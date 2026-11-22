@@ -39,7 +39,8 @@ for (const path of files) {
   if (bytes.includes(0)) continue // Curated video/images only; their source text is checked below.
   const contents = bytes.toString('utf8')
   textFiles += 1
-  if (path.endsWith('.json')) {
+  // TypeScript tsconfig files are JSONC (comments/trailing commas) and are validated by bun run build.
+  if (path.endsWith('.json') && !path.startsWith('tsconfig')) {
     JSON.parse(contents)
     jsonFiles += 1
   }

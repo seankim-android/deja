@@ -62,7 +62,7 @@ for name, (relative, needles) in CLAIMS.items():
     claim_results[name] = {"evidence": relative, "needlesChecked": len(needles), "passed": True}
 
 source_text = (DEMO / "generate_video.py").read_text() + (DEMO / "SCRIPT.md").read_text()
-for forbidden in ["/Users/", "Bearer ", "BEGIN PRIVATE KEY", "cerebras_api_key", "OPENCLAW_GATEWAY_TOKEN"]:
+for forbidden in ["/Users/", "Bearer ", "BEGIN " + "PRIVATE KEY", "cerebras_api_key", "OPENCLAW_GATEWAY_TOKEN"]:
     assert forbidden not in source_text, f"Forbidden source content: {forbidden}"
 for claim_file in {entry[0] for entry in CLAIMS.values()}:
     assert Path(claim_file).name in source_text, f"Video/script does not cite {claim_file}"

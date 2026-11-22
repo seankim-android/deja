@@ -20,8 +20,8 @@ runner behavior and platform adapters, OpenClaw exploration boundaries, bounded 
 classification, cold/warm metrics, CLI/report behavior, and the local viewer. They use fake process
 fixtures where appropriate and do not assert a real device result.
 
-The artifact validator parses every tracked JSON file, rejects generated cache/build/dependency/binary
-artifacts, scans text for private keys/token shapes and machine-specific home paths, and fails if the
+The artifact validator parses every strict tracked JSON file (compiler-owned JSONC `tsconfig` files are
+separately validated by `bun run build`), rejects generated cache/build/dependency/binary artifacts, scans text for private keys/token shapes and machine-specific home paths, and fails if the
 checkout changed during checks. Generated demo scene PNGs remain ignored; the final MP4, generator,
 source text, and evidence-linked rehearsal results are curated intentionally.
 
