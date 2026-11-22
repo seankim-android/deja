@@ -12,7 +12,9 @@ Check an item only when its ticket is complete and its evidence is linked. All t
 
 ## Current P0 queue — Android correctness first
 
-- [ ] [WALK-002](tickets/WALK-002-verified-maestro-runner.md) — Harden the verified Maestro runner adapter.
+- [x] [WALK-002](tickets/WALK-002-verified-maestro-runner.md) — Harden the verified Maestro runner adapter.
+  Evidence: [`runner-unit-tests.txt`](spikes/001-android-walkcache/evidence/runner-unit-tests.txt) and
+  [`runner-android-report.json`](spikes/001-android-walkcache/evidence/runner-android-report.json).
 - [ ] [WALK-003](tickets/WALK-003-self-contained-cold-explore.md) — Add self-contained `explore <goal>`.
 - [ ] [WALK-004](tickets/WALK-004-local-store-regression-tests.md) — Test cache identity, corruption,
   stale builds, path boundaries, and atomic replacement.

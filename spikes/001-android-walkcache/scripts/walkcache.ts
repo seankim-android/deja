@@ -2,7 +2,8 @@
 import { createHash } from 'node:crypto'
 import { copyFile, mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { dirname, relative, resolve, sep } from 'node:path'
+import { dirname, relative, resolve } from 'node:path'
+import { runMaestro, resolveFlowPath, type MaestroRunResult } from '../../../packages/maestro/src/index.ts'
 
 type Walk = {
   goalKey: string
@@ -21,9 +22,10 @@ const memoryPath = resolve(root, '.walkcache/memory/walks.json')
 const apkPath = resolve(root, 'app/build/outputs/apk/debug/app-debug.apk')
 const device = process.env.WALKCACHE_DEVICE ?? 'emulator-5554'
 const appId = 'dev.walkcache.checkout'
-const maestro = resolve(homedir(), '.maestro/bin/maestro')
-const androidHome = '/opt/homebrew/share/android-commandlinetools'
-const javaHome = '/opt/homebrew/opt/openjdk@21'
+const maestro = process.env.WALKCACHE_MAESTRO ?? resolve(homedir(), '.maestro/bin/maestro')
+const androidHome = process.env.ANDROID_HOME ?? process.env.ANDROID_SDK_ROOT
+const javaHome = process.env.JAVA_HOME
+const timeoutMs = Number(process.env.WALKCACHE_TIMEOUT_MS ?? '120000')
 
 function normalize(value: string) {
   return value.trim().toLowerCase().replace(/\s+/g, ' ')
@@ -31,14 +33,6 @@ function normalize(value: string) {
 
 function slug(value: string) {
   return normalize(value).replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
-}
-
-function insideRoot(path: string) {
-  const candidate = resolve(root, path)
-  if (candidate !== root && !candidate.startsWith(`${root}${sep}`)) {
-    throw new Error(`Flow must be inside the spike workspace: ${path}`)
-  }
-  return candidate
 }
 
 async function atomicWrite(path: string, contents: string | Buffer) {
@@ -67,42 +61,40 @@ async function loadMemory(): Promise<Memory> {
   }
 }
 
-async function runMaestro(flowPath: string) {
-  const started = new Date()
-  const startedMs = performance.now()
-  const processHandle = Bun.spawn(
-    [maestro, '--no-ansi', '--device', device, 'test', flowPath],
-    {
-      cwd: root,
-      env: {
-        ...process.env,
-        ANDROID_HOME: androidHome,
-        ANDROID_SDK_ROOT: androidHome,
-        JAVA_HOME: javaHome,
-        MAESTRO_CLI_NO_ANALYTICS: '1',
-        MAESTRO_CLI_ANALYSIS_NOTIFICATION_DISABLED: 'true',
-        PATH: `${androidHome}/platform-tools:${javaHome}/bin:${process.env.PATH ?? ''}`,
-      },
-      stdout: 'pipe',
-      stderr: 'pipe',
-    },
-  )
-  const [exitCode, stdout, stderr] = await Promise.all([
-    processHandle.exited,
-    new Response(processHandle.stdout).text(),
-    new Response(processHandle.stderr).text(),
-  ])
-  const ended = new Date()
-  if (stdout) console.log(stdout.trimEnd())
-  if (stderr) console.error(stderr.trimEnd())
+async function runFlow(flowPath: string, artifactDirectory: string) {
+  const result = await runMaestro({
+    executable: maestro,
+    device,
+    platform: 'android',
+    workspaceRoot: root,
+    flowPath,
+    timeoutMs,
+    androidSdkRoot: androidHome,
+    javaHome,
+    artifacts: { directory: artifactDirectory },
+  })
+  if (result.stdout) console.log(result.stdout.trimEnd())
+  if (result.stderr) console.error(result.stderr.trimEnd())
+  for (const error of result.errors) {
+    console.error(`Maestro ${error.kind} error: ${error.message}`)
+  }
+  return result
+}
+
+function executionDetails(result: MaestroRunResult) {
   return {
-    startedAt: started.toISOString(),
-    endedAt: ended.toISOString(),
-    durationMs: Math.round(ended.getTime() - started.getTime()),
-    monotonicDurationMs: Math.round(performance.now() - startedMs),
-    exitCode,
-    passed: exitCode === 0,
-    output: `${stdout}${stderr}`,
+    startedAt: result.startedAt,
+    endedAt: result.endedAt,
+    durationMs: result.durationMs,
+    monotonicDurationMs: result.monotonicDurationMs,
+    exitCode: result.exitCode,
+    signal: result.signal,
+    timedOut: result.timedOut,
+    passed: result.passed,
+    errors: result.errors,
+    stdoutPath: result.artifacts ? relative(root, result.artifacts.stdoutPath) : undefined,
+    stderrPath: result.artifacts ? relative(root, result.artifacts.stderrPath) : undefined,
+    outputPath: result.artifacts ? relative(root, result.artifacts.outputPath) : undefined,
   }
 }
 
@@ -124,17 +116,15 @@ async function saveReport(command: string, details: Record<string, unknown>) {
 
 async function remember(goalKey: string, flowArgument: string | undefined) {
   if (!flowArgument) throw new Error('remember requires --flow <candidate.yaml>')
-  const candidate = insideRoot(flowArgument)
+  const candidate = resolveFlowPath(root, flowArgument)
   const buildFingerprint = await fingerprint()
-  const result = await runMaestro(candidate)
-  const outputPath = `.walkcache/attempts/remember-${Date.now()}.log`
-  await atomicWrite(resolve(root, outputPath), result.output)
+  const result = await runFlow(candidate, `.walkcache/attempts/remember-${Date.now()}`)
 
   if (!result.passed) {
     await saveReport('remember', {
       goalKey: normalize(goalKey), appId, platform: 'android', buildFingerprint,
       cacheStatus: 'rejected', modelCalls: 0, verificationOnly: true,
-      passed: false, durationMs: result.durationMs, outputPath,
+      ...executionDetails(result),
     })
     process.exitCode = 1
     return
@@ -163,7 +153,7 @@ async function remember(goalKey: string, flowArgument: string | undefined) {
   await saveReport('remember', {
     goalKey: walk.goalKey, appId, platform: 'android', buildFingerprint,
     flowPath, cacheStatus: 'recorded', modelCalls: 0, verificationOnly: true,
-    passed: true, durationMs: result.durationMs, outputPath,
+    ...executionDetails(result),
   })
 }
 
@@ -186,16 +176,14 @@ async function run(goalKey: string) {
     return
   }
 
-  const flowPath = insideRoot(walk.flowPath)
-  const result = await runMaestro(flowPath)
-  const outputPath = `.walkcache/reports/run-${Date.now()}.log`
-  await atomicWrite(resolve(root, outputPath), result.output)
+  const flowPath = resolveFlowPath(root, walk.flowPath)
+  const result = await runFlow(flowPath, `.walkcache/reports/run-${Date.now()}`)
   walk.lastValidation = { passed: result.passed, at: result.endedAt }
   await atomicWrite(memoryPath, `${JSON.stringify(memory, null, 2)}\n`)
   await saveReport('run', {
     goalKey: walk.goalKey, appId, platform: 'android', buildFingerprint,
     flowPath: relative(root, flowPath), cacheStatus: 'hit', modelCalls: 0,
-    passed: result.passed, durationMs: result.durationMs, outputPath,
+    ...executionDetails(result),
   })
   if (!result.passed) process.exitCode = 1
 }

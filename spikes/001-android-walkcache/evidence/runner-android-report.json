@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "command": "run",
+  "goalKey": "checkout",
+  "appId": "dev.walkcache.checkout",
+  "platform": "android",
+  "buildFingerprint": "4746296fa8aa84ae85761915f651b1488c38ef8f5f4e89af0e9ad19784cfcb05",
+  "flowPath": ".walkcache/flows/checkout/android.yaml",
+  "cacheStatus": "hit",
+  "modelCalls": 0,
+  "startedAt": "2026-11-22T04:49:00.117Z",
+  "endedAt": "2026-11-22T04:49:25.895Z",
+  "durationMs": 25778,
+  "monotonicDurationMs": 25779,
+  "exitCode": 0,
+  "signal": null,
+  "timedOut": false,
+  "passed": true,
+  "errors": [],
+  "stdoutPath": ".walkcache/reports/run-1795322940117/stdout.log",
+  "stderrPath": ".walkcache/reports/run-1795322940117/stderr.log",
+  "outputPath": ".walkcache/reports/run-1795322940117/output.log"
+}

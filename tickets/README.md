@@ -22,7 +22,7 @@ Statuses: `done`, `ready` (no incomplete dependencies), `queued` (later P0 work)
 | Ticket | Status | Depends on | Outcome |
 | --- | --- | --- | --- |
 | [WALK-001](WALK-001-android-feasibility-proof.md) | done | — | Validated native Android cold/warm/repair spike |
-| [WALK-002](WALK-002-verified-maestro-runner.md) | ready | 001 | Portable, bounded runner with structured results |
+| [WALK-002](WALK-002-verified-maestro-runner.md) | done | 001 | Portable, bounded runner with structured results |
 | [WALK-003](WALK-003-self-contained-cold-explore.md) | queued | 002 | One-command cold exploration and verified persistence |
 | [WALK-004](WALK-004-local-store-regression-tests.md) | queued | 002 | Cache identity, corruption, and atomic-write tests |
 | [WALK-005](WALK-005-comparable-cold-warm-metrics.md) | queued | 003, 004 | Honest end-to-end cold/warm measurements |

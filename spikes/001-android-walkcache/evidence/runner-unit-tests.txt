@@ -1,0 +1,14 @@
+bun test v1.4.4-canary.1 (191755ec1)
+
+packages/maestro/test/maestro-runner.test.ts:
+(pass) verified Maestro runner > preserves output, timing, configuration, exit status, and artifacts on success [14.98ms]
+(pass) verified Maestro runner > returns a structured execution error and preserves a nonzero exit code [14.67ms]
+(pass) verified Maestro runner > enforces the timeout and terminates only the spawned process tree [1461.06ms]
+(pass) verified Maestro runner > returns a structured launch error for a missing executable [1.59ms]
+(pass) verified Maestro runner > rejects a flow path that escapes the workspace before launching [0.85ms]
+(pass) verified Maestro runner > returns a structured artifact error without discarding process output [13.21ms]
+
+ 6 pass
+ 0 fail
+ 53 expect() calls
+Ran 6 tests across 1 file. [1.54s]
