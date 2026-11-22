@@ -86,6 +86,13 @@ async function cleanup(temporary: string) {
 }
 const recursiveOptions = { recursive: true, force: true }
 
+async function configureSemantic(root: string, semantic: Record<string, unknown>) {
+  const configPath = join(root, 'walkcache.config.json')
+  const config = JSON.parse(await readFile(configPath, 'utf8'))
+  config.semantic = semantic
+  await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`)
+}
+
 describe('production headless CLI', () => {
   test('miss enters real cold lifecycle, then warm bypasses model construction and supports list/inspect', async () => {
     const context = await workspace()
@@ -196,6 +203,112 @@ describe('production headless CLI', () => {
       expect(rejected.stdout).toContain('Source diffs: none')
       const list = await execute(context.root, ['list', '--json'])
       expect(JSON.parse(list.stdout).walks).toHaveLength(0)
+    } finally {
+      await cleanup(context.temporary)
+    }
+  })
+
+  test('opt-in local semantic fallback is exact-first, reports selection, and replays stored YAML', async () => {
+    const context = await workspace()
+    const forbiddenModel = join(context.temporary, 'semantic-model-must-not-run.json')
+    try {
+      await configureSemantic(context.root, { provider: 'local-lexical-v1' })
+      const remembered = await execute(context.root, [
+        'remember', 'complete checkout', '--flow', 'flows/candidate.yaml',
+      ], { capture: forbiddenModel })
+      expect(remembered.exitCode).toBe(0)
+
+      const exact = await execute(context.root, ['run', 'complete checkout', '--json'], {
+        capture: forbiddenModel,
+      })
+      expect(exact.exitCode).toBe(0)
+      expect(exact.report).toMatchObject({
+        outcome: 'passed', modelCalls: 0,
+        semantic: { status: 'skipped-exact-hit', embeddingCalls: 0 },
+      })
+
+      const semantic = await execute(context.root, ['run', 'finish checkout'], {
+        capture: forbiddenModel,
+      })
+      expect(semantic.exitCode).toBe(0)
+      const report = JSON.parse(await readFile(
+        join(context.root, '.walkcache/reports/latest.json'), 'utf8',
+      ))
+      expect(report).toMatchObject({
+        command: 'run', cacheStatus: 'hit', outcome: 'passed', modelCalls: 0,
+        identity: { goal: 'finish checkout' },
+        semantic: {
+          status: 'hit', provider: 'local-lexical-v1', embeddingCalls: 2,
+          candidates: 1, eligibleCandidates: 1, goalSimilarity: 1,
+          minimumSimilarity: 0.9, minimumMargin: 0.15,
+          selectedWalk: { goal: 'complete checkout', goalKey: 'complete checkout' },
+        },
+      })
+      expect(report.semantic.selectedWalk.flowSha256).toBe(report.yamlSha256)
+      expect(semantic.stdout).toContain('Semantic lookup: hit')
+      expect(semantic.stdout).toContain('Semantic embedding calls: 2')
+      expect(semantic.stdout).toContain('Goal similarity: 1.000000')
+      expect(semantic.stdout).toContain('Selected walk: complete checkout')
+      expect(existsSync(forbiddenModel)).toBe(false)
+
+      const memory = JSON.parse(await readFile(
+        join(context.root, '.walkcache/memory/walks.json'), 'utf8',
+      ))
+      expect(memory.walks).toHaveLength(1)
+      expect(memory.walks[0].goalKey).toBe('complete checkout')
+      expect(memory.walks[0].validationHistory.map((entry: { passed: boolean }) => entry.passed))
+        .toEqual([true, true, true])
+
+      const inspected = await execute(context.root, ['inspect', '.walkcache/reports/latest.json'])
+      expect(inspected.exitCode).toBe(0)
+      expect(inspected.stdout).toContain('Selected walk: complete checkout')
+      expect(inspected.stdout).toContain('Goal similarity: 1.000000')
+    } finally {
+      await cleanup(context.temporary)
+    }
+  })
+
+  test('a configured but missing embedding provider uses ordinary cold then exact behavior', async () => {
+    const context = await workspace()
+    const capture = join(context.temporary, 'missing-embedding-provider.json')
+    try {
+      await configureSemantic(context.root, { provider: 'not-installed-v1' })
+      const cold = await execute(context.root, ['run', 'checkout', '--json'], { capture })
+      expect(cold.exitCode).toBe(0)
+      expect(cold.report).toMatchObject({
+        outcome: 'cold-recorded', cacheStatus: 'miss', cacheMissReason: 'not-found', modelCalls: 2,
+        semantic: {
+          status: 'unavailable', reason: 'provider-unavailable',
+          embeddingCalls: 0, selectedWalk: null,
+        },
+      })
+      expect(cold.stdout).toContain('"semantic"')
+      expect(existsSync(capture)).toBe(true)
+
+      const exact = await execute(context.root, ['run', 'checkout'], { capture })
+      expect(exact.exitCode).toBe(0)
+      expect(exact.report).toMatchObject({
+        outcome: 'passed', modelCalls: 0,
+        semantic: { status: 'skipped-exact-hit', embeddingCalls: 0 },
+      })
+      const callsAfterCold = await readFile(capture, 'utf8')
+      const repeatedExact = await execute(context.root, ['run', 'checkout'], { capture })
+      expect(repeatedExact.exitCode).toBe(0)
+      expect(await readFile(capture, 'utf8')).toBe(callsAfterCold)
+
+      await configureSemantic(context.root, {
+        provider: 'local-lexical-v1', minimumSimilarity: null,
+      })
+      const nullThreshold = await execute(context.root, ['list'])
+      expect(nullThreshold.exitCode).toBe(2)
+      expect(nullThreshold.stderr).toContain('between 0.9 and 1')
+
+      await configureSemantic(context.root, {
+        provider: 'local-lexical-v1', minimumMargin: 0,
+      })
+      const disabledMargin = await execute(context.root, ['list'])
+      expect(disabledMargin.exitCode).toBe(2)
+      expect(disabledMargin.stderr).toContain('between 0.15 and 1')
     } finally {
       await cleanup(context.temporary)
     }

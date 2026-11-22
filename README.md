@@ -142,6 +142,7 @@ workspaces.
 | `fixtureCredentials` | Explicit deterministic fixture values only; never real user credentials. Values are redacted from CLI output/reports. |
 | `maestro.executable`, `openClaw.executable`, `openClaw.mcpProxy` | Executable names and the workspace-local Android MCP proxy. |
 | `repair.sourceRoots`, `repair.permittedFileTypes`, `repair.affectedFiles`, `repair.timeBudgetMs` | Closed Android repair allowlist and one shared deadline. No repair block is permitted for Web. |
+| Optional `semantic.provider`, `minimumSimilarity`, `minimumMargin` | WALK-016 opt-in local retrieval proof. `local-lexical-v1` is the only implementation; defaults are 0.90 similarity and 0.15 winner margin. Missing/unsupported providers report unavailable and use the ordinary miss lifecycle. |
 | Web-only `adapter`, `browser`, `headless`, `screenSize` | Exact execution/cache identity and Chromium launch settings. Only loopback `appId` URLs and `browser: chromium` are accepted. |
 | iOS `adapter`, `.app` `buildPath`, simulator-UDID `device` | Exact native bundle-tree/adapter identity and explicit `--platform ios` execution on the dedicated simulator. No repair block is permitted. |
 
@@ -150,6 +151,43 @@ When a corresponding JSON executable/timeout field is omitted, `WALKCACHE_MAESTR
 `ANDROID_SDK_ROOT` and `JAVA_HOME` come from the environment and are not serialized into reports.
 The spike also recognizes its more specific repair override; the production config's documented
 budget is `repair.timeBudgetMs`.
+
+### Opt-in exact-first semantic proof (WALK-016)
+
+Semantic retrieval is off by default. Enable the deterministic local proof in a fixture config:
+
+```json
+{
+  "semantic": {
+    "provider": "local-lexical-v1",
+    "minimumSimilarity": 0.9,
+    "minimumMargin": 0.15
+  }
+}
+```
+
+Exact identity is always checked first and never calls or constructs an embedding provider. Only an
+exact `not-found` miss enters this fallback. Candidate walks must still match app, platform, schema,
+build, adapter/browser, canonical flow checksum, and latest passed validation through the local store
+before they are ranked. Equivalent goals can then select one walk only above both similarity/margin
+thresholds; unrelated, low-confidence, ambiguous, contradictory, and narrow adversarial-instruction
+goals do not select a walk. Adversarial markers stop before cold exploration. A missing provider or
+embedding failure instead follows the ordinary verified miss/explore lifecycle.
+Both floors may only be raised from the defaults, never lowered/disabled. The local provider also
+requires canonical-token equality after scoring so a raw hash collision cannot become a hit.
+
+Every selected flow is revalidated immediately after provider calls and then executed by Maestro;
+its result is recorded against the original stored exact identity. Semantic selection never
+substitutes for verification and never broadens
+repair eligibility. Human/JSON output shows semantic status/reason, embedding calls, eligible
+candidates, similarity, and the selected goal/YAML separately from cold-exploration model calls.
+
+The provider is a tiny in-process lexical hash embedder, not a learned model or remote vector DB. Its
+explicit normalizations are limited to examples such as `check out`/`checkout` and `finish`/`complete`.
+This proves local relevance/fallback plumbing only: **general semantic correctness, broad paraphrase
+coverage, non-English understanding, and complete adversarial detection are not claimed**. See
+[`packages/semantic-local/README.md`](packages/semantic-local/README.md) and the deterministic WALK-016
+tests before relying on a goal outside those examples.
 
 ### Exit codes
 

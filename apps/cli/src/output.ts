@@ -18,7 +18,8 @@ Usage:
 Commands:
   explore   Force verified cold exploration and store only a passing candidate.
   run       Check exact local memory first. Hits never construct an explorer/model client.
-            A miss explores cold; stale-build memory enters only bounded selector repair.
+            Opt-in semantic fallback applies only to not-found misses and replays verified YAML.
+            Other misses explore cold; stale-build memory enters only bounded selector repair.
   remember  Independently verify an existing YAML candidate before storing it.
   list      List local walks without constructing an explorer or runner invocation.
   inspect   Summarize a saved run result, artifact paths, failures, and source diffs.
@@ -28,6 +29,12 @@ Options:
   --flow <file>    Candidate YAML for remember; independently runnable without WalkCache.
   --json           Emit a redacted machine-readable result instead of human-readable text.
   -h, --help       Show help without loading configuration or constructing plugins.
+
+Semantic retrieval:
+  Opt in with {"semantic":{"provider":"local-lexical-v1"}} in the config file.
+  Exact identity still runs first. A semantic selection must clear app/platform/schema/build,
+  adapter/browser/checksum/latest-pass gates, similarity and margin thresholds, then replay YAML.
+  Missing providers fall back to the ordinary miss lifecycle. This is a narrow local lexical proof.
 
 Exit codes:
   0  Successful run/explore/remember, list, inspect, or help.
@@ -60,6 +67,21 @@ export function renderResult(
     `YAML: ${result.yamlPath ?? 'none'}`,
   ]
   if (result.yamlSha256) lines.push(`YAML SHA-256: ${result.yamlSha256}`)
+  if (result.semantic) {
+    lines.push(`Semantic lookup: ${result.semantic.status}${result.semantic.reason ? ` (${result.semantic.reason})` : ''}`)
+    lines.push(`Semantic embedding calls: ${result.semantic.embeddingCalls}`)
+    lines.push(`Eligible semantic candidates: ${result.semantic.eligibleCandidates}`)
+    if (result.semantic.goalSimilarity !== null) {
+      lines.push(`Goal similarity: ${result.semantic.goalSimilarity.toFixed(6)}`)
+    }
+    if (result.semantic.runnerUpSimilarity !== null) {
+      lines.push(`Runner-up similarity: ${result.semantic.runnerUpSimilarity.toFixed(6)}`)
+    }
+    if (result.semantic.selectedWalk) {
+      lines.push(`Selected walk: ${result.semantic.selectedWalk.goalKey}`)
+      lines.push(`Selected walk YAML: ${result.semantic.selectedWalk.flowPath}`)
+    }
+  }
   if (result.failure) {
     const label = result.passed ? 'Resolved diagnosis' : 'Failure'
     lines.push(`${label}: ${result.failure.category} (repair eligible: ${result.failure.repairEligible})`)

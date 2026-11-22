@@ -106,6 +106,52 @@ export interface WalkStore {
   list(): Promise<StoredWalk[]>
 }
 
+/** A bounded provider call for one goal. Implementations are not constructed on an exact hit. */
+export interface GoalEmbeddingProvider {
+  readonly id: string
+  embed(goal: string): Promise<readonly number[]>
+  /** Optional lexical-equivalence guard; the local provider uses it to reject hash collisions. */
+  isCollisionSafeMatch?(requestedGoal: string, candidateGoal: string): boolean
+}
+
+export type SemanticRetrievalOptions = {
+  /** Lazy so even provider/client construction is absent from exact hits. Null means unavailable. */
+  createProvider: () => GoalEmbeddingProvider | null
+  /** Cosine-similarity floor, inclusive. May raise, never lower, the conservative 0.90 default. */
+  minimumSimilarity?: number
+  /** Required score distance from the runner-up. May raise, never lower, the 0.15 default. */
+  minimumMargin?: number
+}
+
+export type SemanticLookupStatus = 'hit' | 'miss' | 'unavailable' |
+  'disabled' | 'skipped-exact-hit' | 'not-applicable'
+
+export type SemanticLookupReason = 'provider-unavailable' | 'adversarial-goal' |
+  'contradictory-goal' | 'no-eligible-candidates' | 'low-confidence' | 'ambiguous'
+
+export type SemanticSelectedWalk = {
+  goal: string
+  goalKey: string
+  flowPath: string
+  flowSha256: string
+}
+
+/** Optional additive run-report data; schema 1 reports without it remain readable. */
+export type SemanticLookupReport = {
+  status: SemanticLookupStatus
+  reason?: SemanticLookupReason
+  provider: string | null
+  embeddingCalls: number
+  durationMs: number
+  candidates: number
+  eligibleCandidates: number
+  minimumSimilarity: number | null
+  minimumMargin: number | null
+  goalSimilarity: number | null
+  runnerUpSimilarity: number | null
+  selectedWalk: SemanticSelectedWalk | null
+}
+
 export type FailureCategory = 'selector' | 'navigation' | 'product_assertion' |
   'runner' | 'timeout' | 'unknown'
 
@@ -215,6 +261,7 @@ export type RunResult = {
   goalKey: string
   cacheStatus: CacheStatus
   cacheMissReason?: CacheMissReason
+  semantic?: SemanticLookupReport
   outcome: RunOutcome
   passed: boolean
   startedAt: string

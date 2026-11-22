@@ -126,7 +126,11 @@ Check an item only when its ticket is complete and its evidence is linked. All t
 
 ## P1 — Deferred until all relevant P0 gates pass
 
-- [ ] [WALK-016](tickets/WALK-016-semantic-goal-retrieval.md) — Exact-match-first semantic retrieval.
+- [x] [WALK-016](tickets/WALK-016-semantic-goal-retrieval.md) — Exact-match-first semantic retrieval.
+  Evidence: [acceptance matrix/limitations](spikes/001-android-walkcache/evidence/walk016-semantic-retrieval.md),
+  [47 focused tests / 271 assertions](packages/core/test/semantic.test.ts), and the
+  [138 tests / 774 assertions](spikes/001-android-walkcache/evidence/walk016-all-tests.txt).
+  The opt-in `local-lexical-v1` proof makes no generalized semantic-correctness claim.
 - [ ] [WALK-017](tickets/WALK-017-route-graph-screen-fingerprints.md) — Route graph and screen fingerprints.
 - [ ] [WALK-018](tickets/WALK-018-reusable-login-subflow.md) — Reuse a verified login subflow.
 - [ ] [WALK-019](tickets/WALK-019-store-plugin-conformance.md) — Second store and plugin conformance tests.

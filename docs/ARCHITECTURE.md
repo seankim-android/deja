@@ -12,13 +12,18 @@ goal + configuration
         v
 platform adapter -> build fingerprint -> exact LocalWalkStore lookup
         |                                      |
-        | hit                                  | miss
+        | hit                                  | opt-in not-found semantic lookup
+        |                                      | other miss -> ordinary lifecycle below
         v                                      v
-MaestroWalkRunner                        not-found -> Android explorer
+MaestroWalkRunner                        constrained/reverify candidates
+        |                                      | hit -> replay selected YAML above
+        |                                      | miss/unavailable -> ordinary lifecycle
+        v                                      v
+validation history + JSON report        not-found -> Android explorer
         |                                      | stale-build -> bounded repair
-        |                                      | failed validation -> failed-validation handling
+        |                                      | failed validation -> failure handling
         v                                      v
-validation history + JSON report        independent full-flow verification
+validation continues                   independent full-flow verification
                                                |
                                                v
                                   atomic verified persistence/replacement
@@ -28,6 +33,11 @@ validation history + JSON report        independent full-flow verification
 constructs `OpenClawWalkExplorer`, its model/MCP client, or a repairer. Cold exploration and repair
 are not concurrent fallback branches. After a repair rejection, core does not substitute blind cold
 exploration.
+When WALK-016 is enabled, the lazy embedding factory is also behind that exact lookup and runs only
+for a `not-found` miss. Wrong-app/platform/schema/adapter/browser, stale-build, missing-flow, and
+failed-validation misses never invoke the provider or ranking. A provider-free adversarial-marker
+guard still stops those requests before repair/exploration when semantic mode is enabled. Semantic
+replay does not broaden repair eligibility.
 
 `remember` is a separate reviewed-YAML entry point: it runs the candidate through the same runner and
 persists only a passing result. All persisted flows remain ordinary independently runnable Maestro
@@ -45,6 +55,7 @@ Core imports no Maestro, OpenClaw, React, filesystem, demo, or platform implemen
 | `WalkExplorer` | Cold exploration and independently verified candidate persistence | `OpenClawWalkExplorer` for Android; explicit `UnsupportedPlatformExplorer` for Web/iOS |
 | `SelectorRepairer` | At most one bounded diagnosis/source-patch/verification result | `BoundedSelectorRepairer` for the configured Android Checkout policy only |
 | `RunReporter` | Serialize a completed result without changing orchestration | Atomic local `JsonRunReporter` in `apps/cli` |
+| `GoalEmbeddingProvider` | Lazily embed one goal only after exact `not-found`; report calls separately | Opt-in deterministic `LocalLexicalEmbeddingProvider` in `packages/semantic-local`; no service or vector DB |
 
 The execution adapters own command selection and build identity. Android fingerprints the APK and
 uses its configured emulator serial. The Web adapter fingerprints every regular file and relative
@@ -81,6 +92,49 @@ manufacture a hit.
 
 `lookupPreviousSuccessful` is diagnostic-only. It can locate the earlier successful build/flow for
 bounded repair but is not a warm hit and does not authorize persistence by itself.
+
+## Exact-first semantic proof (WALK-016)
+
+Semantic retrieval is disabled unless the configuration contains a `semantic` object. Exact lookup
+always remains first. Only its `not-found` result can invoke the lazy provider, so an exact hit makes
+zero embedding calls and zero cold-exploration model calls. Existing non-`not-found` miss reasons and
+their repair/failure behavior are unchanged.
+
+The default `local-lexical-v1` provider is an in-process deterministic bag of hashed lexical features.
+It recognizes only the explicitly documented normalizations (for example, `check out`/`checkout` and
+`finish`/`complete`). It uses no learned model, credentials, network, remote vector database, or new
+stored-memory schema. This is a small relevance/fallback proof, **not generalized semantic
+correctness**. Unknown paraphrases, non-English goals, subtle intent changes, and adversarial wording
+outside the narrow marker list can miss or be misread; conservative misses are preferred.
+Raw hash similarity is never sufficient for this provider: an additional canonical-token equality
+guard rejects lexical hash collisions such as `email`/`search`, even when their raw cosine is 1.
+
+Before candidate goal embedding or ranking, core filters on app, platform, flow schema, build,
+adapter/browser, and latest passed validation, then calls `LocalWalkStore.lookup` with the candidate's
+original goal. That exact lookup rechecks all identity constraints, canonical flow containment,
+missing-flow state, and the recomputed checksum. A candidate removed or invalidated between listing
+and relookup is skipped. Invalid memory/checksum errors propagate; they never become an unavailable
+provider or a manufactured hit.
+
+Cosine similarity defaults require a top score of at least **0.90** and a margin of at least **0.15**
+over the runner-up. No candidates, low confidence, equal/near ties, explicit negation/opposites, and
+narrow adversarial-instruction markers return a miss with no selected walk. Adversarial-marker goals
+stop before provider or cold-explorer construction; other semantic misses continue the ordinary
+verified cold lifecycle. Missing/unsupported providers and embedding errors report
+`provider-unavailable` and also continue that ordinary lifecycle.
+Configuration may raise either floor up to 1 but cannot lower/disable it; zero, null, non-numeric,
+NaN, and infinite values are rejected. Vector components are scale-normalized before cosine math so
+large finite inputs cannot turn a hit score into NaN.
+
+A selected semantic walk is not an automatic pass. Core executes its unchanged stored YAML through
+`WalkRunner`, then records pass/fail validation against the **selected stored exact identity**, not
+the requested paraphrase. After all provider awaits, it performs one final exact store lookup of the
+winner immediately before invoking the runner; a changed/missing/failed winner executes nothing and
+does not trigger blind exploration. Product/unknown/selector failures remain failures; semantic selector
+failures do not enter bounded repair. Exploration/model metrics remain separate from the optional
+additive schema-1 `semantic` report, which exposes status/reason, provider, embedding calls, duration,
+candidate counts, thresholds, top/runner-up similarity, and selected goal/flow/checksum. Reports
+without that optional field remain compatible.
 
 ## Memory schema
 
@@ -214,6 +268,7 @@ contain sensitive content and must remain ignored unless individually reviewed a
 apps/cli/                 Argument/config validation, wiring, redaction, JSON reporting
 packages/core/            Vendor-neutral contracts and lifecycle orchestration
 packages/store-local/     Conservative local memory and atomic persistence
+packages/semantic-local/  Opt-in deterministic lexical embeddings; no model/network/vector DB
 packages/maestro/         Verified runner, adapters, failure classification
 packages/agent-openclaw/  Android-only bounded cold exploration
 packages/repair/          Narrow Android Checkout source repair

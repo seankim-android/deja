@@ -7,11 +7,14 @@ import {
   type RunResult,
   type RunReporter,
   type SelectorRepairer,
+  type SemanticRetrievalOptions,
+  type StoredWalk,
   type WalkExplorer,
   type WalkIdentity,
   type WalkRunner,
   type WalkStore,
 } from './contracts.ts'
+import { ExactFirstWalkRetriever } from './semantic.ts'
 
 type RunStart = Omit<RunResult,
   'endedAt' | 'durationMs' | 'outcome' | 'passed' | 'modelCalls' | 'modelCallBasis' |
@@ -32,6 +35,8 @@ export type WalkCacheDependencies = {
   createExplorer: () => WalkExplorer
   /** Lazy by contract: only an eligible stale selector can construct a repairer. */
   createRepairer?: () => SelectorRepairer
+  /** Optional WALK-016 proof. Its provider factory is lazy and exact hits never invoke it. */
+  semantic?: SemanticRetrievalOptions
   now?: () => Date
   artifactId?: (prefix: 'run' | 'remember') => string
 }
@@ -80,13 +85,27 @@ export class WalkCache {
 
   async run(identity: WalkIdentity): Promise<RunResult> {
     const start = this.base(identity, 'run', 'miss')
-    // This lookup deliberately precedes both lazy factories. A warm hit cannot construct OpenClaw,
-    // an MCP transport, or any model client, even if configuration for those plugins is present.
-    const lookup = await this.dependencies.store.lookup(identity)
+    // Exact lookup deliberately precedes every lazy factory, including semantic embeddings. A warm
+    // hit cannot construct OpenClaw, an MCP transport, an embedding client, or a repairer.
+    const retrieval = await new ExactFirstWalkRetriever({
+      store: this.dependencies.store,
+      ...(this.dependencies.semantic ? { semantic: this.dependencies.semantic } : {}),
+    }).lookup(identity)
 
-    if (lookup.status === 'miss') {
-      const missStart = { ...start, cacheMissReason: lookup.reason }
-      if (lookup.reason === 'stale-build') {
+    if (retrieval.status === 'miss') {
+      const missStart = {
+        ...start, cacheMissReason: retrieval.miss.reason, semantic: retrieval.semantic,
+      }
+      if (retrieval.semantic.reason === 'adversarial-goal') {
+        return this.finish(missStart, {
+          outcome: 'exploration-rejected', passed: false, modelCalls: 0,
+          modelCallBasis: 'adversarial goal marker rejected before explorer construction',
+          assertions: null, repairCount: 0, yamlPath: null, yamlSha256: null,
+          failure: null, artifacts: [], diffs: [],
+          errors: ['Semantic goal safety check rejected the request; cold exploration was not attempted'],
+        })
+      }
+      if (retrieval.miss.reason === 'stale-build') {
         if (!this.dependencies.createRepairer) {
           return this.finish(missStart, {
             outcome: 'repair-rejected', passed: false, modelCalls: 0,
@@ -102,25 +121,66 @@ export class WalkCache {
       return this.finish(missStart, this.explorationDetails(exploration))
     }
 
+    let lookup = retrieval.lookup
+    const selectedIdentity = retrieval.matchType === 'semantic'
+      ? walkIdentity(lookup.walk)
+      : identity
+    let semanticReport = retrieval.semantic
+    if (retrieval.matchType === 'semantic') {
+      // Provider calls above may await arbitrary work. Revalidate the winner after all those calls
+      // and immediately before replay so a stale checksum/latest pass cannot execute changed bytes.
+      const revalidated = await this.dependencies.store.lookup(selectedIdentity)
+      if (revalidated.status === 'miss') {
+        semanticReport = {
+          ...semanticReport, status: 'miss', reason: 'no-eligible-candidates',
+          eligibleCandidates: 0, selectedWalk: null,
+        }
+        return this.finish({
+          ...start, cacheMissReason: revalidated.reason, semantic: semanticReport,
+        }, {
+          outcome: 'failed', passed: false, modelCalls: 0,
+          modelCallBasis: 'semantic candidate changed before replay; explorer and runner were not invoked',
+          assertions: null, repairCount: 0, yamlPath: null, yamlSha256: null,
+          failure: null, artifacts: [], diffs: [],
+          errors: ['Semantic candidate changed before replay; no flow was executed or explored'],
+        })
+      }
+      lookup = revalidated
+      semanticReport = {
+        ...semanticReport,
+        selectedWalk: {
+          goal: lookup.walk.goal,
+          goalKey: lookup.walk.goalKey,
+          flowPath: lookup.walk.flowPath,
+          flowSha256: lookup.walk.flowSha256,
+        },
+      }
+    }
     const execution = await this.dependencies.runner.run({
       flowPath: lookup.flowPath,
       artifactDirectory: `.walkcache/reports/${this.artifactId('run')}`,
     })
-    const hitStart = { ...start, cacheStatus: 'hit' as const, execution }
+    const hitStart = {
+      ...start, cacheStatus: 'hit' as const, execution, semantic: semanticReport,
+    }
+    const modelCallBasis = retrieval.matchType === 'exact'
+      ? 'exact local hit: explorer and model factories were not invoked'
+      : 'semantic hit: embedding calls reported separately; stored YAML replayed and explorer not invoked'
     if (execution.passed) {
-      await this.dependencies.store.recordValidation(identity, {
+      await this.dependencies.store.recordValidation(selectedIdentity, {
         passed: true, at: execution.endedAt,
       })
       return this.finish(hitStart, {
         outcome: 'passed', passed: true, modelCalls: 0,
-        modelCallBasis: 'exact local hit: explorer and model factories were not invoked',
+        modelCallBasis,
         assertions: execution.assertions, repairCount: 0,
         yamlPath: lookup.walk.flowPath, yamlSha256: lookup.walk.flowSha256,
         failure: null, artifacts: execution.artifacts, diffs: [], errors: [],
       })
     }
 
-    if (execution.failure?.category === 'selector' && execution.failure.repairEligible &&
+    if (retrieval.matchType === 'exact' &&
+        execution.failure?.category === 'selector' && execution.failure.repairEligible &&
         this.dependencies.createRepairer) {
       // Keep the previous successful validation intact until the bounded repair diagnoses the same
       // unchanged flow. The repair plugin, not core, owns eligibility and all source/write gates.
@@ -134,14 +194,14 @@ export class WalkCache {
       })
     }
 
-    await this.dependencies.store.recordValidation(identity, {
+    await this.dependencies.store.recordValidation(selectedIdentity, {
       passed: false, at: execution.endedAt,
     })
     const productRegression = execution.failure?.category === 'product_assertion'
     return this.finish(hitStart, {
       outcome: productRegression ? 'product-regression' : 'failed', passed: false,
       modelCalls: 0,
-      modelCallBasis: 'exact local hit: explorer and model factories were not invoked',
+      modelCallBasis,
       assertions: execution.assertions, repairCount: 0,
       yamlPath: lookup.walk.flowPath, yamlSha256: lookup.walk.flowSha256,
       failure: execution.failure, artifacts: execution.artifacts, diffs: [],
@@ -225,5 +285,17 @@ export class WalkCache {
       errors: repair.errors,
       repair,
     }
+  }
+}
+
+function walkIdentity(walk: StoredWalk): WalkIdentity {
+  return {
+    goal: walk.goal,
+    appId: walk.appId,
+    platform: walk.platform,
+    flowSchemaVersion: walk.flowSchemaVersion,
+    buildFingerprint: walk.buildFingerprint,
+    ...(walk.adapter !== undefined ? { adapter: walk.adapter } : {}),
+    ...(walk.browser !== undefined ? { browser: walk.browser } : {}),
   }
 }

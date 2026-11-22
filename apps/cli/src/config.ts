@@ -44,6 +44,11 @@ export type ProductionConfiguration = {
     executable: string
     mcpProxy: string
   }
+  semantic?: {
+    provider: string | null
+    minimumSimilarity: number
+    minimumMargin: number
+  }
   repair?: {
     policy: CheckoutRepairPolicy
     timeBudgetMs: number
@@ -62,6 +67,14 @@ function positiveInteger(value: unknown, fallback: number, label: string) {
   const result = value === undefined ? fallback : Number(value)
   if (!Number.isInteger(result) || result <= 0 || result > 2_147_483_647) {
     throw new CliConfigurationError(`${label} must be a positive integer`)
+  }
+  return result
+}
+
+function unitInterval(value: unknown, fallback: number, label: string) {
+  const result = value === undefined ? fallback : value
+  if (typeof result !== 'number' || !Number.isFinite(result) || result < fallback || result > 1) {
+    throw new CliConfigurationError(`${label} must be a finite number between ${fallback} and 1`)
   }
   return result
 }
@@ -235,6 +248,25 @@ export async function loadProductionConfiguration(configPath: string): Promise<P
     }
   }
 
+  let semantic: ProductionConfiguration['semantic']
+  if (raw.semantic !== undefined) {
+    if (!raw.semantic || typeof raw.semantic !== 'object' || Array.isArray(raw.semantic)) {
+      throw new CliConfigurationError('semantic must be an object')
+    }
+    const configured = raw.semantic as Record<string, unknown>
+    if (configured.provider !== undefined &&
+        (typeof configured.provider !== 'string' || !configured.provider.trim())) {
+      throw new CliConfigurationError('semantic.provider must be a non-empty string when present')
+    }
+    semantic = {
+      provider: typeof configured.provider === 'string' ? configured.provider.trim() : null,
+      minimumSimilarity: unitInterval(
+        configured.minimumSimilarity, 0.90, 'semantic.minimumSimilarity',
+      ),
+      minimumMargin: unitInterval(configured.minimumMargin, 0.15, 'semantic.minimumMargin'),
+    }
+  }
+
   return {
     configPath: absolute,
     explore,
@@ -252,6 +284,7 @@ export async function loadProductionConfiguration(configPath: string): Promise<P
       ),
     },
     ...(openClawConfiguration ? { openClaw: openClawConfiguration } : {}),
+    ...(semantic ? { semantic } : {}),
     ...(repair ? { repair } : {}),
   }
 }

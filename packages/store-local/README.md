@@ -14,6 +14,12 @@ A reusable hit requires all of the following to match exactly:
 - APK/build SHA-256; and
 - the stored flow SHA-256, recomputed from the canonical flow file before every hit.
 
+Web records additionally require their adapter and browser identities. WALK-016 semantic retrieval
+does not relax this method or the memory schema. Core considers it only after exact `not-found`, and
+every differently worded candidate must pass this same exact `lookup` under its original stored goal
+before its embedding is ranked. App/platform/schema/build, adapter/browser, canonical path, latest
+pass, and checksum therefore remain hard gates.
+
 Stored flow paths must remain under `.walkcache/flows` after symlink resolution. Temporary files,
 unreferenced flows, stale builds, wrong app/platform/schema identities, missing flows, and walks whose
 latest validation failed are never hits. A checksum mismatch, malformed JSON, unsupported schema,

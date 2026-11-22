@@ -11,13 +11,19 @@ UI, framework, platform, or storage implementation. The interfaces are:
 - `WalkExplorer`: cold exploration plus independently verified persistence.
 - `SelectorRepairer`: one bounded repair result, including source diff and preservation evidence.
 - `RunReporter`: serialize a completed run without influencing orchestration decisions.
+- `GoalEmbeddingProvider`: lazy one-goal embeddings for the opt-in WALK-016 proof. Embedding calls
+  are reported separately from exploration/model calls.
 
 `WalkCache` receives runner/store/reporter instances plus **lazy** explorer and repairer factories.
 The model client belongs to the explorer implementation, so the explorer factory is also its
 construction boundary. `run` performs `store.lookup` before either factory can be called. Only a
 normal miss constructs the explorer; only eligible selector staleness constructs the repairer.
 Product assertions, navigation/runner/timeout failures, and unknown failures stop without repair.
-Core has no goal/app/platform checks and no Maestro/OpenClaw/React imports.
+`ExactFirstWalkRetriever` owns exact-first semantic fallback. It runs only on exact `not-found`,
+rechecks each candidate through `WalkStore.lookup` before candidate embedding/ranking, rejects low
+confidence/ambiguous/contradictory/narrow adversarial goals, and returns provider failures as ordinary
+misses. A semantic hit still requires runner replay and records validation on the selected stored
+identity. Core has no Maestro/OpenClaw/React imports.
 
 Concrete wiring lives at the edges: `store-local`, `maestro`, `agent-openclaw`, `repair`, and the
 headless CLI's local JSON reporter. Their richer vendor-specific records are translated into the

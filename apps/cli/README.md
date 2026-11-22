@@ -45,6 +45,30 @@ Inspecting a failed report returns that report's original failure class; inspect
 returns zero. Help does not load configuration. Invalid memory must be quarantined, not edited into
 a hit.
 
+## WALK-016 opt-in semantic lookup
+
+Add `semantic: { "provider": "local-lexical-v1" }` to enable the local deterministic proof. Optional
+`minimumSimilarity` (default `0.90`) and `minimumMargin` (default `0.15`) accept values from those
+defaults through one only; they may be raised but never lowered. Zero, null, non-numbers, NaN, and infinity are
+rejected. Omitting `semantic` preserves prior behavior; a present config with a missing/unsupported
+provider reports `provider-unavailable` and continues the ordinary miss/explore lifecycle rather than
+manufacturing a hit.
+
+Exact lookup always runs first with zero provider constructions and embedding calls. Only exact
+`not-found` invokes semantic retrieval. Candidates must pass the same full store identity, canonical
+path/checksum, and latest-validation gates before candidate embedding/ranking. Ambiguous,
+low-confidence, unrelated, contradictory, and narrow adversarial-marker goals select no walk;
+adversarial markers stop before cold exploration. Other misses preserve the normal cold lifecycle.
+The local provider rejects raw hash collisions with a canonical-token guard. After provider calls,
+the winner is exactly re-looked-up immediately before replay; a changed winner executes nothing.
+
+A semantic hit replays the unchanged selected YAML and records validation against that stored goal,
+not the paraphrase. It never bypasses verification or enters semantic-driven repair. Output includes
+semantic provider/status/reason, embedding calls, candidate counts, similarity/runner-up, and selected
+goal/flow. Model-call metrics remain separate. The fixed local lexical vocabulary and limitations are
+documented in [`packages/semantic-local/README.md`](../../packages/semantic-local/README.md); this is
+not generalized semantic correctness or a remote vector service.
+
 ## WALK-010 Web boundary
 
 [`spikes/002-web-walkcache`](../../spikes/002-web-walkcache/README.md) adds a distinct Maestro Web

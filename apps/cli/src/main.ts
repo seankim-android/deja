@@ -14,6 +14,10 @@ import {
 } from '../../../packages/maestro/src/index.ts'
 import { BoundedSelectorRepairer } from '../../../packages/repair/src/index.ts'
 import {
+  LOCAL_LEXICAL_EMBEDDING_PROVIDER,
+  LocalLexicalEmbeddingProvider,
+} from '../../../packages/semantic-local/src/index.ts'
+import {
   buildFingerprint,
   CliConfigurationError,
   defaultConfigPath,
@@ -116,6 +120,15 @@ function createOrchestration(
     store,
     runner,
     reporter,
+    ...(configuration.semantic ? {
+      semantic: {
+        createProvider: () => configuration.semantic!.provider === LOCAL_LEXICAL_EMBEDDING_PROVIDER
+          ? new LocalLexicalEmbeddingProvider()
+          : null,
+        minimumSimilarity: configuration.semantic!.minimumSimilarity,
+        minimumMargin: configuration.semantic!.minimumMargin,
+      },
+    } : {}),
     createExplorer: () => {
       if (configuration.explore.platform !== 'android') {
         return new UnsupportedPlatformExplorer(configuration.explore.platform)
