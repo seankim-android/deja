@@ -1,0 +1,5 @@
+device_state=device
+selector_stale_setting=null
+product_regression_setting=null
+apk_sha256=1de8864ea046b64d124ece93ca97b0ae69d11d1fc3d39a89ff405f0e2dd2262d
+source_matches_pre_experiment=yes

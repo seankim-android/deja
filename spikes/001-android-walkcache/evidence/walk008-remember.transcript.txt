@@ -1,0 +1,23 @@
+$ bun ../../apps/cli/walkcache.ts remember checkout --flow evidence/repaired-checkout.yaml --config walkcache.config.json
+Command: remember
+Goal: checkout
+Outcome: remembered
+Passed: yes
+Cache status: not-checked
+Model calls: 0 (remember performs independent verification only)
+Duration: 24712 ms
+Assertions: 12
+Repair count: 0
+YAML: .walkcache/flows/checkout/android-e09660f45502b720f79f95a65c78ad5f48a4e11ae1ff5f52c6cb99972b12b478.yaml
+YAML SHA-256: e09660f45502b720f79f95a65c78ad5f48a4e11ae1ff5f52c6cb99972b12b478
+Report: .walkcache/reports/remember-1795333540554-25739.json
+Latest report: .walkcache/reports/latest.json
+Artifacts:
+- [yaml] evidence/repaired-checkout.yaml
+- [output] .walkcache/attempts/remember-1795333515842-idawwg01/output.log
+- [output] .walkcache/attempts/remember-1795333515842-idawwg01/stdout.log
+- [output] .walkcache/attempts/remember-1795333515842-idawwg01/stderr.log
+- [yaml] .walkcache/flows/checkout/android-e09660f45502b720f79f95a65c78ad5f48a4e11ae1ff5f52c6cb99972b12b478.yaml
+- [memory] .walkcache/memory/walks.json
+Source diffs: none
+Exit code: 0

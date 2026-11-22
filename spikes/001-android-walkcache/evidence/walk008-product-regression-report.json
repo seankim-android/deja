@@ -1,0 +1,86 @@
+{
+  "schemaVersion": 1,
+  "command": "run",
+  "identity": {
+    "goal": "checkout",
+    "appId": "dev.walkcache.checkout",
+    "platform": "android",
+    "flowSchemaVersion": "maestro/v1",
+    "buildFingerprint": "1de8864ea046b64d124ece93ca97b0ae69d11d1fc3d39a89ff405f0e2dd2262d"
+  },
+  "goalKey": "checkout",
+  "cacheStatus": "hit",
+  "startedAt": "2026-11-22T07:44:30.336Z",
+  "execution": {
+    "passed": false,
+    "startedAt": "2026-11-22T07:44:30.336Z",
+    "endedAt": "2026-11-22T07:45:12.209Z",
+    "durationMs": 41873,
+    "exitCode": 1,
+    "assertions": 11,
+    "failure": {
+      "category": "product_assertion",
+      "failingStep": "Assert that \"Order #WC-1001 · Mochi sticker pack\", id: dev.walkcache.checkout:id/screen_confirmation is visible",
+      "rawArtifactPath": ".walkcache/reports/run-1795333470336-fjibugej/output.log",
+      "advisory": true,
+      "repairEligible": false
+    },
+    "artifacts": [
+      {
+        "kind": "yaml",
+        "path": ".walkcache/flows/checkout/android-be212808db3b372a6178a8f6ef03ca8894342b0edb021ab8cb9283c7319da07c.yaml"
+      },
+      {
+        "kind": "output",
+        "path": ".walkcache/reports/run-1795333470336-fjibugej/output.log"
+      },
+      {
+        "kind": "output",
+        "path": ".walkcache/reports/run-1795333470336-fjibugej/stdout.log"
+      },
+      {
+        "kind": "output",
+        "path": ".walkcache/reports/run-1795333470336-fjibugej/stderr.log"
+      }
+    ]
+  },
+  "outcome": "product-regression",
+  "passed": false,
+  "modelCalls": 0,
+  "modelCallBasis": "exact local hit: explorer and model factories were not invoked",
+  "assertions": 11,
+  "repairCount": 0,
+  "yamlPath": ".walkcache/flows/checkout/android-be212808db3b372a6178a8f6ef03ca8894342b0edb021ab8cb9283c7319da07c.yaml",
+  "yamlSha256": "be212808db3b372a6178a8f6ef03ca8894342b0edb021ab8cb9283c7319da07c",
+  "failure": {
+    "category": "product_assertion",
+    "failingStep": "Assert that \"Order #WC-1001 · Mochi sticker pack\", id: dev.walkcache.checkout:id/screen_confirmation is visible",
+    "rawArtifactPath": ".walkcache/reports/run-1795333470336-fjibugej/output.log",
+    "advisory": true,
+    "repairEligible": false
+  },
+  "artifacts": [
+    {
+      "kind": "yaml",
+      "path": ".walkcache/flows/checkout/android-be212808db3b372a6178a8f6ef03ca8894342b0edb021ab8cb9283c7319da07c.yaml"
+    },
+    {
+      "kind": "output",
+      "path": ".walkcache/reports/run-1795333470336-fjibugej/output.log"
+    },
+    {
+      "kind": "output",
+      "path": ".walkcache/reports/run-1795333470336-fjibugej/stdout.log"
+    },
+    {
+      "kind": "output",
+      "path": ".walkcache/reports/run-1795333470336-fjibugej/stderr.log"
+    }
+  ],
+  "diffs": [],
+  "errors": [
+    "Meaningful product assertion failed; repair was not attempted"
+  ],
+  "endedAt": "2026-11-22T07:45:12.212Z",
+  "durationMs": 41876
+}

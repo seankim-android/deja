@@ -1,93 +1,41 @@
 import { createHash } from 'node:crypto'
 import { mkdir, readFile, realpath, rename, stat, writeFile } from 'node:fs/promises'
 import { dirname, isAbsolute, resolve, sep } from 'node:path'
+import {
+  normalizeGoal as normalizeGoalContract,
+  type ExplorationDetails,
+  type LookupHit,
+  type LookupMiss,
+  type PersistedWalk,
+  type PersistVerifiedOptions,
+  type PersistVerifiedRepairOptions,
+  type RepairProvenance,
+  type StoredWalk,
+  type WalkIdentity,
+  type WalkStore,
+  type WalkValidation,
+} from '../../core/src/index.ts'
+
+export {
+  type ExplorationDetails,
+  type LookupHit,
+  type LookupMiss,
+  type PersistedWalk,
+  type PersistVerifiedOptions,
+  type PersistVerifiedRepairOptions,
+  type RepairProvenance,
+  type StoredWalk,
+  type WalkIdentity,
+  type WalkValidation,
+} from '../../core/src/index.ts'
 
 export const LOCAL_MEMORY_SCHEMA_VERSION = 2
 export const MAESTRO_FLOW_SCHEMA_VERSION = 'maestro/v1'
 export const LOCAL_MEMORY_PATH = '.walkcache/memory/walks.json'
 
-export type WalkIdentity = {
-  goal: string
-  appId: string
-  platform: string
-  flowSchemaVersion: string
-  buildFingerprint: string
-}
-
-export type WalkValidation = {
-  passed: boolean
-  at: string
-}
-
-export type StoredValidation = WalkValidation & {
-  flowSha256: string
-}
-
-export type RepairProvenance = {
-  attemptId: string
-  patchPath: string
-  previousBuildFingerprint: string
-  previousFlowSha256: string
-}
-
-export type ExplorationDetails = {
-  explorationDurationMs: number | null
-  verificationDurationMs: number | null
-  mcpCalls: number | null
-  modelCalls: number | null
-  modelCallBasis: string
-}
-
-export type StoredWalk = WalkIdentity & {
-  goalKey: string
-  flowPath: string
-  flowSha256: string
-  lastValidation: WalkValidation
-  validationHistory: StoredValidation[]
-  origin?: 'remember' | 'explore' | 'repair'
-  exploration?: ExplorationDetails
-  repairHistory?: RepairProvenance[]
-}
-
 export type WalkMemory = {
   schemaVersion: typeof LOCAL_MEMORY_SCHEMA_VERSION
   walks: StoredWalk[]
-}
-
-export type LookupHit = {
-  status: 'hit'
-  walk: StoredWalk
-  flowPath: string
-}
-
-export type LookupMiss = {
-  status: 'miss'
-  reason: 'not-found' | 'wrong-app' | 'wrong-platform' | 'wrong-flow-schema' |
-    'stale-build' | 'missing-flow' | 'failed-validation'
-}
-
-export type PersistVerifiedOptions = {
-  identity: WalkIdentity
-  candidatePath: string
-  validation: WalkValidation
-  origin: 'remember' | 'explore'
-  exploration?: ExplorationDetails
-}
-
-export type PersistVerifiedRepairOptions = Omit<PersistVerifiedOptions, 'origin' | 'exploration'> & {
-  previous: {
-    buildFingerprint: string
-    flowSha256: string
-  }
-  repair: RepairProvenance
-}
-
-export type PersistedWalk = {
-  walk: StoredWalk
-  flowPath: string
-  flowSha256: string
-  storedMetadataPath: typeof LOCAL_MEMORY_PATH
-  atomicWrite: true
 }
 
 export type LocalWalkStoreOptions = {
@@ -104,7 +52,7 @@ export class InvalidWalkMemoryError extends Error {
 }
 
 export function normalizeGoal(goal: string) {
-  return goal.trim().toLowerCase().replace(/\s+/g, ' ')
+  return normalizeGoalContract(goal).key
 }
 
 function errorCode(error: unknown) {
@@ -274,7 +222,7 @@ function flowSlug(goalKey: string) {
   return slug
 }
 
-export class LocalWalkStore {
+export class LocalWalkStore implements WalkStore {
   readonly workspaceRoot: string
   readonly memoryPath: string
   private readonly renameFile: (temporaryPath: string, destinationPath: string) => Promise<void>
@@ -420,6 +368,10 @@ export class LocalWalkStore {
 
   async persistVerifiedRepair(options: PersistVerifiedRepairOptions): Promise<PersistedWalk> {
     return this.persistVerified({ ...options, origin: 'remember' }, options)
+  }
+
+  async list(): Promise<StoredWalk[]> {
+    return [...(await this.loadMemory()).walks]
   }
 
   async lookup(identityInput: WalkIdentity): Promise<LookupHit | LookupMiss> {

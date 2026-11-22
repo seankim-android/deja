@@ -1,3 +1,8 @@
+export {
+  OpenClawWalkExplorer,
+  type OpenClawWalkExplorerOptions,
+} from './production-explorer.ts'
+
 import { spawn } from 'node:child_process'
 import { appendFileSync, existsSync, readFileSync } from 'node:fs'
 import { mkdir, rename, writeFile } from 'node:fs/promises'

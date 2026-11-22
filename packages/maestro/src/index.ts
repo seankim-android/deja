@@ -4,6 +4,12 @@ import { mkdir, realpath, writeFile } from 'node:fs/promises'
 import { delimiter, dirname, resolve, sep } from 'node:path'
 
 export {
+  MaestroWalkRunner,
+  countFlowAssertions,
+  type MaestroWalkRunnerOptions,
+} from './walk-runner.ts'
+
+export {
   classifyMaestroFailure,
   type MaestroFailureCategory,
   type MaestroFailureClassification,

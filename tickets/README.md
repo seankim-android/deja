@@ -33,16 +33,16 @@ Statuses: `in_progress`, `done`, `ready` (no incomplete dependencies), `queued` 
 
 | Ticket | Status | Depends on | Outcome |
 | --- | --- | --- | --- |
-| [WALK-008](WALK-008-production-cli-plugin-contracts.md) | queued | 003–007 | Headless CLI around plugin interfaces |
-| [WALK-009](WALK-009-local-run-viewer.md) | queued | 008 | Optional local dashboard for runs and artifacts |
-| [WALK-010](WALK-010-verified-web-proof.md) | queued | 005, 007, 008 | Real Chromium evidence or named blocker |
-| [WALK-011](WALK-011-verified-ios-proof.md) | queued | 005, 007, 008 | Real iOS simulator evidence or named blocker |
+| [WALK-008](WALK-008-production-cli-plugin-contracts.md) | done | 003–007 | Headless CLI around plugin interfaces |
+| [WALK-009](WALK-009-local-run-viewer.md) | ready | 008 | Optional local dashboard for runs and artifacts |
+| [WALK-010](WALK-010-verified-web-proof.md) | ready | 005, 007, 008 | Real Chromium evidence or named blocker |
+| [WALK-011](WALK-011-verified-ios-proof.md) | ready | 005, 007, 008 | Real iOS simulator evidence or named blocker |
 
 ## P0 — Release
 
 | Ticket | Status | Depends on | Outcome |
 | --- | --- | --- | --- |
-| [WALK-012](WALK-012-oss-docs-metadata.md) | queued | 008 | Accurate quick start, architecture, license, limitations |
+| [WALK-012](WALK-012-oss-docs-metadata.md) | ready | 008 | Accurate quick start, architecture, license, limitations |
 | [WALK-013](WALK-013-portable-tests-clean-ci.md) | queued | 012 | Portable tests and clean-checkout CI evidence |
 | [WALK-014](WALK-014-demo-assets-rehearsal.md) | queued | 005, 007, 008, 013 | Reproducible demo and two verified rehearsals |
 | [WALK-015](WALK-015-video-submission.md) | queued | 014 | Reviewed ≤60-second video and confirmed submission |

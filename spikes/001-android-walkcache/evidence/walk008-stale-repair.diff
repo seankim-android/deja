@@ -1,0 +1,30 @@
+--- a/app/src/main/java/dev/walkcache/checkout/MainActivity.java
++++ b/app/src/main/java/dev/walkcache/checkout/MainActivity.java
+@@ -70,7 +70,10 @@
+         content.addView(body("1 × Mochi sticker pack"));
+         content.addView(body("Total: $5.00"));
+ 
+-        Button checkout = button("Checkout", null);
++        Integer checkoutId = Settings.Global.getInt(
++            getContentResolver(), CHECKOUT_SELECTOR_STALE_SETTING, 0
++        ) == 1 ? null : R.id.checkout_button;
++        Button checkout = button("Checkout", checkoutId);
+         checkout.setOnClickListener(view -> showConfirmation());
+         content.addView(checkout);
+         setContentView(scroll(content));
+--- a/app/src/main/res/values/ids.xml
++++ b/app/src/main/res/values/ids.xml
+@@ -7,9 +7,10 @@
+     <item name="screen_catalog" type="id" />
+     <item name="add_to_cart" type="id" />
+     <item name="screen_cart" type="id" />
+-    <item name="screen_confirmation" type="id" />
+-    <item name="order_confirmation" type="id" />
+-    <!-- checkout_button is deliberately absent for the selector-repair spike. -->
++    <item name="checkout_button" type="id" />
++    <item name="screen_confirmation" type="id" />
++    <item name="order_confirmation" type="id" />
++    <!-- checkout_button was added by the verified selector-repair spike. -->
+ </resources>
+ 
+ 

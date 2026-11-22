@@ -1,0 +1,106 @@
+{
+  "schemaVersion": 1,
+  "command": "run",
+  "identity": {
+    "goal": "checkout",
+    "appId": "dev.walkcache.checkout",
+    "platform": "android",
+    "flowSchemaVersion": "maestro/v1",
+    "buildFingerprint": "1de8864ea046b64d124ece93ca97b0ae69d11d1fc3d39a89ff405f0e2dd2262d"
+  },
+  "goalKey": "checkout",
+  "cacheStatus": "miss",
+  "startedAt": "2026-11-22T07:31:49.285Z",
+  "cacheMissReason": "not-found",
+  "outcome": "cold-recorded",
+  "passed": true,
+  "modelCalls": 13,
+  "modelCallBasis": "openclaw agent exec assistantTurns (completed round trips)",
+  "assertions": 11,
+  "repairCount": 0,
+  "yamlPath": ".walkcache/flows/checkout/android-be212808db3b372a6178a8f6ef03ca8894342b0edb021ab8cb9283c7319da07c.yaml",
+  "yamlSha256": "be212808db3b372a6178a8f6ef03ca8894342b0edb021ab8cb9283c7319da07c",
+  "failure": null,
+  "artifacts": [
+    {
+      "kind": "attempt",
+      "path": ".walkcache/attempts/explore-1795332709286-23475"
+    },
+    {
+      "kind": "output",
+      "path": ".walkcache/attempts/explore-1795332709286-23475/activity.jsonl"
+    },
+    {
+      "kind": "output",
+      "path": ".walkcache/attempts/explore-1795332709286-23475/mcp-activity.jsonl"
+    },
+    {
+      "kind": "yaml",
+      "path": ".walkcache/attempts/explore-1795332709286-23475/candidate.yaml"
+    },
+    {
+      "kind": "model-metrics",
+      "path": ".walkcache/attempts/explore-1795332709286-23475/openclaw-result.json"
+    },
+    {
+      "kind": "yaml",
+      "path": ".walkcache/flows/checkout/android-be212808db3b372a6178a8f6ef03ca8894342b0edb021ab8cb9283c7319da07c.yaml",
+      "sha256": "be212808db3b372a6178a8f6ef03ca8894342b0edb021ab8cb9283c7319da07c"
+    },
+    {
+      "kind": "output",
+      "path": ".walkcache/attempts/explore-1795332709286-23475/verification/output.log"
+    }
+  ],
+  "diffs": [],
+  "errors": [],
+  "exploration": {
+    "passed": true,
+    "durationMs": 95496,
+    "explorationDurationMs": 70220,
+    "verificationDurationMs": 25131,
+    "mcpCalls": 11,
+    "modelCalls": 13,
+    "modelCallBasis": "openclaw agent exec assistantTurns (completed round trips)",
+    "model": "moonshotai-kimi-k3.1-pro-trial",
+    "provider": "cerebras",
+    "assertions": 11,
+    "flowPath": ".walkcache/flows/checkout/android-be212808db3b372a6178a8f6ef03ca8894342b0edb021ab8cb9283c7319da07c.yaml",
+    "flowSha256": "be212808db3b372a6178a8f6ef03ca8894342b0edb021ab8cb9283c7319da07c",
+    "failure": null,
+    "artifacts": [
+      {
+        "kind": "attempt",
+        "path": ".walkcache/attempts/explore-1795332709286-23475"
+      },
+      {
+        "kind": "output",
+        "path": ".walkcache/attempts/explore-1795332709286-23475/activity.jsonl"
+      },
+      {
+        "kind": "output",
+        "path": ".walkcache/attempts/explore-1795332709286-23475/mcp-activity.jsonl"
+      },
+      {
+        "kind": "yaml",
+        "path": ".walkcache/attempts/explore-1795332709286-23475/candidate.yaml"
+      },
+      {
+        "kind": "model-metrics",
+        "path": ".walkcache/attempts/explore-1795332709286-23475/openclaw-result.json"
+      },
+      {
+        "kind": "yaml",
+        "path": ".walkcache/flows/checkout/android-be212808db3b372a6178a8f6ef03ca8894342b0edb021ab8cb9283c7319da07c.yaml",
+        "sha256": "be212808db3b372a6178a8f6ef03ca8894342b0edb021ab8cb9283c7319da07c"
+      },
+      {
+        "kind": "output",
+        "path": ".walkcache/attempts/explore-1795332709286-23475/verification/output.log"
+      }
+    ],
+    "errors": []
+  },
+  "endedAt": "2026-11-22T07:33:24.784Z",
+  "durationMs": 95499
+}

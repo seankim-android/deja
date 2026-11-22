@@ -1,0 +1,112 @@
+$ bun test
+
+bun test v1.4.4-canary.1 (191755ec1)
+
+apps/cli/test/cli.test.ts:
+(pass) production headless CLI > miss enters real cold lifecycle, then warm bypasses model construction and supports list/inspect [278.13ms]
+(pass) production headless CLI > remember verifies and persists; a genuine classified product failure stops with failed validation [65.37ms]
+(pass) production headless CLI > rejected cold verification exits 3 and never creates successful memory [153.66ms]
+(pass) production headless CLI > help, command errors, bad config, and inspection failures use documented exits [75.18ms]
+
+packages/agent-openclaw/test/openclaw-explorer.test.ts:
+(pass) self-contained OpenClaw cold exploration > pins an MCP-only explorer and persists only after independent verification [13.67ms]
+(pass) self-contained OpenClaw cold exploration > a rejected candidate cannot create or replace known-good memory [10.48ms]
+(pass) self-contained OpenClaw cold exploration > extracts fenced YAML and enforces the app plus a fresh clearState launch [10.20ms]
+(pass) self-contained OpenClaw cold exploration > leaves model and MCP metrics unknown when instrumentation is absent [9.88ms]
+
+packages/metrics/test/cold-warm.test.ts:
+(pass) cold/warm comparison aggregation > retains every raw sample and reports deterministic variability and paired medians [0.36ms]
+(pass) cold/warm comparison aggregation > does not turn missing model instrumentation into zero or infer it from MCP calls [1.00ms]
+(pass) cold/warm comparison aggregation > rejects incomparable builds and missing meaningful outcome assertions [0.05ms]
+(pass) cold/warm comparison aggregation > failed samples remain visible and block a wall-clock reduction claim [0.06ms]
+
+packages/core/test/orchestration.test.ts:
+(pass) vendor-independent orchestration > core source has no platform, demo, UI, filesystem, or vendor imports [0.22ms]
+(pass) vendor-independent orchestration > a warm constructor/spy proves no explorer or repairer is constructed or invoked [0.32ms]
+(pass) vendor-independent orchestration > a normal miss invokes the cold explorer once and returns its verified metrics [0.06ms]
+(pass) vendor-independent orchestration > explicit explore also uses the injected cold lifecycle and times the whole command [0.05ms]
+(pass) vendor-independent orchestration > a stale-build miss uses exactly one bounded repair and no explorer [0.04ms]
+(pass) vendor-independent orchestration > a stale selector on an exact hit enters only the bounded repair plugin [0.03ms]
+(pass) vendor-independent orchestration > product_assertion reports and stops without constructing a repairer or explorer [0.04ms]
+(pass) vendor-independent orchestration > unknown reports and stops without constructing a repairer or explorer
+(pass) vendor-independent orchestration > remember independently verifies before persistence and rejects failures without exploration [0.09ms]
+(pass) vendor-independent orchestration > rejected exploration and repair remain failures rather than falling through to a pass [0.04ms]
+
+packages/maestro/test/cache-replay-classification.test.ts:
+(pass) a failing cache hit stays at zero model calls and its failed validation is not reused [38.60ms]
+
+packages/maestro/test/maestro-runner.test.ts:
+(pass) verified Maestro runner > preserves output, timing, configuration, exit status, and artifacts on success [10.25ms]
+(pass) verified Maestro runner > returns a structured execution error and preserves a nonzero exit code [8.63ms]
+(pass) verified Maestro runner > enforces the timeout and terminates only the spawned process tree [1465.22ms]
+(pass) verified Maestro runner > returns a structured launch error for a missing executable [5.61ms]
+(pass) verified Maestro runner > rejects a flow path that escapes the workspace before launching [3.15ms]
+(pass) verified Maestro runner > returns a structured artifact error without discarding process output [30.64ms]
+
+packages/maestro/test/failure-classification.test.ts:
+(pass) advisory Maestro failure classification fixtures > selector-positive remains deterministic and conservative [0.64ms]
+(pass) advisory Maestro failure classification fixtures > selector-negative remains deterministic and conservative [0.33ms]
+(pass) advisory Maestro failure classification fixtures > navigation-positive remains deterministic and conservative [0.74ms]
+(pass) advisory Maestro failure classification fixtures > navigation-negative remains deterministic and conservative [0.21ms]
+(pass) advisory Maestro failure classification fixtures > product-assertion-positive remains deterministic and conservative [0.19ms]
+(pass) advisory Maestro failure classification fixtures > product-assertion-negative remains deterministic and conservative [0.97ms]
+(pass) advisory Maestro failure classification fixtures > runner-positive remains deterministic and conservative [0.08ms]
+(pass) advisory Maestro failure classification fixtures > runner-negative remains deterministic and conservative [0.10ms]
+(pass) advisory Maestro failure classification fixtures > timeout-positive remains deterministic and conservative [0.08ms]
+(pass) advisory Maestro failure classification fixtures > timeout-negative remains deterministic and conservative [0.10ms]
+(pass) advisory Maestro failure classification fixtures > unknown-positive remains deterministic and conservative [0.10ms]
+(pass) advisory Maestro failure classification fixtures > unknown-negative remains deterministic and conservative [0.09ms]
+(pass) advisory Maestro failure classification fixtures > a passing runner result has no failure classification [0.03ms]
+(pass) advisory Maestro failure classification fixtures > mixed selector and assertion diagnostics stay unknown and ineligible for repair [0.03ms]
+(pass) advisory Maestro failure classification fixtures > multiple failing steps stay ambiguous and retain the raw artifact reference [0.02ms]
+
+packages/store-local/test/local-store.test.ts:
+(pass) conservative local walk store > returns a first-run miss when no memory exists [1.28ms]
+(pass) conservative local walk store > normalizes the goal and returns a valid hit with the complete exact identity [2.71ms]
+(pass) conservative local walk store > returns a stale-build miss instead of replaying another APK fingerprint [1.86ms]
+(pass) conservative local walk store > returns a wrong-app miss without loosening app identity [1.91ms]
+(pass) conservative local walk store > returns a wrong-platform miss without sharing Android memory across platforms [1.83ms]
+(pass) conservative local walk store > returns a missing-flow miss and never treats metadata alone as a pass [1.81ms]
+(pass) conservative local walk store > rejects a flow checksum mismatch instead of executing changed bytes [2.23ms]
+(pass) conservative local walk store > rejects malformed JSON as invalid memory [0.88ms]
+(pass) conservative local walk store > rejects an unsupported memory schema [1.62ms]
+(pass) conservative local walk store > rejects invalid entries instead of filtering them out to produce a hit [1.61ms]
+(pass) conservative local walk store > rejects stored flow paths outside the canonical flow directory [1.53ms]
+(pass) conservative local walk store > rejects a symlink whose canonical flow path escapes the workspace [1.70ms]
+(pass) conservative local walk store > an interruption before flow rename leaves only ignored temporary files and a first-run miss [0.98ms]
+(pass) conservative local walk store > failed candidate verification preserves the known-good flow and metadata byte for byte [1.49ms]
+(pass) conservative local walk store > failed replacement preserves known-good flow and metadata and excludes the orphan and temp [2.04ms]
+(pass) conservative local walk store > failed validation remains in history and never remains a successful reusable hit [1.91ms]
+(pass) conservative local walk store > upgrades valid WALK-003 schema-one metadata without inventing validation success [1.85ms]
+
+packages/repair/test/build-install.test.ts:
+(pass) bounded Gradle build and device install > installs the exact rebuilt APK on the configured device within the shared lifecycle [210.67ms]
+(pass) bounded Gradle build and device install > never installs a failed build [37.94ms]
+
+packages/repair/test/bounded-repair.test.ts:
+(pass) bounded checkout selector repair > verifies the exact two-file patch, new build identity, no Git action, and atomic replacement [22.57ms]
+(pass) bounded checkout selector repair > refuses product_assertion without source, assertion, build, or memory changes [6.12ms]
+(pass) bounded checkout selector repair > refuses navigation without source, assertion, build, or memory changes [5.39ms]
+(pass) bounded checkout selector repair > refuses unknown without source, assertion, build, or memory changes [4.85ms]
+(pass) bounded checkout selector repair > refuses timeout without source, assertion, build, or memory changes [4.28ms]
+(pass) bounded checkout selector repair > refuses runner without source, assertion, build, or memory changes [4.85ms]
+(pass) bounded checkout selector repair > refuses other-selector without source, assertion, build, or memory changes [5.03ms]
+(pass) bounded checkout selector repair > failed full-journey verification rolls back source and preserves last-known-good memory and failed artifacts [6.62ms]
+(pass) bounded checkout selector repair > rejects an unchanged rebuilt fingerprint before verification or persistence [5.55ms]
+(pass) bounded checkout selector repair > enforces one overall time budget and rolls back a partial attempt without retrying [45.54ms]
+
+packages/repair/test/repair-policy.test.ts:
+(pass) canonical two-file repair policy > produces a minimal exact diff only for the affected component and selector files [1.83ms]
+(pass) canonical two-file repair policy > rejects writes outside the configured affected files [1.42ms]
+(pass) canonical two-file repair policy > rejects unpermitted assertion/file types [1.90ms]
+(pass) canonical two-file repair policy > rejects lexical source-root escapes [1.18ms]
+(pass) canonical two-file repair policy > rejects a symlinked source root even when its target is inside the workspace [1.29ms]
+(pass) canonical two-file repair policy > rejects a source-file symlink escape and leaves the outside target unchanged [1.50ms]
+(pass) canonical two-file repair policy > fails closed if the validated stale selector text is absent or ambiguous [1.62ms]
+
+ 80 pass
+ 0 fail
+ 500 expect() calls
+Ran 80 tests across 11 files. [2.61s]
+
+Exit code: 0

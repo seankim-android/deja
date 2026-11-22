@@ -1,0 +1,236 @@
+import { describe, expect, test } from 'bun:test'
+import { spawn } from 'node:child_process'
+import { existsSync } from 'node:fs'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join, resolve } from 'node:path'
+
+const cli = resolve(import.meta.dir, '../walkcache.ts')
+const fakeMaestro = resolve(import.meta.dir, '../../../packages/maestro/test/fixtures/fake-maestro.cjs')
+const fakeOpenClaw = resolve(import.meta.dir, '../../../packages/agent-openclaw/test/fixtures/fake-openclaw.cjs')
+async function workspace() {
+  const temporary = await mkdtemp(join(tmpdir(), 'walkcache-cli-'))
+  const root = join(temporary, 'workspace')
+  await mkdir(join(root, 'app/build'), { recursive: true })
+  await mkdir(join(root, 'flows'), { recursive: true })
+  await mkdir(join(root, 'scripts'), { recursive: true })
+  await mkdir(join(root, 'fixture-sdk/platform-tools'), { recursive: true })
+  await writeFile(join(root, 'app/build/app.apk'), 'deterministic test build')
+  await writeFile(join(root, 'scripts/maestro-mcp-proxy.ts'), '// controlled fixture: no MCP process is started\n')
+  await writeFile(join(root, 'fixture-sdk/platform-tools/adb'), `#!/bin/sh
+printf '%s\\n' "$*" >> "${join(root, 'adb-calls.log')}"
+exit 0
+`, { mode: 0o755 })
+  await writeFile(join(root, 'flows/candidate.yaml'), `appId: dev.walkcache.checkout
+---
+- launchApp:
+    clearState: true
+- assertVisible: WalkCache Shop
+- assertVisible: Order confirmed
+`)
+  await writeFile(join(root, 'walkcache.config.json'), `${JSON.stringify({
+    workspaceRoot: '.',
+    appId: 'dev.walkcache.checkout',
+    platform: 'android',
+    buildPath: 'app/build/app.apk',
+    device: 'fixture-device',
+    openClawModel: 'cerebras/moonshotai-kimi-k3.1-pro-trial',
+    openClawBaseUrl: 'https://api.cerebras.ai/v1',
+    explorationTimeoutSeconds: 30,
+    verificationTimeoutMs: 2000,
+    fixtureCredentials: [{ label: 'Fixture password', value: 'testing123' }],
+    maestro: { executable: fakeMaestro, timeoutMs: 2000 },
+    openClaw: { executable: fakeOpenClaw, mcpProxy: 'scripts/maestro-mcp-proxy.ts' },
+  }, null, 2)}\n`)
+  return { temporary, root }
+}
+
+async function execute(root: string, args: string[], modes: {
+  maestro?: 'product' | 'selector'
+  explorer?: 'invalid'
+  capture?: string
+} = {}) {
+  const cliArguments = args.includes('--config') ? args : [...args, '--config', 'walkcache.config.json']
+  const child = spawn(process.execPath, [cli, ...cliArguments], {
+    cwd: root,
+    env: {
+      ...process.env,
+      ANDROID_HOME: join(root, 'fixture-sdk'),
+      WALKCACHE_FAKE_MAESTRO_MODE: modes.maestro ?? '',
+      WALKCACHE_FAKE_OPENCLAW_MODE: modes.explorer ?? '',
+      ...(modes.capture ? { WALKCACHE_FAKE_OPENCLAW_CAPTURE: modes.capture } : {}),
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  const stdout: string[] = []
+  const stderr: string[] = []
+  child.stdout.setEncoding('utf8')
+  child.stderr.setEncoding('utf8')
+  child.stdout.on('data', chunk => stdout.push(chunk))
+  child.stderr.on('data', chunk => stderr.push(chunk))
+  const exitCode = await new Promise<number | null>(resolveExit => {
+    child.once('error', error => stderr.push(String(error)))
+    child.once('close', code => resolveExit(code))
+  })
+  let report: Record<string, unknown> | null = null
+  try {
+    report = JSON.parse(await readFile(join(root, '.walkcache/reports/latest.json'), 'utf8'))
+  } catch {
+    // Usage/help/config failures intentionally have no run report.
+  }
+  return { exitCode, stdout: stdout.join(''), stderr: stderr.join(''), report }
+}
+
+async function cleanup(temporary: string) {
+  await rm(temporary, recursiveOptions)
+}
+const recursiveOptions = { recursive: true, force: true }
+
+describe('production headless CLI', () => {
+  test('miss enters real cold lifecycle, then warm bypasses model construction and supports list/inspect', async () => {
+    const context = await workspace()
+    const capture = join(context.temporary, 'model-invocation.json')
+    try {
+      const cold = await execute(context.root, ['run', 'checkout'], { capture })
+      expect(cold.exitCode).toBe(0)
+      expect(cold.report).toMatchObject({
+        command: 'run', cacheStatus: 'miss', cacheMissReason: 'not-found',
+        outcome: 'cold-recorded', passed: true, modelCalls: 2, repairCount: 0, assertions: 2,
+      })
+      expect(cold.stdout).toContain('Cache status: miss (not-found)')
+      expect(cold.stdout).toContain('Model calls: 2')
+      expect(cold.stdout).toContain('Duration:')
+      expect(cold.stdout).toContain('Assertions: 2')
+      expect(cold.stdout).toContain('Repair count: 0')
+      expect(cold.stdout).toContain('Report: .walkcache/reports/run-')
+      expect(cold.stdout).toContain('YAML: .walkcache/flows/checkout/')
+      expect(existsSync(capture)).toBe(true)
+      expect((await readFile(join(context.root, 'adb-calls.log'), 'utf8')).split('\n').filter(Boolean)).toHaveLength(2)
+      expect(JSON.stringify(cold.report)).not.toContain(context.root)
+      expect(JSON.stringify(cold.report)).not.toContain('testing123')
+      const modelCapture = await readFile(capture, 'utf8')
+
+      const warm = await execute(context.root, ['run', 'checkout'], { capture })
+      expect(warm.exitCode).toBe(0)
+      expect(warm.report).toMatchObject({
+        cacheStatus: 'hit', outcome: 'passed', modelCalls: 0, repairCount: 0,
+      })
+      expect(await readFile(capture, 'utf8')).toBe(modelCapture)
+      expect(warm.stdout).toContain('exact local hit')
+      expect(warm.stdout).toContain('Source diffs: none')
+
+      const listed = await execute(context.root, ['list', '--json'])
+      expect(listed.exitCode).toBe(0)
+      const listJson = JSON.parse(listed.stdout)
+      expect(listJson.walks).toHaveLength(1)
+      expect(listJson.walks[0]).toMatchObject({ goalKey: 'checkout', origin: 'explore' })
+      const inspected = await execute(context.root, ['inspect', '.walkcache/reports/latest.json'])
+      expect(inspected.exitCode).toBe(0)
+      expect(inspected.stdout).toContain('Outcome: passed')
+      expect(inspected.stdout).toContain('Cache status: hit')
+      expect(inspected.stdout).toContain('Artifacts:')
+
+      // The persisted YAML remains independently executable without WalkCache or a model client.
+      const flowPath = String(warm.report!.yamlPath)
+      const standalone = spawn(fakeMaestro, [
+        '--no-ansi', '--device', 'fixture-device', 'test', join(context.root, flowPath),
+      ], {
+        cwd: context.root,
+        env: { ...process.env, WALKCACHE_OPENCLAW: join(context.root, 'must-not-exist') },
+        stdio: 'ignore',
+      })
+      expect(await new Promise<number | null>(resolveExit => standalone.once('close', resolveExit))).toBe(0)
+    } finally {
+      await cleanup(context.temporary)
+    }
+  })
+
+  test('remember verifies and persists; a genuine classified product failure stops with failed validation', async () => {
+    const context = await workspace()
+    const forbiddenModel = join(context.temporary, 'model-must-not-run.json')
+    try {
+      const remembered = await execute(context.root, [
+        'remember', 'checkout', '--flow', 'flows/candidate.yaml',
+      ], { capture: forbiddenModel })
+      expect(remembered.exitCode).toBe(0)
+      expect(remembered.report).toMatchObject({
+        command: 'remember', outcome: 'remembered', modelCalls: 0,
+        cacheStatus: 'not-checked', passed: true,
+      })
+      expect(existsSync(forbiddenModel)).toBe(false)
+
+      const regression = await execute(context.root, ['run', 'checkout'], { maestro: 'product', capture: forbiddenModel })
+      expect(regression.exitCode).toBe(1)
+      expect(regression.report).toMatchObject({
+        outcome: 'product-regression', passed: false, modelCalls: 0, repairCount: 0,
+        failure: { category: 'product_assertion', repairEligible: false },
+      })
+      expect(regression.stdout).toContain('repair was not attempted')
+      expect(regression.stdout).toContain('Source diffs: none')
+      expect(existsSync(forbiddenModel)).toBe(false)
+      const memory = JSON.parse(await readFile(join(context.root, '.walkcache/memory/walks.json'), 'utf8'))
+      expect(memory.walks[0].lastValidation.passed).toBe(false)
+      expect(memory.walks[0].validationHistory.map((entry: { passed: boolean }) => entry.passed)).toEqual([true, false])
+
+      const inspected = await execute(context.root, ['inspect', '.walkcache/reports/latest.json'])
+      expect(inspected.exitCode).toBe(1)
+      expect(inspected.stdout).toContain('Outcome: product-regression')
+      expect(inspected.stdout).not.toContain('testing123')
+    } finally {
+      await cleanup(context.temporary)
+    }
+  })
+
+  test('rejected cold verification exits 3 and never creates successful memory', async () => {
+    const context = await workspace()
+    try {
+      const rejected = await execute(context.root, ['explore', 'checkout'], {
+        explorer: 'invalid', maestro: 'product',
+      })
+      expect(rejected.exitCode).toBe(3)
+      expect(rejected.report).toMatchObject({
+        command: 'explore', outcome: 'exploration-rejected', passed: false,
+        repairCount: 0, yamlPath: null,
+      })
+      expect(rejected.stdout).toContain('Cache status: not-checked')
+      expect(rejected.stdout).toContain('Source diffs: none')
+      const list = await execute(context.root, ['list', '--json'])
+      expect(JSON.parse(list.stdout).walks).toHaveLength(0)
+    } finally {
+      await cleanup(context.temporary)
+    }
+  })
+
+  test('help, command errors, bad config, and inspection failures use documented exits', async () => {
+    const context = await workspace()
+    try {
+      const help = await execute(context.root, ['--help', '--config', 'does-not-exist.json'])
+      expect(help.exitCode).toBe(0)
+      expect(help.stdout).toContain('walkcache explore <goal>')
+      expect(help.stdout).toContain('Exit codes:')
+      expect(help.report).toBeNull()
+
+      const unknown = await execute(context.root, ['unknown-command'])
+      expect(unknown.exitCode).toBe(2)
+      expect(unknown.stderr).toContain('Unknown command')
+      const missingFlow = await execute(context.root, ['remember', 'checkout'])
+      expect(missingFlow.exitCode).toBe(2)
+      expect(missingFlow.stderr).toContain('requires --flow')
+      const missingReport = await execute(context.root, ['inspect', 'missing-report.json'])
+      expect(missingReport.exitCode).toBe(2)
+      const badConfig = await execute(context.root, ['list', '--config', 'missing-config.json'])
+      expect(badConfig.exitCode).toBe(2)
+      expect(badConfig.stderr).toContain('Cannot read WalkCache config')
+
+      await mkdir(join(context.root, '.walkcache/memory'), { recursive: true })
+      await writeFile(join(context.root, '.walkcache/memory/walks.json'), '{not json\n')
+      const corrupt = await execute(context.root, ['list'])
+      expect(corrupt.exitCode).toBe(4)
+      expect(corrupt.stderr).toContain('Invalid walk memory')
+      expect(corrupt.stderr).toContain('quarantine')
+      expect(corrupt.stderr).not.toContain(context.root)
+    } finally {
+      await cleanup(context.temporary)
+    }
+  })
+})

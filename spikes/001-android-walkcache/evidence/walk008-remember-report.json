@@ -1,0 +1,81 @@
+{
+  "schemaVersion": 1,
+  "command": "remember",
+  "identity": {
+    "goal": "checkout",
+    "appId": "dev.walkcache.checkout",
+    "platform": "android",
+    "flowSchemaVersion": "maestro/v1",
+    "buildFingerprint": "1de8864ea046b64d124ece93ca97b0ae69d11d1fc3d39a89ff405f0e2dd2262d"
+  },
+  "goalKey": "checkout",
+  "cacheStatus": "not-checked",
+  "startedAt": "2026-11-22T07:45:15.842Z",
+  "outcome": "remembered",
+  "passed": true,
+  "modelCalls": 0,
+  "modelCallBasis": "remember performs independent verification only",
+  "assertions": 12,
+  "repairCount": 0,
+  "yamlPath": ".walkcache/flows/checkout/android-e09660f45502b720f79f95a65c78ad5f48a4e11ae1ff5f52c6cb99972b12b478.yaml",
+  "yamlSha256": "e09660f45502b720f79f95a65c78ad5f48a4e11ae1ff5f52c6cb99972b12b478",
+  "failure": null,
+  "artifacts": [
+    {
+      "kind": "yaml",
+      "path": "evidence/repaired-checkout.yaml"
+    },
+    {
+      "kind": "output",
+      "path": ".walkcache/attempts/remember-1795333515842-idawwg01/output.log"
+    },
+    {
+      "kind": "output",
+      "path": ".walkcache/attempts/remember-1795333515842-idawwg01/stdout.log"
+    },
+    {
+      "kind": "output",
+      "path": ".walkcache/attempts/remember-1795333515842-idawwg01/stderr.log"
+    },
+    {
+      "kind": "yaml",
+      "path": ".walkcache/flows/checkout/android-e09660f45502b720f79f95a65c78ad5f48a4e11ae1ff5f52c6cb99972b12b478.yaml",
+      "sha256": "e09660f45502b720f79f95a65c78ad5f48a4e11ae1ff5f52c6cb99972b12b478"
+    },
+    {
+      "kind": "memory",
+      "path": ".walkcache/memory/walks.json"
+    }
+  ],
+  "diffs": [],
+  "errors": [],
+  "execution": {
+    "passed": true,
+    "startedAt": "2026-11-22T07:45:15.843Z",
+    "endedAt": "2026-11-22T07:45:40.551Z",
+    "durationMs": 24708,
+    "exitCode": 0,
+    "assertions": 12,
+    "failure": null,
+    "artifacts": [
+      {
+        "kind": "yaml",
+        "path": "evidence/repaired-checkout.yaml"
+      },
+      {
+        "kind": "output",
+        "path": ".walkcache/attempts/remember-1795333515842-idawwg01/output.log"
+      },
+      {
+        "kind": "output",
+        "path": ".walkcache/attempts/remember-1795333515842-idawwg01/stdout.log"
+      },
+      {
+        "kind": "output",
+        "path": ".walkcache/attempts/remember-1795333515842-idawwg01/stderr.log"
+      }
+    ]
+  },
+  "endedAt": "2026-11-22T07:45:40.554Z",
+  "durationMs": 24712
+}

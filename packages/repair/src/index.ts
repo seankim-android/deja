@@ -1,3 +1,9 @@
+export {
+  BoundedSelectorRepairer,
+  type BoundedSelectorRepairerOptions,
+} from './adapter.ts'
+
+import type { WalkStore } from '../../core/src/index.ts'
 import { createHash } from 'node:crypto'
 import { mkdir, readFile, realpath, rename, writeFile } from 'node:fs/promises'
 import { dirname, relative, resolve, sep } from 'node:path'
@@ -52,7 +58,8 @@ export type BoundedCheckoutRepairOptions = {
   timeoutMs: number
   policy: CheckoutRepairPolicy
   attemptId?: string
-  store?: LocalWalkStore
+  store?: WalkStore
+  memoryPath?: string
   fingerprint: () => Promise<string>
   runFlow: (flowPath: string, artifactDirectory: string, timeoutMs: number) => Promise<MaestroRunResult>
   build: (timeoutMs: number) => Promise<RepairBuildResult>
@@ -303,7 +310,7 @@ async function executeBoundedCheckoutRepair(
 
   const sourceFiles = [...CHECKOUT_AFFECTED_FILES]
   const beforeSource = await sourceTreeDigest(root, sourceFiles)
-  const beforeMemoryPath = store.memoryPath
+  const beforeMemoryPath = options.memoryPath ?? resolve(root, LOCAL_MEMORY_PATH)
   beforeMemory = await readFile(beforeMemoryPath)
   const identityBase = {
     goal: options.goal,

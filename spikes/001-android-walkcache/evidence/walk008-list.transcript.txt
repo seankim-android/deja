@@ -1,0 +1,2 @@
+Verified walks: 1
+- checkout app=dev.walkcache.checkout platform=android build=1de8864ea046b64d124ece93ca97b0ae69d11d1fc3d39a89ff405f0e2dd2262d lastValidation=passed yaml=.walkcache/flows/checkout/android-e09660f45502b720f79f95a65c78ad5f48a4e11ae1ff5f52c6cb99972b12b478.yaml origin=remember repairs=0

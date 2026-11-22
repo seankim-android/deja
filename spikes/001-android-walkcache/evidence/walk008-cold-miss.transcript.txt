@@ -1,0 +1,24 @@
+$ bun ../../apps/cli/walkcache.ts run checkout --config walkcache.config.json
+Command: run
+Goal: checkout
+Outcome: cold-recorded
+Passed: yes
+Cache status: miss (not-found)
+Model calls: 13 (openclaw agent exec assistantTurns (completed round trips))
+Duration: 95499 ms
+Assertions: 11
+Repair count: 0
+YAML: .walkcache/flows/checkout/android-be212808db3b372a6178a8f6ef03ca8894342b0edb021ab8cb9283c7319da07c.yaml
+YAML SHA-256: be212808db3b372a6178a8f6ef03ca8894342b0edb021ab8cb9283c7319da07c
+Report: .walkcache/reports/run-1795332804784-23475.json
+Latest report: .walkcache/reports/latest.json
+Artifacts:
+- [attempt] .walkcache/attempts/explore-1795332709286-23475
+- [output] .walkcache/attempts/explore-1795332709286-23475/activity.jsonl
+- [output] .walkcache/attempts/explore-1795332709286-23475/mcp-activity.jsonl
+- [yaml] .walkcache/attempts/explore-1795332709286-23475/candidate.yaml
+- [model-metrics] .walkcache/attempts/explore-1795332709286-23475/openclaw-result.json
+- [yaml] .walkcache/flows/checkout/android-be212808db3b372a6178a8f6ef03ca8894342b0edb021ab8cb9283c7319da07c.yaml
+- [output] .walkcache/attempts/explore-1795332709286-23475/verification/output.log
+Source diffs: none
+Exit code: 0

@@ -1,0 +1,57 @@
+$ bun ../../apps/cli/walkcache.ts run checkout --config walkcache.config.json
+Command: run
+Goal: checkout
+Outcome: repaired
+Passed: yes
+Cache status: miss (stale-build)
+Model calls: 0 (bounded selector repair uses the verified deterministic policy only)
+Duration: 65865 ms
+Assertions: 11
+Repair count: 1
+YAML: .walkcache/flows/checkout/android-be212808db3b372a6178a8f6ef03ca8894342b0edb021ab8cb9283c7319da07c.yaml
+YAML SHA-256: be212808db3b372a6178a8f6ef03ca8894342b0edb021ab8cb9283c7319da07c
+Failure: selector (repair eligible: true)
+Failing step: Tap on id: dev.walkcache.checkout:id/checkout_button
+Report: .walkcache/reports/run-1795333347893-24818.json
+Latest report: .walkcache/reports/latest.json
+Artifacts:
+- [attempt] .walkcache/patches/repair-1795333282029-24818
+- [repair-report] .walkcache/patches/repair-1795333282029-24818/repair-report.json
+- [memory] .walkcache/memory/walks.json
+- [output] .walkcache/patches/repair-1795333282029-24818/diagnosis/output.log
+- [output] .walkcache/patches/repair-1795333282029-24818/build/output.log
+- [output] .walkcache/patches/repair-1795333282029-24818/verification/output.log
+- [diff] .walkcache/patches/repair-1795333282029-24818/proposed.patch
+Source diffs (proposed only; never auto-committed):
+Diff: .walkcache/patches/repair-1795333282029-24818/proposed.patch
+Affected file: app/src/main/java/dev/walkcache/checkout/MainActivity.java
+Affected file: app/src/main/res/values/ids.xml
+--- a/app/src/main/java/dev/walkcache/checkout/MainActivity.java
++++ b/app/src/main/java/dev/walkcache/checkout/MainActivity.java
+@@ -70,7 +70,10 @@
+         content.addView(body("1 × Mochi sticker pack"));
+         content.addView(body("Total: $5.00"));
+
+-        Button checkout = button("Checkout", null);
++        Integer checkoutId = Settings.Global.getInt(
++            getContentResolver(), CHECKOUT_SELECTOR_STALE_SETTING, 0
++        ) == 1 ? null : R.id.checkout_button;
++        Button checkout = button("Checkout", checkoutId);
+         checkout.setOnClickListener(view -> showConfirmation());
+         content.addView(checkout);
+         setContentView(scroll(content));
+--- a/app/src/main/res/values/ids.xml
++++ b/app/src/main/res/values/ids.xml
+@@ -7,9 +7,10 @@
+     <item name="screen_catalog" type="id" />
+     <item name="add_to_cart" type="id" />
+     <item name="screen_cart" type="id" />
+-    <item name="screen_confirmation" type="id" />
+-    <item name="order_confirmation" type="id" />
+-    <!-- checkout_button is deliberately absent for the selector-repair spike. -->
++    <item name="checkout_button" type="id" />
++    <item name="screen_confirmation" type="id" />
++    <item name="order_confirmation" type="id" />
++    <!-- checkout_button was added by the verified selector-repair spike. -->
+ </resources>
+Exit code: 0

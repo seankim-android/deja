@@ -1,0 +1,19 @@
+$ maestro --no-ansi --device emulator-5554 test flows/checkout.yaml
+Running on walkcache_api_34
+ > Flow Checkout reference
+Launch app "dev.walkcache.checkout" with clear state... COMPLETED
+Assert that id: screen_login is visible... COMPLETED
+Tap on id: username_input... COMPLETED
+Input text <redacted-fixture-value>... COMPLETED
+Tap on id: password_input... COMPLETED
+Input text <redacted-fixture-value>... COMPLETED
+Hide Keyboard... COMPLETED
+Tap on id: login_button... COMPLETED
+Assert that id: screen_catalog is visible... COMPLETED
+Tap on id: add_to_cart... COMPLETED
+Assert that id: screen_cart is visible... COMPLETED
+Tap on "Checkout"... COMPLETED
+Assert that id: order_confirmation is visible... COMPLETED
+Assert that "Order #WC-1001.*" is visible... COMPLETED
+Take screenshot order-confirmed... COMPLETED
+Exit code: 0

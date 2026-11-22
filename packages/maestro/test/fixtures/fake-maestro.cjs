@@ -34,6 +34,13 @@ if (modeArgument === 'grandchild' || modeArgument === 'bystander') {
     process.exitCode = 1
   }
 
+  if (process.env.WALKCACHE_FAKE_MAESTRO_MODE === 'product') {
+    console.log('Launch app "dev.walkcache.checkout" with clear state... COMPLETED')
+    console.log('Assert that "Order #WC-1001" is visible... FAILED')
+    console.log('Assertion is false: "Order #WC-1001" is visible')
+    process.exitCode = 1
+  }
+
   if (mode === 'nonzero') process.exitCode = 7
   if (mode === 'timeout') {
     const markerPath = join(dirname(flowPath), 'timed-out-process-survived.txt')

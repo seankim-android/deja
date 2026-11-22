@@ -1,0 +1,24 @@
+$ bun ../../apps/cli/walkcache.ts run checkout --config walkcache.config.json
+Command: run
+Goal: checkout
+Outcome: product-regression
+Passed: no
+Cache status: hit
+Model calls: 0 (exact local hit: explorer and model factories were not invoked)
+Duration: 41876 ms
+Assertions: 11
+Repair count: 0
+YAML: .walkcache/flows/checkout/android-be212808db3b372a6178a8f6ef03ca8894342b0edb021ab8cb9283c7319da07c.yaml
+YAML SHA-256: be212808db3b372a6178a8f6ef03ca8894342b0edb021ab8cb9283c7319da07c
+Failure: product_assertion (repair eligible: false)
+Failing step: Assert that "Order #WC-1001 · Mochi sticker pack", id: dev.walkcache.checkout:id/screen_confirmation is visible
+Error: Meaningful product assertion failed; repair was not attempted
+Report: .walkcache/reports/run-1795333512212-25579.json
+Latest report: .walkcache/reports/latest.json
+Artifacts:
+- [yaml] .walkcache/flows/checkout/android-be212808db3b372a6178a8f6ef03ca8894342b0edb021ab8cb9283c7319da07c.yaml
+- [output] .walkcache/reports/run-1795333470336-fjibugej/output.log
+- [output] .walkcache/reports/run-1795333470336-fjibugej/stdout.log
+- [output] .walkcache/reports/run-1795333470336-fjibugej/stderr.log
+Source diffs: none
+Exit code: 1
