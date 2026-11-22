@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "ticket": "WALK-020",
+  "channel": "C0CKR1JT42Z",
+  "threadTs": "1795305727.220879",
+  "fileId": "F0CL4RMSE4C",
+  "filename": "walkcache-live-demo.mp4",
+  "localFile": "demo/walkcache-live-demo.mp4",
+  "sha256": "d834bda3b156137df2693d11297855180e8e5c681fc870417fa05a0647aec945",
+  "sentAtEpochMs": 1795380050763,
+  "deliveryReceipt": "Slack upload-file tool returned ok=true with this file/message ID, channel, and thread",
+  "humanSignOffClaimed": false,
+  "externalSocialPostOrOfficialSubmission": false
+}

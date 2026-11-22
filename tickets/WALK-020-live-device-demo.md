@@ -3,7 +3,7 @@ id: WALK-020
 title: Record reviewed live Android and Chromium before/after demo
 milestone: M7C
 priority: P0
-status: in_progress
+status: done
 depends_on: [WALK-014]
 ---
 
@@ -41,7 +41,7 @@ only; it does not authorize a public social post or official hackathon submissio
   where used and a mapping from every segment to raw timestamps and reports.
 - [x] Validate every delivered video with ffprobe, full decode, visual review, and secret/private-path
   scans. Do not imply desktop/window capture when OS permission blocks it.
-- [ ] Keep `demo/walkcache-demo.mp4` unchanged as the WALK-014 fallback until the new live cut passes
+- [x] Keep `demo/walkcache-demo.mp4` unchanged as the WALK-014 fallback until the new live cut passes
   review; upload only the completed reviewed live MP4 to Slack channel `C0CKR1JT42Z`, thread
   `1795305727.220879`, and record its file ID.
 - [x] Commit only this ticket's scripts, curated evidence, documentation, and reviewed video after
@@ -93,10 +93,10 @@ only; it does not authorize a public social post or official hackathon submissio
 
 ## Acceptance evidence
 
-Chromium, Android, the combined cut, and final automated/AI review are complete. The ticket remains
-`in_progress` only for the authorized Slack delivery and final durable delivery receipt:
+Chromium, Android, the combined cut, final automated/AI review, authorized Slack delivery, and durable
+delivery receipt are complete:
 
-- [Curated commands, receipts, saved YAML, capture metadata, edit map, and review](../../demo/live-evidence/chromium/)
+- [Curated commands, receipts, saved YAML, capture metadata, edit map, and review](../demo/live-evidence/chromium/)
   for accepted run `walk020-20261122T195607-94392`. Raw uncut videos stay under
   `demo/generated/browser/walk020-20261122T195607-94392/`.
 - `remember`: independent verification passed 12 assertions with 0 model calls and persisted reviewed
@@ -106,14 +106,14 @@ Chromium, Android, the combined cut, and final automated/AI review are complete.
 - Raw videos: 19.733333 s / 592 frames and 18.900000 s / 567 frames, both H.264, full decode passed.
   Concise browser segments are 7.866667 s and 7.533333 s at a visible 2.5× playback-compression label,
   with no removed waits/failures and no wall-clock speedup claim.
-- [AI visual/content review and rejected-take record](../../demo/live-evidence/chromium/REVIEW.md):
+- [AI visual/content review and rejected-take record](../demo/live-evidence/chromium/REVIEW.md):
   accepted frames are readable and secret-free; human sign-off is not claimed. macOS desktop capture
   permission was blocked, so the truthful capture is the exact headed Maestro Chromium CDP screencast.
 - WALK-014 fallback SHA-256 remains `3e6c9ec2f4040ec1a8e8bb1e4f8eee2bbe977d6e3f2a69e5b6503cf2f178e461`.
 
 ## Android and final-cut evidence
 
-- [Android review](../../demo/live-evidence/android/REVIEW.md) and [rejected-take record](../../demo/live-evidence/android/REJECTED.md)
+- [Android review](../demo/live-evidence/android/REVIEW.md) and [rejected-take record](../demo/live-evidence/android/REJECTED.md)
   cover accepted raw run `walk020-android-checkout-06` and all rejected/restricted takes.
 - Fresh cold/warm: 13 real model round trips, independent verification, then exact identity/YAML hit with
   0 model calls; 14 assertions and YAML `e95532ce04a4e125d3bd56e1b9d5d367b31dd67eed4441c56271ca52f3c3d0a1`.
@@ -127,17 +127,18 @@ Chromium, Android, the combined cut, and final automated/AI review are complete.
   messages are quantified in the review; the normalized final MP4 decodes with no warnings/errors.
 - Normal selector source hashes and stable device flags are restored; source diff is empty, no patch
   backups remain, and the WALK-014 fallback is unchanged.
-- Final video: [`demo/walkcache-live-demo.mp4`](../../demo/walkcache-live-demo.mp4), 59.733333 seconds,
+- Final video: [`demo/walkcache-live-demo.mp4`](../demo/walkcache-live-demo.mp4), 59.733333 seconds,
   1920×1080, 30 fps, 1,792 decoded frames, SHA-256
   `d834bda3b156137df2693d11297855180e8e5c681fc870417fa05a0647aec945`.
-- [Final visual/decode/raw-map review](../../demo/live-evidence/FINAL_REVIEW.md),
-  [final cut map](../../demo/live-evidence/live-cut-map.json), and
-  [read-only final gate](../../demo/live-evidence/final-check.json) all pass. The final gate rehashed and
+- [Final visual/decode/raw-map review](../demo/live-evidence/FINAL_REVIEW.md),
+  [final cut map](../demo/live-evidence/live-cut-map.json), and
+  [read-only final gate](../demo/live-evidence/final-check.json) all pass. The final gate rehashed and
   decoded raw sources, verified all seven evidence segments and scanned 72 curated text files. Human
   sign-off is not claimed.
 
-Slack upload has not occurred: this subagent's available tools do not expose Slack's `message` action
-(`tool_describe` returned unknown tool). The requester must upload the exact reviewed MP4 above to channel
-`C0CKR1JT42Z`, thread `1795305727.220879`, record its file ID in `demo/live-evidence/slack-upload.json`,
-and run `python3 demo/live/check_live_demo.py --require-upload`. No external social post or official
-submission is authorized by this ticket.
+The requester uploaded the exact reviewed MP4 to Slack channel `C0CKR1JT42Z`, thread
+`1795305727.220879`, as file `F0CL4RMSE4C`. The durable [Slack receipt](../demo/live-evidence/slack-upload.json)
+matches its SHA-256. [Final delivery gate](../demo/live-evidence/final-delivery-check.json):
+`python3 demo/live/check_live_demo.py --check-raw --require-upload` passed, including Slack receipt
+verification, raw hash/decode checks, all seven evidence segments, and scans of 74 curated text files.
+Human sign-off is not claimed. No external social post or official submission was made.

@@ -106,7 +106,7 @@ Check an item only when its ticket is complete and its evidence is linked. All t
   as `F0CKVLY06F7` (superseding `F0CKUL64YBD`). AI visual review plus all
   1,740 encoded-frame/source comparisons passed; this is not claimed as human sign-off. External submission remains open; the
   milestone/deadline passed before this late fallback was completed.
-- [ ] [WALK-020](tickets/WALK-020-live-device-demo.md) — Replace static evidence with actual uncut
+- [x] [WALK-020](tickets/WALK-020-live-device-demo.md) — Replace static evidence with actual uncut
   Chromium/Android before/after recordings and a reviewed, timestamp-mapped ≤60-second live cut.
   Accepted raw runs: Chromium `walk020-20261122T195607-94392` and Android
   `walk020-android-checkout-06`; fresh cold/warm plus separately disclosed valid repair fixture.
@@ -115,9 +115,11 @@ Check an item only when its ticket is complete and its evidence is linked. All t
   [`Android review`](demo/live-evidence/android/REVIEW.md),
   [`Chromium review`](demo/live-evidence/chromium/REVIEW.md), and
   [`final automated/AI review`](demo/live-evidence/FINAL_REVIEW.md) pass; raw decode/hash checks,
-  seven segment maps and 72-file secret/private-path scans pass. Human sign-off is not claimed.
-  Authorized Slack upload/file ID remains pending because the message tool is not exposed to this
-  subagent; no social post or official submission is included.
+  seven segment maps and secret/private-path scans pass. Human sign-off is not claimed.
+  Uploaded to the authorized Slack thread as `F0CL4RMSE4C`; the
+  [`delivery receipt`](demo/live-evidence/slack-upload.json) matches the SHA-256 and the
+  [`final delivery gate`](demo/live-evidence/final-delivery-check.json) passes raw checks and scans
+  of 74 curated text files. No social post or official submission is included.
 - [ ] [WALK-015](tickets/WALK-015-video-submission.md) — Record/review a ≤60-second video, publish the
   required authorized social post, and confirm official submission by 9:00 AM. Keep 9:00–10:00 AM for
   upload/submission failures; the recorded deadline is 10:00 AM on November 22, 2026.
