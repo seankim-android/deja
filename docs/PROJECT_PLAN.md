@@ -109,7 +109,8 @@ writes are atomic: a failed replacement never destroys the last known-good walk.
 ## Time-boxed milestones
 
 Times are stopping points, not aspirations. If a milestone misses its exit gate, cut its polish
-and protect the next demonstration-critical milestone. The actionable checklist is in `TODO.md`.
+and protect the next demonstration-critical milestone. The actionable checklist is in `TODO.md`;
+repo-local ticket scope, dependencies, acceptance criteria, and evidence live in `tickets/`.
 
 ### M0 — Plan and Android environment gate — completed
 

@@ -6,7 +6,8 @@ WalkCache is a learning layer around Maestro: an OpenClaw/Kimi agent explores a 
 saves a verified Maestro flow, and replays later runs without model calls. The first Android proof
 in [`spikes/001-android-walkcache`](spikes/001-android-walkcache) has passed cold exploration,
 independent verification, and zero-model warm replay. The remaining Vite app is still a starter;
-implementation status and deferred work are tracked in [`TODO.md`](TODO.md).
+implementation status is tracked in [`TODO.md`](TODO.md), with granular repo-local tickets and
+acceptance criteria in [`tickets/`](tickets/README.md).
 
 Read [`docs/PROJECT_PLAN.md`](docs/PROJECT_PLAN.md) for the MVP contract, architecture,
 time-boxed milestones, demo script, and scope cut line.
