@@ -42,7 +42,7 @@ Statuses: `in_progress`, `done`, `ready` (no incomplete dependencies), `queued` 
 
 | Ticket | Status | Depends on | Outcome |
 | --- | --- | --- | --- |
-| [WALK-012](WALK-012-oss-docs-metadata.md) | ready | 008 | Accurate quick start, architecture, license, limitations |
+| [WALK-012](WALK-012-oss-docs-metadata.md) | in_progress | 008 | Accurate quick start, architecture, license, limitations; independent README review pending |
 | [WALK-013](WALK-013-portable-tests-clean-ci.md) | queued | 012 | Portable tests and clean-checkout CI evidence |
 | [WALK-014](WALK-014-demo-assets-rehearsal.md) | queued | 005, 007, 008, 013 | Reproducible demo and two verified rehearsals |
 | [WALK-015](WALK-015-video-submission.md) | queued | 014 | Reviewed ≤60-second video and confirmed submission |

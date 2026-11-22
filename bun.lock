@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "kimi-hackathon",
+      "name": "walkcache",
       "dependencies": {
         "@modelcontextprotocol/sdk": "^1.32.2",
         "react": "^19.3.1",

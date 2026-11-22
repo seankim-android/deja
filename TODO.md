@@ -77,6 +77,12 @@ Check an item only when its ticket is complete and its evidence is linked. All t
 
 - [ ] [WALK-012](tickets/WALK-012-oss-docs-metadata.md) — Add accurate quick start, architecture,
   security/limitations, Apache-2.0 license, and package metadata.
+  Evidence: [`README`](README.md), [`ARCHITECTURE`](docs/ARCHITECTURE.md), [`LICENSE`](LICENSE),
+  [`package.json`](package.json), and the author-executed
+  [`README quick-start runtime review`](spikes/001-android-walkcache/evidence/walk012-readme-review.txt).
+  Checks: 101 tests / 599 assertions, lint, TypeScript/Vite build, and `git diff --check`.
+  The isolated clean-context reviewer failed before execution; independent documentation review
+  remains unverified and is the only unchecked acceptance step.
 - [ ] [WALK-013](tickets/WALK-013-portable-tests-clean-ci.md) — Pass portable tests and clean-checkout CI.
 - [ ] [WALK-014](tickets/WALK-014-demo-assets-rehearsal.md) — Prepare deterministic demo assets and
   complete two evidence-checked rehearsals before the 6:30 AM milestone gate.
@@ -93,8 +99,9 @@ Check an item only when its ticket is complete and its evidence is linked. All t
 
 ## Standing cut and safety rules
 
-- Do not claim cold/warm speedup until WALK-005 measures it; the current proof establishes zero-model
-  replay, with Maestro executions around 25 seconds in both verified paths.
+- Do not turn historical WALK-001/WALK-005 spike timings into a current-CLI measured speedup claim.
+  Current proof establishes zero-model replay; nested Maestro runner ranges overlap, and any future
+  performance comparison must use equivalent complete lifecycles and new raw evidence.
 - Never save an unverified candidate, weaken a product assertion, auto-commit a repair, or hide a real
   product regression behind a selector/source patch.
 - Keep generated `.walkcache/`, build, temporary, credential, and personal-data artifacts out of Git;
