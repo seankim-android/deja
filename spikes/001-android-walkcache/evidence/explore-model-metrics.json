@@ -1,0 +1,35 @@
+{
+  "source": "openclaw agent exec JSON envelope",
+  "provider": "cerebras",
+  "model": "moonshotai-kimi-k3.1-pro-trial",
+  "sessionId": "928deb98-f46e-4e37-bfea-e2088c2f9109",
+  "assistantTurns": 15,
+  "modelCalls": 15,
+  "modelCallBasis": "completed assistant/provider round trips; excludes any claim about HTTP retries, tokens, or cost",
+  "bridgeCalls": {
+    "search": 0,
+    "describe": 4,
+    "call": 13
+  },
+  "toolSummary": {
+    "calls": 30,
+    "tools": [
+      "tool_describe",
+      "maestro__list_devices",
+      "dispatch_action",
+      "maestro__cheat_sheet",
+      "maestro__inspect_screen",
+      "maestro__run"
+    ],
+    "failures": 2
+  },
+  "usage": {
+    "usageReport": {
+      "state": "unavailable"
+    },
+    "contextUsage": {
+      "state": "unavailable"
+    }
+  },
+  "mcpCallBoundary": "13 proxied tools/call requests; initialize, tools/list, tool_describe, and dispatch wrappers are excluded"
+}

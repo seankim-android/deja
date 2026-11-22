@@ -4,6 +4,8 @@ import { copyFile, mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, relative, resolve } from 'node:path'
 import { runMaestro, resolveFlowPath, type MaestroRunResult } from '../../../packages/maestro/src/index.ts'
+import type { PersistenceDetails, VerificationDetails } from '../../../packages/agent-openclaw/src/index.ts'
+import { exploreGoal } from './explore.ts'
 
 type Walk = {
   goalKey: string
@@ -13,6 +15,15 @@ type Walk = {
   buildFingerprint: string
   flowPath: string
   lastValidation: { passed: boolean; at: string }
+  flowSha256?: string
+  origin?: 'remember' | 'explore'
+  exploration?: {
+    explorationDurationMs: number | null
+    verificationDurationMs: number | null
+    mcpCalls: number | null
+    modelCalls: number | null
+    modelCallBasis: string
+  }
 }
 
 type Memory = { schemaVersion: 1; walks: Walk[] }
@@ -23,6 +34,7 @@ const apkPath = resolve(root, 'app/build/outputs/apk/debug/app-debug.apk')
 const device = process.env.WALKCACHE_DEVICE ?? 'emulator-5554'
 const appId = 'dev.walkcache.checkout'
 const maestro = process.env.WALKCACHE_MAESTRO ?? resolve(homedir(), '.maestro/bin/maestro')
+const openClawExecutable = process.env.WALKCACHE_OPENCLAW ?? 'openclaw'
 const androidHome = process.env.ANDROID_HOME ?? process.env.ANDROID_SDK_ROOT
 const javaHome = process.env.JAVA_HOME
 const timeoutMs = Number(process.env.WALKCACHE_TIMEOUT_MS ?? '120000')
@@ -114,6 +126,52 @@ async function saveReport(command: string, details: Record<string, unknown>) {
   }, null, 2))
 }
 
+async function persistVerifiedCandidate(
+  goalKey: string,
+  candidatePath: string,
+  buildFingerprint: string,
+  verification: VerificationDetails,
+  exploration?: Walk['exploration'],
+  origin: 'remember' | 'explore' = 'explore',
+): Promise<PersistenceDetails> {
+  if (!verification.passed || typeof verification.endedAt !== 'string') {
+    throw new Error('Only an independently passing candidate can enter successful storage')
+  }
+  const candidate = resolveFlowPath(root, candidatePath)
+  const flowSha256 = createHash('sha256').update(Buffer.from(await Bun.file(candidate).arrayBuffer())).digest('hex')
+  // Validate existing memory before touching the last known-good flow. Each final replacement below
+  // is a same-directory rename; failed candidate verification never reaches this helper.
+  const memory = await loadMemory()
+  const flowPath = `.walkcache/flows/${slug(goalKey)}/android.yaml`
+  await mkdir(dirname(resolve(root, flowPath)), { recursive: true })
+  const temporaryFlow = `${flowPath}.${process.pid}.tmp`
+  await copyFile(candidate, resolve(root, temporaryFlow))
+  await rename(resolve(root, temporaryFlow), resolve(root, flowPath))
+
+  const walk: Walk = {
+    goalKey: normalize(goalKey),
+    goal: goalKey,
+    appId,
+    platform: 'android',
+    buildFingerprint,
+    flowPath,
+    flowSha256,
+    origin,
+    ...(exploration ? { exploration } : {}),
+    lastValidation: { passed: true, at: verification.endedAt },
+  }
+  const remaining = memory.walks.filter(item => !(
+    item.goalKey === walk.goalKey && item.appId === appId && item.platform === 'android'
+  ))
+  await atomicWrite(memoryPath, `${JSON.stringify({ schemaVersion: 1, walks: [...remaining, walk] }, null, 2)}\n`)
+  return {
+    flowPath,
+    flowSha256,
+    storedMetadataPath: '.walkcache/memory/walks.json',
+    atomicWrite: true,
+  }
+}
+
 async function remember(goalKey: string, flowArgument: string | undefined) {
   if (!flowArgument) throw new Error('remember requires --flow <candidate.yaml>')
   const candidate = resolveFlowPath(root, flowArgument)
@@ -130,31 +188,52 @@ async function remember(goalKey: string, flowArgument: string | undefined) {
     return
   }
 
-  const flowPath = `.walkcache/flows/${slug(goalKey)}/android.yaml`
-  await mkdir(dirname(resolve(root, flowPath)), { recursive: true })
-  const temporaryFlow = `${flowPath}.${process.pid}.tmp`
-  await copyFile(candidate, resolve(root, temporaryFlow))
-  await rename(resolve(root, temporaryFlow), resolve(root, flowPath))
-
-  const memory = await loadMemory()
-  const walk: Walk = {
-    goalKey: normalize(goalKey),
-    goal: goalKey,
-    appId,
-    platform: 'android',
+  const persisted = await persistVerifiedCandidate(
+    goalKey,
+    candidate,
     buildFingerprint,
-    flowPath,
-    lastValidation: { passed: true, at: result.endedAt },
-  }
-  const remaining = memory.walks.filter(item => !(
-    item.goalKey === walk.goalKey && item.appId === appId && item.platform === 'android'
-  ))
-  await atomicWrite(memoryPath, `${JSON.stringify({ schemaVersion: 1, walks: [...remaining, walk] }, null, 2)}\n`)
+    executionDetails(result),
+    undefined,
+    'remember',
+  )
   await saveReport('remember', {
-    goalKey: walk.goalKey, appId, platform: 'android', buildFingerprint,
-    flowPath, cacheStatus: 'recorded', modelCalls: 0, verificationOnly: true,
+    goalKey: normalize(goalKey), appId, platform: 'android', buildFingerprint,
+    flowPath: persisted.flowPath, cacheStatus: 'recorded', modelCalls: 0, verificationOnly: true,
     ...executionDetails(result),
   })
+}
+
+async function explore(goalKey: string, configPath: string) {
+  const report = await exploreGoal(goalKey, configPath, {
+    root,
+    maestro,
+    openClawExecutable,
+    androidSdkRoot: androidHome,
+    javaHome,
+    persistVerified: async (
+      persistGoal,
+      candidatePath,
+      buildFingerprint,
+      verification,
+      metrics,
+    ) => persistVerifiedCandidate(
+      persistGoal,
+      candidatePath,
+      buildFingerprint,
+      verification,
+      metrics,
+    ),
+  })
+  await saveReport('explore', { ...report })
+  console.log(JSON.stringify({
+    explorationDurationMs: report.explorationDurationMs,
+    verificationDurationMs: report.verificationDurationMs,
+    mcpCalls: report.mcpCalls,
+    modelCallBasis: report.modelCallBasis,
+    attemptDirectory: report.attemptDirectory,
+    flowPath: report.flowPath,
+  }, null, 2))
+  if (!report.passed) process.exitCode = 1
 }
 
 async function run(goalKey: string) {
@@ -190,12 +269,15 @@ async function run(goalKey: string) {
 
 try {
   const [command, goalKey, ...flags] = Bun.argv.slice(2)
-  if (!command || !goalKey || !['remember', 'run'].includes(command)) {
-    throw new Error('Usage: bun scripts/walkcache.ts remember <goal> --flow <candidate.yaml> | run <goal>')
+  if (!command || !goalKey || !['explore', 'remember', 'run'].includes(command)) {
+    throw new Error('Usage: bun scripts/walkcache.ts explore <goal> [--config <explore.config.json>] | remember <goal> --flow <candidate.yaml> | run <goal>')
   }
   const flowFlag = flags.indexOf('--flow')
   const flow = flowFlag >= 0 ? flags[flowFlag + 1] : undefined
-  if (command === 'remember') await remember(goalKey, flow)
+  const configFlag = flags.indexOf('--config')
+  const configPath = resolve(root, configFlag >= 0 ? flags[configFlag + 1] : 'explore.config.json')
+  if (command === 'explore') await explore(goalKey, configPath)
+  else if (command === 'remember') await remember(goalKey, flow)
   else await run(goalKey)
 } catch (error) {
   console.error(error instanceof Error ? error.message : error)

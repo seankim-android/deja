@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "walks": [
+    {
+      "goalKey": "checkout",
+      "goal": "checkout",
+      "appId": "dev.walkcache.checkout",
+      "platform": "android",
+      "buildFingerprint": "4746296fa8aa84ae85761915f651b1488c38ef8f5f4e89af0e9ad19784cfcb05",
+      "flowPath": ".walkcache/flows/checkout/android.yaml",
+      "flowSha256": "064e0621edf6c3e538fc717d71fca1395dd4cf32f09ec1e8a87f002959748f08",
+      "origin": "explore",
+      "exploration": {
+        "explorationDurationMs": 80598,
+        "verificationDurationMs": 26406,
+        "mcpCalls": 13,
+        "modelCalls": 15,
+        "modelCallBasis": "openclaw agent exec assistantTurns (completed round trips)"
+      },
+      "lastValidation": {
+        "passed": true,
+        "at": "2026-11-22T04:58:59.928Z"
+      }
+    }
+  ]
+}

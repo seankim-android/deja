@@ -15,7 +15,10 @@ Check an item only when its ticket is complete and its evidence is linked. All t
 - [x] [WALK-002](tickets/WALK-002-verified-maestro-runner.md) — Harden the verified Maestro runner adapter.
   Evidence: [`runner-unit-tests.txt`](spikes/001-android-walkcache/evidence/runner-unit-tests.txt) and
   [`runner-android-report.json`](spikes/001-android-walkcache/evidence/runner-android-report.json).
-- [ ] [WALK-003](tickets/WALK-003-self-contained-cold-explore.md) — Add self-contained `explore <goal>`.
+- [x] [WALK-003](tickets/WALK-003-self-contained-cold-explore.md) — Add self-contained `explore <goal>`.
+  Evidence: [`explore-android-report.json`](spikes/001-android-walkcache/evidence/explore-android-report.json),
+  [`explore-candidate.yaml`](spikes/001-android-walkcache/evidence/explore-candidate.yaml), and
+  [`explore-rejection-preservation.json`](spikes/001-android-walkcache/evidence/explore-rejection-preservation.json).
 - [ ] [WALK-004](tickets/WALK-004-local-store-regression-tests.md) — Test cache identity, corruption,
   stale builds, path boundaries, and atomic replacement.
 - [ ] [WALK-006](tickets/WALK-006-selector-failure-classification.md) — Repeat selector invalidation and

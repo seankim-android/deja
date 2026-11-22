@@ -1,0 +1,14 @@
+{
+  "invalidCandidate": ".walkcache/attempts/explore-1795323588986-97150/candidate.yaml",
+  "rejectedReport": "evidence/explore-rejected-report.json",
+  "before": {
+    ".walkcache/flows/checkout/android.yaml": "064e0621edf6c3e538fc717d71fca1395dd4cf32f09ec1e8a87f002959748f08",
+    ".walkcache/memory/walks.json": "1b13b9d3bce7c291e23d520650c549734cb9361577485023b494227d218eaa9d"
+  },
+  "after": {
+    ".walkcache/flows/checkout/android.yaml": "064e0621edf6c3e538fc717d71fca1395dd4cf32f09ec1e8a87f002959748f08",
+    ".walkcache/memory/walks.json": "1b13b9d3bce7c291e23d520650c549734cb9361577485023b494227d218eaa9d"
+  },
+  "unchanged": true,
+  "successfulMemoryCreatedOrReplaced": false
+}

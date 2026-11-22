@@ -47,6 +47,59 @@ package without rewriting it normally.
 - Parent-controlled `bun scripts/walkcache.ts remember checkout --flow
   .walkcache/candidate/checkout-android.yaml` independently passed in 25.101s before storing it.
 
+### Self-contained cold lifecycle (WALK-003)
+
+After building/installing the fixture and sourcing `scripts/env.sh`, one command runs the complete cold lifecycle:
+
+```sh
+WALKCACHE_OPENCLAW="$(command -v openclaw)" \
+  bun scripts/walkcache.ts explore checkout --config explore.config.json
+```
+
+`explore.config.json` explicitly pins the workspace, Android app/package, APK build, emulator, Cerebras
+HTTPS endpoint, Kimi model, timeouts, and deterministic fixture-only credentials. The generated pinned
+OpenClaw config invokes `openclaw agent exec --json` with only `maestro__*` tools. A stdio proxy starts
+Maestro MCP and records redacted JSON-RPC activity without copying inline YAML or screen contents into
+the activity log. See [`packages/agent-openclaw/README.md`](../../packages/agent-openclaw/README.md)
+for the invocation, denial, and metric contracts.
+
+The parent clears only `dev.walkcache.checkout` before exploration and again before independent
+verification. The explorer has an empty attempt workspace, no file/shell/web/memory/session tools, no
+reference flow or app source, and no successful-memory path. Its final YAML is written to a fresh
+`.walkcache/attempts/explore-*/candidate.yaml`. Only a complete passing WALK-002 `runMaestro` verification
+calls the atomic successful-store helper. Provider authentication uses OpenClaw's existing Cerebras
+credential; no provider credential is written to the pinned config, prompt, report, or MCP activity log.
+
+Recorded Android evidence from the clean-cache command:
+
+- Candidate: [`evidence/explore-candidate.yaml`](evidence/explore-candidate.yaml).
+- MCP and lifecycle activity: [`evidence/explore-mcp-activity.jsonl`](evidence/explore-mcp-activity.jsonl)
+  and [`evidence/explore-activity.jsonl`](evidence/explore-activity.jsonl).
+- Independent passing report: [`evidence/explore-android-report.json`](evidence/explore-android-report.json),
+  with 13 MCP calls, 80,598 ms exploration, 26,406 ms verification wrapper time, 15 OpenClaw assistant
+  turns, a 26,404 ms runner duration, exit code 0, and atomic persistence at
+  `2026-11-22T04:58:59.928Z`.
+- Stored metadata: [`evidence/explore-stored-memory.json`](evidence/explore-stored-memory.json), including
+  flow SHA-256 `064e0621edf6c3e538fc717d71fca1395dd4cf32f09ec1e8a87f002959748f08`.
+- Model instrumentation: [`evidence/explore-model-metrics.json`](evidence/explore-model-metrics.json).
+  Usage/cost data was unavailable and is not inferred.
+
+A deterministic invalid-candidate fixture exercises the same CLI without another model call:
+
+```sh
+WALKCACHE_OPENCLAW="$PWD/../../packages/agent-openclaw/test/fixtures/fake-openclaw.cjs" \
+WALKCACHE_FAKE_OPENCLAW_MODE=invalid WALKCACHE_FAKE_OPENCLAW_NO_TURNS=1 \
+  bun scripts/walkcache.ts explore checkout --config explore.config.json
+```
+
+Its asserted `Order #WC-9999` failed real WALK-002 verification (exit 1; wrapper 22,631 ms; runner
+22,630 ms). The fake explorer makes no MCP or model calls, so the report records zero MCP calls and
+`modelCalls: null` / `modelCallBasis: "unknown"` rather than treating the fixture as Kimi evidence.
+[`evidence/explore-rejected-report.json`](evidence/explore-rejected-report.json), the
+[`rejected candidate`](evidence/explore-rejected-candidate.yaml), and
+[`preservation proof`](evidence/explore-rejection-preservation.json) show that successful flow and memory
+SHA-256 values were byte-for-byte unchanged.
+
 ### Warm replay
 
 - `bun scripts/walkcache.ts run checkout` found an exact goal/app/platform/APK-fingerprint match,
@@ -76,9 +129,10 @@ repair can be verified before the cache is replaced.
 
 ## Known limitations / next production step
 
-- Cold exploration was orchestrated as an isolated OpenClaw/Kimi session, not yet integrated into
-  `walkcache.ts` as one self-contained `explore <goal>` CLI command.
-- The spike does not measure a total cold-vs-warm speedup or claim precise cold model-call counts.
+- The original manual cold session's total duration/model-call count remains unknown. The WALK-003
+  lifecycle has its own measurements, but no total cold-vs-warm speedup or cross-run comparison is claimed.
+  `modelCalls` means OpenClaw `assistantTurns` (completed assistant/provider round trips), not network
+  retries, tokens, or cost. MCP counts cover only proxied `tools/call` requests.
 - Cache lookup is exact/local. Semantic retrieval, route graphs, and subflow composition are future work.
 - Selector failure vs product regression classification is not generalized yet. No autonomous repair
   loop is claimed, and a deliberate product-regression negative test remains in the root TODO.
@@ -94,10 +148,14 @@ cd spikes/001-android-walkcache
 ./gradlew :app:assembleDebug
 adb -s emulator-5554 install -r -g app/build/outputs/apk/debug/app-debug.apk
 
-# MCP bridge used by the exploring agent:
+# Self-contained cold exploration after the build/install steps above:
+WALKCACHE_OPENCLAW="$(command -v openclaw)" \
+  bun scripts/walkcache.ts explore checkout --config explore.config.json
+
+# Original single-call MCP bridge retained for spike diagnosis:
 bun scripts/mcp-call.ts inspect_screen '{"device_id":"emulator-5554"}'
 
-# Independently verify/store an agent candidate, then run a matching cache hit:
+# Independently verify/store an existing candidate, then run a matching cache hit:
 bun scripts/walkcache.ts remember checkout --flow .walkcache/candidate/checkout-android.yaml
 bun scripts/walkcache.ts run checkout
 cat .walkcache/reports/latest.json

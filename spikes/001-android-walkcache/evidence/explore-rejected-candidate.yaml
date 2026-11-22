@@ -1,0 +1,7 @@
+appId: dev.walkcache.checkout
+---
+- launchApp:
+    appId: dev.walkcache.checkout
+    clearState: true
+- assertVisible: WalkCache Shop
+- assertVisible: "Order #WC-9999"

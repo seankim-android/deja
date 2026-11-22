@@ -1,0 +1,9 @@
+{"timestamp":"2026-11-22T04:57:12.634Z","event":"exploration_started","platform":"android","appId":"dev.walkcache.checkout"}
+{"timestamp":"2026-11-22T04:57:12.679Z","event":"clean_state_succeeded","phase":"exploration"}
+{"timestamp":"2026-11-22T04:57:12.680Z","event":"openclaw_started","model":"cerebras/moonshotai-kimi-k3.1-pro-trial","invocation":"openclaw agent exec --json","allowedTools":["maestro__*"]}
+{"timestamp":"2026-11-22T04:58:33.279Z","event":"openclaw_finished","exitCode":0,"timedOut":false,"resultParsed":true}
+{"timestamp":"2026-11-22T04:58:33.280Z","event":"candidate_authored","destination":".walkcache/attempts/explore-1795323432634-96662/candidate.yaml"}
+{"timestamp":"2026-11-22T04:58:33.388Z","event":"clean_state_succeeded","phase":"verification"}
+{"timestamp":"2026-11-22T04:58:59.929Z","event":"independent_verification_finished","passed":true}
+{"timestamp":"2026-11-22T04:58:59.932Z","event":"successful_memory_persisted","flowPath":".walkcache/flows/checkout/android.yaml","flowSha256":"064e0621edf6c3e538fc717d71fca1395dd4cf32f09ec1e8a87f002959748f08"}
+{"timestamp":"2026-11-22T04:58:59.932Z","event":"exploration_reported","passed":true,"cacheStatus":"recorded","modelCalls":15,"mcpCalls":13,"explorationDurationMs":80598,"verificationDurationMs":26406}

@@ -1,0 +1,70 @@
+{
+  "schemaVersion": 1,
+  "command": "explore",
+  "goalKey": "checkout",
+  "goal": "checkout",
+  "appId": "dev.walkcache.checkout",
+  "platform": "android",
+  "buildFingerprint": "4746296fa8aa84ae85761915f651b1488c38ef8f5f4e89af0e9ad19784cfcb05",
+  "buildPath": "app/build/outputs/apk/debug/app-debug.apk",
+  "workspaceRoot": "/Users/seankim/.openclaw/workspace/kimi-hackathon/spikes/001-android-walkcache",
+  "cacheStatus": "rejected",
+  "passed": false,
+  "durationMs": 22707,
+  "explorationDurationMs": 11,
+  "verificationDurationMs": 22631,
+  "mcpCalls": 0,
+  "mcpCallBasis": "maestro-mcp-proxy tools/call requests",
+  "modelCalls": null,
+  "modelCallBasis": "unknown",
+  "model": "fixture-kimi",
+  "provider": "fixture",
+  "explorerExitCode": 0,
+  "attemptDirectory": ".walkcache/attempts/explore-1795323588986-97150",
+  "candidatePath": ".walkcache/attempts/explore-1795323588986-97150/candidate.yaml",
+  "activityPath": ".walkcache/attempts/explore-1795323588986-97150/activity.jsonl",
+  "mcpActivityPath": ".walkcache/attempts/explore-1795323588986-97150/mcp-activity.jsonl",
+  "openClawResultPath": ".walkcache/attempts/explore-1795323588986-97150/openclaw-result.json",
+  "flowPath": null,
+  "flowSha256": null,
+  "transport": "maestro-mcp-stdio",
+  "accessPolicy": {
+    "allowedTools": [
+      "maestro__*"
+    ],
+    "referenceFlow": "denied",
+    "appSource": "denied",
+    "candidateDestination": "attempt-only"
+  },
+  "cleanState": {
+    "exploration": true,
+    "independentVerification": true,
+    "candidateClearStateLaunch": true
+  },
+  "verification": {
+    "runner": "WALK-002 runMaestro",
+    "freshClearStateLaunch": true,
+    "startedAt": "2026-11-22T04:59:49.063Z",
+    "endedAt": "2026-11-22T05:00:11.693Z",
+    "durationMs": 22630,
+    "monotonicDurationMs": 22630,
+    "exitCode": 1,
+    "signal": null,
+    "timedOut": false,
+    "passed": false,
+    "errors": [
+      {
+        "kind": "execution",
+        "message": "Maestro exited with code 1",
+        "code": "MAESTRO_EXIT"
+      }
+    ],
+    "stdoutPath": ".walkcache/attempts/explore-1795323588986-97150/verification/stdout.log",
+    "stderrPath": ".walkcache/attempts/explore-1795323588986-97150/verification/stderr.log",
+    "outputPath": ".walkcache/attempts/explore-1795323588986-97150/verification/output.log"
+  },
+  "persistence": null,
+  "errors": [
+    "Independent WALK-002 Maestro verification rejected the candidate"
+  ]
+}

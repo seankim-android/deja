@@ -1,0 +1,20 @@
+bun test v1.4.4-canary.1 (191755ec1)
+
+packages/agent-openclaw/test/openclaw-explorer.test.ts:
+(pass) self-contained OpenClaw cold exploration > pins an MCP-only explorer and persists only after independent verification [18.54ms]
+(pass) self-contained OpenClaw cold exploration > a rejected candidate cannot create or replace known-good memory [16.21ms]
+(pass) self-contained OpenClaw cold exploration > extracts fenced YAML and enforces the app plus a fresh clearState launch [13.54ms]
+(pass) self-contained OpenClaw cold exploration > leaves model and MCP metrics unknown when instrumentation is absent [18.64ms]
+
+packages/maestro/test/maestro-runner.test.ts:
+(pass) verified Maestro runner > preserves output, timing, configuration, exit status, and artifacts on success [22.38ms]
+(pass) verified Maestro runner > returns a structured execution error and preserves a nonzero exit code [13.63ms]
+(pass) verified Maestro runner > enforces the timeout and terminates only the spawned process tree [1457.51ms]
+(pass) verified Maestro runner > returns a structured launch error for a missing executable [1.80ms]
+(pass) verified Maestro runner > rejects a flow path that escapes the workspace before launching [0.83ms]
+(pass) verified Maestro runner > returns a structured artifact error without discarding process output [15.77ms]
+
+ 10 pass
+ 0 fail
+ 97 expect() calls
+Ran 10 tests across 2 files. [1.63s]

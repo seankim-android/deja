@@ -1,0 +1,67 @@
+{
+  "schemaVersion": 1,
+  "command": "explore",
+  "goalKey": "checkout",
+  "goal": "checkout",
+  "appId": "dev.walkcache.checkout",
+  "platform": "android",
+  "buildFingerprint": "4746296fa8aa84ae85761915f651b1488c38ef8f5f4e89af0e9ad19784cfcb05",
+  "buildPath": "app/build/outputs/apk/debug/app-debug.apk",
+  "workspaceRoot": "/Users/seankim/.openclaw/workspace/kimi-hackathon/spikes/001-android-walkcache",
+  "cacheStatus": "recorded",
+  "passed": true,
+  "durationMs": 107297,
+  "explorationDurationMs": 80598,
+  "verificationDurationMs": 26406,
+  "mcpCalls": 13,
+  "mcpCallBasis": "maestro-mcp-proxy tools/call requests",
+  "modelCalls": 15,
+  "modelCallBasis": "openclaw agent exec assistantTurns (completed round trips)",
+  "model": "moonshotai-kimi-k3.1-pro-trial",
+  "provider": "cerebras",
+  "explorerExitCode": 0,
+  "attemptDirectory": ".walkcache/attempts/explore-1795323432634-96662",
+  "candidatePath": ".walkcache/attempts/explore-1795323432634-96662/candidate.yaml",
+  "activityPath": ".walkcache/attempts/explore-1795323432634-96662/activity.jsonl",
+  "mcpActivityPath": ".walkcache/attempts/explore-1795323432634-96662/mcp-activity.jsonl",
+  "openClawResultPath": ".walkcache/attempts/explore-1795323432634-96662/openclaw-result.json",
+  "flowPath": ".walkcache/flows/checkout/android.yaml",
+  "flowSha256": "064e0621edf6c3e538fc717d71fca1395dd4cf32f09ec1e8a87f002959748f08",
+  "transport": "maestro-mcp-stdio",
+  "accessPolicy": {
+    "allowedTools": [
+      "maestro__*"
+    ],
+    "referenceFlow": "denied",
+    "appSource": "denied",
+    "candidateDestination": "attempt-only"
+  },
+  "cleanState": {
+    "exploration": true,
+    "independentVerification": true,
+    "candidateClearStateLaunch": true
+  },
+  "verification": {
+    "runner": "WALK-002 runMaestro",
+    "freshClearStateLaunch": true,
+    "startedAt": "2026-11-22T04:58:33.524Z",
+    "endedAt": "2026-11-22T04:58:59.928Z",
+    "durationMs": 26404,
+    "monotonicDurationMs": 26405,
+    "exitCode": 0,
+    "signal": null,
+    "timedOut": false,
+    "passed": true,
+    "errors": [],
+    "stdoutPath": ".walkcache/attempts/explore-1795323432634-96662/verification/stdout.log",
+    "stderrPath": ".walkcache/attempts/explore-1795323432634-96662/verification/stderr.log",
+    "outputPath": ".walkcache/attempts/explore-1795323432634-96662/verification/output.log"
+  },
+  "persistence": {
+    "flowPath": ".walkcache/flows/checkout/android.yaml",
+    "flowSha256": "064e0621edf6c3e538fc717d71fca1395dd4cf32f09ec1e8a87f002959748f08",
+    "storedMetadataPath": ".walkcache/memory/walks.json",
+    "atomicWrite": true
+  },
+  "errors": []
+}
