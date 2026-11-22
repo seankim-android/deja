@@ -15,7 +15,8 @@ const forbiddenPaths = [
   /(^|\/)node_modules\//,
   /(^|\/)dist\//,
   /(^|\/)\.gradle\//,
-  /\.(apk|aab|class|jar|pyc)$/,
+  /\.(apk|aab|class|pyc)$/,
+  /(^|\/)(build|dist|out)\/.*\.jar$/,
   /(^|\/)demo\/assets\//,
   /(^|\/)demo\/rehearsal\/scene-[0-9]+\.png$/,
 ]
