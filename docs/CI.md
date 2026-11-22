@@ -53,7 +53,9 @@ The actual local executions remain separately curated:
 - Chromium: [`warm replay`](../spikes/002-web-walkcache/evidence/walk010-warm.txt),
   [`independent remember`](../spikes/002-web-walkcache/evidence/walk010-remember.txt), and
   [`regression`](../spikes/002-web-walkcache/evidence/walk010-product-regression.txt).
-- iOS is not claimed and has no CI/integration entry.
+- iOS: [`WALK-011 warm replay`](../spikes/003-ios-walkcache/evidence/walk011-warm.txt) and
+  [`independent remember`](../spikes/003-ios-walkcache/evidence/walk011-remember.txt) are local
+  simulator evidence, not a portable CI/integration job or physical-device claim.
 
 To verify that stored Android YAML is standalone Maestro rather than WalkCache-dependent syntax,
 start the deterministic Android fixture as described in the root README, then from its directory run:

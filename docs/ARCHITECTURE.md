@@ -41,16 +41,18 @@ Core imports no Maestro, OpenClaw, React, filesystem, demo, or platform implemen
 | Contract | Responsibility | Current implementation |
 | --- | --- | --- |
 | `WalkStore` | Exact lookup, prior-success diagnostic lookup, verified persistence/replacement, validation history, listing | `LocalWalkStore` in `packages/store-local` |
-| `WalkRunner` | Execute a flow; return timing, assertions, artifacts, exit state, and conservative failure classification | `MaestroWalkRunner` plus Android/Web execution adapters in `packages/maestro` |
-| `WalkExplorer` | Cold exploration and independently verified candidate persistence | `OpenClawWalkExplorer` for Android; explicit `UnsupportedWebExplorer` for Web |
+| `WalkRunner` | Execute a flow; return timing, assertions, artifacts, exit state, and conservative failure classification | `MaestroWalkRunner` plus Android/Web/iOS execution adapters in `packages/maestro` |
+| `WalkExplorer` | Cold exploration and independently verified candidate persistence | `OpenClawWalkExplorer` for Android; explicit `UnsupportedPlatformExplorer` for Web/iOS |
 | `SelectorRepairer` | At most one bounded diagnosis/source-patch/verification result | `BoundedSelectorRepairer` for the configured Android Checkout policy only |
 | `RunReporter` | Serialize a completed result without changing orchestration | Atomic local `JsonRunReporter` in `apps/cli` |
 
 The execution adapters own command selection and build identity. Android fingerprints the APK and
 uses its configured emulator serial. The Web adapter fingerprints every regular file and relative
 path in the configured static tree, rejects symlinks/special files, selects `--platform web --device
-chromium`, and supplies adapter/browser identity. Android install/state/source behavior is not reused
-for Web.
+chromium`, and supplies adapter/browser identity. The iOS adapter fingerprints relative paths and
+contents of every regular file in the native `.app` tree, selects `--platform ios` with the configured
+simulator UDID, and supplies adapter identity. Android install/state/source behavior is reused for
+neither Web nor iOS.
 
 The explorer receives only goal/app/device configuration and explicit fixture values. Its empty
 attempt workspace excludes app source, reference flows, successful memory, filesystem/shell/web/
@@ -67,7 +69,7 @@ exact match for:
 - `appId`;
 - `platform`;
 - flow schema (`maestro/v1`);
-- build fingerprint (Android APK SHA-256 or Web static-tree SHA-256);
+- build fingerprint (Android APK SHA-256, Web static-tree SHA-256, or iOS `.app`-tree SHA-256);
 - adapter and browser when supplied by an adapter (required by Web); and
 - a recomputed SHA-256 of the canonical stored flow, equal to its metadata checksum.
 
@@ -183,9 +185,10 @@ rewritten, weakened, or persisted as success. Unknown, ambiguous, infrastructure
 selector/navigation cases are also refused by this policy. Repair prints its exact diff and
 `autoCommit: false`; no implementation invokes Git, commits a repair, or opens a pull request.
 
-Web cold exploration returns `exploration-rejected` with zero model calls and directs the operator to
-reviewed YAML plus `remember`. Web has no repair plugin: a stale static build returns
-`repair-rejected`, never a blind Android repair or cold fallback. iOS has no verified adapter path.
+Web and iOS cold exploration return `exploration-rejected` with zero model calls and direct the
+operator to reviewed YAML plus `remember`. Neither has a repair plugin: a stale static/native build
+returns `repair-rejected`, never a blind Android repair or cold fallback. iOS support is limited to the
+real simulator `remember`/warm-replay/invalidation/regression behavior evidenced by WALK-011.
 
 ## Metrics and secrets
 
@@ -217,6 +220,7 @@ packages/repair/          Narrow Android Checkout source repair
 src/, viewer/             Optional read-only local report viewer
 spikes/001-.../           Preserved Android fixture and curated evidence
 spikes/002-.../           Chromium fixture and explicit unsupported boundaries
+spikes/003-.../           Native iOS simulator fixture and reviewed-YAML/replay evidence
 tickets/, TODO.md         Repo-local delivery backlog and evidence index
 ```
 

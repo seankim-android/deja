@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "command": "run",
+  "identity": {
+    "goal": "checkout",
+    "appId": "dev.walkcache.ios.checkout",
+    "platform": "ios",
+    "flowSchemaVersion": "maestro/v1",
+    "buildFingerprint": "a7d181292994f0164276bddee95e9f918e347a56d9a31631d4ef7967c396de1d",
+    "adapter": "maestro-ios@2.12.0"
+  },
+  "goalKey": "checkout",
+  "cacheStatus": "miss",
+  "startedAt": "2026-11-22T19:49:56.192Z",
+  "cacheMissReason": "stale-build",
+  "outcome": "repair-rejected",
+  "passed": false,
+  "modelCalls": 0,
+  "modelCallBasis": "stale-build diagnosis never constructs a model client",
+  "assertions": null,
+  "repairCount": 0,
+  "yamlPath": null,
+  "yamlSha256": null,
+  "failure": null,
+  "artifacts": [],
+  "diffs": [],
+  "errors": [
+    "A stale build requires a configured selector repairer; cold exploration was not substituted"
+  ],
+  "endedAt": "2026-11-22T19:49:56.193Z",
+  "durationMs": 1
+}

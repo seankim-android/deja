@@ -1,0 +1,24 @@
+Commands (only on dedicated walkcache_ios):
+xcrun simctl spawn DFC4D233-498B-4B33-B713-E59B239FA86A \
+  defaults write NSGlobalDomain WALKCACHE_FIXTURE_ORDER -string WC-9999
+bun ../../apps/cli/walkcache.ts run checkout --config walkcache.config.json
+xcrun simctl spawn DFC4D233-498B-4B33-B713-E59B239FA86A \
+  defaults delete NSGlobalDomain WALKCACHE_FIXTURE_ORDER
+
+Actual result:
+Outcome: product-regression
+Passed: no
+Cache status: hit
+Model calls: 0 (exact local hit: explorer and model factories were not invoked)
+Duration: 47704 ms
+Assertions: 12
+Repair count: 0
+Failure: product_assertion (repair eligible: false)
+Failing step: Assert that "Order #WC-1001 · Mochi sticker pack" is visible
+Error: Meaningful product assertion failed; repair was not attempted
+Exit code: 1
+
+The simulator-global fixture value changed the app's actual returned order to WC-9999 while the
+reviewed YAML and .app bytes/fingerprint stayed unchanged. The meaningful WC-1001 assertion was not
+weakened or reclassified as stale. The override was deleted immediately after the failed run.
+See walk011-product-regression-report.json.

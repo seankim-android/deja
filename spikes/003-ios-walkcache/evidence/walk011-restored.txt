@@ -1,0 +1,21 @@
+Precondition check:
+defaults read NSGlobalDomain WALKCACHE_FIXTURE_ORDER
+# Error: Could not find key 'WALKCACHE_FIXTURE_ORDER' in domain 'kCFPreferencesAnyApplication'.
+
+Command:
+bun ../../apps/cli/walkcache.ts remember checkout \
+  --flow evidence/checkout.yaml --config walkcache.config.json
+
+Actual result:
+Outcome: remembered
+Passed: yes
+Cache status: not-checked
+Model calls: 0 (remember performs independent verification only)
+Duration: 21666 ms
+Assertions: 12
+Repair count: 0
+YAML SHA-256: ee638a68d26d684f414c3b526d93042e6066412a909df8cd318117a087f21ad0
+Exit code: 0
+
+Restoring default WC-1001 behavior required and received a fresh independent full-flow verification;
+the failed validation was not presented as a pass. See walk011-restored-report.json.

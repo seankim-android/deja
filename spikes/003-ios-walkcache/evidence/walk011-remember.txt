@@ -1,0 +1,18 @@
+Command:
+bun ../../apps/cli/walkcache.ts remember checkout \
+  --flow evidence/checkout.yaml --config walkcache.config.json
+
+Actual result:
+Outcome: remembered
+Passed: yes
+Cache status: not-checked
+Model calls: 0 (remember performs independent verification only)
+Duration: 29067 ms
+Assertions: 12
+Repair count: 0
+YAML SHA-256: ee638a68d26d684f414c3b526d93042e6066412a909df8cd318117a087f21ad0
+Exit code: 0
+
+The candidate executed through the real iOS adapter and entered successful storage only after its
+complete independently executed journey passed. See walk011-remember-report.json for the redacted
+structured result and exact build/adapter identity.

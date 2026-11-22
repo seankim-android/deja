@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process'
-import type { MaestroExecutionAdapter } from './platform-adapter.ts'
+import type { MaestroExecutionAdapter, MaestroPlatform } from './platform-adapter.ts'
 import { realpathSync, statSync } from 'node:fs'
 import { mkdir, realpath, writeFile } from 'node:fs/promises'
 import { delimiter, dirname, resolve, sep } from 'node:path'
@@ -12,10 +12,12 @@ export {
 
 export {
   androidMaestroAdapter,
+  iosMaestroAdapter,
   webMaestroAdapter,
   type AdapterCacheIdentity,
   type AdapterIdentityInput,
   type AndroidAdapterOptions,
+  type IosAdapterOptions,
   type MaestroExecutionAdapter,
   type MaestroPlatform,
   type WebAdapterOptions,
@@ -53,7 +55,7 @@ export type MaestroArtifactPaths = {
 export type RunMaestroOptions = {
   executable: string
   device: string
-  platform: 'android' | 'web'
+  platform: MaestroPlatform
   adapter?: MaestroExecutionAdapter
   workspaceRoot: string
   flowPath: string
@@ -66,7 +68,7 @@ export type RunMaestroOptions = {
 }
 
 export type MaestroRunResult = {
-  platform: 'android' | 'web'
+  platform: MaestroPlatform
   device: string
   flowPath: string
   startedAt: string

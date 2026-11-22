@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import { readFile, readdir } from 'node:fs/promises'
 import { relative, resolve, sep } from 'node:path'
 
-export type MaestroPlatform = 'android' | 'web'
+export type MaestroPlatform = 'android' | 'web' | 'ios'
 
 export type AdapterIdentityInput = { buildFingerprint: string }
 export type AdapterCacheIdentity = AdapterIdentityInput & {
@@ -14,23 +14,23 @@ async function fingerprintFile(root: string, buildPath: string) {
   return createHash('sha256').update(await readFile(resolve(root, buildPath))).digest('hex')
 }
 
-async function filesBelow(directory: string): Promise<string[]> {
+async function filesBelow(directory: string, label: string): Promise<string[]> {
   const entries = await readdir(directory, { withFileTypes: true })
   const files: string[] = []
   for (const entry of entries) {
     const path = resolve(directory, entry.name)
-    if (entry.isDirectory()) files.push(...await filesBelow(path))
+    if (entry.isDirectory()) files.push(...await filesBelow(path, label))
     else if (entry.isFile()) files.push(path)
-    else throw new Error('Web build tree cannot contain symbolic links or special files')
+    else throw new Error(`${label} build tree cannot contain symbolic links or special files`)
   }
   return files.sort()
 }
 
-async function fingerprintTree(root: string, buildPath: string) {
+async function fingerprintTree(root: string, buildPath: string, label: string) {
   const directory = resolve(root, buildPath)
   const hash = createHash('sha256')
-  const paths = await filesBelow(directory)
-  if (paths.length === 0) throw new Error('Web build tree must contain at least one file')
+  const paths = await filesBelow(directory, label)
+  if (paths.length === 0) throw new Error(`${label} build tree must contain at least one file`)
   for (const path of paths) {
     hash.update(relative(directory, path).split(sep).join('/'))
     hash.update(Buffer.from([0]))
@@ -56,6 +56,11 @@ export type WebAdapterOptions = {
   device?: string
   headless?: boolean
   screenSize?: string
+  adapterId?: string
+}
+
+export type IosAdapterOptions = {
+  device: string
   adapterId?: string
 }
 
@@ -88,10 +93,26 @@ export function webMaestroAdapter(options: WebAdapterOptions = {}): MaestroExecu
     browser: 'chromium',
     device,
     cacheIdentity: ({ buildFingerprint }) => ({ buildFingerprint, adapter: id, browser: 'chromium' }),
-    buildFingerprint: fingerprintTree,
+    buildFingerprint: (root, buildPath) => fingerprintTree(root, buildPath, 'Web'),
     commandArguments: flowPath => [
       '--no-ansi', '--platform', 'web', '--device', device,
       'test', ...(headless ? ['--headless'] : []), '--screen-size', screenSize, flowPath,
+    ],
+  }
+}
+
+export function iosMaestroAdapter(options: IosAdapterOptions): MaestroExecutionAdapter {
+  if (!options.device.trim()) throw new TypeError('An iOS simulator UDID is required')
+  const id = options.adapterId ?? 'maestro-ios/v1'
+  return {
+    id,
+    platform: 'ios',
+    browser: null,
+    device: options.device,
+    cacheIdentity: ({ buildFingerprint }) => ({ buildFingerprint, adapter: id }),
+    buildFingerprint: (root, buildPath) => fingerprintTree(root, buildPath, 'iOS'),
+    commandArguments: flowPath => [
+      '--no-ansi', '--platform', 'ios', '--device', options.device, 'test', flowPath,
     ],
   }
 }

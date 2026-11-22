@@ -19,13 +19,15 @@ journey before replacing cache memory, shows the diff, and never invokes Git or 
 | --- | --- | --- |
 | Android emulator, API 34, Maestro 2.12.0 | Cold exploration, independent verification/`remember`, exact warm replay, build invalidation, one bounded Checkout selector repair, and genuine product-regression handling | General-purpose repair, other apps/selectors without a new policy, physical devices, or other Android versions |
 | Chromium Desktop via Maestro Web 2.12.0 **Beta/Experimental** | Independently reviewed YAML via `remember`, exact warm replay, static-build invalidation, and product-regression handling on the loopback fixture | **Cold exploration and repair are unsupported.** Firefox, Safari, mobile web, non-loopback targets, and parallel sharding are not claimed |
-| iOS | None | **No iOS support is claimed.** WALK-011 remains unfinished |
+| iPhone 17 simulator, iOS 27.0, Xcode 27.2, Maestro 2.12.0 | Independently reviewed YAML via `remember`, exact warm replay, native `.app` build invalidation, and product-regression handling | **Cold exploration and repair are unsupported.** Physical devices, other runtimes/models, and other Maestro versions are not claimed |
 
 Shared Maestro YAML does not establish cross-platform support. See the
 [Android evidence](spikes/001-android-walkcache/README.md),
-[Chromium fixture and command boundary](spikes/002-web-walkcache/README.md), and
+[Chromium fixture and command boundary](spikes/002-web-walkcache/README.md),
+[native iOS fixture and command boundary](spikes/003-ios-walkcache/README.md), and
 [WALK-010](tickets/WALK-010-verified-web-proof.md)/[WALK-011](tickets/WALK-011-verified-ios-proof.md)
-for the evidence behind this matrix.
+for the evidence behind this matrix. The post-WALK-011 Android compatibility attempt was blocked
+before boot by insufficient emulator disk space; its exact limit is linked from WALK-011.
 
 **No measured wall-clock speedup is claimed for the current CLI.** Warm replay eliminates model
 calls; it does not make Maestro itself instant. Historical WALK-005 spike samples measured complete
@@ -114,7 +116,7 @@ bun run walkcache -- --help
 
 | Command | Behavior |
 | --- | --- |
-| `explore <goal>` | Force Android cold exploration; independently verify and persist only a passing candidate. Web returns `exploration-rejected` with zero model calls. |
+| `explore <goal>` | Force Android cold exploration; independently verify and persist only a passing candidate. Web and iOS return `exploration-rejected` with zero model calls. |
 | `run <goal>` | Compute exact identity and check memory first. A hit replays YAML; a normal miss explores; eligible Android stale-build memory enters one bounded repair. A failed hit is recorded and is not reusable. |
 | `remember <goal> --flow <candidate.yaml>` | Independently execute reviewed YAML and persist only after a complete pass. A bad product assertion remains a failure. |
 | `list` | List valid local walks; does not invoke a runner, explorer, or model. |
@@ -141,6 +143,7 @@ workspaces.
 | `maestro.executable`, `openClaw.executable`, `openClaw.mcpProxy` | Executable names and the workspace-local Android MCP proxy. |
 | `repair.sourceRoots`, `repair.permittedFileTypes`, `repair.affectedFiles`, `repair.timeBudgetMs` | Closed Android repair allowlist and one shared deadline. No repair block is permitted for Web. |
 | Web-only `adapter`, `browser`, `headless`, `screenSize` | Exact execution/cache identity and Chromium launch settings. Only loopback `appId` URLs and `browser: chromium` are accepted. |
+| iOS `adapter`, `.app` `buildPath`, simulator-UDID `device` | Exact native bundle-tree/adapter identity and explicit `--platform ios` execution on the dedicated simulator. No repair block is permitted. |
 
 When a corresponding JSON executable/timeout field is omitted, `WALKCACHE_MAESTRO`,
 `WALKCACHE_OPENCLAW`, and `WALKCACHE_TIMEOUT_MS` supply defaults. `ANDROID_HOME`/
@@ -153,8 +156,8 @@ budget is `repair.timeBudgetMs`.
 | Code | Meaning |
 | --- | --- |
 | `0` | Successful `run`/`explore`/`remember`, `list`, `inspect` of a passing report, or help |
-| `1` | Product/unknown failure, rejected candidate, or rejected/failed bounded repair |
-| `2` | Usage, configuration, report-inspection, executable, or I/O error; also no command |
+| `1` | Product/unknown/runner failure (including a Maestro executable-launch failure), rejected candidate, or rejected/failed bounded repair |
+| `2` | Usage, configuration, report-inspection, or direct I/O error; also no command |
 | `3` | Cold exploration was rejected or failed to produce a verified reusable walk |
 | `4` | Invalid/corrupt local memory; quarantine it and recover through verified cold exploration |
 
@@ -235,6 +238,7 @@ The package scripts also include `preview` for the built viewer.
 - [`apps/cli/README.md`](apps/cli/README.md) — CLI adapter details and Web boundary.
 - [`spikes/001-android-walkcache/`](spikes/001-android-walkcache/README.md) — preserved Android fixture/evidence.
 - [`spikes/002-web-walkcache/`](spikes/002-web-walkcache/README.md) — bounded Chromium fixture/evidence.
+- [`spikes/003-ios-walkcache/`](spikes/003-ios-walkcache/README.md) — bounded native iOS simulator fixture/evidence.
 - [`TODO.md`](TODO.md) and [`tickets/README.md`](tickets/README.md) — repo-local backlog, status, and dependencies.
 - [`docs/PROJECT_PLAN.md`](docs/PROJECT_PLAN.md) — historical hackathon scope and plan; current verified behavior is defined by ticket evidence, not aspirations.
 

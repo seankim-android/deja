@@ -1,0 +1,16 @@
+Command:
+bun ../../apps/cli/walkcache.ts explore checkout --config walkcache.config.json
+
+Actual result:
+Outcome: exploration-rejected
+Passed: no
+Cache status: not-checked
+Model calls: 0 (WALK-011 iOS exploration is disabled; no explorer or model was invoked)
+Duration: 0 ms
+Assertions: unknown
+Repair count: 0
+YAML: none
+Error: Cold iOS exploration is not supported in WALK-011. Independently verified iOS YAML can enter cache with remember; no model fallback was attempted.
+Exit code: 3
+
+No cold iOS behavior is claimed. See walk011-cold-unsupported-report.json.

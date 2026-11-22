@@ -1,0 +1,87 @@
+{
+  "schemaVersion": 1,
+  "command": "run",
+  "identity": {
+    "goal": "checkout",
+    "appId": "dev.walkcache.ios.checkout",
+    "platform": "ios",
+    "flowSchemaVersion": "maestro/v1",
+    "buildFingerprint": "90e11aa072d3449b18be19c523e474cb641a2f2ab932660c5d33333fd689eae6",
+    "adapter": "maestro-ios@2.12.0"
+  },
+  "goalKey": "checkout",
+  "cacheStatus": "hit",
+  "startedAt": "2026-11-22T19:49:58.015Z",
+  "execution": {
+    "passed": false,
+    "startedAt": "2026-11-22T19:49:58.016Z",
+    "endedAt": "2026-11-22T19:50:45.713Z",
+    "durationMs": 47697,
+    "exitCode": 1,
+    "assertions": 12,
+    "failure": {
+      "category": "product_assertion",
+      "failingStep": "Assert that \"Order #WC-1001 · Mochi sticker pack\" is visible",
+      "rawArtifactPath": ".walkcache/reports/run-1795376998016-3vitwul8/output.log",
+      "advisory": true,
+      "repairEligible": false
+    },
+    "artifacts": [
+      {
+        "kind": "yaml",
+        "path": ".walkcache/flows/checkout/ios-ee638a68d26d684f414c3b526d93042e6066412a909df8cd318117a087f21ad0.yaml"
+      },
+      {
+        "kind": "output",
+        "path": ".walkcache/reports/run-1795376998016-3vitwul8/output.log"
+      },
+      {
+        "kind": "output",
+        "path": ".walkcache/reports/run-1795376998016-3vitwul8/stdout.log"
+      },
+      {
+        "kind": "output",
+        "path": ".walkcache/reports/run-1795376998016-3vitwul8/stderr.log"
+      }
+    ]
+  },
+  "outcome": "product-regression",
+  "passed": false,
+  "modelCalls": 0,
+  "modelCallBasis": "exact local hit: explorer and model factories were not invoked",
+  "assertions": 12,
+  "repairCount": 0,
+  "yamlPath": ".walkcache/flows/checkout/ios-ee638a68d26d684f414c3b526d93042e6066412a909df8cd318117a087f21ad0.yaml",
+  "yamlSha256": "ee638a68d26d684f414c3b526d93042e6066412a909df8cd318117a087f21ad0",
+  "failure": {
+    "category": "product_assertion",
+    "failingStep": "Assert that \"Order #WC-1001 · Mochi sticker pack\" is visible",
+    "rawArtifactPath": ".walkcache/reports/run-1795376998016-3vitwul8/output.log",
+    "advisory": true,
+    "repairEligible": false
+  },
+  "artifacts": [
+    {
+      "kind": "yaml",
+      "path": ".walkcache/flows/checkout/ios-ee638a68d26d684f414c3b526d93042e6066412a909df8cd318117a087f21ad0.yaml"
+    },
+    {
+      "kind": "output",
+      "path": ".walkcache/reports/run-1795376998016-3vitwul8/output.log"
+    },
+    {
+      "kind": "output",
+      "path": ".walkcache/reports/run-1795376998016-3vitwul8/stdout.log"
+    },
+    {
+      "kind": "output",
+      "path": ".walkcache/reports/run-1795376998016-3vitwul8/stderr.log"
+    }
+  ],
+  "diffs": [],
+  "errors": [
+    "Meaningful product assertion failed; repair was not attempted"
+  ],
+  "endedAt": "2026-11-22T19:50:45.719Z",
+  "durationMs": 47704
+}

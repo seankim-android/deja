@@ -25,9 +25,16 @@ export type WebExploreConfiguration = Omit<ExploreConfiguration,
   screenSize: string
 }
 
+export type IosExploreConfiguration = Omit<ExploreConfiguration,
+  'platform' | 'openClawModel' | 'openClawBaseUrl'
+> & {
+  platform: 'ios'
+  adapter: string
+}
+
 export type ProductionConfiguration = {
   configPath: string
-  explore: ExploreConfiguration | WebExploreConfiguration
+  explore: ExploreConfiguration | WebExploreConfiguration | IosExploreConfiguration
   workspaceRoot: string
   maestro: {
     executable: string
@@ -114,6 +121,44 @@ function loadWebExploreConfiguration(absolute: string, raw: Record<string, unkno
   }
 }
 
+function loadIosExploreConfiguration(absolute: string, raw: Record<string, unknown>): IosExploreConfiguration {
+  const workspaceRoot = resolve(dirname(absolute), String(raw.workspaceRoot ?? ''))
+  const appId = typeof raw.appId === 'string' ? raw.appId.trim() : ''
+  const buildPath = typeof raw.buildPath === 'string' ? raw.buildPath : ''
+  if (!/^[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$/.test(appId)) {
+    throw new CliConfigurationError('iOS appId must be an explicit fixture bundle identifier')
+  }
+  if (!raw.workspaceRoot || !buildPath.endsWith('.app') || !inside(workspaceRoot, buildPath) ||
+      !existsSync(workspaceRoot) || !existsSync(resolve(workspaceRoot, buildPath))) {
+    throw new CliConfigurationError('iOS config requires existing workspaceRoot and an .app buildPath inside it')
+  }
+  if (typeof raw.device !== 'string' || !raw.device.trim()) {
+    throw new CliConfigurationError('iOS config requires an explicit simulator UDID')
+  }
+  if (!Array.isArray(raw.fixtureCredentials)) {
+    throw new CliConfigurationError('fixtureCredentials must be an explicit array')
+  }
+  const fixtureCredentials = raw.fixtureCredentials.map((entry, index) => {
+    const credential = entry as Record<string, unknown>
+    if (typeof credential.label !== 'string' || typeof credential.value !== 'string' ||
+        !credential.label.trim() || credential.value.length > 4096) {
+      throw new CliConfigurationError(`fixtureCredentials[${index}] requires a label and bounded fixture value`)
+    }
+    return { label: credential.label, value: credential.value }
+  })
+  return {
+    workspaceRoot,
+    appId,
+    platform: 'ios',
+    buildPath,
+    device: raw.device.trim(),
+    fixtureCredentials,
+    explorationTimeoutSeconds: positiveInteger(raw.explorationTimeoutSeconds, 120, 'explorationTimeoutSeconds'),
+    verificationTimeoutMs: positiveInteger(raw.verificationTimeoutMs, 120_000, 'verificationTimeoutMs'),
+    adapter: text(raw.adapter, 'maestro-ios/v1', 'adapter'),
+  }
+}
+
 export async function loadProductionConfiguration(configPath: string): Promise<ProductionConfiguration> {
   const absolute = resolve(configPath)
   let raw: Record<string, unknown>
@@ -124,11 +169,13 @@ export async function loadProductionConfiguration(configPath: string): Promise<P
   } catch (error) {
     throw new CliConfigurationError(`Cannot read WalkCache config ${configPath}`, { cause: error })
   }
-  let explore: ExploreConfiguration | WebExploreConfiguration
+  let explore: ExploreConfiguration | WebExploreConfiguration | IosExploreConfiguration
   try {
     explore = raw.platform === 'web'
       ? loadWebExploreConfiguration(absolute, raw)
-      : loadExploreConfiguration(absolute)
+      : raw.platform === 'ios'
+        ? loadIosExploreConfiguration(absolute, raw)
+        : loadExploreConfiguration(absolute)
   } catch (error) {
     throw new CliConfigurationError('Invalid WalkCache fixture configuration', { cause: error })
   }
@@ -160,6 +207,9 @@ export async function loadProductionConfiguration(configPath: string): Promise<P
   let repair: ProductionConfiguration['repair']
   if (explore.platform === 'web' && raw.repair !== undefined) {
     throw new CliConfigurationError('WALK-010 Web does not configure the Android-only repair plugin')
+  }
+  if (explore.platform === 'ios' && raw.repair !== undefined) {
+    throw new CliConfigurationError('WALK-011 iOS does not configure the Android-only repair plugin')
   }
   if (raw.repair !== undefined) {
     if (!raw.repair || typeof raw.repair !== 'object' || Array.isArray(raw.repair)) {

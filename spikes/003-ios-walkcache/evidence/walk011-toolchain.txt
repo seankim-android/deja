@@ -1,0 +1,31 @@
+WALK-011 real iOS toolchain and exact identity
+
+Xcode 27.2 (Build version 27B52)
+Maestro 2.12.0
+Simulator name: walkcache_ios
+Simulator device: iPhone 17
+Simulator runtime: iOS 27.0 (27.0 - 24A434)
+Simulator UDID: DFC4D233-498B-4B33-B713-E59B239FA86A
+Native build SDK: iphonesimulator27.2
+Bundle identifier: dev.walkcache.ios.checkout
+Adapter: maestro-ios@2.12.0
+Verified .app-tree SHA-256: 90e11aa072d3449b18be19c523e474cb641a2f2ab932660c5d33333fd689eae6
+Reviewed YAML SHA-256: ee638a68d26d684f414c3b526d93042e6066412a909df8cd318117a087f21ad0
+YAML assertions: 12
+
+Commands from spikes/003-ios-walkcache (Maestro/Java PATH configured):
+
+xcodebuild -project WalkCacheFixture.xcodeproj -scheme WalkCacheFixture \
+  -configuration Debug -sdk iphonesimulator -derivedDataPath build \
+  CODE_SIGNING_ALLOWED=NO build
+# Result: ** BUILD SUCCEEDED **
+
+xcrun simctl install DFC4D233-498B-4B33-B713-E59B239FA86A \
+  build/Build/Products/Debug-iphonesimulator/WalkCacheFixture.app
+
+maestro --no-ansi --platform ios \
+  --device DFC4D233-498B-4B33-B713-E59B239FA86A test evidence/checkout.yaml
+
+A repeated xcodebuild also succeeded, and the recomputed .app-tree fingerprint matched the
+verified fingerprint above byte-for-byte. Only the named walkcache_ios simulator was created,
+booted, installed to, and used for fixture defaults probes.

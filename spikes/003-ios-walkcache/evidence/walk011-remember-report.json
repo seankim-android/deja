@@ -1,0 +1,82 @@
+{
+  "schemaVersion": 1,
+  "command": "remember",
+  "identity": {
+    "goal": "checkout",
+    "appId": "dev.walkcache.ios.checkout",
+    "platform": "ios",
+    "flowSchemaVersion": "maestro/v1",
+    "buildFingerprint": "90e11aa072d3449b18be19c523e474cb641a2f2ab932660c5d33333fd689eae6",
+    "adapter": "maestro-ios@2.12.0"
+  },
+  "goalKey": "checkout",
+  "cacheStatus": "not-checked",
+  "startedAt": "2026-11-22T19:47:41.473Z",
+  "outcome": "remembered",
+  "passed": true,
+  "modelCalls": 0,
+  "modelCallBasis": "remember performs independent verification only",
+  "assertions": 12,
+  "repairCount": 0,
+  "yamlPath": ".walkcache/flows/checkout/ios-ee638a68d26d684f414c3b526d93042e6066412a909df8cd318117a087f21ad0.yaml",
+  "yamlSha256": "ee638a68d26d684f414c3b526d93042e6066412a909df8cd318117a087f21ad0",
+  "failure": null,
+  "artifacts": [
+    {
+      "kind": "yaml",
+      "path": "evidence/checkout.yaml"
+    },
+    {
+      "kind": "output",
+      "path": ".walkcache/attempts/remember-1795376861473-vqp7ito4/output.log"
+    },
+    {
+      "kind": "output",
+      "path": ".walkcache/attempts/remember-1795376861473-vqp7ito4/stdout.log"
+    },
+    {
+      "kind": "output",
+      "path": ".walkcache/attempts/remember-1795376861473-vqp7ito4/stderr.log"
+    },
+    {
+      "kind": "yaml",
+      "path": ".walkcache/flows/checkout/ios-ee638a68d26d684f414c3b526d93042e6066412a909df8cd318117a087f21ad0.yaml",
+      "sha256": "ee638a68d26d684f414c3b526d93042e6066412a909df8cd318117a087f21ad0"
+    },
+    {
+      "kind": "memory",
+      "path": ".walkcache/memory/walks.json"
+    }
+  ],
+  "diffs": [],
+  "errors": [],
+  "execution": {
+    "passed": true,
+    "startedAt": "2026-11-22T19:47:41.473Z",
+    "endedAt": "2026-11-22T19:48:10.536Z",
+    "durationMs": 29063,
+    "exitCode": 0,
+    "assertions": 12,
+    "failure": null,
+    "artifacts": [
+      {
+        "kind": "yaml",
+        "path": "evidence/checkout.yaml"
+      },
+      {
+        "kind": "output",
+        "path": ".walkcache/attempts/remember-1795376861473-vqp7ito4/output.log"
+      },
+      {
+        "kind": "output",
+        "path": ".walkcache/attempts/remember-1795376861473-vqp7ito4/stdout.log"
+      },
+      {
+        "kind": "output",
+        "path": ".walkcache/attempts/remember-1795376861473-vqp7ito4/stderr.log"
+      }
+    ]
+  },
+  "endedAt": "2026-11-22T19:48:10.540Z",
+  "durationMs": 29067
+}

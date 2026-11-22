@@ -38,8 +38,9 @@ the exact proposed source diff and `autoCommit: false`. Reports are atomic under
 redacts configured fixture values, credentials-like fields, workspace/home absolute paths. Generated
 YAML may contain deterministic fixture inputs but is never printed by the CLI summary.
 
-Exit codes are `0` success/help/list/inspect-of-pass, `1` product/unknown/repair/candidate failure,
-`2` usage/config/report/I/O error, `3` rejected or failed cold exploration, and `4` invalid memory.
+Exit codes are `0` success/help/list/inspect-of-pass, `1` product/unknown/runner/executable-launch/
+repair/candidate failure, `2` usage/config/report/direct-I/O error, `3` rejected or failed cold
+exploration, and `4` invalid memory.
 Inspecting a failed report returns that report's original failure class; inspecting a passing report
 returns zero. Help does not load configuration. Invalid memory must be quarantined, not edited into
 a hit.
@@ -60,3 +61,18 @@ Web has no repair plugin: a stale build returns `repair-rejected` and never fall
 exploration. Android MCP `launchApp/clearState`, APK hashing/install, and Android source patching
 are deliberately not reused. No cross-browser, non-loopback, generalized exploration, or measured
 speedup claim is made. Actual commands/results are linked from the Web fixture README.
+
+## WALK-011 iOS boundary
+
+[`spikes/003-ios-walkcache`](../../spikes/003-ios-walkcache/README.md) adds a distinct native iOS
+execution adapter. Configuration requires `platform: ios`, a fixture bundle identifier, an `.app`
+build tree, an explicit simulator UDID, and adapter identity. The adapter hashes every regular file
+and relative path in the native bundle, includes the adapter in exact cache identity, and executes
+Maestro with `--platform ios --device <UDID>`. It never shares Android install/state/repair logic.
+
+Only independently reviewed YAML via `remember`, exact zero-model warm replay, native-build
+invalidation, and meaningful product-regression handling are supported. Cold iOS exploration returns
+`exploration-rejected` with 0 model calls; stale builds return `repair-rejected` without a cold
+fallback. The verified target is the dedicated iPhone 17 / iOS 27.0 `walkcache_ios` simulator with
+Xcode 27.2 and Maestro 2.12.0. The requested Android compatibility replay was blocked before boot
+by emulator disk capacity, as recorded in the WALK-011 evidence; portable tests do not replace it.

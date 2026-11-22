@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   androidMaestroAdapter,
+  iosMaestroAdapter,
   webMaestroAdapter,
 } from '../src/index.ts'
 
@@ -33,6 +34,38 @@ describe('Maestro execution platform adapters', () => {
     expect(adapter.commandArguments('/workspace/flow.yaml')).toEqual([
       '--no-ansi', '--device', 'emulator-5554', 'test', '/workspace/flow.yaml',
     ])
+  })
+
+  test('iOS identity and command include adapter, simulator, build, and explicit platform', () => {
+    const udid = 'DFC4D233-498B-4B33-B713-E59B239FA86A'
+    const adapter = iosMaestroAdapter({ device: udid, adapterId: 'maestro-ios@2.12.0' })
+    expect(adapter.cacheIdentity({ buildFingerprint: fingerprint })).toEqual({
+      buildFingerprint: fingerprint,
+      adapter: 'maestro-ios@2.12.0',
+    })
+    expect(adapter.commandArguments('/workspace/flow.yaml')).toEqual([
+      '--no-ansi', '--platform', 'ios', '--device', udid, 'test', '/workspace/flow.yaml',
+    ])
+    expect(() => iosMaestroAdapter({ device: ' ' })).toThrow('simulator UDID')
+  })
+
+  test('iOS app fingerprint covers bundle paths and contents', async () => {
+    const temporary = await mkdtemp(join(tmpdir(), 'walkcache-ios-build-'))
+    try {
+      const app = join(temporary, 'Fixture.app')
+      await mkdir(join(app, '_CodeSignature'), { recursive: true })
+      await writeFile(join(app, 'Info.plist'), '<plist>one</plist>')
+      await writeFile(join(app, 'Fixture'), 'binary-one')
+      await writeFile(join(app, '_CodeSignature/CodeResources'), 'signature-one')
+      const adapter = iosMaestroAdapter({ device: 'test-simulator' })
+      const before = await adapter.buildFingerprint(temporary, 'Fixture.app')
+      expect(before).toMatch(/^[a-f0-9]{64}$/)
+      expect(await adapter.buildFingerprint(temporary, 'Fixture.app')).toBe(before)
+      await writeFile(join(app, 'Fixture'), 'binary-two')
+      expect(await adapter.buildFingerprint(temporary, 'Fixture.app')).not.toBe(before)
+    } finally {
+      await rm(temporary, { recursive: true, force: true })
+    }
   })
 
   test('Web build fingerprint covers paths and every deterministic static file', async () => {

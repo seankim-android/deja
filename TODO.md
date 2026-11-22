@@ -70,8 +70,15 @@ Check an item only when its ticket is complete and its evidence is linked. All t
   [`Android compatibility replay`](spikes/001-android-walkcache/evidence/walk010-android-warm.txt), and
   [`101 tests / 599 assertions`](spikes/002-web-walkcache/evidence/walk010-all-tests.txt).
   Cold Web exploration and Web repair are explicitly unsupported, not silently substituted.
-- [ ] [WALK-011](tickets/WALK-011-verified-ios-proof.md) — Run the journey on an iOS simulator through
-  the iOS adapter, or document the concrete blocker and make no support claim.
+- [x] [WALK-011](tickets/WALK-011-verified-ios-proof.md) — Prove reviewed native iOS YAML, independent
+  `remember`, zero-model warm replay, build invalidation, and genuine product-regression handling on
+  iPhone 17 / iOS 27.0 through the dedicated adapter/simulator. Evidence:
+  [`support boundary`](spikes/003-ios-walkcache/README.md),
+  [`warm replay`](spikes/003-ios-walkcache/evidence/walk011-warm.txt),
+  [`regression guard`](spikes/003-ios-walkcache/evidence/walk011-product-regression.txt),
+  and [`105 tests / 621 assertions`](spikes/003-ios-walkcache/evidence/walk011-all-tests.txt).
+  Cold exploration and repair are explicitly unsupported. The post-change Android replay was attempted
+  but blocked before boot by emulator disk capacity; no device compatibility pass is claimed.
 
 ## P0 — OSS release and submission
 

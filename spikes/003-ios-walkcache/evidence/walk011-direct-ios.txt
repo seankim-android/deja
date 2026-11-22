@@ -1,0 +1,30 @@
+Command:
+maestro --no-ansi --platform ios \
+  --device DFC4D233-498B-4B33-B713-E59B239FA86A test evidence/checkout.yaml
+
+Actual output:
+Running on walkcache_ios - iOS 27.0 - DFC4D233-498B-4B33-B713-E59B239FA86A
+ > Flow checkout
+Launch app "dev.walkcache.ios.checkout" with clear state... COMPLETED
+Assert that id: screen_login is visible... COMPLETED
+Assert that "WalkCache iOS Shop" is visible... COMPLETED
+Tap on id: username_input... COMPLETED
+Input text qa@walkcache.dev... COMPLETED
+Assert that "qa@walkcache.dev" is visible... COMPLETED
+Tap on id: password_input... COMPLETED
+Input text testing123... COMPLETED
+Tap on id: login_button... COMPLETED
+Assert that id: screen_catalog is visible... COMPLETED
+Assert that "Mochi sticker pack" is visible... COMPLETED
+Assert that "$5.00 · 6 stickers" is visible... COMPLETED
+Tap on id: add_to_cart... COMPLETED
+Assert that id: screen_cart is visible... COMPLETED
+Assert that "1 × Mochi sticker pack" is visible... COMPLETED
+Assert that "Total: $5.00" is visible... COMPLETED
+Tap on id: checkout_button... COMPLETED
+Assert that id: order_confirmation is visible... COMPLETED
+Assert that "Order confirmed" is visible... COMPLETED
+Assert that "Order #WC-1001 · Mochi sticker pack" is visible... COMPLETED
+
+Exit code: 0
+Standalone Maestro execution required no WalkCache orchestration or model.

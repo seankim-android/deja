@@ -1,0 +1,22 @@
+Probe command:
+printf 'stale-probe' >> build/Build/Products/Debug-iphonesimulator/WalkCacheFixture.app/PkgInfo
+bun ../../apps/cli/walkcache.ts run checkout --config walkcache.config.json
+printf 'APPL????' > build/Build/Products/Debug-iphonesimulator/WalkCacheFixture.app/PkgInfo
+
+Actual result:
+Outcome: repair-rejected
+Passed: no
+Cache status: miss (stale-build)
+Model calls: 0 (stale-build diagnosis never constructs a model client)
+Duration: 1 ms
+Assertions: unknown
+Repair count: 0
+YAML: none
+Error: A stale build requires a configured selector repairer; cold exploration was not substituted
+Exit code: 1
+
+PkgInfo before: 82502191c9484b04d685374f9879a0066069c49b8acae7a04b01d38d07e8eca0
+PkgInfo after:  82502191c9484b04d685374f9879a0066069c49b8acae7a04b01d38d07e8eca0
+
+The changed .app-tree identity never replayed as a warm hit, no Android repair or cold fallback was
+substituted, and the probe restored the file byte-for-byte. See walk011-build-invalidation-report.json.

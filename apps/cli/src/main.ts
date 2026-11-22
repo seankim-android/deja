@@ -6,7 +6,12 @@ import {
   LocalWalkStore,
   MAESTRO_FLOW_SCHEMA_VERSION,
 } from '../../../packages/store-local/src/index.ts'
-import { MaestroWalkRunner, androidMaestroAdapter, webMaestroAdapter } from '../../../packages/maestro/src/index.ts'
+import {
+  MaestroWalkRunner,
+  androidMaestroAdapter,
+  iosMaestroAdapter,
+  webMaestroAdapter,
+} from '../../../packages/maestro/src/index.ts'
 import { BoundedSelectorRepairer } from '../../../packages/repair/src/index.ts'
 import {
   buildFingerprint,
@@ -18,7 +23,7 @@ import {
 import { HELP, renderResult, renderWalks } from './output.ts'
 import { createRedactor, redactJson } from './redaction.ts'
 import { JsonRunReporter, readRunReport } from './reporter.ts'
-import { UnsupportedWebExplorer } from './unsupported-web-explorer.ts'
+import { UnsupportedPlatformExplorer } from './unsupported-platform-explorer.ts'
 
 export type CliIo = {
   stdout: (text: string) => void
@@ -90,6 +95,11 @@ function createOrchestration(
       headless: configuration.explore.headless,
       screenSize: configuration.explore.screenSize,
     })
+    : configuration.explore.platform === 'ios'
+      ? iosMaestroAdapter({
+        device: configuration.explore.device,
+        adapterId: configuration.explore.adapter,
+      })
     : androidMaestroAdapter({ device: configuration.explore.device })
   const runner = new MaestroWalkRunner({
     workspaceRoot: configuration.workspaceRoot,
@@ -107,7 +117,9 @@ function createOrchestration(
     runner,
     reporter,
     createExplorer: () => {
-      if (configuration.explore.platform !== 'android') return new UnsupportedWebExplorer()
+      if (configuration.explore.platform !== 'android') {
+        return new UnsupportedPlatformExplorer(configuration.explore.platform)
+      }
       return new OpenClawWalkExplorer({
         configuration: configuration.explore,
         buildFingerprint: currentFingerprint,

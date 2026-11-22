@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "command": "explore",
+  "identity": {
+    "goal": "checkout",
+    "appId": "dev.walkcache.ios.checkout",
+    "platform": "ios",
+    "flowSchemaVersion": "maestro/v1",
+    "buildFingerprint": "90e11aa072d3449b18be19c523e474cb641a2f2ab932660c5d33333fd689eae6",
+    "adapter": "maestro-ios@2.12.0"
+  },
+  "goalKey": "checkout",
+  "cacheStatus": "not-checked",
+  "startedAt": "2026-11-22T19:49:54.724Z",
+  "outcome": "exploration-rejected",
+  "passed": false,
+  "modelCalls": 0,
+  "modelCallBasis": "WALK-011 iOS exploration is disabled; no explorer or model was invoked",
+  "assertions": null,
+  "repairCount": 0,
+  "yamlPath": null,
+  "yamlSha256": null,
+  "failure": null,
+  "artifacts": [],
+  "diffs": [],
+  "errors": [
+    "Cold iOS exploration is not supported in WALK-011. Independently verified iOS YAML can enter cache with remember; no model fallback was attempted."
+  ],
+  "exploration": {
+    "passed": false,
+    "durationMs": 0,
+    "explorationDurationMs": 0,
+    "verificationDurationMs": null,
+    "mcpCalls": 0,
+    "modelCalls": 0,
+    "modelCallBasis": "WALK-011 iOS exploration is disabled; no explorer or model was invoked",
+    "model": null,
+    "provider": null,
+    "assertions": null,
+    "flowPath": null,
+    "flowSha256": null,
+    "failure": null,
+    "artifacts": [],
+    "errors": [
+      "Cold iOS exploration is not supported in WALK-011. Independently verified iOS YAML can enter cache with remember; no model fallback was attempted."
+    ]
+  },
+  "endedAt": "2026-11-22T19:49:54.724Z",
+  "durationMs": 0
+}

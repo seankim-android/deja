@@ -19,8 +19,10 @@ const result = await runMaestro({
 ```
 
 The executable, device, flow, workspace, timeout, SDK, Java, and artifact locations are explicit
-configuration. No Homebrew, user-home, emulator, or SDK path is fixed by the adapter. Android is
-the only platform this runner currently accepts; it makes no iOS or web support claim.
+configuration. No Homebrew, user-home, emulator, or SDK path is fixed by the adapter. The example
+above is Android. Separate Web and iOS adapters own their command flags and build identities; their
+claimed behavior is limited to the real Chromium and iOS simulator evidence in WALK-010/WALK-011.
+Generic interfaces alone are never treated as platform proof.
 
 Flows must resolve to a regular file inside the canonical workspace, including after following
 symlinks. Artifact directories have the same boundary. When configured, the runner writes
