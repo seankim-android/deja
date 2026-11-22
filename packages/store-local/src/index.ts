@@ -23,6 +23,13 @@ export type StoredValidation = WalkValidation & {
   flowSha256: string
 }
 
+export type RepairProvenance = {
+  attemptId: string
+  patchPath: string
+  previousBuildFingerprint: string
+  previousFlowSha256: string
+}
+
 export type ExplorationDetails = {
   explorationDurationMs: number | null
   verificationDurationMs: number | null
@@ -37,8 +44,9 @@ export type StoredWalk = WalkIdentity & {
   flowSha256: string
   lastValidation: WalkValidation
   validationHistory: StoredValidation[]
-  origin?: 'remember' | 'explore'
+  origin?: 'remember' | 'explore' | 'repair'
   exploration?: ExplorationDetails
+  repairHistory?: RepairProvenance[]
 }
 
 export type WalkMemory = {
@@ -64,6 +72,14 @@ export type PersistVerifiedOptions = {
   validation: WalkValidation
   origin: 'remember' | 'explore'
   exploration?: ExplorationDetails
+}
+
+export type PersistVerifiedRepairOptions = Omit<PersistVerifiedOptions, 'origin' | 'exploration'> & {
+  previous: {
+    buildFingerprint: string
+    flowSha256: string
+  }
+  repair: RepairProvenance
 }
 
 export type PersistedWalk = {
@@ -144,6 +160,21 @@ function readExploration(value: unknown): ExplorationDetails {
   return result
 }
 
+function readRepairProvenance(value: unknown): RepairProvenance {
+  if (!object(value) || !nonEmptyString(value.attemptId) || !nonEmptyString(value.patchPath) ||
+      !value.patchPath.startsWith('.walkcache/patches/') || isAbsolute(value.patchPath) ||
+      value.patchPath.split('/').includes('..') || !fingerprint(value.previousBuildFingerprint) ||
+      !fingerprint(value.previousFlowSha256)) {
+    throw new InvalidWalkMemoryError('walk repair provenance is invalid')
+  }
+  return {
+    attemptId: value.attemptId,
+    patchPath: value.patchPath,
+    previousBuildFingerprint: value.previousBuildFingerprint,
+    previousFlowSha256: value.previousFlowSha256,
+  }
+}
+
 function normalizeIdentity(identity: WalkIdentity) {
   const goal = identity.goal.trim()
   const goalKey = normalizeGoal(goal)
@@ -185,9 +216,15 @@ function validateWalk(value: unknown, legacy = false): StoredWalk {
       latest.flowSha256 !== value.flowSha256) {
     throw new InvalidWalkMemoryError('lastValidation must equal the latest history entry for the stored flow')
   }
-  if (value.origin !== undefined && value.origin !== 'remember' && value.origin !== 'explore') {
-    throw new InvalidWalkMemoryError('walk origin must be remember or explore')
+  if (value.origin !== undefined && value.origin !== 'remember' && value.origin !== 'explore' &&
+      value.origin !== 'repair') {
+    throw new InvalidWalkMemoryError('walk origin must be remember, explore, or repair')
   }
+  if (value.repairHistory !== undefined &&
+      (!Array.isArray(value.repairHistory) || value.repairHistory.length === 0)) {
+    throw new InvalidWalkMemoryError('walk repairHistory must be a non-empty array when present')
+  }
+  const repairHistory = value.repairHistory?.map(readRepairProvenance)
   return {
     goal: value.goal,
     goalKey: value.goalKey,
@@ -201,6 +238,7 @@ function validateWalk(value: unknown, legacy = false): StoredWalk {
     validationHistory: history,
     ...(value.origin ? { origin: value.origin } : {}),
     ...(value.exploration !== undefined ? { exploration: readExploration(value.exploration) } : {}),
+    ...(repairHistory ? { repairHistory } : {}),
   }
 }
 
@@ -316,7 +354,10 @@ export class LocalWalkStore {
     await this.atomicWrite(this.memoryPath, `${JSON.stringify(memory, null, 2)}\n`)
   }
 
-  async persistVerifiedCandidate(options: PersistVerifiedOptions): Promise<PersistedWalk> {
+  private async persistVerified(
+    options: PersistVerifiedOptions,
+    repair?: PersistVerifiedRepairOptions,
+  ): Promise<PersistedWalk> {
     if (!options.validation.passed) {
       throw new Error('Only an independently passing candidate can enter successful storage')
     }
@@ -330,6 +371,16 @@ export class LocalWalkStore {
     // Validate all existing entries before creating a replacement. Corrupt memory is never silently
     // repaired by dropping entries or by declaring a newly verified candidate a successful recovery.
     const memory = await this.loadMemory()
+    const previous = repair ? memory.walks.find(item =>
+      item.goalKey === identity.goalKey && item.appId === identity.appId &&
+      item.platform === identity.platform && item.flowSchemaVersion === identity.flowSchemaVersion &&
+      item.buildFingerprint === repair.previous.buildFingerprint &&
+      item.flowSha256 === repair.previous.flowSha256 && item.lastValidation.passed,
+    ) : undefined
+    if (repair && !previous) {
+      throw new InvalidWalkMemoryError('the previous successful repair base changed before replacement')
+    }
+    if (repair) readRepairProvenance(repair.repair)
     const candidateBytes = await readFile(candidate)
     const flowSha256 = sha256(candidateBytes)
     const platformSlug = flowSlug(normalizeGoal(identity.platform))
@@ -337,14 +388,18 @@ export class LocalWalkStore {
     await this.atomicWrite(resolve(root, flowPath), candidateBytes)
 
     const validation = { passed: true as const, at: options.validation.at }
+    const historyEntry = { ...validation, flowSha256 }
+    const exploration = previous?.exploration ?? options.exploration
     const walk: StoredWalk = {
       ...identity,
       flowPath,
       flowSha256,
       lastValidation: validation,
-      validationHistory: [{ ...validation, flowSha256 }],
-      origin: options.origin,
-      ...(options.exploration ? { exploration: options.exploration } : {}),
+      validationHistory: previous ? [...previous.validationHistory, historyEntry] : [historyEntry],
+      origin: repair ? 'repair' : options.origin,
+      ...(exploration ? { exploration } : {}),
+      ...(repair && previous
+        ? { repairHistory: [...(previous.repairHistory ?? []), repair.repair] } : {}),
     }
     const remaining = memory.walks.filter(item => !(
       item.goalKey === identity.goalKey && item.appId === identity.appId && item.platform === identity.platform
@@ -357,6 +412,14 @@ export class LocalWalkStore {
       storedMetadataPath: LOCAL_MEMORY_PATH,
       atomicWrite: true,
     }
+  }
+
+  async persistVerifiedCandidate(options: PersistVerifiedOptions): Promise<PersistedWalk> {
+    return this.persistVerified(options)
+  }
+
+  async persistVerifiedRepair(options: PersistVerifiedRepairOptions): Promise<PersistedWalk> {
+    return this.persistVerified({ ...options, origin: 'remember' }, options)
   }
 
   async lookup(identityInput: WalkIdentity): Promise<LookupHit | LookupMiss> {
@@ -373,6 +436,29 @@ export class LocalWalkStore {
     const walk = sameSchema.find(item => item.buildFingerprint === identity.buildFingerprint)
     if (!walk) return { status: 'miss', reason: 'stale-build' }
     if (!walk.lastValidation.passed) return { status: 'miss', reason: 'failed-validation' }
+    const flowPath = await this.storedFlowPath(walk)
+    if (!flowPath) return { status: 'miss', reason: 'missing-flow' }
+    if (sha256(await readFile(flowPath)) !== walk.flowSha256) {
+      throw new InvalidWalkMemoryError(`stored flow checksum does not match ${walk.flowPath}`)
+    }
+    return { status: 'hit', walk, flowPath }
+  }
+
+  /**
+   * Select a previous successful flow only for an explicitly requested repair diagnosis. This is
+   * never a warm-cache hit: the caller must execute and classify it before making any source change.
+   */
+  async lookupPreviousSuccessful(identityInput: WalkIdentity): Promise<LookupHit | LookupMiss> {
+    const identity = normalizeIdentity(identityInput)
+    const memory = await this.loadMemory()
+    const candidates = memory.walks.filter(item =>
+      item.goalKey === identity.goalKey && item.appId === identity.appId &&
+      item.platform === identity.platform && item.flowSchemaVersion === identity.flowSchemaVersion &&
+      item.lastValidation.passed,
+    )
+    if (candidates.length === 0) return { status: 'miss', reason: 'not-found' }
+    candidates.sort((left, right) => right.lastValidation.at.localeCompare(left.lastValidation.at))
+    const walk = candidates[0]
     const flowPath = await this.storedFlowPath(walk)
     if (!flowPath) return { status: 'miss', reason: 'missing-flow' }
     if (sha256(await readFile(flowPath)) !== walk.flowSha256) {

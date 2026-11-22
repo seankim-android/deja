@@ -44,6 +44,20 @@ Each persisted walk has `lastValidation` and append-only `validationHistory` ent
 `failed-validation`; it never overwrites history with a success or remains reusable merely because an
 older validation passed. The flow bytes are left intact for diagnosis.
 
+## Explicit repair provenance (WALK-007)
+
+`lookupPreviousSuccessful` is a separate diagnostic API used only by the bounded repair lifecycle. It
+can select an earlier successful build's checksum-verified flow, but it is never a warm-cache hit and
+does not authorize a write by itself. The caller must independently execute that flow and satisfy the
+strict selector classification before planning a patch.
+
+`persistVerifiedRepair` accepts a passing verification only while the named previous successful
+build/flow still exists unchanged in valid memory. Its atomic replacement has `origin: "repair"`,
+appends to the previous validation history, preserves previous exploration metrics, and adds
+`repairHistory` containing the attempt ID, proposed patch path, and previous build/flow SHA-256. The
+exact prior metadata/flow bytes are also preserved in the repair attempt artifacts. A failed build or
+verification never reaches this method.
+
 ## Invalid-memory recovery and exploration
 
 Corruption is not a cache hit and is not silently repaired into a pass:

@@ -3,17 +3,24 @@
 set -eu
 
 device="${WALKCACHE_DEVICE:-emulator-5554}"
-setting="walkcache_checkout_selector_stale"
+selector_setting="walkcache_checkout_selector_stale"
+regression_setting="walkcache_product_regression"
 
 case "${1:-}" in
   stable)
-    adb -s "$device" shell settings delete global "$setting" >/dev/null
+    adb -s "$device" shell settings delete global "$selector_setting" >/dev/null
+    adb -s "$device" shell settings delete global "$regression_setting" >/dev/null
     ;;
   stale)
-    adb -s "$device" shell settings put global "$setting" 1 >/dev/null
+    adb -s "$device" shell settings put global "$selector_setting" 1 >/dev/null
+    adb -s "$device" shell settings delete global "$regression_setting" >/dev/null
+    ;;
+  product-regression)
+    adb -s "$device" shell settings delete global "$selector_setting" >/dev/null
+    adb -s "$device" shell settings put global "$regression_setting" 1 >/dev/null
     ;;
   *)
-    echo "Usage: sh scripts/fixture-mode.sh stable|stale" >&2
+    echo "Usage: sh scripts/fixture-mode.sh stable|stale|product-regression" >&2
     exit 2
     ;;
 esac

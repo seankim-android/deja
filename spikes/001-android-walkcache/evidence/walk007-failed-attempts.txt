@@ -1,0 +1,5 @@
+Preserved original ignored attempt directories:
+.walkcache/patches/repair-1795331399965-17930
+.walkcache/patches/repair-1795331583029-19098
+c5c058b0964b493da3a1cebf5070f656c587bb51c6a98a7bb81909d553691f92  .walkcache/patches/repair-1795331399965-17930/previous/walks.json
+c5c058b0964b493da3a1cebf5070f656c587bb51c6a98a7bb81909d553691f92  .walkcache/patches/repair-1795331583029-19098/previous/walks.json

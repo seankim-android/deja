@@ -27,7 +27,7 @@ Statuses: `in_progress`, `done`, `ready` (no incomplete dependencies), `queued` 
 | [WALK-004](WALK-004-local-store-regression-tests.md) | done | 002 | Cache identity, corruption, and atomic-write tests |
 | [WALK-005](WALK-005-comparable-cold-warm-metrics.md) | done | 003, 004 | Honest end-to-end cold/warm measurements |
 | [WALK-006](WALK-006-selector-failure-classification.md) | done | 002 | Repeatable invalidation and regression classification |
-| [WALK-007](WALK-007-bounded-repair-regression-guard.md) | queued | 006 | Safe one-attempt repair and negative regression proof |
+| [WALK-007](WALK-007-bounded-repair-regression-guard.md) | done | 006 | Safe one-attempt repair and negative regression proof |
 
 ## P0 — Product and verified platforms
 

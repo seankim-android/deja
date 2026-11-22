@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 import { createHash } from 'node:crypto'
-import { mkdir, rename, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, relative, resolve } from 'node:path'
 import {
@@ -17,6 +17,11 @@ import {
   MAESTRO_FLOW_SCHEMA_VERSION,
   type ExplorationDetails,
 } from '../../../packages/store-local/src/index.ts'
+import {
+  BoundedCheckoutRepairer,
+  CHECKOUT_AFFECTED_FILES,
+  runCheckoutBuildAndInstall,
+} from '../../../packages/repair/src/index.ts'
 import { exploreGoal } from './explore.ts'
 
 const root = process.cwd()
@@ -45,14 +50,14 @@ async function fingerprint() {
   return createHash('sha256').update(Buffer.from(await Bun.file(apkPath).arrayBuffer())).digest('hex')
 }
 
-async function runFlow(flowPath: string, artifactDirectory: string) {
+async function runFlow(flowPath: string, artifactDirectory: string, remainingBudgetMs = timeoutMs) {
   const result = await runMaestro({
     executable: maestro,
     device,
     platform: 'android',
     workspaceRoot: root,
     flowPath,
-    timeoutMs,
+    timeoutMs: remainingBudgetMs,
     androidSdkRoot: androidHome,
     javaHome,
     artifacts: { directory: artifactDirectory },
@@ -204,6 +209,51 @@ async function explore(goalKey: string, configPath: string) {
   if (!report.passed) process.exitCode = 1
 }
 
+async function repair(goalKey: string, configPath: string) {
+  const parsed = JSON.parse(await readFile(configPath, 'utf8')) as {
+    sourceRoots: string[]
+    permittedFileTypes: string[]
+    affectedFiles: string[]
+    timeBudgetMs: number
+  }
+  const timeBudgetMs = Number(process.env.WALKCACHE_REPAIR_TIMEOUT_MS ?? parsed.timeBudgetMs)
+  const repairer = new BoundedCheckoutRepairer({
+    workspaceRoot: root,
+    goal: goalKey,
+    appId,
+    platform: 'android',
+    timeoutMs: timeBudgetMs,
+    policy: {
+      workspaceRoot: root,
+      sourceRoots: parsed.sourceRoots,
+      permittedFileTypes: parsed.permittedFileTypes,
+      affectedFiles: parsed.affectedFiles,
+    },
+    fingerprint,
+    runFlow,
+    build: remainingMs => runCheckoutBuildAndInstall({
+      workspaceRoot: root,
+      timeoutMs: remainingMs,
+      device,
+      apkPath,
+      ...(androidHome ? { androidSdkRoot: androidHome } : {}),
+      ...(javaHome ? { javaHome } : {}),
+    }),
+    displayPatch: (diff, affectedFiles) => {
+      console.log('\nBounded repair affected files (no commit or pull request):')
+      for (const path of affectedFiles) console.log(`- ${path}`)
+      console.log('\nProposed minimal diff:')
+      console.log(diff)
+    },
+  })
+  if (parsed.affectedFiles.length !== CHECKOUT_AFFECTED_FILES.length) {
+    throw new Error('Repair configuration must name exactly the two validated Checkout files')
+  }
+  const report = await repairer.repair()
+  await saveReport('repair', { ...report })
+  if (!report.passed) process.exitCode = 1
+}
+
 async function run(goalKey: string) {
   const buildFingerprint = await fingerprint()
   const identity = {
@@ -237,15 +287,21 @@ async function run(goalKey: string) {
 
 try {
   const [command, goalKey, ...flags] = Bun.argv.slice(2)
-  if (!command || !goalKey || !['explore', 'remember', 'run'].includes(command)) {
-    throw new Error('Usage: bun scripts/walkcache.ts explore <goal> [--config <explore.config.json>] | remember <goal> --flow <candidate.yaml> | run <goal>')
+  if (!command || !goalKey || !['explore', 'remember', 'repair', 'run'].includes(command)) {
+    throw new Error('Usage: bun scripts/walkcache.ts explore <goal> [--config <explore.config.json>] | remember <goal> --flow <candidate.yaml> | repair <goal> [--config <repair.config.json>] | run <goal>')
   }
   const flowFlag = flags.indexOf('--flow')
   const flow = flowFlag >= 0 ? flags[flowFlag + 1] : undefined
   const configFlag = flags.indexOf('--config')
-  const configPath = resolve(root, configFlag >= 0 ? flags[configFlag + 1] : 'explore.config.json')
+  const configPath = resolve(
+    root,
+    configFlag >= 0
+      ? flags[configFlag + 1]
+      : command === 'repair' ? 'repair.config.json' : 'explore.config.json',
+  )
   if (command === 'explore') await explore(goalKey, configPath)
   else if (command === 'remember') await remember(goalKey, flow)
+  else if (command === 'repair') await repair(goalKey, configPath)
   else await run(goalKey)
 } catch (error) {
   console.error(error instanceof Error ? error.message : error)

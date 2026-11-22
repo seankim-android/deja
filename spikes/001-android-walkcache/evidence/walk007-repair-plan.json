@@ -1,0 +1,25 @@
+{
+  "affectedFiles": [
+    {
+      "path": "app/src/main/java/dev/walkcache/checkout/MainActivity.java",
+      "beforeSha256": "04ba02c66d2e7ed5c632942d2c084ba10622d244be236389d9f624c3457d76c5",
+      "afterSha256": "cd4578674bb4a28a554b2a56180d1bc2acf1b8f35e51443e3cab30692e61615d"
+    },
+    {
+      "path": "app/src/main/res/values/ids.xml",
+      "beforeSha256": "1c04352ff793843c01fa85df454d81c478d91e35f62a832f25dd767cc30b2e34",
+      "afterSha256": "04d41f4a45e46e777e3c7e9bc0d86ec510ef77a308a9778f22ac3d2b9808d827"
+    }
+  ],
+  "diffSha256": "eb1c11cba9a519eddaa7d12eb55eb69789f5c305cce7711328d4df292211663e",
+  "sourceRoots": [
+    "app/src/main/java/dev/walkcache/checkout",
+    "app/src/main/res/values"
+  ],
+  "permittedFileTypes": [
+    ".java",
+    ".xml"
+  ],
+  "modelCalls": 0,
+  "generalizedAutonomousRepair": false
+}

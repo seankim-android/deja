@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 2,
+  "walks": [
+    {
+      "goal": "checkout",
+      "appId": "dev.walkcache.checkout",
+      "platform": "android",
+      "flowSchemaVersion": "maestro/v1",
+      "buildFingerprint": "1de8864ea046b64d124ece93ca97b0ae69d11d1fc3d39a89ff405f0e2dd2262d",
+      "goalKey": "checkout",
+      "flowPath": ".walkcache/flows/checkout/android-e09660f45502b720f79f95a65c78ad5f48a4e11ae1ff5f52c6cb99972b12b478.yaml",
+      "flowSha256": "e09660f45502b720f79f95a65c78ad5f48a4e11ae1ff5f52c6cb99972b12b478",
+      "lastValidation": {
+        "passed": true,
+        "at": "2026-11-22T07:15:07.784Z"
+      },
+      "validationHistory": [
+        {
+          "passed": true,
+          "at": "2026-11-22T07:08:05.091Z",
+          "flowSha256": "e09660f45502b720f79f95a65c78ad5f48a4e11ae1ff5f52c6cb99972b12b478"
+        },
+        {
+          "passed": true,
+          "at": "2026-11-22T07:15:07.784Z",
+          "flowSha256": "e09660f45502b720f79f95a65c78ad5f48a4e11ae1ff5f52c6cb99972b12b478"
+        }
+      ],
+      "origin": "repair",
+      "repairHistory": [
+        {
+          "attemptId": "repair-1795331641853-19282",
+          "patchPath": ".walkcache/patches/repair-1795331641853-19282/proposed.patch",
+          "previousBuildFingerprint": "1de8864ea046b64d124ece93ca97b0ae69d11d1fc3d39a89ff405f0e2dd2262d",
+          "previousFlowSha256": "e09660f45502b720f79f95a65c78ad5f48a4e11ae1ff5f52c6cb99972b12b478"
+        }
+      ]
+    }
+  ]
+}

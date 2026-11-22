@@ -1,0 +1,102 @@
+{
+  "schemaVersion": 1,
+  "command": "repair",
+  "attemptId": "repair-1795331583029-19098",
+  "attemptDirectory": ".walkcache/patches/repair-1795331583029-19098",
+  "goalKey": "checkout",
+  "appId": "dev.walkcache.checkout",
+  "platform": "android",
+  "startedAt": "2026-11-22T07:13:03.029Z",
+  "endedAt": "2026-11-22T07:13:43.379Z",
+  "durationMs": 40350,
+  "monotonicDurationMs": 40349,
+  "timeBudgetMs": 240000,
+  "status": "failed",
+  "passed": false,
+  "modelCalls": 0,
+  "repairAttempts": 1,
+  "oneAttemptOnly": true,
+  "autoCommit": false,
+  "pullRequest": false,
+  "affectedFiles": [
+    "app/src/main/java/dev/walkcache/checkout/MainActivity.java",
+    "app/src/main/res/values/ids.xml"
+  ],
+  "proposedPatchPath": ".walkcache/patches/repair-1795331583029-19098/proposed.patch",
+  "previous": {
+    "buildFingerprint": "1de8864ea046b64d124ece93ca97b0ae69d11d1fc3d39a89ff405f0e2dd2262d",
+    "flowPath": ".walkcache/flows/checkout/android-e09660f45502b720f79f95a65c78ad5f48a4e11ae1ff5f52c6cb99972b12b478.yaml",
+    "flowSha256": "e09660f45502b720f79f95a65c78ad5f48a4e11ae1ff5f52c6cb99972b12b478",
+    "memoryPath": ".walkcache/memory/walks.json",
+    "memorySha256": "c5c058b0964b493da3a1cebf5070f656c587bb51c6a98a7bb81909d553691f92"
+  },
+  "diagnosisBuildFingerprint": "1de8864ea046b64d124ece93ca97b0ae69d11d1fc3d39a89ff405f0e2dd2262d",
+  "buildFingerprintAfter": "1de8864ea046b64d124ece93ca97b0ae69d11d1fc3d39a89ff405f0e2dd2262d",
+  "buildIdentityRecomputed": true,
+  "diagnosis": {
+    "startedAt": "2026-11-22T07:13:03.033Z",
+    "endedAt": "2026-11-22T07:13:42.536Z",
+    "durationMs": 39503,
+    "monotonicDurationMs": 39504,
+    "exitCode": 1,
+    "timedOut": false,
+    "passed": false,
+    "errors": [
+      {
+        "kind": "execution",
+        "message": "Maestro exited with code 1",
+        "code": "MAESTRO_EXIT"
+      }
+    ],
+    "stdoutPath": ".walkcache/patches/repair-1795331583029-19098/diagnosis/stdout.log",
+    "stderrPath": ".walkcache/patches/repair-1795331583029-19098/diagnosis/stderr.log",
+    "outputPath": ".walkcache/patches/repair-1795331583029-19098/diagnosis/output.log",
+    "failureClassification": {
+      "category": "selector",
+      "failingStep": "Tap on id: dev.walkcache.checkout:id/checkout_button",
+      "rawArtifactPath": ".walkcache/patches/repair-1795331583029-19098/diagnosis/output.log",
+      "advisory": true,
+      "repairEligible": true
+    }
+  },
+  "build": {
+    "command": [
+      "/Users/seankim/.openclaw/workspace/kimi-hackathon-walk-007/spikes/001-android-walkcache/gradlew",
+      "clean",
+      ":app:assembleDebug"
+    ],
+    "startedAt": "2026-11-22T07:13:42.542Z",
+    "endedAt": "2026-11-22T07:13:43.375Z",
+    "durationMs": 833,
+    "monotonicDurationMs": 833,
+    "exitCode": 0,
+    "signal": null,
+    "timedOut": false,
+    "passed": true,
+    "errors": [],
+    "stdoutPath": ".walkcache/patches/repair-1795331583029-19098/build/stdout.log",
+    "stderrPath": ".walkcache/patches/repair-1795331583029-19098/build/stderr.log",
+    "outputPath": ".walkcache/patches/repair-1795331583029-19098/build/output.log"
+  },
+  "verification": null,
+  "persistence": null,
+  "preservation": {
+    "memoryBeforeSha256": "c5c058b0964b493da3a1cebf5070f656c587bb51c6a98a7bb81909d553691f92",
+    "memoryAfterSha256": "c5c058b0964b493da3a1cebf5070f656c587bb51c6a98a7bb81909d553691f92",
+    "memoryUnchangedByteForByte": true,
+    "flowBeforeSha256": "e09660f45502b720f79f95a65c78ad5f48a4e11ae1ff5f52c6cb99972b12b478",
+    "flowAfterSha256": "e09660f45502b720f79f95a65c78ad5f48a4e11ae1ff5f52c6cb99972b12b478",
+    "assertionsUnchangedByteForByte": true,
+    "sourceBeforeSha256": {
+      "app/src/main/java/dev/walkcache/checkout/MainActivity.java": "04ba02c66d2e7ed5c632942d2c084ba10622d244be236389d9f624c3457d76c5",
+      "app/src/main/res/values/ids.xml": "1c04352ff793843c01fa85df454d81c478d91e35f62a832f25dd767cc30b2e34"
+    },
+    "sourceAfterSha256": {
+      "app/src/main/java/dev/walkcache/checkout/MainActivity.java": "04ba02c66d2e7ed5c632942d2c084ba10622d244be236389d9f624c3457d76c5",
+      "app/src/main/res/values/ids.xml": "1c04352ff793843c01fa85df454d81c478d91e35f62a832f25dd767cc30b2e34"
+    },
+    "sourceUnchangedByteForByte": true
+  },
+  "rejectionReason": null,
+  "error": "The rebuilt APK fingerprint did not change; refusing unverified cache replacement"
+}

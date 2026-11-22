@@ -16,6 +16,7 @@ import android.widget.TextView;
 /** A deterministic, dependency-free Android app used only by the WalkCache PoC. */
 public final class MainActivity extends Activity {
     private static final String CHECKOUT_SELECTOR_STALE_SETTING = "walkcache_checkout_selector_stale";
+    private static final String PRODUCT_REGRESSION_SETTING = "walkcache_product_regression";
     private EditText usernameInput;
     private EditText passwordInput;
 
@@ -81,7 +82,10 @@ public final class MainActivity extends Activity {
     private void showConfirmation() {
         LinearLayout content = screen();
         content.addView(title("Order confirmed", R.id.order_confirmation));
-        TextView confirmation = body("Order #WC-1001 · Mochi sticker pack");
+        String orderNumber = Settings.Global.getInt(
+            getContentResolver(), PRODUCT_REGRESSION_SETTING, 0
+        ) == 1 ? "WC-9999" : "WC-1001";
+        TextView confirmation = body("Order #" + orderNumber + " · Mochi sticker pack");
         confirmation.setId(R.id.screen_confirmation);
         content.addView(confirmation);
         setContentView(scroll(content));

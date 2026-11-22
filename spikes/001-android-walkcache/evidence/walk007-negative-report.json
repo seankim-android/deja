@@ -1,0 +1,81 @@
+{
+  "schemaVersion": 1,
+  "command": "repair",
+  "attemptId": "repair-1795331760530-19780",
+  "attemptDirectory": ".walkcache/patches/repair-1795331760530-19780",
+  "goalKey": "checkout",
+  "appId": "dev.walkcache.checkout",
+  "platform": "android",
+  "startedAt": "2026-11-22T07:16:00.531Z",
+  "endedAt": "2026-11-22T07:16:42.407Z",
+  "durationMs": 41876,
+  "monotonicDurationMs": 41877,
+  "timeBudgetMs": 240000,
+  "status": "rejected",
+  "passed": false,
+  "modelCalls": 0,
+  "repairAttempts": 0,
+  "oneAttemptOnly": true,
+  "autoCommit": false,
+  "pullRequest": false,
+  "affectedFiles": [],
+  "proposedPatchPath": null,
+  "previous": {
+    "buildFingerprint": "1de8864ea046b64d124ece93ca97b0ae69d11d1fc3d39a89ff405f0e2dd2262d",
+    "flowPath": ".walkcache/flows/checkout/android-e09660f45502b720f79f95a65c78ad5f48a4e11ae1ff5f52c6cb99972b12b478.yaml",
+    "flowSha256": "e09660f45502b720f79f95a65c78ad5f48a4e11ae1ff5f52c6cb99972b12b478",
+    "memoryPath": ".walkcache/memory/walks.json",
+    "memorySha256": "b9f2118712b22e2b68228715cdd408bda8a25d7a9dbf743299ef57f081cd2f78"
+  },
+  "diagnosisBuildFingerprint": "1de8864ea046b64d124ece93ca97b0ae69d11d1fc3d39a89ff405f0e2dd2262d",
+  "buildFingerprintAfter": null,
+  "buildIdentityRecomputed": false,
+  "diagnosis": {
+    "startedAt": "2026-11-22T07:16:00.533Z",
+    "endedAt": "2026-11-22T07:16:42.405Z",
+    "durationMs": 41872,
+    "monotonicDurationMs": 41873,
+    "exitCode": 1,
+    "timedOut": false,
+    "passed": false,
+    "errors": [
+      {
+        "kind": "execution",
+        "message": "Maestro exited with code 1",
+        "code": "MAESTRO_EXIT"
+      }
+    ],
+    "stdoutPath": ".walkcache/patches/repair-1795331760530-19780/diagnosis/stdout.log",
+    "stderrPath": ".walkcache/patches/repair-1795331760530-19780/diagnosis/stderr.log",
+    "outputPath": ".walkcache/patches/repair-1795331760530-19780/diagnosis/output.log",
+    "failureClassification": {
+      "category": "product_assertion",
+      "failingStep": "Assert that \"Order #WC-1001 · Mochi sticker pack\" is visible",
+      "rawArtifactPath": ".walkcache/patches/repair-1795331760530-19780/diagnosis/output.log",
+      "advisory": true,
+      "repairEligible": false
+    }
+  },
+  "build": null,
+  "verification": null,
+  "persistence": null,
+  "preservation": {
+    "memoryBeforeSha256": "b9f2118712b22e2b68228715cdd408bda8a25d7a9dbf743299ef57f081cd2f78",
+    "memoryAfterSha256": "b9f2118712b22e2b68228715cdd408bda8a25d7a9dbf743299ef57f081cd2f78",
+    "memoryUnchangedByteForByte": true,
+    "flowBeforeSha256": "e09660f45502b720f79f95a65c78ad5f48a4e11ae1ff5f52c6cb99972b12b478",
+    "flowAfterSha256": "e09660f45502b720f79f95a65c78ad5f48a4e11ae1ff5f52c6cb99972b12b478",
+    "assertionsUnchangedByteForByte": true,
+    "sourceBeforeSha256": {
+      "app/src/main/java/dev/walkcache/checkout/MainActivity.java": "cd4578674bb4a28a554b2a56180d1bc2acf1b8f35e51443e3cab30692e61615d",
+      "app/src/main/res/values/ids.xml": "04d41f4a45e46e777e3c7e9bc0d86ec510ef77a308a9778f22ac3d2b9808d827"
+    },
+    "sourceAfterSha256": {
+      "app/src/main/java/dev/walkcache/checkout/MainActivity.java": "cd4578674bb4a28a554b2a56180d1bc2acf1b8f35e51443e3cab30692e61615d",
+      "app/src/main/res/values/ids.xml": "04d41f4a45e46e777e3c7e9bc0d86ec510ef77a308a9778f22ac3d2b9808d827"
+    },
+    "sourceUnchangedByteForByte": true
+  },
+  "rejectionReason": "Repair refused for product_assertion; only the validated checkout selector failure is eligible",
+  "error": null
+}

@@ -1,0 +1,50 @@
+bun test v1.4.4-canary.1 (191755ec1)
+
+packages/store-local/test/local-store.test.ts:
+(pass) conservative local walk store > returns a first-run miss when no memory exists [1.84ms]
+(pass) conservative local walk store > normalizes the goal and returns a valid hit with the complete exact identity [5.40ms]
+(pass) conservative local walk store > returns a stale-build miss instead of replaying another APK fingerprint [1.59ms]
+(pass) conservative local walk store > returns a wrong-app miss without loosening app identity [1.47ms]
+(pass) conservative local walk store > returns a wrong-platform miss without sharing Android memory across platforms [1.50ms]
+(pass) conservative local walk store > returns a missing-flow miss and never treats metadata alone as a pass [1.24ms]
+(pass) conservative local walk store > rejects a flow checksum mismatch instead of executing changed bytes [1.33ms]
+(pass) conservative local walk store > rejects malformed JSON as invalid memory [0.68ms]
+(pass) conservative local walk store > rejects an unsupported memory schema [2.00ms]
+(pass) conservative local walk store > rejects invalid entries instead of filtering them out to produce a hit [2.11ms]
+(pass) conservative local walk store > rejects stored flow paths outside the canonical flow directory [3.06ms]
+(pass) conservative local walk store > rejects a symlink whose canonical flow path escapes the workspace [2.24ms]
+(pass) conservative local walk store > an interruption before flow rename leaves only ignored temporary files and a first-run miss [1.79ms]
+(pass) conservative local walk store > failed candidate verification preserves the known-good flow and metadata byte for byte [1.87ms]
+(pass) conservative local walk store > failed replacement preserves known-good flow and metadata and excludes the orphan and temp [2.29ms]
+(pass) conservative local walk store > failed validation remains in history and never remains a successful reusable hit [2.83ms]
+(pass) conservative local walk store > upgrades valid WALK-003 schema-one metadata without inventing validation success [2.11ms]
+
+packages/repair/test/build-install.test.ts:
+(pass) bounded Gradle build and device install > installs the exact rebuilt APK on the configured device within the shared lifecycle [233.16ms]
+(pass) bounded Gradle build and device install > never installs a failed build [97.51ms]
+
+packages/repair/test/bounded-repair.test.ts:
+(pass) bounded checkout selector repair > verifies the exact two-file patch, new build identity, no Git action, and atomic replacement [9.38ms]
+(pass) bounded checkout selector repair > refuses product_assertion without source, assertion, build, or memory changes [4.35ms]
+(pass) bounded checkout selector repair > refuses navigation without source, assertion, build, or memory changes [3.61ms]
+(pass) bounded checkout selector repair > refuses unknown without source, assertion, build, or memory changes [4.05ms]
+(pass) bounded checkout selector repair > refuses timeout without source, assertion, build, or memory changes [3.35ms]
+(pass) bounded checkout selector repair > refuses runner without source, assertion, build, or memory changes [3.94ms]
+(pass) bounded checkout selector repair > refuses other-selector without source, assertion, build, or memory changes [3.49ms]
+(pass) bounded checkout selector repair > failed full-journey verification rolls back source and preserves last-known-good memory and failed artifacts [6.74ms]
+(pass) bounded checkout selector repair > rejects an unchanged rebuilt fingerprint before verification or persistence [5.10ms]
+(pass) bounded checkout selector repair > enforces one overall time budget and rolls back a partial attempt without retrying [45.84ms]
+
+packages/repair/test/repair-policy.test.ts:
+(pass) canonical two-file repair policy > produces a minimal exact diff only for the affected component and selector files [1.62ms]
+(pass) canonical two-file repair policy > rejects writes outside the configured affected files [1.25ms]
+(pass) canonical two-file repair policy > rejects unpermitted assertion/file types [1.34ms]
+(pass) canonical two-file repair policy > rejects lexical source-root escapes [1.09ms]
+(pass) canonical two-file repair policy > rejects a symlinked source root even when its target is inside the workspace [1.23ms]
+(pass) canonical two-file repair policy > rejects a source-file symlink escape and leaves the outside target unchanged [1.39ms]
+(pass) canonical two-file repair policy > fails closed if the validated stale selector text is absent or ambiguous [1.80ms]
+
+ 36 pass
+ 0 fail
+ 228 expect() calls
+Ran 36 tests across 4 files. [536.00ms]

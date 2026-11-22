@@ -34,8 +34,13 @@ Check an item only when its ticket is complete and its evidence is linked. All t
   Evidence: [`walk005-comparison.md`](spikes/001-android-walkcache/evidence/walk005-comparison.md),
   [`walk005-comparison.json`](spikes/001-android-walkcache/evidence/walk005-comparison.json), and all eight
   linked raw reports in the ticket (two cold, six warm; every sample passed).
-- [ ] [WALK-007](tickets/WALK-007-bounded-repair-regression-guard.md) — Enforce bounded repair and prove
+- [x] [WALK-007](tickets/WALK-007-bounded-repair-regression-guard.md) — Enforce bounded repair and prove
   a genuine product regression is never repaired into a pass.
+  Evidence: [`walk007-repair-report.json`](spikes/001-android-walkcache/evidence/walk007-repair-report.json),
+  [`walk007-repair.diff`](spikes/001-android-walkcache/evidence/walk007-repair.diff),
+  [`walk007-negative-preservation.json`](spikes/001-android-walkcache/evidence/walk007-negative-preservation.json),
+  [`walk007-negative-source.diff`](spikes/001-android-walkcache/evidence/walk007-negative-source.diff), and
+  [`walk007-all-tests.txt`](spikes/001-android-walkcache/evidence/walk007-all-tests.txt).
 
 ## P0 — Headless product, then optional viewer
 

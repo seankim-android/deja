@@ -1,0 +1,2 @@
+# A unified diff uses a literal leading space for blank context lines. Keep those bytes intact.
+spikes/001-android-walkcache/evidence/*.diff whitespace=-trailing-space,-blank-at-eol

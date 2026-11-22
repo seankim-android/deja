@@ -183,6 +183,72 @@ emulator remained running.
 the positive/negative fixtures and conservative category boundaries. Classification is advisory only;
 WALK-006 does not generate a source patch or decide repairs.
 
+### Bounded source repair and genuine-regression guard (WALK-007)
+
+`bun scripts/walkcache.ts repair checkout --config repair.config.json` now implements only the two-file
+Checkout source patch. It requires the exact WALK-006 selector failure at
+`dev.walkcache.checkout:id/checkout_button`; navigation, product assertions, unknown output, other
+selectors, timeouts, and runner errors are refused. The complete deterministic safety contract is in
+[`packages/repair/README.md`](../../packages/repair/README.md).
+
+The accepted source-repair run used a passing cached walk created from the current stable source, then
+temporarily reversed only [`evidence/walk007-repair.diff`](evidence/walk007-repair.diff) with
+`git apply -R` and rebuilt/installed that stale fixture. From this directory:
+
+```sh
+. ./scripts/env.sh
+./gradlew clean :app:assembleDebug
+adb -s emulator-5554 install -r -g app/build/outputs/apk/debug/app-debug.apk
+sh scripts/fixture-mode.sh stable
+bun scripts/walkcache.ts remember checkout --flow evidence/repaired-checkout.yaml
+
+# Experiment-only mutation; never commit this reversal. The bounded repair restores these bytes.
+git apply -R evidence/walk007-repair.diff
+./gradlew clean :app:assembleDebug
+adb -s emulator-5554 install -r -g app/build/outputs/apk/debug/app-debug.apk
+WALKCACHE_REPAIR_TIMEOUT_MS=240000 \
+  bun scripts/walkcache.ts repair checkout --config repair.config.json
+bun scripts/walkcache.ts run checkout
+```
+
+The [actual repair report](evidence/walk007-repair-report.json) and [exact proposed diff](evidence/walk007-repair.diff)
+record one attempt inside the 240,000 ms total budget: selector-only diagnosis failed after 16 passing
+steps in 39,408 ms, Gradle plus adb install passed in 911 ms, complete independent verification passed
+in 25,601 ms, and atomic persistence followed. Overall lifecycle time was 65,935 ms. APK SHA-256 changed
+from stale `b991a1796d81f390d9b9fd00853986fe066431bdc8f9fcb5dfce78d755e3f91a` to repaired
+`1de8864ea046b64d124ece93ca97b0ae69d11d1fc3d39a89ff405f0e2dd2262d`. The unchanged flow SHA-256 is
+`e09660f45502b720f79f95a65c78ad5f48a4e11ae1ff5f52c6cb99972b12b478`.
+[Diagnosis](evidence/walk007-repair-diagnosis-output.log), [build/install](evidence/walk007-repair-build-output.log),
+[verification](evidence/walk007-repair-verification-output.log), [previous memory](evidence/walk007-repair-previous-memory.json),
+and [atomically replaced metadata](evidence/walk007-repair-stored-memory.json) are retained. A subsequent
+[zero-model warm hit](evidence/walk007-repair-warm-report.json) passed in 24,129 ms.
+
+The negative fixture is an actual app-behavior switch, not a wrong test expectation.
+`sh scripts/fixture-mode.sh product-regression` makes the confirmation screen display **WC-9999** while
+all selectors and checkout behavior remain unchanged. The original flow still requires **WC-1001**:
+
+```sh
+sh scripts/fixture-mode.sh product-regression
+WALKCACHE_REPAIR_TIMEOUT_MS=240000 \
+  bun scripts/walkcache.ts repair checkout --config repair.config.json  # expected exit 1
+sh scripts/fixture-mode.sh stable
+bun scripts/walkcache.ts run checkout
+```
+
+[The negative report](evidence/walk007-negative-report.json) exited 1 after 41,876 ms with
+`product_assertion`, zero repair attempts, no proposed patch, no build, and no verification/replacement.
+[Its raw diagnosis](evidence/walk007-negative-diagnosis-output.log) completed Checkout and failed only
+at the unchanged WC-1001 assertion. [Byte-preservation evidence](evidence/walk007-negative-preservation.json)
+records equal before/after SHA-256 values for memory and flow, plus a
+[zero-byte app-source diff](evidence/walk007-negative-source.diff). The [restored stable replay](evidence/walk007-restored-stable-report.json)
+passed in 25,653 ms; [fixture restoration](evidence/walk007-fixture-restored.txt) confirms both device
+settings are `null`, the APK fingerprint is unchanged, and the emulator remains `device`.
+
+This is narrow, deterministic repair evidence, not generalized autonomous repair. The final experiment
+restored the two selector files to their pre-experiment repaired bytes; only the intentional product
+regression fixture is a source change in this ticket. No repair was committed automatically and no PR
+was created by the repair lifecycle. WALK-001's curated evidence remains untouched.
+
 ### Warm replay
 
 - `bun scripts/walkcache.ts run checkout` found an exact goal/app/platform/APK-fingerprint match,

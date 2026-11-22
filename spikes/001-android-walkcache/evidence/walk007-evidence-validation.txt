@@ -1,0 +1,2 @@
+Credential-pattern scan: no matches in curated WALK-007 files
+Historical WALK-001 evidence unchanged; selector ids.xml restored; git diff --check passed

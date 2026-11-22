@@ -1,0 +1,130 @@
+{
+  "schemaVersion": 1,
+  "command": "repair",
+  "attemptId": "repair-1795331641853-19282",
+  "attemptDirectory": ".walkcache/patches/repair-1795331641853-19282",
+  "goalKey": "checkout",
+  "appId": "dev.walkcache.checkout",
+  "platform": "android",
+  "startedAt": "2026-11-22T07:14:01.853Z",
+  "endedAt": "2026-11-22T07:15:07.788Z",
+  "durationMs": 65935,
+  "monotonicDurationMs": 65934,
+  "timeBudgetMs": 240000,
+  "status": "repaired",
+  "passed": true,
+  "modelCalls": 0,
+  "repairAttempts": 1,
+  "oneAttemptOnly": true,
+  "autoCommit": false,
+  "pullRequest": false,
+  "affectedFiles": [
+    "app/src/main/java/dev/walkcache/checkout/MainActivity.java",
+    "app/src/main/res/values/ids.xml"
+  ],
+  "proposedPatchPath": ".walkcache/patches/repair-1795331641853-19282/proposed.patch",
+  "previous": {
+    "buildFingerprint": "1de8864ea046b64d124ece93ca97b0ae69d11d1fc3d39a89ff405f0e2dd2262d",
+    "flowPath": ".walkcache/flows/checkout/android-e09660f45502b720f79f95a65c78ad5f48a4e11ae1ff5f52c6cb99972b12b478.yaml",
+    "flowSha256": "e09660f45502b720f79f95a65c78ad5f48a4e11ae1ff5f52c6cb99972b12b478",
+    "memoryPath": ".walkcache/memory/walks.json",
+    "memorySha256": "c5c058b0964b493da3a1cebf5070f656c587bb51c6a98a7bb81909d553691f92"
+  },
+  "diagnosisBuildFingerprint": "b991a1796d81f390d9b9fd00853986fe066431bdc8f9fcb5dfce78d755e3f91a",
+  "buildFingerprintAfter": "1de8864ea046b64d124ece93ca97b0ae69d11d1fc3d39a89ff405f0e2dd2262d",
+  "buildIdentityRecomputed": true,
+  "diagnosis": {
+    "startedAt": "2026-11-22T07:14:01.856Z",
+    "endedAt": "2026-11-22T07:14:41.264Z",
+    "durationMs": 39408,
+    "monotonicDurationMs": 39408,
+    "exitCode": 1,
+    "timedOut": false,
+    "passed": false,
+    "errors": [
+      {
+        "kind": "execution",
+        "message": "Maestro exited with code 1",
+        "code": "MAESTRO_EXIT"
+      }
+    ],
+    "stdoutPath": ".walkcache/patches/repair-1795331641853-19282/diagnosis/stdout.log",
+    "stderrPath": ".walkcache/patches/repair-1795331641853-19282/diagnosis/stderr.log",
+    "outputPath": ".walkcache/patches/repair-1795331641853-19282/diagnosis/output.log",
+    "failureClassification": {
+      "category": "selector",
+      "failingStep": "Tap on id: dev.walkcache.checkout:id/checkout_button",
+      "rawArtifactPath": ".walkcache/patches/repair-1795331641853-19282/diagnosis/output.log",
+      "advisory": true,
+      "repairEligible": true
+    }
+  },
+  "build": {
+    "command": [
+      "/Users/seankim/.openclaw/workspace/kimi-hackathon-walk-007/spikes/001-android-walkcache/gradlew",
+      "clean",
+      ":app:assembleDebug"
+    ],
+    "startedAt": "2026-11-22T07:14:41.271Z",
+    "endedAt": "2026-11-22T07:14:42.182Z",
+    "durationMs": 911,
+    "monotonicDurationMs": 911,
+    "exitCode": 0,
+    "signal": null,
+    "timedOut": false,
+    "passed": true,
+    "errors": [],
+    "stdoutPath": ".walkcache/patches/repair-1795331641853-19282/build/stdout.log",
+    "stderrPath": ".walkcache/patches/repair-1795331641853-19282/build/stderr.log",
+    "outputPath": ".walkcache/patches/repair-1795331641853-19282/build/output.log"
+  },
+  "verification": {
+    "startedAt": "2026-11-22T07:14:42.183Z",
+    "endedAt": "2026-11-22T07:15:07.784Z",
+    "durationMs": 25601,
+    "monotonicDurationMs": 25602,
+    "exitCode": 0,
+    "timedOut": false,
+    "passed": true,
+    "errors": [],
+    "stdoutPath": ".walkcache/patches/repair-1795331641853-19282/verification/stdout.log",
+    "stderrPath": ".walkcache/patches/repair-1795331641853-19282/verification/stderr.log",
+    "outputPath": ".walkcache/patches/repair-1795331641853-19282/verification/output.log",
+    "failureClassification": null
+  },
+  "persistence": {
+    "flowPath": ".walkcache/flows/checkout/android-e09660f45502b720f79f95a65c78ad5f48a4e11ae1ff5f52c6cb99972b12b478.yaml",
+    "flowSha256": "e09660f45502b720f79f95a65c78ad5f48a4e11ae1ff5f52c6cb99972b12b478",
+    "storedMetadataPath": ".walkcache/memory/walks.json",
+    "atomicWrite": true,
+    "origin": "repair",
+    "repairHistory": [
+      {
+        "attemptId": "repair-1795331641853-19282",
+        "patchPath": ".walkcache/patches/repair-1795331641853-19282/proposed.patch",
+        "previousBuildFingerprint": "1de8864ea046b64d124ece93ca97b0ae69d11d1fc3d39a89ff405f0e2dd2262d",
+        "previousFlowSha256": "e09660f45502b720f79f95a65c78ad5f48a4e11ae1ff5f52c6cb99972b12b478"
+      }
+    ],
+    "preservedValidationHistoryEntries": 2
+  },
+  "preservation": {
+    "memoryBeforeSha256": "c5c058b0964b493da3a1cebf5070f656c587bb51c6a98a7bb81909d553691f92",
+    "memoryAfterSha256": "a8d183da3f8fe0ea4333e83242b738e27a317e28c3f4917e66be52e4ab83bf54",
+    "memoryUnchangedByteForByte": false,
+    "flowBeforeSha256": "e09660f45502b720f79f95a65c78ad5f48a4e11ae1ff5f52c6cb99972b12b478",
+    "flowAfterSha256": "e09660f45502b720f79f95a65c78ad5f48a4e11ae1ff5f52c6cb99972b12b478",
+    "assertionsUnchangedByteForByte": true,
+    "sourceBeforeSha256": {
+      "app/src/main/java/dev/walkcache/checkout/MainActivity.java": "04ba02c66d2e7ed5c632942d2c084ba10622d244be236389d9f624c3457d76c5",
+      "app/src/main/res/values/ids.xml": "1c04352ff793843c01fa85df454d81c478d91e35f62a832f25dd767cc30b2e34"
+    },
+    "sourceAfterSha256": {
+      "app/src/main/java/dev/walkcache/checkout/MainActivity.java": "cd4578674bb4a28a554b2a56180d1bc2acf1b8f35e51443e3cab30692e61615d",
+      "app/src/main/res/values/ids.xml": "04d41f4a45e46e777e3c7e9bc0d86ec510ef77a308a9778f22ac3d2b9808d827"
+    },
+    "sourceUnchangedByteForByte": false
+  },
+  "rejectionReason": null,
+  "error": null
+}
