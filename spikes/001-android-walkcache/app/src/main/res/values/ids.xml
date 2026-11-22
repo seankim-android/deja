@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <item name="screen_login" type="id" />
+    <item name="username_input" type="id" />
+    <item name="password_input" type="id" />
+    <item name="login_button" type="id" />
+    <item name="screen_catalog" type="id" />
+    <item name="add_to_cart" type="id" />
+    <item name="screen_cart" type="id" />
+    <item name="checkout_button" type="id" />
+    <item name="screen_confirmation" type="id" />
+    <item name="order_confirmation" type="id" />
+    <!-- checkout_button was added by the verified selector-repair spike. -->
+</resources>
+

@@ -1,0 +1,24 @@
+--- .walkcache/patches/before/ids.xml	2026-11-21 19:24:55
++++ app/src/main/res/values/ids.xml	2026-11-21 19:30:50
+@@ -7,8 +7,9 @@
+     <item name="screen_catalog" type="id" />
+     <item name="add_to_cart" type="id" />
+     <item name="screen_cart" type="id" />
++    <item name="checkout_button" type="id" />
+     <item name="screen_confirmation" type="id" />
+     <item name="order_confirmation" type="id" />
+-    <!-- checkout_button is deliberately absent for the selector-repair spike. -->
++    <!-- checkout_button was added by the verified selector-repair spike. -->
+ </resources>
+ 
+--- .walkcache/patches/before/MainActivity.java	2026-11-21 19:24:55
++++ app/src/main/java/dev/walkcache/checkout/MainActivity.java	2026-11-21 19:30:50
+@@ -67,7 +67,7 @@
+         content.addView(body("1 × Mochi sticker pack"));
+         content.addView(body("Total: $5.00"));
+ 
+-        Button checkout = button("Checkout", null);
++        Button checkout = button("Checkout", R.id.checkout_button);
+         checkout.setOnClickListener(view -> showConfirmation());
+         content.addView(checkout);
+         setContentView(scroll(content));

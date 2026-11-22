@@ -20,9 +20,11 @@ The demo must prove three things with observable evidence:
 
 ## MVP contract
 
-The primary demo journey is **login -> add item -> checkout** in a small Expo/React Native app.
-The architecture supports iOS, Android, and web through platform adapters. The web path is the
-first end-to-end target; native platform support is proven after the web vertical slice works.
+The primary journey is **login -> add item -> checkout**. The feasibility PoC comes first in a
+dependency-free native Android app under `spikes/001-android-walkcache`, per Sean's Android-first
+direction. Expo/React Native is deferred until the Android cold/warm loop is validated. The future
+architecture supports iOS, Android, and web through platform adapters; later platforms must not
+slow down or weaken the first working Android proof.
 
 ### Required behavior
 
@@ -63,8 +65,10 @@ packages/
   agent-openclaw/      OpenClaw + Kimi exploration through Maestro MCP
   store-local/         Atomic filesystem walk memory and attempt logs
   repair/              Bounded selector diagnosis and source-patch interface
+spikes/
+  001-android-walkcache/ Minimal native Android feasibility proof
 examples/
-  checkout-demo/       Expo app targeting iOS, Android, and web
+  checkout-demo/       Later Expo app targeting iOS, Android, and web
   flows/               Small checked-in, secret-free example Maestro flows
 docs/
   PROJECT_PLAN.md      Scope, architecture, milestones, and demo plan
@@ -107,21 +111,21 @@ writes are atomic: a failed replacement never destroys the last known-good walk.
 Times are stopping points, not aspirations. If a milestone misses its exit gate, cut its polish
 and protect the next demonstration-critical milestone. The actionable checklist is in `TODO.md`.
 
-### M0 — Plan and environment gate — by 5:45 PM
+### M0 — Plan and Android environment gate — completed
 
-- Lock this scope and repository boundaries.
-- Install or locate Maestro; verify its MCP and web support on the actual machine.
-- Verify an iOS simulator and locate the Android SDK/emulator path.
-- Run one trivial Maestro command before building orchestration around it.
-- **Exit gate:** the cold-path execution mechanism is runnable, not just documented.
+- Lock this scope and repository boundaries, then switch the first proof to Android per Sean.
+- Locate Maestro and install Android platform/command-line tools plus an API 34 emulator.
+- Verify the emulator through Maestro before building orchestration around it.
+- Defer web/iOS environment work to M5.
+- **Exit gate:** the Android execution mechanism is available; MCP actions are checked in M2.
 
-### M1 — Demo app and manual Maestro smoke — by 7:30 PM
+### M1 — Android demo app and manual Maestro smoke — completed
 
-- Build the Expo checkout journey with deterministic test data and stable final assertions.
-- Add stable selectors everywhere except the checkout control used for the repair demo.
-- Write and run one hand-authored Maestro YAML flow on web.
-- Establish the manual baseline that generated flows must reproduce.
-- **Exit gate:** the journey passes through Maestro without any agent involvement.
+- Build a dependency-free native Java checkout journey with deterministic test data and assertions.
+- Add stable Android resource IDs everywhere except checkout, which is reserved for repair.
+- Write and run one hand-authored Maestro YAML flow on Android.
+- Keep this feasibility spike separate from the future Expo and production package structure.
+- **Exit gate:** the 15-step journey passes through Maestro without any agent involvement.
 
 ### M2 — Cold exploration vertical slice — by 10:00 PM
 
@@ -147,9 +151,9 @@ and protect the next demonstration-critical milestone. The actionable checklist 
 - Replace cached memory only after verification; preserve the original as an attempt artifact.
 - **Exit gate:** the repair demo passes, and a simulated product regression remains a failure.
 
-### M5 — Cross-platform proof — by 3:00 AM
+### M5 — Cross-platform proof (after the Android PoC)
 
-- Run the same goal through platform-specific adapters on iOS, Android, and web.
+- Complete Android evidence first, then run the same goal through adapters on web and iOS.
 - Use `testID` on native and the verified stable DOM selector mechanism on web.
 - Record an honest support matrix with actual command evidence and platform limitations.
 - **Exit gate:** all three target platforms run, or a concrete tool blocker is documented and the

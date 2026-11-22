@@ -1,0 +1,44 @@
+{
+  "verdict": "VALIDATED",
+  "platform": "android emulator API 34",
+  "maestroVersion": "2.12.0",
+  "cold": {
+    "agentSessions": 1,
+    "mcpCalls": 21,
+    "candidateCommands": 21,
+    "candidateMcpReplayPassed": true,
+    "independentVerificationMs": 25101,
+    "totalDurationMs": null,
+    "modelCalls": null
+  },
+  "warm": {
+    "cacheStatus": "hit",
+    "modelCalls": 0,
+    "passed": true,
+    "durationMs": 24824,
+    "buildFingerprint": "d1a45c22dd29c1841d121f12e40ea980bb0f6269e5d3110f995444a37c69134e"
+  },
+  "staleSelector": {
+    "failedOnlyAt": "checkout_button",
+    "cacheStatus": "hit",
+    "modelCalls": 0,
+    "passed": false,
+    "durationMs": 40707
+  },
+  "repair": {
+    "filesChanged": [
+      "app/src/main/res/values/ids.xml",
+      "app/src/main/java/dev/walkcache/checkout/MainActivity.java"
+    ],
+    "postRebuildOldCacheStatus": "miss",
+    "postRebuildOldCacheExitCode": 2,
+    "verificationMs": 25784,
+    "newBuildFingerprint": "4746296fa8aa84ae85761915f651b1488c38ef8f5f4e89af0e9ad19784cfcb05",
+    "newWarmRun": {
+      "cacheStatus": "hit",
+      "modelCalls": 0,
+      "passed": true,
+      "durationMs": 24510
+    }
+  }
+}

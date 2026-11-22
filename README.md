@@ -2,10 +2,11 @@
 
 Explore once. Replay instantly. Repair only when needed.
 
-WalkCache is a planned learning layer around Maestro: an OpenClaw agent explores a new QA
-journey, saves a verified Maestro flow, and replays later runs without model calls. The current
-repository is still a React and TypeScript starter; implementation status is tracked in
-[`TODO.md`](TODO.md).
+WalkCache is a learning layer around Maestro: an OpenClaw/Kimi agent explores a new QA journey,
+saves a verified Maestro flow, and replays later runs without model calls. The first Android proof
+in [`spikes/001-android-walkcache`](spikes/001-android-walkcache) has passed cold exploration,
+independent verification, and zero-model warm replay. The remaining Vite app is still a starter;
+implementation status and deferred work are tracked in [`TODO.md`](TODO.md).
 
 Read [`docs/PROJECT_PLAN.md`](docs/PROJECT_PLAN.md) for the MVP contract, architecture,
 time-boxed milestones, demo script, and scope cut line.
