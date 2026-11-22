@@ -55,5 +55,5 @@ Statuses: `in_progress`, `done`, `ready` (no incomplete dependencies), `queued` 
 | [WALK-016](WALK-016-semantic-goal-retrieval.md) | done | Exact-match-first semantic retrieval |
 | [WALK-017](WALK-017-route-graph-screen-fingerprints.md) | deferred | Minimal route graph and screen-state fingerprints |
 | [WALK-018](WALK-018-reusable-login-subflow.md) | deferred | Verified login subflow reused by another goal |
-| [WALK-019](WALK-019-store-plugin-conformance.md) | deferred | Second store and conformance tests |
+| [WALK-019](WALK-019-store-plugin-conformance.md) | done | Second store and conformance tests |
 

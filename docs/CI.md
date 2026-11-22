@@ -15,7 +15,7 @@ bun scripts/validate-release-artifacts.ts
 git rev-parse HEAD
 ```
 
-The 138 deterministic unit/component/contract tests (774 assertions) cover orchestration, exact/corrupt storage,
+The deterministic unit/component/contract tests cover orchestration, exact/corrupt storage,
 runner behavior and platform adapters, OpenClaw exploration boundaries, bounded repair, failure
 classification, cold/warm metrics, CLI/report behavior, and the local viewer. They use fake process
 fixtures where appropriate and do not assert a real device result.

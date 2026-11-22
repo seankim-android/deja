@@ -94,13 +94,18 @@ recovery procedure, not a claim that exploration or a warm replay passed.
 
 ## Focused deterministic verification
 
-From the repository root:
+The original storage regressions now live in the implementation-neutral
+[WalkStore conformance suite](../store-conformance/README.md), which runs the same 20 behavior cases
+against this store and `SQLiteWalkStore`. It adds duplicate identities, repair-base/provenance checks,
+real reopen durability, and production-runner orchestration to the retained identity, corruption,
+replacement-failure, and history cases. From the repository root:
 
 ```sh
-bun test packages/store-local/test/local-store.test.ts --timeout=10000 --check
+bun test packages/store-conformance/test/conformance.test.ts \
+  packages/store-local/test/local-store.test.ts \
+  packages/store-sqlite/test/sqlite-store.test.ts --timeout=10000 --check
 ```
 
-The test names enumerate first-run/hit/identity cases, stale builds, missing flows, corruption,
-canonical path escapes, interruption before rename, failed verification/replacement preservation,
-validation history, and WALK-003 schema upgrade. `renameFile` is injectable solely to deterministically
-model filesystem failures; the production default is `node:fs/promises.rename`.
+The remaining `local-store.test.ts` case covers the filesystem-specific WALK-003 schema-1 upgrade.
+`renameFile` is injectable solely to deterministically model filesystem failures; the production
+default is `node:fs/promises.rename`.

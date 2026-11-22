@@ -25,6 +25,8 @@ confidence/ambiguous/contradictory/narrow adversarial goals, and returns provide
 misses. A semantic hit still requires runner replay and records validation on the selected stored
 identity. Core has no Maestro/OpenClaw/React imports.
 
-Concrete wiring lives at the edges: `store-local`, `maestro`, `agent-openclaw`, `repair`, and the
-headless CLI's local JSON reporter. Their richer vendor-specific records are translated into the
-shared result contract without weakening their original safety gates.
+Concrete wiring lives at the edges: `store-local`, `store-sqlite`, `maestro`, `agent-openclaw`,
+`repair`, and the headless CLI's local JSON reporter. Their richer vendor-specific records are
+translated into the shared result contract without weakening their original safety gates. WALK-019
+runs one unchanged `WalkStore` behavior suite against both real stores plus one production-runner
+warm orchestration per store; see `packages/store-conformance`.

@@ -8,6 +8,8 @@
     { "path": "./packages/maestro" },
     { "path": "./packages/agent-openclaw" },
     { "path": "./packages/store-local" },
+    { "path": "./packages/store-sqlite" },
+    { "path": "./packages/store-conformance" },
     { "path": "./packages/repair" },
     { "path": "./apps/cli" }
   ]

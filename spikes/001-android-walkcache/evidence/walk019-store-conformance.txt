@@ -1,0 +1,58 @@
+bun test v1.4.4-canary.1 (191755ec1)
+
+packages/store-local/test/local-store.test.ts:
+(pass) upgrades valid WALK-003 schema-one metadata without inventing validation success [3.23ms]
+
+packages/store-sqlite/test/sqlite-store.test.ts:
+(pass) a real SQLite error rolls back the entire metadata replacement and retains the known-good walk [6.12ms]
+
+packages/store-conformance/test/conformance.test.ts:
+(pass) LocalWalkStore (filesystem + JSON): shared WalkStore behavioral contract > returns a first-run miss without creating metadata [0.66ms]
+(pass) LocalWalkStore (filesystem + JSON): shared WalkStore behavioral contract > persists across instances, normalizes the goal, and returns the complete exact identity [1.39ms]
+(pass) LocalWalkStore (filesystem + JSON): shared WalkStore behavioral contract > returns stale-build instead of replaying another build fingerprint [1.11ms]
+(pass) LocalWalkStore (filesystem + JSON): shared WalkStore behavioral contract > returns wrong-app without loosening app identity [1.11ms]
+(pass) LocalWalkStore (filesystem + JSON): shared WalkStore behavioral contract > returns wrong-platform without sharing memory across platforms [1.14ms]
+(pass) LocalWalkStore (filesystem + JSON): shared WalkStore behavioral contract > partitions Web identity by both adapter and browser [1.28ms]
+(pass) LocalWalkStore (filesystem + JSON): shared WalkStore behavioral contract > returns missing-flow and never treats metadata alone as a pass [1.17ms]
+(pass) LocalWalkStore (filesystem + JSON): shared WalkStore behavioral contract > rejects a tampered flow checksum instead of executing changed YAML [1.18ms]
+(pass) LocalWalkStore (filesystem + JSON): shared WalkStore behavioral contract > rejects malformed metadata as invalid memory [1.20ms]
+(pass) LocalWalkStore (filesystem + JSON): shared WalkStore behavioral contract > rejects an unsupported metadata schema [1.15ms]
+(pass) LocalWalkStore (filesystem + JSON): shared WalkStore behavioral contract > rejects an invalid entry instead of filtering it out to produce a hit [1.09ms]
+(pass) LocalWalkStore (filesystem + JSON): shared WalkStore behavioral contract > rejects duplicate exact identities as ambiguous [1.10ms]
+(pass) LocalWalkStore (filesystem + JSON): shared WalkStore behavioral contract > rejects stored flow paths outside the canonical flow directory [1.22ms]
+(pass) LocalWalkStore (filesystem + JSON): shared WalkStore behavioral contract > rejects a symlink whose canonical flow path escapes the workspace [1.38ms]
+(pass) LocalWalkStore (filesystem + JSON): shared WalkStore behavioral contract > an interruption before flow rename leaves only ignored temporary files and a first-run miss [0.99ms]
+(pass) LocalWalkStore (filesystem + JSON): shared WalkStore behavioral contract > failed candidate verification preserves known-good YAML and metadata byte for byte [1.18ms]
+(pass) LocalWalkStore (filesystem + JSON): shared WalkStore behavioral contract > failed metadata replacement preserves last-known-good bytes and ignores orphan and temporary YAML [1.65ms]
+(pass) LocalWalkStore (filesystem + JSON): shared WalkStore behavioral contract > failed validation remains append-only history and blocks subsequent reuse without changing YAML [1.92ms]
+(pass) LocalWalkStore (filesystem + JSON): shared WalkStore behavioral contract > verified repair retains history and exploration, adds provenance, and selects its diagnostic base [2.43ms]
+(pass) LocalWalkStore (filesystem + JSON): shared WalkStore behavioral contract > a changed repair base fails closed and preserves last-known-good metadata and YAML [1.77ms]
+(pass) SQLiteWalkStore (Bun SQLite + YAML): shared WalkStore behavioral contract > returns a first-run miss without creating metadata [0.63ms]
+(pass) SQLiteWalkStore (Bun SQLite + YAML): shared WalkStore behavioral contract > persists across instances, normalizes the goal, and returns the complete exact identity [3.23ms]
+(pass) SQLiteWalkStore (Bun SQLite + YAML): shared WalkStore behavioral contract > returns stale-build instead of replaying another build fingerprint [2.04ms]
+(pass) SQLiteWalkStore (Bun SQLite + YAML): shared WalkStore behavioral contract > returns wrong-app without loosening app identity [1.97ms]
+(pass) SQLiteWalkStore (Bun SQLite + YAML): shared WalkStore behavioral contract > returns wrong-platform without sharing memory across platforms [2.27ms]
+(pass) SQLiteWalkStore (Bun SQLite + YAML): shared WalkStore behavioral contract > partitions Web identity by both adapter and browser [3.62ms]
+(pass) SQLiteWalkStore (Bun SQLite + YAML): shared WalkStore behavioral contract > returns missing-flow and never treats metadata alone as a pass [2.17ms]
+(pass) SQLiteWalkStore (Bun SQLite + YAML): shared WalkStore behavioral contract > rejects a tampered flow checksum instead of executing changed YAML [1.99ms]
+(pass) SQLiteWalkStore (Bun SQLite + YAML): shared WalkStore behavioral contract > rejects malformed metadata as invalid memory [2.51ms]
+(pass) SQLiteWalkStore (Bun SQLite + YAML): shared WalkStore behavioral contract > rejects an unsupported metadata schema [2.65ms]
+(pass) SQLiteWalkStore (Bun SQLite + YAML): shared WalkStore behavioral contract > rejects an invalid entry instead of filtering it out to produce a hit [2.18ms]
+(pass) SQLiteWalkStore (Bun SQLite + YAML): shared WalkStore behavioral contract > rejects duplicate exact identities as ambiguous [2.51ms]
+(pass) SQLiteWalkStore (Bun SQLite + YAML): shared WalkStore behavioral contract > rejects stored flow paths outside the canonical flow directory [3.08ms]
+(pass) SQLiteWalkStore (Bun SQLite + YAML): shared WalkStore behavioral contract > rejects a symlink whose canonical flow path escapes the workspace [4.02ms]
+(pass) SQLiteWalkStore (Bun SQLite + YAML): shared WalkStore behavioral contract > an interruption before flow rename leaves only ignored temporary files and a first-run miss [1.07ms]
+(pass) SQLiteWalkStore (Bun SQLite + YAML): shared WalkStore behavioral contract > failed candidate verification preserves known-good YAML and metadata byte for byte [2.68ms]
+(pass) SQLiteWalkStore (Bun SQLite + YAML): shared WalkStore behavioral contract > failed metadata replacement preserves last-known-good bytes and ignores orphan and temporary YAML [4.52ms]
+(pass) SQLiteWalkStore (Bun SQLite + YAML): shared WalkStore behavioral contract > failed validation remains append-only history and blocks subsequent reuse without changing YAML [3.95ms]
+(pass) SQLiteWalkStore (Bun SQLite + YAML): shared WalkStore behavioral contract > verified repair retains history and exploration, adds provenance, and selects its diagnostic base [3.22ms]
+(pass) SQLiteWalkStore (Bun SQLite + YAML): shared WalkStore behavioral contract > a changed repair base fails closed and preserves last-known-good metadata and YAML [2.17ms]
+WALK019_ORCHESTRATION {"store":"LocalWalkStore (filesystem + JSON)","runner":"MaestroWalkRunner (real child process, deterministic local executable fixture)","cacheStatus":"hit","outcome":"passed","modelCalls":0,"explorerConstructions":0,"repairerConstructions":0,"childProcessExitCode":0,"assertions":1,"validationHistoryEntries":2,"platformExecutionClaim":"none; this is runner/store orchestration, not a device result"}
+(pass) LocalWalkStore (filesystem + JSON): actual orchestration conformance > one production-runner cache hit performs zero model calls and appends passing validation [14.68ms]
+WALK019_ORCHESTRATION {"store":"SQLiteWalkStore (Bun SQLite + YAML)","runner":"MaestroWalkRunner (real child process, deterministic local executable fixture)","cacheStatus":"hit","outcome":"passed","modelCalls":0,"explorerConstructions":0,"repairerConstructions":0,"childProcessExitCode":0,"assertions":1,"validationHistoryEntries":2,"platformExecutionClaim":"none; this is runner/store orchestration, not a device result"}
+(pass) SQLiteWalkStore (Bun SQLite + YAML): actual orchestration conformance > one production-runner cache hit performs zero model calls and appends passing validation [14.37ms]
+
+ 44 pass
+ 0 fail
+ 153 expect() calls
+Ran 44 tests across 3 files. [175.00ms]

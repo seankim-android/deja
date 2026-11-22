@@ -10,7 +10,7 @@ are not imported by core orchestration.
 goal + configuration
         |
         v
-platform adapter -> build fingerprint -> exact LocalWalkStore lookup
+platform adapter -> build fingerprint -> exact WalkStore lookup
         |                                      |
         | hit                                  | opt-in not-found semantic lookup
         |                                      | other miss -> ordinary lifecycle below
@@ -50,7 +50,7 @@ Core imports no Maestro, OpenClaw, React, filesystem, demo, or platform implemen
 
 | Contract | Responsibility | Current implementation |
 | --- | --- | --- |
-| `WalkStore` | Exact lookup, prior-success diagnostic lookup, verified persistence/replacement, validation history, listing | `LocalWalkStore` in `packages/store-local` |
+| `WalkStore` | Exact lookup, prior-success diagnostic lookup, verified persistence/replacement, validation history, listing | CLI default `LocalWalkStore` in `packages/store-local`; second conforming `SQLiteWalkStore` in `packages/store-sqlite` |
 | `WalkRunner` | Execute a flow; return timing, assertions, artifacts, exit state, and conservative failure classification | `MaestroWalkRunner` plus Android/Web/iOS execution adapters in `packages/maestro` |
 | `WalkExplorer` | Cold exploration and independently verified candidate persistence | `OpenClawWalkExplorer` for Android; explicit `UnsupportedPlatformExplorer` for Web/iOS |
 | `SelectorRepairer` | At most one bounded diagnosis/source-patch/verification result | `BoundedSelectorRepairer` for the configured Android Checkout policy only |
@@ -138,7 +138,9 @@ without that optional field remain compatible.
 
 ## Memory schema
 
-The current `.walkcache/memory/walks.json` envelope is schema **2**:
+The CLI-default `LocalWalkStore` uses the `.walkcache/memory/walks.json` envelope at schema **2**.
+The same `StoredWalk` logical contract is stored relationally by the second local `SQLiteWalkStore`
+in `.walkcache/memory/walks.sqlite` (`PRAGMA user_version = 2`), with separate ordered history tables:
 
 ```ts
 type WalkMemory = {
@@ -180,9 +182,11 @@ type StoredWalk = {
 }
 ```
 
-Valid schema-1 records with the legacy complete identity/checksum are read conservatively and emit
-schema 2 on their next validation/persistence write. Upgrade does not turn a failed validation into
-a success. Unsupported or incomplete legacy entries fail closed.
+The filesystem store reads valid schema-1 records with the legacy complete identity/checksum
+conservatively and emits schema 2 on their next validation/persistence write. Upgrade does not turn a
+failed validation into a success. Unsupported or incomplete legacy entries fail closed. The SQLite
+store accepts only its schema 2; it does not import JSON schema 1. Both implementations validate all
+identities, checksums, history, origins, and exploration/repair metadata before lookup or replacement.
 
 `validationHistory` is append-only. A replay failure is recorded as the latest failed validation;
 flow bytes stay available for diagnosis but cannot produce a subsequent hit until independently
@@ -203,11 +207,21 @@ Verified flow files are content-addressed:
 .walkcache/flows/<normalized-goal-slug>/<platform>-<flow-sha256>.yaml
 ```
 
-Persistence writes/renames the flow before atomically replacing `walks.json`. If metadata replacement
-fails, the previous referenced flow and metadata remain byte-for-byte intact; an unreferenced new flow
-is ignored. Temporary files left before rename are never loaded. `recordValidation` and report writes
-also use a temporary file plus rename. Atomic rename provides replacement integrity on the local
-filesystem, not distributed transactions or multi-writer coordination.
+Both stores write/rename the flow before atomically replacing metadata. `LocalWalkStore` replaces
+`walks.json` with a temporary file plus rename; `SQLiteWalkStore` replaces relational metadata in one
+`BEGIN IMMEDIATE` transaction with `synchronous = FULL` and a rollback journal. If metadata
+replacement fails, the previous referenced flow and logical metadata remain intact (the shared
+injected-failure test also checks byte-for-byte snapshots); an unreferenced new flow is ignored.
+Temporary files left before flow rename are never loaded. SQLite validation writes use the same
+transaction mechanism; filesystem validation and report writes use temporary file plus rename.
+
+Filesystem rename and SQLite commit provide local replacement integrity, not one cross-resource
+transaction, distributed transactions, or multi-writer coordination. SQLite serializes immediate
+writers and has a 1-second busy timeout, but its high-level read/modify/write lifecycle has no
+optimistic revision check or update merge: persistence/validation writers must be single-writer per
+workspace. Deterministic rename failures and a real trigger-aborted SQLite transaction are tested;
+power loss, drive failures, every crash point, and concurrent-writer conflicts are not certified.
+See `packages/store-sqlite/README.md` for setup and durability boundaries.
 
 Reports are written under `.walkcache/reports/<command>-<time>-<pid>.json`, then `latest.json` is
 atomically replaced. Runner artifacts retain separate `stdout.log`, `stderr.log`, and combined
@@ -267,7 +281,9 @@ contain sensitive content and must remain ignored unless individually reviewed a
 ```text
 apps/cli/                 Argument/config validation, wiring, redaction, JSON reporting
 packages/core/            Vendor-neutral contracts and lifecycle orchestration
-packages/store-local/     Conservative local memory and atomic persistence
+packages/store-local/     CLI-default JSON memory and atomic filesystem persistence
+packages/store-sqlite/    Second local store: relational metadata, transactional replacement, YAML
+packages/store-conformance/ Same WalkStore behavior suite and actual warm orchestration for both
 packages/semantic-local/  Opt-in deterministic lexical embeddings; no model/network/vector DB
 packages/maestro/         Verified runner, adapters, failure classification
 packages/agent-openclaw/  Android-only bounded cold exploration

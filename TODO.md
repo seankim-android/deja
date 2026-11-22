@@ -133,7 +133,13 @@ Check an item only when its ticket is complete and its evidence is linked. All t
   The opt-in `local-lexical-v1` proof makes no generalized semantic-correctness claim.
 - [ ] [WALK-017](tickets/WALK-017-route-graph-screen-fingerprints.md) — Route graph and screen fingerprints.
 - [ ] [WALK-018](tickets/WALK-018-reusable-login-subflow.md) — Reuse a verified login subflow.
-- [ ] [WALK-019](tickets/WALK-019-store-plugin-conformance.md) — Second store and plugin conformance tests.
+- [x] [WALK-019](tickets/WALK-019-store-plugin-conformance.md) — Second local Bun SQLite store,
+  transactional metadata replacement, actual YAML persistence, and one unchanged contract suite against
+  both stores. Evidence: [`44 focused tests / 153 assertions and both zero-model orchestrations`](spikes/001-android-walkcache/evidence/walk019-store-conformance.txt),
+  [`132 full tests / 719 assertions`](spikes/001-android-walkcache/evidence/walk019-all-tests.txt),
+  [`lint`](spikes/001-android-walkcache/evidence/walk019-lint.txt), and
+  [`build`](spikes/001-android-walkcache/evidence/walk019-build.txt). Setup, atomicity, single-writer,
+  and durability boundaries are documented in [`packages/store-sqlite/README.md`](packages/store-sqlite/README.md).
 
 ## Standing cut and safety rules
 

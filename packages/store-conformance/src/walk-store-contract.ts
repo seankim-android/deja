@@ -1,0 +1,434 @@
+import { describe, expect, test } from 'bun:test'
+import { existsSync } from 'node:fs'
+import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join, resolve } from 'node:path'
+import type { WalkIdentity, WalkStore } from '../../core/src/index.ts'
+
+export const initialValidation = '2026-11-22T00:00:00.000Z'
+export const laterValidation = '2026-11-22T00:01:00.000Z'
+
+export function contractIdentity(overrides: Partial<WalkIdentity> = {}): WalkIdentity {
+  return {
+    goal: 'Checkout',
+    appId: 'dev.walkcache.checkout',
+    platform: 'android',
+    flowSchemaVersion: 'maestro/v1',
+    buildFingerprint: 'a'.repeat(64),
+    ...overrides,
+  }
+}
+
+export type StoreFailureInjection = {
+  failFlowRename?: boolean
+  failMetadataReplacement?: boolean
+}
+
+export type MetadataTamper = 'malformed' | 'unsupported-schema' | 'invalid-entry' |
+  'duplicate-identity'
+
+/** Backend-specific setup and tamper hooks; every behavioral assertion below is shared verbatim. */
+export type WalkStoreContractImplementation = {
+  name: string
+  metadataPath(workspaceRoot: string): string
+  createStore(workspaceRoot: string, failures?: StoreFailureInjection): WalkStore
+  closeStore(store: WalkStore): void | Promise<void>
+  snapshotMetadata(workspaceRoot: string): Promise<Buffer>
+  tamperMetadata(workspaceRoot: string, kind: MetadataTamper): Promise<void>
+  setFirstFlowPath(workspaceRoot: string, flowPath: string): Promise<void>
+}
+
+async function temporaryFiles(root: string): Promise<string[]> {
+  if (!existsSync(root)) return []
+  const found: string[] = []
+  for (const entry of await readdir(root, { withFileTypes: true })) {
+    const path = join(root, entry.name)
+    if (entry.isDirectory()) found.push(...await temporaryFiles(path))
+    else if (entry.name.endsWith('.tmp')) found.push(path)
+  }
+  return found
+}
+
+async function fixture() {
+  const temporary = await mkdtemp(join(tmpdir(), 'walkcache-store-contract-'))
+  const workspaceRoot = join(temporary, 'workspace')
+  await mkdir(join(workspaceRoot, '.walkcache/attempts'), { recursive: true })
+  const candidatePath = '.walkcache/attempts/candidate.yaml'
+  await writeFile(
+    join(workspaceRoot, candidatePath),
+    'appId: dev.walkcache.checkout\n- assertVisible: Order confirmed\n',
+  )
+  return { temporary, workspaceRoot, candidatePath }
+}
+
+export function runWalkStoreContractTests(implementation: WalkStoreContractImplementation) {
+  async function context(failures?: StoreFailureInjection) {
+    const value = await fixture()
+    const stores: WalkStore[] = []
+    const makeStore = (injectedFailures = failures) => {
+      const store = implementation.createStore(value.workspaceRoot, injectedFailures)
+      stores.push(store)
+      return store
+    }
+    const cleanup = async () => {
+      for (const store of stores.reverse()) await implementation.closeStore(store)
+      await rm(value.temporary, { recursive: true, force: true })
+    }
+    const seed = async (overrides: Partial<WalkIdentity> = {}) => {
+      const store = makeStore()
+      const persisted = await store.persistVerifiedCandidate({
+        identity: contractIdentity(overrides),
+        candidatePath: value.candidatePath,
+        validation: { passed: true, at: initialValidation },
+        origin: 'explore',
+      })
+      return { store, persisted }
+    }
+    return { ...value, makeStore, cleanup, seed }
+  }
+
+  describe(`${implementation.name}: shared WalkStore behavioral contract`, () => {
+    test('returns a first-run miss without creating metadata', async () => {
+      const ctx = await context()
+      try {
+        const result = await ctx.makeStore().lookup(contractIdentity())
+        expect(result).toEqual({ status: 'miss', reason: 'not-found' })
+        expect(existsSync(implementation.metadataPath(ctx.workspaceRoot))).toBe(false)
+      } finally {
+        await ctx.cleanup()
+      }
+    })
+
+    test('persists across instances, normalizes the goal, and returns the complete exact identity', async () => {
+      const ctx = await context()
+      try {
+        const { persisted } = await ctx.seed({ goal: '  Check   Out  ' })
+        const reopened = ctx.makeStore()
+        const result = await reopened.lookup(contractIdentity({ goal: '\tcheck  out\n' }))
+        expect(result.status).toBe('hit')
+        if (result.status !== 'hit') throw new Error('expected hit')
+        expect(result.walk.goal).toBe('Check   Out')
+        expect(result.walk.goalKey).toBe('check out')
+        expect(result.walk).toMatchObject({
+          appId: contractIdentity().appId,
+          platform: 'android',
+          flowSchemaVersion: 'maestro/v1',
+          buildFingerprint: 'a'.repeat(64),
+          flowSha256: persisted.flowSha256,
+        })
+        expect(result.flowPath).toBe(resolve(ctx.workspaceRoot, persisted.flowPath))
+        expect(result.walk.lastValidation.passed).toBe(true)
+        expect(result.walk.validationHistory).toHaveLength(1)
+        expect(await reopened.lookup(contractIdentity({ goal: 'check out', flowSchemaVersion: 'other/v1' })))
+          .toEqual({ status: 'miss', reason: 'wrong-flow-schema' })
+      } finally {
+        await ctx.cleanup()
+      }
+    })
+
+    test('returns stale-build instead of replaying another build fingerprint', async () => {
+      const ctx = await context()
+      try {
+        const { store } = await ctx.seed()
+        expect(await store.lookup(contractIdentity({ buildFingerprint: 'b'.repeat(64) })))
+          .toEqual({ status: 'miss', reason: 'stale-build' })
+      } finally {
+        await ctx.cleanup()
+      }
+    })
+
+    test('returns wrong-app without loosening app identity', async () => {
+      const ctx = await context()
+      try {
+        const { store } = await ctx.seed()
+        expect(await store.lookup(contractIdentity({ appId: 'dev.walkcache.other' })))
+          .toEqual({ status: 'miss', reason: 'wrong-app' })
+      } finally {
+        await ctx.cleanup()
+      }
+    })
+
+    test('returns wrong-platform without sharing memory across platforms', async () => {
+      const ctx = await context()
+      try {
+        const { store } = await ctx.seed()
+        expect(await store.lookup(contractIdentity({ platform: 'ios' })))
+          .toEqual({ status: 'miss', reason: 'wrong-platform' })
+      } finally {
+        await ctx.cleanup()
+      }
+    })
+
+    test('partitions Web identity by both adapter and browser', async () => {
+      const ctx = await context()
+      try {
+        const web = contractIdentity({
+          appId: 'http://127.0.0.1:4174', platform: 'web',
+          adapter: 'maestro-web@2.12.0', browser: 'chromium',
+        })
+        const { store } = await ctx.seed(web)
+        const hit = await store.lookup(web)
+        expect(hit.status).toBe('hit')
+        if (hit.status === 'hit') {
+          expect(hit.walk).toMatchObject({
+            platform: 'web', browser: 'chromium', adapter: 'maestro-web@2.12.0',
+            buildFingerprint: web.buildFingerprint,
+          })
+        }
+        expect(await store.lookup({ ...web, adapter: 'maestro-web-other' }))
+          .toEqual({ status: 'miss', reason: 'wrong-adapter' })
+        expect(await store.lookup({ ...web, browser: 'firefox' }))
+          .toEqual({ status: 'miss', reason: 'wrong-browser' })
+        expect(await store.lookup({ ...web, buildFingerprint: 'c'.repeat(64) }))
+          .toEqual({ status: 'miss', reason: 'stale-build' })
+      } finally {
+        await ctx.cleanup()
+      }
+    })
+
+    test('returns missing-flow and never treats metadata alone as a pass', async () => {
+      const ctx = await context()
+      try {
+        const { store, persisted } = await ctx.seed()
+        await rm(join(ctx.workspaceRoot, persisted.flowPath))
+        expect(await store.lookup(contractIdentity()))
+          .toEqual({ status: 'miss', reason: 'missing-flow' })
+      } finally {
+        await ctx.cleanup()
+      }
+    })
+
+    test('rejects a tampered flow checksum instead of executing changed YAML', async () => {
+      const ctx = await context()
+      try {
+        const { store, persisted } = await ctx.seed()
+        await writeFile(join(ctx.workspaceRoot, persisted.flowPath), '# tampered flow\n')
+        await expect(store.lookup(contractIdentity())).rejects.toThrow('flow checksum does not match')
+      } finally {
+        await ctx.cleanup()
+      }
+    })
+
+    test('rejects malformed metadata as invalid memory', async () => {
+      const ctx = await context()
+      try {
+        const { store } = await ctx.seed()
+        await implementation.tamperMetadata(ctx.workspaceRoot, 'malformed')
+        await expect(store.lookup(contractIdentity())).rejects.toThrow()
+        await expect(store.list()).rejects.toThrow()
+      } finally {
+        await ctx.cleanup()
+      }
+    })
+
+    test('rejects an unsupported metadata schema', async () => {
+      const ctx = await context()
+      try {
+        const { store } = await ctx.seed()
+        await implementation.tamperMetadata(ctx.workspaceRoot, 'unsupported-schema')
+        await expect(store.lookup(contractIdentity())).rejects.toThrow('999')
+      } finally {
+        await ctx.cleanup()
+      }
+    })
+
+    test('rejects an invalid entry instead of filtering it out to produce a hit', async () => {
+      const ctx = await context()
+      try {
+        const { store } = await ctx.seed()
+        await implementation.tamperMetadata(ctx.workspaceRoot, 'invalid-entry')
+        await expect(store.lookup(contractIdentity())).rejects.toThrow('identity fields')
+      } finally {
+        await ctx.cleanup()
+      }
+    })
+
+    test('rejects duplicate exact identities as ambiguous', async () => {
+      const ctx = await context()
+      try {
+        const { store } = await ctx.seed()
+        await implementation.tamperMetadata(ctx.workspaceRoot, 'duplicate-identity')
+        await expect(store.lookup(contractIdentity())).rejects.toThrow('duplicate exact walk identities')
+      } finally {
+        await ctx.cleanup()
+      }
+    })
+
+    test('rejects stored flow paths outside the canonical flow directory', async () => {
+      const ctx = await context()
+      try {
+        await mkdir(ctx.workspaceRoot, { recursive: true })
+        await writeFile(join(ctx.workspaceRoot, 'outside.yaml'), '# outside\n')
+        const { store } = await ctx.seed()
+        await implementation.setFirstFlowPath(ctx.workspaceRoot, '../outside.yaml')
+        await expect(store.lookup(contractIdentity())).rejects.toThrow('must stay under .walkcache/flows')
+      } finally {
+        await ctx.cleanup()
+      }
+    })
+
+    test('rejects a symlink whose canonical flow path escapes the workspace', async () => {
+      if (process.platform === 'win32') return
+      const ctx = await context()
+      try {
+        const { store } = await ctx.seed()
+        const outside = join(ctx.temporary, 'outside.yaml')
+        await writeFile(outside, '# outside\n')
+        const linkDirectory = join(ctx.workspaceRoot, '.walkcache/flows/escape')
+        await mkdir(linkDirectory, { recursive: true })
+        await symlink(outside, join(linkDirectory, 'android.yaml'))
+        await implementation.setFirstFlowPath(ctx.workspaceRoot, '.walkcache/flows/escape/android.yaml')
+        await expect(store.lookup(contractIdentity())).rejects.toThrow()
+      } finally {
+        await ctx.cleanup()
+      }
+    })
+
+    test('an interruption before flow rename leaves only ignored temporary files and a first-run miss', async () => {
+      const ctx = await context({ failFlowRename: true })
+      try {
+        const store = ctx.makeStore()
+        await expect(store.persistVerifiedCandidate({
+          identity: contractIdentity(), candidatePath: ctx.candidatePath,
+          validation: { passed: true, at: initialValidation }, origin: 'explore',
+        })).rejects.toThrow('simulated interruption before flow rename')
+        expect((await temporaryFiles(ctx.workspaceRoot)).length).toBeGreaterThan(0)
+        expect(existsSync(implementation.metadataPath(ctx.workspaceRoot))).toBe(false)
+        expect(await store.lookup(contractIdentity())).toEqual({ status: 'miss', reason: 'not-found' })
+      } finally {
+        await ctx.cleanup()
+      }
+    })
+
+    test('failed candidate verification preserves known-good YAML and metadata byte for byte', async () => {
+      const ctx = await context()
+      try {
+        const { persisted } = await ctx.seed()
+        const flowPath = join(ctx.workspaceRoot, persisted.flowPath)
+        const beforeFlow = await readFile(flowPath)
+        const beforeMetadata = await implementation.snapshotMetadata(ctx.workspaceRoot)
+        const store = ctx.makeStore()
+        await expect(store.persistVerifiedCandidate({
+          identity: contractIdentity({ buildFingerprint: 'b'.repeat(64) }), candidatePath: ctx.candidatePath,
+          validation: { passed: false, at: laterValidation }, origin: 'explore',
+        })).rejects.toThrow('Only an independently passing candidate')
+        expect(await readFile(flowPath)).toEqual(beforeFlow)
+        expect(await implementation.snapshotMetadata(ctx.workspaceRoot)).toEqual(beforeMetadata)
+        expect((await store.lookup(contractIdentity())).status).toBe('hit')
+      } finally {
+        await ctx.cleanup()
+      }
+    })
+
+    test('failed metadata replacement preserves last-known-good bytes and ignores orphan and temporary YAML', async () => {
+      const ctx = await context()
+      try {
+        const { persisted } = await ctx.seed()
+        const oldFlowPath = join(ctx.workspaceRoot, persisted.flowPath)
+        const beforeFlow = await readFile(oldFlowPath)
+        const beforeMetadata = await implementation.snapshotMetadata(ctx.workspaceRoot)
+        await writeFile(join(ctx.workspaceRoot, ctx.candidatePath), '# independently verified replacement\n')
+        const store = ctx.makeStore({ failMetadataReplacement: true })
+        await expect(store.persistVerifiedCandidate({
+          identity: contractIdentity({ buildFingerprint: 'b'.repeat(64) }), candidatePath: ctx.candidatePath,
+          validation: { passed: true, at: laterValidation }, origin: 'remember',
+        })).rejects.toThrow('simulated metadata replacement failure')
+        expect(await readFile(oldFlowPath)).toEqual(beforeFlow)
+        expect(await implementation.snapshotMetadata(ctx.workspaceRoot)).toEqual(beforeMetadata)
+        expect((await store.lookup(contractIdentity())).status).toBe('hit')
+        expect(await store.lookup(contractIdentity({ buildFingerprint: 'b'.repeat(64) })))
+          .toEqual({ status: 'miss', reason: 'stale-build' })
+      } finally {
+        await ctx.cleanup()
+      }
+    })
+
+    test('failed validation remains append-only history and blocks subsequent reuse without changing YAML', async () => {
+      const ctx = await context()
+      try {
+        const { store, persisted } = await ctx.seed()
+        const beforeFlow = await readFile(join(ctx.workspaceRoot, persisted.flowPath))
+        const updated = await store.recordValidation(
+          contractIdentity(), { passed: false, at: laterValidation },
+        )
+        expect(updated.lastValidation).toEqual({ passed: false, at: laterValidation })
+        expect(updated.validationHistory).toHaveLength(2)
+        expect(updated.validationHistory[0].passed).toBe(true)
+        expect(updated.validationHistory[1]).toEqual({
+          passed: false, at: laterValidation, flowSha256: persisted.flowSha256,
+        })
+        expect(await store.lookup(contractIdentity()))
+          .toEqual({ status: 'miss', reason: 'failed-validation' })
+        expect(await readFile(join(ctx.workspaceRoot, persisted.flowPath))).toEqual(beforeFlow)
+        const stored = await ctx.makeStore().list()
+        expect(stored[0].lastValidation.passed).toBe(false)
+        expect(stored[0].validationHistory.map(entry => entry.passed)).toEqual([true, false])
+      } finally {
+        await ctx.cleanup()
+      }
+    })
+
+    test('verified repair retains history and exploration, adds provenance, and selects its diagnostic base', async () => {
+      const ctx = await context()
+      try {
+        const oldIdentity = contractIdentity()
+        const newIdentity = contractIdentity({ buildFingerprint: 'b'.repeat(64) })
+        const store = ctx.makeStore()
+        const previous = await store.persistVerifiedCandidate({
+          identity: oldIdentity, candidatePath: ctx.candidatePath,
+          validation: { passed: true, at: initialValidation }, origin: 'explore',
+          exploration: {
+            explorationDurationMs: 10, verificationDurationMs: 5,
+            mcpCalls: 2, modelCalls: 1, modelCallBasis: 'fixture turns',
+          },
+        })
+        await writeFile(join(ctx.workspaceRoot, ctx.candidatePath), '# verified repaired flow\n')
+        const diagnostic = await store.lookupPreviousSuccessful(newIdentity)
+        expect(diagnostic.status).toBe('hit')
+        if (diagnostic.status === 'hit') expect(diagnostic.walk.flowSha256).toBe(previous.flowSha256)
+        const repaired = await store.persistVerifiedRepair({
+          identity: newIdentity, candidatePath: ctx.candidatePath,
+          validation: { passed: true, at: laterValidation },
+          previous: { buildFingerprint: oldIdentity.buildFingerprint, flowSha256: previous.flowSha256 },
+          repair: {
+            attemptId: 'contract-repair', patchPath: '.walkcache/patches/contract-repair/proposed.patch',
+            previousBuildFingerprint: oldIdentity.buildFingerprint, previousFlowSha256: previous.flowSha256,
+          },
+        })
+        expect(repaired.walk.origin).toBe('repair')
+        expect(repaired.walk.validationHistory).toHaveLength(2)
+        expect(repaired.walk.exploration?.modelCalls).toBe(1)
+        expect(repaired.walk.repairHistory?.[0]).toMatchObject({
+          attemptId: 'contract-repair', previousBuildFingerprint: oldIdentity.buildFingerprint,
+        })
+        expect((await ctx.makeStore().lookup(newIdentity)).status).toBe('hit')
+        expect(await store.lookup(oldIdentity)).toEqual({ status: 'miss', reason: 'stale-build' })
+      } finally {
+        await ctx.cleanup()
+      }
+    })
+
+    test('a changed repair base fails closed and preserves last-known-good metadata and YAML', async () => {
+      const ctx = await context()
+      try {
+        const { store, persisted } = await ctx.seed()
+        const beforeMetadata = await implementation.snapshotMetadata(ctx.workspaceRoot)
+        const beforeFlow = await readFile(join(ctx.workspaceRoot, persisted.flowPath))
+        await expect(store.persistVerifiedRepair({
+          identity: contractIdentity({ buildFingerprint: 'b'.repeat(64) }), candidatePath: ctx.candidatePath,
+          validation: { passed: true, at: laterValidation },
+          previous: { buildFingerprint: 'c'.repeat(64), flowSha256: persisted.flowSha256 },
+          repair: {
+            attemptId: 'stale-repair', patchPath: '.walkcache/patches/stale-repair/proposed.patch',
+            previousBuildFingerprint: 'c'.repeat(64), previousFlowSha256: persisted.flowSha256,
+          },
+        })).rejects.toThrow('previous successful repair base changed')
+        expect(await implementation.snapshotMetadata(ctx.workspaceRoot)).toEqual(beforeMetadata)
+        expect(await readFile(join(ctx.workspaceRoot, persisted.flowPath))).toEqual(beforeFlow)
+        expect((await store.lookup(contractIdentity())).status).toBe('hit')
+      } finally {
+        await ctx.cleanup()
+      }
+    })
+  })
+}
