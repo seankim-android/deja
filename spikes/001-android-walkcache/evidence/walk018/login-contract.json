@@ -29,6 +29,10 @@
   "preconditions": [
     {
       "kind": "clean-app-launch"
+    },
+    {
+      "kind": "screen-visible",
+      "resourceId": "screen_login"
     }
   ],
   "postconditions": [

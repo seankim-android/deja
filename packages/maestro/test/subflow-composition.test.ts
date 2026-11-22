@@ -36,8 +36,12 @@ function execution(passed: boolean): ExecutionResult {
 describe('bounded verified login composition', () => {
   test('pure composition contains a reference and all new assertions, never login commands or values', async () => {
     const continuation = await readFile(resolve(repo, `${evidence}/continuation/checkout.yaml`), 'utf8')
+    const workspaceRoot = resolve(repo, evidence)
     const yaml = composeMaestroLoginFlow(
-      identity.appId, '../../segments/login-v1/android-fixture.yaml', continuation)
+      identity.appId, '../../segments/login-v1/android-fixture.yaml', continuation, {
+        workspaceRoot,
+        flowDirectory: resolve(workspaceRoot, 'composed/sign-in-and-check-out-mochi-sticker-pack'),
+      })
     expect((yaml.match(/^- runFlow:/gm) ?? [])).toHaveLength(1)
     expect(yaml).toContain('- runFlow: "../../segments/login-v1/android-fixture.yaml"')
     for (const duplicated of [
@@ -47,6 +51,30 @@ describe('bounded verified login composition', () => {
     expect(yaml).toContain('id: order_confirmation')
     expect(yaml).toContain('id: screen_confirmation')
     expect(yaml).toContain('Order #WC-1001 · Mochi sticker pack')
+  })
+
+  test('flow references accept same-directory files and reject every containment escape', () => {
+    const workspaceRoot = resolve(repo, evidence)
+    const continuation = '- assertVisible: Catalog\n'
+    const containment = { workspaceRoot, flowDirectory: workspaceRoot }
+    expect(composeMaestroLoginFlow(identity.appId, 'login.yaml', continuation, containment))
+      .toContain('- runFlow: "login.yaml"')
+    expect(composeMaestroLoginFlow(
+      identity.appId, 'flows/../login.yaml', continuation, containment))
+      .toContain('- runFlow: "login.yaml"')
+    for (const reference of [
+      '../../../outside.yaml',
+      'flows/../../../outside.yaml',
+      '/tmp/outside.yaml',
+      '..\\outside.yaml',
+    ]) {
+      expect(() => composeMaestroLoginFlow(identity.appId, reference, continuation, containment))
+        .toThrow(/relative path|escapes containment/)
+    }
+    expect(() => composeMaestroLoginFlow(
+      identity.appId, 'login.yaml', continuation,
+      { workspaceRoot, flowDirectory: resolve(workspaceRoot, '../outside') }))
+      .toThrow('Flow directory escapes containment root')
   })
 
   test('rejects nested launch, nested composition, headers, and duplicated login controls', async () => {
@@ -59,7 +87,7 @@ describe('bounded verified login composition', () => {
       '- tapOn:\n    id: login_button\n',
       '- inputText: qa@walkcache.dev\n- tapOn:\n    id: username_input\n',
     ]) {
-      expect(() => composeMaestroLoginFlow(identity.appId, '../../segments/login.yaml', invalid))
+      expect(() => composeMaestroLoginFlow(identity.appId, 'login.yaml', invalid))
         .toThrow()
     }
   })
@@ -131,6 +159,31 @@ describe('bounded verified login composition', () => {
       const result = await composer.verifyAndSaveSegment(contract, candidatePath)
       expect(result.status).toBe('rejected')
       expect(result.errors).toContain('Runner assertion count differs from the typed contract')
+      expect(result.segment).toBeNull()
+      expect(await segments.list()).toEqual([])
+    } finally {
+      await rm(temporary, { recursive: true, force: true })
+    }
+  })
+
+  test('a passing run without runner observations cannot authorize reusable persistence', async () => {
+    const temporary = await mkdtemp(join(tmpdir(), 'walk018-observation-reject-'))
+    try {
+      const workspaceRoot = temporary
+      const candidatePath = 'login.yaml'
+      const loginName = 'android-c415a62dae8b1346213ac1f92c5201d2a8c17e01d98c84e6ab979f4d785f3266.yaml'
+      await writeFile(resolve(workspaceRoot, candidatePath), await readFile(resolve(
+        repo, `${evidence}/segments/login-v1/${loginName}`), 'utf8'))
+      const contract = JSON.parse(await readFile(resolve(repo, `${evidence}/login-contract.json`), 'utf8'))
+      const segments = new LocalVerifiedSubflowStore({ workspaceRoot })
+      const composer = new MaestroLoginComposer({
+        workspaceRoot, segments, walks: new LocalWalkStore({ workspaceRoot }),
+        runner: { run: async () => ({ ...execution(true), assertions: contract.assertionCount }) },
+      })
+      const result = await composer.verifyAndSaveSegment(contract, candidatePath)
+      expect(result.status).toBe('rejected')
+      expect(result.errors).toContain(
+        'Runner did not expose bounded observations required for segment verification')
       expect(result.segment).toBeNull()
       expect(await segments.list()).toEqual([])
     } finally {
@@ -264,10 +317,36 @@ describe('bounded verified login composition', () => {
     })
     expect(report.failedCompositionPreservation.before)
       .toEqual(report.failedCompositionPreservation.after)
+    const regressions = report.failedCompositionPreservation.adversarialRegressions
+    expect(regressions.wrongFinalText).toMatchObject({
+      status: 'rejected', runnerPassed: false, failureCategory: 'product_assertion',
+      byteForByteUnchanged: true,
+    })
+    expect(regressions.wrongFinalText.before).toEqual(regressions.wrongFinalText.after)
+    expect(regressions.lateSecondClearLaunch).toMatchObject({
+      status: 'rejected', runnerPassed: true, cleanStateLaunches: 2, finalScreen: 'login',
+      byteForByteUnchanged: true,
+    })
+    expect(regressions.lateSecondClearLaunch.rejectionReasons.join(' '))
+      .toContain('exactly one clean launch')
+    expect(regressions.lateSecondClearLaunch.before)
+      .toEqual(regressions.lateSecondClearLaunch.after)
+    expect(report.composition.finalProductAssertionsRetained).toEqual([
+      { resourceId: 'order_confirmation', text: 'Order confirmed' },
+      { resourceId: 'screen_confirmation', text: 'Order #WC-1001 · Mochi sticker pack' },
+    ])
+    expect(report.exactCacheReplay.finalProductAssertionsRetained)
+      .toEqual(report.composition.finalProductAssertionsRetained)
     expect(logs['walk018-login-verification.log']).toContain('clear state... COMPLETED')
-    expect(logs['walk018-clean-state-composition.log']).toContain('id: screen_confirmation is visible... COMPLETED')
-    expect(logs['walk018-exact-replay.log']).toContain('id: screen_confirmation is visible... COMPLETED')
+    const retainedFinalText =
+      'id: screen_confirmation is visible, text: "Order #WC-1001 · Mochi sticker pack"... COMPLETED'
+    expect(logs['walk018-clean-state-composition.log']).toContain(retainedFinalText)
+    expect(logs['walk018-exact-replay.log']).toContain(retainedFinalText)
     expect(logs['walk018-failed-composition.log']).toContain('Element not found: Id matching regex: checkout_button')
-    expect(logs['walk018-failed-composition.log']).not.toContain('id: screen_confirmation is visible... COMPLETED')
+    expect(logs['walk018-failed-composition.log']).not.toContain(retainedFinalText)
+    expect(logs['walk018-wrong-final-text.log']).toContain('Order #WC-9999 · Wrong item')
+    expect(logs['walk018-wrong-final-text.log']).toContain('"finalProductAssertionPassed":false')
+    expect(logs['walk018-late-second-clear-launch.log']).toContain('"clearStateLaunches":2')
+    expect(logs['walk018-late-second-clear-launch.log']).toContain('"screen":"login"')
   })
 })

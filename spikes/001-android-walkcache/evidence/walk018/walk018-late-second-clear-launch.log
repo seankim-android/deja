@@ -1,0 +1,25 @@
+Launch app "dev.walkcache.checkout" with clear state... COMPLETED
+FIXTURE_OBSERVATION {"kind":"launch","clearState":true}
+Assert that id: screen_login is visible, text: "WalkCache Shop"... COMPLETED
+FIXTURE_OBSERVATION {"kind":"assertVisible","resourceId":"screen_login","text":"WalkCache Shop"}
+Assert that id: username_input is visible... COMPLETED
+FIXTURE_OBSERVATION {"kind":"assertVisible","resourceId":"username_input","text":null}
+Assert that id: password_input is visible... COMPLETED
+FIXTURE_OBSERVATION {"kind":"assertVisible","resourceId":"password_input","text":null}
+Assert that id: login_button is visible, text: "Sign in"... COMPLETED
+FIXTURE_OBSERVATION {"kind":"assertVisible","resourceId":"login_button","text":"Sign in"}
+Tap on id: username_input... COMPLETED
+FIXTURE_OBSERVATION {"kind":"action","command":"tapOn"}
+Input text "qa@walkcache.dev"... COMPLETED
+FIXTURE_OBSERVATION {"kind":"action","command":"inputText"}
+Tap on id: password_input... COMPLETED
+FIXTURE_OBSERVATION {"kind":"action","command":"tapOn"}
+Input text "testing123"... COMPLETED
+FIXTURE_OBSERVATION {"kind":"action","command":"inputText"}
+Tap on id: login_button... COMPLETED
+FIXTURE_OBSERVATION {"kind":"action","command":"tapOn"}
+Assert that id: screen_catalog is visible, text: "Catalog"... COMPLETED
+FIXTURE_OBSERVATION {"kind":"assertVisible","resourceId":"screen_catalog","text":"Catalog"}
+Launch app "dev.walkcache.checkout" with clear state... COMPLETED
+FIXTURE_OBSERVATION {"kind":"launch","clearState":true}
+FIXTURE_SUMMARY {"clearStateLaunches":2,"steps":12,"reusedSteps":0,"assertions":5,"assertionObservations":[{"resourceId":"screen_login","text":"WalkCache Shop"},{"resourceId":"username_input","text":null},{"resourceId":"password_input","text":null},{"resourceId":"login_button","text":"Sign in"},{"resourceId":"screen_catalog","text":"Catalog"}],"visibleResourceIds":["screen_login","username_input","password_input","login_button"],"finalProductAssertionPassed":false,"screen":"login"}

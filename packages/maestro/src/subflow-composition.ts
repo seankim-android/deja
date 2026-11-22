@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
-import { dirname, isAbsolute, relative, resolve, sep } from 'node:path'
+import { dirname, isAbsolute, normalize, relative, resolve, sep } from 'node:path'
 import {
   normalizeGoal,
   validateSubflowContract,
@@ -16,6 +16,10 @@ import {
   type WalkRunner,
   type WalkStore,
 } from '../../core/src/index.ts'
+import {
+  readCompositionRunnerTrace,
+  type CompositionRunnerTrace,
+} from './execution-observations.ts'
 
 export const MAESTRO_COMPOSITE_FLOW_SCHEMA = 'maestro/v1'
 export const COMPOSITION_MODEL_METRICS: CompositionModelMetrics = {
@@ -55,6 +59,11 @@ export type MaestroLoginComposerOptions = {
   walks: WalkStore
   runner: WalkRunner
   artifactId?: (prefix: 'login-verification' | 'composition-verification') => string
+}
+
+export type MaestroFlowContainment = {
+  workspaceRoot: string
+  flowDirectory: string
 }
 
 function portable(path: string) {
@@ -100,21 +109,47 @@ function validateContinuation(contents: string): string {
   return contents.endsWith('\n') ? contents : `${contents}\n`
 }
 
+function inside(root: string, candidate: string) {
+  return candidate !== root && candidate.startsWith(`${root}${sep}`)
+}
+
+export function validateMaestroFlowReference(
+  reference: string,
+  containment?: MaestroFlowContainment,
+): string {
+  if (!reference || reference.includes('\0') || reference.includes('\\') || isAbsolute(reference)) {
+    throw new TypeError('Flow reference must be a non-empty portable relative path')
+  }
+  if (containment) {
+    const root = resolve(containment.workspaceRoot)
+    const flowDirectory = resolve(containment.flowDirectory)
+    if (flowDirectory !== root && !inside(root, flowDirectory)) {
+      throw new TypeError('Flow directory escapes containment root')
+    }
+    const target = resolve(flowDirectory, reference)
+    if (!inside(root, target)) throw new TypeError('Flow reference escapes containment root')
+    return portable(relative(flowDirectory, target))
+  }
+  const normalized = normalize(reference)
+  if (normalized === '..' || normalized.startsWith(`..${sep}`)) {
+    throw new TypeError('Flow reference escapes its flow directory')
+  }
+  return portable(normalized)
+}
+
 /** Compose by reference: no login command or fixture value is copied into the composed YAML. */
 export function composeMaestroLoginFlow(
   appId: string,
   segmentReference: string,
   continuationYaml: string,
+  containment?: MaestroFlowContainment,
 ): string {
   if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,159}$/.test(appId)) {
     throw new TypeError('A bounded Maestro appId is required')
   }
-  if (!segmentReference || isAbsolute(segmentReference) || segmentReference.includes('\\') ||
-      segmentReference.split('/').includes('..') === false) {
-    throw new TypeError('The segment reference must be a portable relative path within attempt/storage roots')
-  }
+  const validatedReference = validateMaestroFlowReference(segmentReference, containment)
   const continuation = validateContinuation(continuationYaml)
-  return `appId: ${appId}\n---\n- runFlow: ${JSON.stringify(portable(segmentReference))}\n${continuation}`
+  return `appId: ${appId}\n---\n- runFlow: ${JSON.stringify(validatedReference)}\n${continuation}`
 }
 
 export function countMaestroSteps(contents: string): number {
@@ -135,16 +170,86 @@ function hasResourceAssertion(contents: string, resourceId: string): boolean {
     .test(contents)
 }
 
+function cleanLaunchErrors(trace: CompositionRunnerTrace): string[] {
+  const launches = trace.observations.filter(observation => observation.kind === 'launch')
+  if (launches.length !== 1 || trace.observations[0]?.kind !== 'launch' ||
+      trace.observations[0].clearState !== true) {
+    return ['Runner observations require exactly one clean launch as the first product step']
+  }
+  return []
+}
+
+function preconditionErrors(
+  trace: CompositionRunnerTrace,
+  contract: SubflowContract,
+): string[] {
+  const errors = cleanLaunchErrors(trace)
+  const firstAction = trace.observations.findIndex(observation => observation.kind === 'action')
+  const prefix = trace.observations.slice(0, firstAction < 0 ? undefined : firstAction)
+  for (const condition of contract.preconditions) {
+    if (condition.kind === 'screen-visible' && !prefix.some(observation =>
+      observation.kind === 'assertVisible' && observation.resourceId === condition.resourceId)) {
+      errors.push(`Precondition ${condition.resourceId} was not observed before the first action`)
+    }
+  }
+  return errors
+}
+
+function trailingAssertions(observations: CompositionRunnerTrace['observations']) {
+  const trailing = []
+  for (let index = observations.length - 1; index >= 0; index -= 1) {
+    const observation = observations[index]
+    if (observation.kind !== 'assertVisible') break
+    trailing.push(observation)
+  }
+  return trailing
+}
+
+function postconditionErrors(
+  contract: SubflowContract,
+  observations: CompositionRunnerTrace['observations'],
+  finalVisibleResourceIds: string[] | null,
+): string[] {
+  const trailing = trailingAssertions(observations)
+  const errors: string[] = []
+  for (const condition of contract.postconditions) {
+    if (!trailing.some(observation => observation.resourceId === condition.resourceId)) {
+      errors.push(`Postcondition ${condition.resourceId} was not the completed assertion boundary`)
+    }
+    if (finalVisibleResourceIds && !finalVisibleResourceIds.includes(condition.resourceId)) {
+      errors.push(`Postcondition ${condition.resourceId} was not visible at verification completion`)
+    }
+  }
+  return errors
+}
+
+function segmentObservationErrors(
+  trace: CompositionRunnerTrace,
+  contract: SubflowContract,
+): string[] {
+  return [
+    ...preconditionErrors(trace, contract),
+    ...postconditionErrors(contract, trace.observations, trace.finalVisibleResourceIds),
+  ]
+}
+
+function reusedBoundaryObservationErrors(
+  trace: CompositionRunnerTrace,
+  contract: SubflowContract,
+): string[] {
+  return [
+    ...preconditionErrors(trace, contract),
+    ...postconditionErrors(
+      contract, trace.observations.slice(0, contract.stepCount), null),
+  ]
+}
+
 function contractCandidateErrors(contract: SubflowContract, contents: string): string[] {
   const errors: string[] = []
   if (!contents.startsWith(`appId: ${contract.identity.appId}\n---\n`)) {
     errors.push('Candidate appId does not match segment identity')
   }
   if (/^\s*- runFlow:/m.test(contents)) errors.push('Nested segment references are outside this narrow proof')
-  if (contract.preconditions.some(condition => condition.kind === 'clean-app-launch') &&
-      !/^- launchApp:\s*\n {4}clearState: true\s*$/m.test(contents)) {
-    errors.push('Candidate does not enforce its clean-app-launch precondition')
-  }
   for (const condition of contract.postconditions) {
     if (!hasResourceAssertion(contents, condition.resourceId)) {
       errors.push(`Candidate lacks postcondition assertion for ${condition.resourceId}`)
@@ -192,6 +297,12 @@ export class MaestroLoginComposer {
     const candidateErrors = contractCandidateErrors(contract, candidateContents)
     if (execution.assertions !== contract.assertionCount) {
       candidateErrors.push('Runner assertion count differs from the typed contract')
+    }
+    const trace = await readCompositionRunnerTrace(this.options.workspaceRoot, execution)
+    if (!trace) {
+      candidateErrors.push('Runner did not expose bounded observations required for segment verification')
+    } else {
+      candidateErrors.push(...segmentObservationErrors(trace, contract))
     }
     if (candidateErrors.length > 0) {
       return {
@@ -246,7 +357,10 @@ export class MaestroLoginComposer {
     if (portable(relative(finalDirectory, segmentPath)) !== segmentReference) {
       throw new Error('Candidate and stored flow would resolve different segment paths')
     }
-    const yaml = composeMaestroLoginFlow(identity.appId, segmentReference, continuation)
+    const yaml = composeMaestroLoginFlow(identity.appId, segmentReference, continuation, {
+      workspaceRoot: root,
+      flowDirectory: candidateDirectory,
+    })
     const candidateBytes = Buffer.from(yaml, 'utf8')
     const candidateSha256 = createHash('sha256').update(candidateBytes).digest('hex')
     await mkdir(candidateDirectory, { recursive: true })
@@ -280,6 +394,17 @@ export class MaestroLoginComposer {
         ...base, status: 'rejected', verificationPassed: false, candidatePath, candidateSha256,
         segment: lookup.segment, execution, steps,
         errors: ['Runner assertion accounting did not include every reused and new assertion'],
+      }
+    }
+    const trace = await readCompositionRunnerTrace(this.options.workspaceRoot, execution)
+    const observationErrors = trace
+      ? reusedBoundaryObservationErrors(trace, lookup.segment)
+      : ['Runner did not expose bounded observations required for composed verification']
+    if (observationErrors.length > 0) {
+      return {
+        ...base, status: 'rejected', verificationPassed: false, candidatePath, candidateSha256,
+        segment: lookup.segment, execution, steps,
+        errors: [...observationErrors, 'Goal memory was not replaced'],
       }
     }
     try {

@@ -177,6 +177,50 @@ export async function runWalk018Verification() {
         !afterFailureMemory.equals(lastKnownGoodMemory)) {
       throw new Error('Failed composition changed login bytes or last-known-good goal memory')
     }
+
+    const wrongFinalContinuation = continuation.replace(
+      'Order #WC-1001 · Mochi sticker pack', 'Order #WC-9999 · Wrong item')
+    if (wrongFinalContinuation === continuation) throw new Error('Wrong-text mutation did not apply')
+    const wrongFinalText = await composer.compose(identity, 'login-v1', wrongFinalContinuation)
+    if (wrongFinalText.status !== 'rejected' || !wrongFinalText.execution ||
+        wrongFinalText.execution.passed || wrongFinalText.persisted !== null ||
+        wrongFinalText.execution.failure?.category !== 'product_assertion') {
+      throw new Error('Wrong final text did not fail closed as a product assertion')
+    }
+    const wrongFinalTextOutput = await executionOutput(
+      workspaceRoot, wrongFinalText.execution.artifacts)
+    const afterWrongFinalText = await snapshot(
+      workspaceRoot, login.segment.flowPath, previousFlowPath)
+    if (JSON.stringify(afterWrongFinalText) !== JSON.stringify(afterSuccess) ||
+        !(await readFile(resolve(workspaceRoot, VERIFIED_SUBFLOW_INDEX_PATH))).equals(segmentIndexBytes) ||
+        !(await readFile(resolve(workspaceRoot, login.segment.flowPath))).equals(segmentFlowBytes) ||
+        !(await readFile(resolve(workspaceRoot, LOCAL_MEMORY_PATH))).equals(lastKnownGoodMemory)) {
+      throw new Error('Wrong final text changed login bytes or last-known-good goal memory')
+    }
+
+    const lateLaunchCandidate = '.walkcache/attempts/login-second-clear-launch.yaml'
+    await writeFile(resolve(workspaceRoot, lateLaunchCandidate), `${await read(loginSource)}- launchApp:\n    clearState: true\n`)
+    // Keep all static counts valid so rejection must come from observations, not the old count gate.
+    const lateLaunch = await composer.verifyAndSaveSegment(
+      { ...contract, stepCount: contract.stepCount + 1 }, lateLaunchCandidate)
+    if (lateLaunch.status !== 'rejected' || !lateLaunch.execution.passed ||
+        lateLaunch.segment !== null || !lateLaunch.errors.some(error =>
+          error.includes('exactly one clean launch'))) {
+      throw new Error('Late second clear launch was not rejected by runner observations')
+    }
+    const lateLaunchOutput = await executionOutput(workspaceRoot, lateLaunch.execution.artifacts)
+    const lateLaunchSummary = fixtureSummary(lateLaunchOutput)
+    if (lateLaunchSummary.clearStateLaunches !== 2 || lateLaunchSummary.screen !== 'login') {
+      throw new Error('Late-launch fixture did not actually complete a second clean launch')
+    }
+    const afterLateLaunch = await snapshot(workspaceRoot, login.segment.flowPath, previousFlowPath)
+    if (JSON.stringify(afterLateLaunch) !== JSON.stringify(afterSuccess) ||
+        !(await readFile(resolve(workspaceRoot, VERIFIED_SUBFLOW_INDEX_PATH))).equals(segmentIndexBytes) ||
+        !(await readFile(resolve(workspaceRoot, login.segment.flowPath))).equals(segmentFlowBytes) ||
+        !(await readFile(resolve(workspaceRoot, LOCAL_MEMORY_PATH))).equals(lastKnownGoodMemory)) {
+      throw new Error('Late second clear launch changed reusable or last-known-good memory')
+    }
+
     const previousIdentity: WalkIdentity = { ...identity, goal: previousSource.goal }
     const previousHit = await walks.lookup(previousIdentity)
     if (previousHit.status !== 'hit' || previousHit.walk.flowSha256 !== previousSource.flowSha256) {
@@ -191,6 +235,18 @@ export async function runWalk018Verification() {
         loginSummary.clearStateLaunches !== 1 || !exactSummary.finalProductAssertionPassed ||
         exactSummary.clearStateLaunches !== 1 || exact.assertions !== 14) {
       throw new Error(`Clean-state execution did not retain complete reused/new steps and assertions: ${JSON.stringify({ cleanSummary, loginSummary, exactSummary, exactAssertions: exact.assertions })}`)
+    }
+    const finalAssertionsFromObservations = (summary: {
+      assertionObservations: { resourceId: string | null; text: string | null }[]
+    }) => summary.assertionObservations.filter(observation =>
+      observation.resourceId === 'order_confirmation' ||
+      observation.resourceId === 'screen_confirmation')
+    const retainedFinalAssertions = finalAssertionsFromObservations(cleanSummary)
+    const replayedFinalAssertions = finalAssertionsFromObservations(exactSummary)
+    if (retainedFinalAssertions.length !== 2 ||
+        retainedFinalAssertions.some(observation => observation.text === null) ||
+        JSON.stringify(replayedFinalAssertions) !== JSON.stringify(retainedFinalAssertions)) {
+      throw new Error('Exactly two final product assertions must come from real runner observations')
     }
     const expectedComposed = await read(
       `${evidenceRoot}/composed/sign-in-and-check-out-mochi-sticker-pack/candidate.yaml`)
@@ -229,10 +285,7 @@ export async function runWalk018Verification() {
         steps: composed.steps,
         modelCalls: composed.modelCalls,
         cleanState: cleanSummary,
-        finalProductAssertionsRetained: [
-          'order_confirmation: Order confirmed',
-          'screen_confirmation: Order #WC-1001 · Mochi sticker pack',
-        ],
+        finalProductAssertionsRetained: retainedFinalAssertions,
       },
       exactCacheReplay: {
         cacheStatus: exact.cacheStatus,
@@ -241,6 +294,7 @@ export async function runWalk018Verification() {
         explorerConstructions,
         assertions: exact.assertions,
         cleanState: exactSummary,
+        finalProductAssertionsRetained: replayedFinalAssertions,
       },
       failedCompositionPreservation: {
         status: failed.status,
@@ -253,12 +307,34 @@ export async function runWalk018Verification() {
         lastKnownGoodMemorySha256: sha256(afterFailureMemory),
         previousGoalStillUsable: true,
         finalProductAssertionsUnchanged: true,
+        adversarialRegressions: {
+          wrongFinalText: {
+            status: wrongFinalText.status,
+            runnerPassed: wrongFinalText.execution.passed,
+            failureCategory: wrongFinalText.execution.failure?.category,
+            before: afterSuccess,
+            after: afterWrongFinalText,
+            byteForByteUnchanged: true,
+          },
+          lateSecondClearLaunch: {
+            status: lateLaunch.status,
+            runnerPassed: lateLaunch.execution.passed,
+            cleanStateLaunches: lateLaunchSummary.clearStateLaunches,
+            finalScreen: lateLaunchSummary.screen,
+            rejectionReasons: lateLaunch.errors,
+            before: afterSuccess,
+            after: afterLateLaunch,
+            byteForByteUnchanged: true,
+          },
+        },
       },
       logs: {
         loginVerification: `${evidenceRoot}/walk018-login-verification.log`,
         cleanStateComposition: `${evidenceRoot}/walk018-clean-state-composition.log`,
         exactReplay: `${evidenceRoot}/walk018-exact-replay.log`,
         failedComposition: `${evidenceRoot}/walk018-failed-composition.log`,
+        wrongFinalText: `${evidenceRoot}/walk018-wrong-final-text.log`,
+        lateSecondClearLaunch: `${evidenceRoot}/walk018-late-second-clear-launch.log`,
       },
     }
     return {
@@ -268,6 +344,8 @@ export async function runWalk018Verification() {
         'walk018-clean-state-composition.log': composedOutput,
         'walk018-exact-replay.log': exactOutput,
         'walk018-failed-composition.log': failedOutput,
+        'walk018-wrong-final-text.log': wrongFinalTextOutput,
+        'walk018-late-second-clear-launch.log': lateLaunchOutput,
       },
     }
   } finally {
@@ -302,6 +380,14 @@ if (import.meta.main) {
       value.failedCompositionPreservation.after = 'validated-equal-within-run'
       value.failedCompositionPreservation.segmentIndexSha256 = 'validated-byte-equal-within-run'
       value.failedCompositionPreservation.lastKnownGoodMemorySha256 = 'validated-byte-equal-within-run'
+      for (const regression of Object.values(
+        value.failedCompositionPreservation.adversarialRegressions) as {
+          before: unknown
+          after: unknown
+        }[]) {
+        regression.before = 'validated-equal-within-run'
+        regression.after = 'validated-equal-within-run'
+      }
     }
     if (JSON.stringify(actual) !== JSON.stringify(expectedReport)) {
       throw new Error('Fresh deterministic execution differs from curated WALK-018 verification evidence')
@@ -323,5 +409,6 @@ if (import.meta.main) {
     exactCacheReplay: report.exactCacheReplay,
     failedCompositionPreservedByteForByte:
       report.failedCompositionPreservation.byteForByteUnchanged,
+    adversarialRegressions: report.failedCompositionPreservation.adversarialRegressions,
   }, null, 2))
 }

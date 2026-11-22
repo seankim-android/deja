@@ -59,9 +59,174 @@
       "steps": 22,
       "reusedSteps": 11,
       "assertions": 14,
+      "assertionObservations": [
+        {
+          "resourceId": "screen_login",
+          "text": "WalkCache Shop"
+        },
+        {
+          "resourceId": "username_input",
+          "text": null
+        },
+        {
+          "resourceId": "password_input",
+          "text": null
+        },
+        {
+          "resourceId": "login_button",
+          "text": "Sign in"
+        },
+        {
+          "resourceId": "screen_catalog",
+          "text": "Catalog"
+        },
+        {
+          "resourceId": null,
+          "text": "Mochi sticker pack"
+        },
+        {
+          "resourceId": null,
+          "text": "$5.00 · 6 stickers"
+        },
+        {
+          "resourceId": "add_to_cart",
+          "text": "Add to cart"
+        },
+        {
+          "resourceId": "screen_cart",
+          "text": "Your cart"
+        },
+        {
+          "resourceId": null,
+          "text": "1 × Mochi sticker pack"
+        },
+        {
+          "resourceId": null,
+          "text": "Total: $5.00"
+        },
+        {
+          "resourceId": "checkout_button",
+          "text": "Checkout"
+        },
+        {
+          "resourceId": "order_confirmation",
+          "text": "Order confirmed"
+        },
+        {
+          "resourceId": "screen_confirmation",
+          "text": "Order #WC-1001 · Mochi sticker pack"
+        }
+      ],
+      "visibleResourceIds": [
+        "order_confirmation",
+        "screen_confirmation"
+      ],
       "finalProductAssertionPassed": true,
       "screen": "confirmation"
-    }
+    },
+    "finalProductAssertionsRetained": [
+      {
+        "resourceId": "order_confirmation",
+        "text": "Order confirmed"
+      },
+      {
+        "resourceId": "screen_confirmation",
+        "text": "Order #WC-1001 · Mochi sticker pack"
+      }
+    ]
   },
-  "failedCompositionPreservedByteForByte": true
+  "failedCompositionPreservedByteForByte": true,
+  "adversarialRegressions": {
+    "wrongFinalText": {
+      "status": "rejected",
+      "runnerPassed": false,
+      "failureCategory": "product_assertion",
+      "before": {
+        ".walkcache/memory/walks.json": {
+          "sha256": "564b31ddfe41737f4ecdaad592e52b5cd5a7bbc76daf7e0c0420d83444d75467",
+          "bytes": 2512
+        },
+        ".walkcache/segments/index.json": {
+          "sha256": "50753c8c10d35506870c82822306bdd20c87b24eda062b1dd0ccbc97deeb07ed",
+          "bytes": 2217
+        },
+        ".walkcache/segments/login-v1/android-c415a62dae8b1346213ac1f92c5201d2a8c17e01d98c84e6ab979f4d785f3266.yaml": {
+          "sha256": "c415a62dae8b1346213ac1f92c5201d2a8c17e01d98c84e6ab979f4d785f3266",
+          "bytes": 473
+        },
+        ".walkcache/flows/checkout/android-e95532ce04a4e125d3bd56e1b9d5d367b31dd67eed4441c56271ca52f3c3d0a1.yaml": {
+          "sha256": "e95532ce04a4e125d3bd56e1b9d5d367b31dd67eed4441c56271ca52f3c3d0a1",
+          "bytes": 1025
+        }
+      },
+      "after": {
+        ".walkcache/memory/walks.json": {
+          "sha256": "564b31ddfe41737f4ecdaad592e52b5cd5a7bbc76daf7e0c0420d83444d75467",
+          "bytes": 2512
+        },
+        ".walkcache/segments/index.json": {
+          "sha256": "50753c8c10d35506870c82822306bdd20c87b24eda062b1dd0ccbc97deeb07ed",
+          "bytes": 2217
+        },
+        ".walkcache/segments/login-v1/android-c415a62dae8b1346213ac1f92c5201d2a8c17e01d98c84e6ab979f4d785f3266.yaml": {
+          "sha256": "c415a62dae8b1346213ac1f92c5201d2a8c17e01d98c84e6ab979f4d785f3266",
+          "bytes": 473
+        },
+        ".walkcache/flows/checkout/android-e95532ce04a4e125d3bd56e1b9d5d367b31dd67eed4441c56271ca52f3c3d0a1.yaml": {
+          "sha256": "e95532ce04a4e125d3bd56e1b9d5d367b31dd67eed4441c56271ca52f3c3d0a1",
+          "bytes": 1025
+        }
+      },
+      "byteForByteUnchanged": true
+    },
+    "lateSecondClearLaunch": {
+      "status": "rejected",
+      "runnerPassed": true,
+      "cleanStateLaunches": 2,
+      "finalScreen": "login",
+      "rejectionReasons": [
+        "Runner observations require exactly one clean launch as the first product step",
+        "Postcondition screen_catalog was not the completed assertion boundary",
+        "Postcondition screen_catalog was not visible at verification completion",
+        "Reusable storage was not written"
+      ],
+      "before": {
+        ".walkcache/memory/walks.json": {
+          "sha256": "564b31ddfe41737f4ecdaad592e52b5cd5a7bbc76daf7e0c0420d83444d75467",
+          "bytes": 2512
+        },
+        ".walkcache/segments/index.json": {
+          "sha256": "50753c8c10d35506870c82822306bdd20c87b24eda062b1dd0ccbc97deeb07ed",
+          "bytes": 2217
+        },
+        ".walkcache/segments/login-v1/android-c415a62dae8b1346213ac1f92c5201d2a8c17e01d98c84e6ab979f4d785f3266.yaml": {
+          "sha256": "c415a62dae8b1346213ac1f92c5201d2a8c17e01d98c84e6ab979f4d785f3266",
+          "bytes": 473
+        },
+        ".walkcache/flows/checkout/android-e95532ce04a4e125d3bd56e1b9d5d367b31dd67eed4441c56271ca52f3c3d0a1.yaml": {
+          "sha256": "e95532ce04a4e125d3bd56e1b9d5d367b31dd67eed4441c56271ca52f3c3d0a1",
+          "bytes": 1025
+        }
+      },
+      "after": {
+        ".walkcache/memory/walks.json": {
+          "sha256": "564b31ddfe41737f4ecdaad592e52b5cd5a7bbc76daf7e0c0420d83444d75467",
+          "bytes": 2512
+        },
+        ".walkcache/segments/index.json": {
+          "sha256": "50753c8c10d35506870c82822306bdd20c87b24eda062b1dd0ccbc97deeb07ed",
+          "bytes": 2217
+        },
+        ".walkcache/segments/login-v1/android-c415a62dae8b1346213ac1f92c5201d2a8c17e01d98c84e6ab979f4d785f3266.yaml": {
+          "sha256": "c415a62dae8b1346213ac1f92c5201d2a8c17e01d98c84e6ab979f4d785f3266",
+          "bytes": 473
+        },
+        ".walkcache/flows/checkout/android-e95532ce04a4e125d3bd56e1b9d5d367b31dd67eed4441c56271ca52f3c3d0a1.yaml": {
+          "sha256": "e95532ce04a4e125d3bd56e1b9d5d367b31dd67eed4441c56271ca52f3c3d0a1",
+          "bytes": 1025
+        }
+      },
+      "byteForByteUnchanged": true
+    }
+  }
 }

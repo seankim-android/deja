@@ -13,9 +13,31 @@ const state = {
   steps: 0,
   reusedSteps: 0,
   assertions: 0,
-  orderConfirmed: false,
+  assertionObservations: [],
+  finalProductAssertions: {},
 }
 let failed = false
+
+const visibleByScreen = {
+  login: {
+    screen_login: 'WalkCache Shop',
+    username_input: null,
+    password_input: null,
+    login_button: 'Sign in',
+  },
+  catalog: {
+    screen_catalog: 'Catalog',
+    add_to_cart: 'Add to cart',
+  },
+  cart: {
+    screen_cart: 'Your cart',
+    checkout_button: 'Checkout',
+  },
+  confirmation: {
+    order_confirmation: 'Order confirmed',
+    screen_confirmation: 'Order #WC-1001 · Mochi sticker pack',
+  },
+}
 
 function scalar(value) {
   const trimmed = value.trim()
@@ -57,6 +79,10 @@ function fail(message, diagnostic) {
   failed = true
 }
 
+function observation(value) {
+  console.log(`FIXTURE_OBSERVATION ${JSON.stringify(value)}`)
+}
+
 function executeAssert(lines) {
   state.assertions += 1
   if (lines[0] !== 'assertVisible:' && lines[0].startsWith('assertVisible:')) {
@@ -68,21 +94,28 @@ function executeAssert(lines) {
         : []
     const message = `Assert that "${expected}" is visible`
     if (!allowed.includes(expected)) return fail(message, `Assertion is false: "${expected}" is visible`)
-    return pass(message)
+    pass(message)
+    state.assertionObservations.push({ resourceId: null, text: expected })
+    observation({ kind: 'assertVisible', resourceId: null, text: expected })
+    return
   }
   const id = property(lines.slice(1), 'id')
-  const allowed = {
-    login: ['screen_login', 'username_input', 'password_input', 'login_button'],
-    catalog: ['screen_catalog', 'add_to_cart'],
-    cart: ['screen_cart', 'checkout_button'],
-    confirmation: ['order_confirmation', 'screen_confirmation'],
-  }[state.screen] ?? []
-  const message = `Assert that id: ${id} is visible`
-  if (!id || !allowed.includes(id)) {
-    return fail(message, `Assertion is false: id: ${id} is visible`)
+  const declaredText = property(lines.slice(1), 'text')
+  const expectedText = visibleByScreen[state.screen]?.[id]
+  const known = id && Object.hasOwn(visibleByScreen[state.screen] ?? {}, id)
+  const textMatches = declaredText === null || declaredText === expectedText
+  const message = known && !textMatches && declaredText !== null
+    ? `Assert that "${declaredText}" is visible`
+    : `Assert that id: ${id} is visible`
+  if (!known || !textMatches) {
+    return fail(message, `Assertion is false: ${message.slice('Assert that '.length)}`)
   }
-  if (id === 'screen_confirmation') state.orderConfirmed = true
-  return pass(message)
+  pass(`${message}${declaredText !== null ? `, text: ${JSON.stringify(declaredText)}` : ''}`)
+  state.assertionObservations.push({ resourceId: id, text: declaredText })
+  observation({ kind: 'assertVisible', resourceId: id, text: declaredText })
+  if (state.screen === 'confirmation' && declaredText === expectedText) {
+    state.finalProductAssertions[id] = true
+  }
 }
 
 function executeTap(lines) {
@@ -93,21 +126,29 @@ function executeTap(lines) {
   }
   if (state.screen === 'login' && (id === 'username_input' || id === 'password_input')) {
     state.focused = id
-    return pass(message)
+    pass(message)
+    observation({ kind: 'action', command: 'tapOn' })
+    return
   }
   if (state.screen === 'login' && id === 'login_button' &&
       state.usernameEntered && state.passwordEntered) {
     state.screen = 'catalog'
     state.focused = null
-    return pass(message)
+    pass(message)
+    observation({ kind: 'action', command: 'tapOn' })
+    return
   }
   if (state.screen === 'catalog' && id === 'add_to_cart') {
     state.screen = 'cart'
-    return pass(message)
+    pass(message)
+    observation({ kind: 'action', command: 'tapOn' })
+    return
   }
   if (state.screen === 'cart' && id === 'checkout_button') {
     state.screen = 'confirmation'
-    return pass(message)
+    pass(message)
+    observation({ kind: 'action', command: 'tapOn' })
+    return
   }
   return fail(message, `Element not found: Id matching regex: ${id}`)
 }
@@ -135,9 +176,9 @@ function executeFlow(path, depth) {
       state.focused = null
       state.usernameEntered = false
       state.passwordEntered = false
-      state.orderConfirmed = false
       state.clearStateLaunches += 1
       pass('Launch app "dev.walkcache.checkout" with clear state')
+      observation({ kind: 'launch', clearState: true })
     } else if (command === 'assertVisible:' || command.startsWith('assertVisible:')) {
       executeAssert(lines)
     } else if (command === 'tapOn:' || command.startsWith('tapOn:')) {
@@ -150,6 +191,7 @@ function executeFlow(path, depth) {
         if (state.focused === 'username_input') state.usernameEntered = true
         if (state.focused === 'password_input') state.passwordEntered = true
         pass(`Input text "${value}"`)
+        observation({ kind: 'action', command: 'inputText' })
       }
     } else if (command.startsWith('runFlow:')) {
       const reference = scalar(command.slice('runFlow:'.length))
@@ -166,6 +208,10 @@ console.log(`FIXTURE_SUMMARY ${JSON.stringify({
   steps: state.steps,
   reusedSteps: state.reusedSteps,
   assertions: state.assertions,
-  finalProductAssertionPassed: state.orderConfirmed && !failed,
+  assertionObservations: state.assertionObservations,
+  visibleResourceIds: Object.keys(visibleByScreen[state.screen] ?? {}),
+  finalProductAssertionPassed: state.screen === 'confirmation' && !failed &&
+    state.finalProductAssertions.order_confirmation === true &&
+    state.finalProductAssertions.screen_confirmation === true,
   screen: state.screen,
 })}`)

@@ -64,7 +64,10 @@ const continuationPath = `${evidenceDirectory}/continuation/checkout.yaml`
 const composedPath = `${evidenceDirectory}/composed/sign-in-and-check-out-mochi-sticker-pack/candidate.yaml`
 const contractPath = `${evidenceDirectory}/login-contract.json`
 const reference = `../../segments/login-v1/android-${loginSha256}.yaml`
-const composed = composeMaestroLoginFlow('dev.walkcache.checkout', reference, continuation)
+const composed = composeMaestroLoginFlow('dev.walkcache.checkout', reference, continuation, {
+  workspaceRoot: resolve(repo, evidenceDirectory),
+  flowDirectory: resolve(repo, dirname(composedPath)),
+})
 const contract = validateSubflowContract({
   schemaVersion: 1,
   segmentId: 'login-v1',
@@ -81,7 +84,10 @@ const contract = validateSubflowContract({
   outputs: [
     { name: 'authenticatedCatalog', kind: 'screen', resourceId: 'screen_catalog' },
   ],
-  preconditions: [{ kind: 'clean-app-launch' }],
+  preconditions: [
+    { kind: 'clean-app-launch' },
+    { kind: 'screen-visible', resourceId: 'screen_login' },
+  ],
   postconditions: [{ kind: 'screen-visible', resourceId: 'screen_catalog' }],
   stepCount: 11,
   assertionCount: 5,

@@ -18,10 +18,18 @@ export {
   countMaestroAssertions,
   countMaestroSteps,
   readMaestroContinuation,
+  validateMaestroFlowReference,
   type LoginCompositionResult,
+  type MaestroFlowContainment,
   type MaestroLoginComposerOptions,
   type SegmentVerificationResult,
 } from './subflow-composition.ts'
+
+export {
+  readCompositionRunnerTrace,
+  type CompositionRunnerObservation,
+  type CompositionRunnerTrace,
+} from './execution-observations.ts'
 
 export {
   androidMaestroAdapter,

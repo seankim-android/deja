@@ -1,23 +1,45 @@
 Launch app "dev.walkcache.checkout" with clear state... COMPLETED
-Assert that id: screen_login is visible... COMPLETED
+FIXTURE_OBSERVATION {"kind":"launch","clearState":true}
+Assert that id: screen_login is visible, text: "WalkCache Shop"... COMPLETED
+FIXTURE_OBSERVATION {"kind":"assertVisible","resourceId":"screen_login","text":"WalkCache Shop"}
 Assert that id: username_input is visible... COMPLETED
+FIXTURE_OBSERVATION {"kind":"assertVisible","resourceId":"username_input","text":null}
 Assert that id: password_input is visible... COMPLETED
-Assert that id: login_button is visible... COMPLETED
+FIXTURE_OBSERVATION {"kind":"assertVisible","resourceId":"password_input","text":null}
+Assert that id: login_button is visible, text: "Sign in"... COMPLETED
+FIXTURE_OBSERVATION {"kind":"assertVisible","resourceId":"login_button","text":"Sign in"}
 Tap on id: username_input... COMPLETED
+FIXTURE_OBSERVATION {"kind":"action","command":"tapOn"}
 Input text "qa@walkcache.dev"... COMPLETED
+FIXTURE_OBSERVATION {"kind":"action","command":"inputText"}
 Tap on id: password_input... COMPLETED
+FIXTURE_OBSERVATION {"kind":"action","command":"tapOn"}
 Input text "testing123"... COMPLETED
+FIXTURE_OBSERVATION {"kind":"action","command":"inputText"}
 Tap on id: login_button... COMPLETED
-Assert that id: screen_catalog is visible... COMPLETED
+FIXTURE_OBSERVATION {"kind":"action","command":"tapOn"}
+Assert that id: screen_catalog is visible, text: "Catalog"... COMPLETED
+FIXTURE_OBSERVATION {"kind":"assertVisible","resourceId":"screen_catalog","text":"Catalog"}
 Assert that "Mochi sticker pack" is visible... COMPLETED
+FIXTURE_OBSERVATION {"kind":"assertVisible","resourceId":null,"text":"Mochi sticker pack"}
 Assert that "$5.00 · 6 stickers" is visible... COMPLETED
-Assert that id: add_to_cart is visible... COMPLETED
+FIXTURE_OBSERVATION {"kind":"assertVisible","resourceId":null,"text":"$5.00 · 6 stickers"}
+Assert that id: add_to_cart is visible, text: "Add to cart"... COMPLETED
+FIXTURE_OBSERVATION {"kind":"assertVisible","resourceId":"add_to_cart","text":"Add to cart"}
 Tap on id: add_to_cart... COMPLETED
-Assert that id: screen_cart is visible... COMPLETED
+FIXTURE_OBSERVATION {"kind":"action","command":"tapOn"}
+Assert that id: screen_cart is visible, text: "Your cart"... COMPLETED
+FIXTURE_OBSERVATION {"kind":"assertVisible","resourceId":"screen_cart","text":"Your cart"}
 Assert that "1 × Mochi sticker pack" is visible... COMPLETED
+FIXTURE_OBSERVATION {"kind":"assertVisible","resourceId":null,"text":"1 × Mochi sticker pack"}
 Assert that "Total: $5.00" is visible... COMPLETED
-Assert that id: checkout_button is visible... COMPLETED
+FIXTURE_OBSERVATION {"kind":"assertVisible","resourceId":null,"text":"Total: $5.00"}
+Assert that id: checkout_button is visible, text: "Checkout"... COMPLETED
+FIXTURE_OBSERVATION {"kind":"assertVisible","resourceId":"checkout_button","text":"Checkout"}
 Tap on id: checkout_button... COMPLETED
-Assert that id: order_confirmation is visible... COMPLETED
-Assert that id: screen_confirmation is visible... COMPLETED
-FIXTURE_SUMMARY {"clearStateLaunches":1,"steps":22,"reusedSteps":11,"assertions":14,"finalProductAssertionPassed":true,"screen":"confirmation"}
+FIXTURE_OBSERVATION {"kind":"action","command":"tapOn"}
+Assert that id: order_confirmation is visible, text: "Order confirmed"... COMPLETED
+FIXTURE_OBSERVATION {"kind":"assertVisible","resourceId":"order_confirmation","text":"Order confirmed"}
+Assert that id: screen_confirmation is visible, text: "Order #WC-1001 · Mochi sticker pack"... COMPLETED
+FIXTURE_OBSERVATION {"kind":"assertVisible","resourceId":"screen_confirmation","text":"Order #WC-1001 · Mochi sticker pack"}
+FIXTURE_SUMMARY {"clearStateLaunches":1,"steps":22,"reusedSteps":11,"assertions":14,"assertionObservations":[{"resourceId":"screen_login","text":"WalkCache Shop"},{"resourceId":"username_input","text":null},{"resourceId":"password_input","text":null},{"resourceId":"login_button","text":"Sign in"},{"resourceId":"screen_catalog","text":"Catalog"},{"resourceId":null,"text":"Mochi sticker pack"},{"resourceId":null,"text":"$5.00 · 6 stickers"},{"resourceId":"add_to_cart","text":"Add to cart"},{"resourceId":"screen_cart","text":"Your cart"},{"resourceId":null,"text":"1 × Mochi sticker pack"},{"resourceId":null,"text":"Total: $5.00"},{"resourceId":"checkout_button","text":"Checkout"},{"resourceId":"order_confirmation","text":"Order confirmed"},{"resourceId":"screen_confirmation","text":"Order #WC-1001 · Mochi sticker pack"}],"visibleResourceIds":["order_confirmation","screen_confirmation"],"finalProductAssertionPassed":true,"screen":"confirmation"}

@@ -17,7 +17,8 @@ closed schema-1 `SubflowContract` validated by `packages/core/src/subflow.ts`:
   contract-metadata fields. The YAML retains only the already accepted WALK-020 test-fixture values,
   not credentials for a real account.
 - **Output:** `authenticatedCatalog`, a screen identified by `screen_catalog`.
-- **Precondition:** exactly one clean app launch. The segment itself owns `clearState: true`.
+- **Preconditions:** exactly one clean app launch, with `screen_login` observed before the first
+  action. The segment itself owns `clearState: true`.
 - **Postcondition:** an `assertVisible` for `screen_catalog`, also required by the declared output.
 - **Bounds and provenance:** 11 steps, 5 assertions, closed hashed source artifacts, and explicit
   `newDeviceRunRecorded: false`.
@@ -30,9 +31,13 @@ adapter/browser identity, verifies the current file checksum, and fails closed o
 It never performs semantic segment selection.
 
 `MaestroLoginComposer.verifyAndSaveSegment` calls `WalkRunner` first. Only a passing run whose YAML
-matches the app ID, clean launch, resource assertions, declared 11 steps and 5 assertions, and whose
-runner also reports 5 assertions can reach `persistVerified`. Failed execution, mismatched contracts,
-wrong identity, checksum changes, and missing YAML cannot become reusable success.
+matches the app ID, resource assertions, declared 11 steps and 5 assertions, and whose runner also
+reports 5 assertions can reach `persistVerified`. The runner must additionally emit bounded execution
+observations proving exactly one clean launch as the first product step, `screen_login` before the
+first action, and `screen_catalog` as the completed assertion boundary still visible at completion.
+A green process without those observations fails closed. Failed execution, mismatched contracts,
+wrong identity, checksum changes, missing YAML, and late or repeated clean launches cannot become
+reusable success.
 
 ## Composition without copied login steps
 
@@ -47,11 +52,13 @@ persisted: .walkcache/flows/<goal>/<platform>-<composed-sha256>.yaml
 reference: ../../segments/login-v1/android-<login-sha256>.yaml
 ```
 
-The composer proves candidate and final directory references match **before** verification. Nested
-subflows, a second launch, duplicated login controls, flow headers, and oversized/unbounded suffixes
-are rejected. `countFlowAssertions` now follows bounded `runFlow` references and detects reference
-cycles solely so reports count the complete expanded flow; existing flows without `runFlow` retain
-the same assertion behavior.
+The composer proves candidate and final directory references match **before** verification. It
+resolves the reference against the candidate directory and rejects absolute paths, normalized
+escapes, and targets outside the workspace; same-directory references such as `login.yaml` remain
+valid. Nested subflows, a second launch, duplicated login controls, flow headers, and
+oversized/unbounded suffixes are rejected. `countFlowAssertions` now follows bounded `runFlow`
+references and detects reference cycles solely so reports count the complete expanded flow;
+existing flows without `runFlow` retain the same assertion behavior.
 
 Curated artifacts:
 
@@ -73,7 +80,7 @@ WALK-018 used no explorer or model client for derivation, composition, verificat
 ## Clean-state proof and preservation
 
 [`walk018-verification.json`](../spikes/001-android-walkcache/evidence/walk018/walk018-verification.json)
-and its four raw deterministic runner logs record this independently runnable sequence in isolated
+and its six raw deterministic runner logs record this independently runnable sequence in isolated
 temporary storage:
 
 1. Seed the accepted prior `checkout` goal memory and flow bytes.
@@ -90,6 +97,19 @@ temporary storage:
    persisted. Login index/YAML, the previous accepted goal flow, and complete goal memory—including
    the newly composed last-known-good validation history—remain byte-for-byte unchanged. The original
    `checkout` goal still resolves independently as an exact usable hit.
+6. Mutate the final item assertion to `Order #WC-9999 · Wrong item`. The fixture enforces both the
+   declared ID and text, returns a product-assertion failure with
+   `finalProductAssertionPassed: false`, and performs no persistence; all four preserved snapshots
+   are byte-identical before and after.
+7. Append a second `clearState` launch after the catalog assertion while keeping declared counts
+   consistent. The runner exits successfully after two clean launches and ends back on `login`, but
+   the observation gate rejects the segment and writes no reusable storage. The same four snapshots
+   again remain byte-identical.
+
+The fixture does not infer success from `screen_confirmation` alone. Structured `assertVisible`
+steps match their declared text against actual visible fixture text, and the final success summary
+requires both confirmation assertions. The two retained final assertions in the verification report
+are selected from the emitted runner observations on both the clean composition and exact replay.
 
 A separate integration test injects a filesystem metadata-replacement failure **after** a complete
 passing verification. It proves the same login bytes, previous flow, and previous memory remain
@@ -98,8 +118,10 @@ failures preserve an earlier verified segment byte-for-byte and orphan YAML is n
 
 Evidence logs: [login](../spikes/001-android-walkcache/evidence/walk018/walk018-login-verification.log),
 [clean composed run](../spikes/001-android-walkcache/evidence/walk018/walk018-clean-state-composition.log),
-[stored exact replay](../spikes/001-android-walkcache/evidence/walk018/walk018-exact-replay.log), and
-[failed recomposition](../spikes/001-android-walkcache/evidence/walk018/walk018-failed-composition.log).
+[stored exact replay](../spikes/001-android-walkcache/evidence/walk018/walk018-exact-replay.log),
+[failed recomposition](../spikes/001-android-walkcache/evidence/walk018/walk018-failed-composition.log),
+[wrong final text](../spikes/001-android-walkcache/evidence/walk018/walk018-wrong-final-text.log), and
+[late second clean launch](../spikes/001-android-walkcache/evidence/walk018/walk018-late-second-clear-launch.log).
 
 ## Exact provenance and reproduction
 
