@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "ticket": "WALK-018",
-  "generatedAt": "2026-11-22T21:53:14.600Z",
+  "generatedAt": "2026-11-22T21:59:32.015Z",
   "newDeviceRunRecorded": false,
   "provenance": {
     "kind": "curated-evidence",
@@ -18,7 +18,7 @@
     "storedFlowPath": ".walkcache/segments/login-v1/android-c415a62dae8b1346213ac1f92c5201d2a8c17e01d98c84e6ab979f4d785f3266.yaml",
     "flowSha256": "c415a62dae8b1346213ac1f92c5201d2a8c17e01d98c84e6ab979f4d785f3266",
     "independentlyVerified": true,
-    "verificationEndedAt": "2026-11-22T21:53:14.545Z",
+    "verificationEndedAt": "2026-11-22T21:59:31.958Z",
     "cleanState": {
       "clearStateLaunches": 1,
       "steps": 11,
@@ -93,7 +93,7 @@
     "goal": "Sign in and check out Mochi sticker pack",
     "candidateSha256": "59778cf6a4dd43d2cac304e2af0145fd6ffde695031e8154221832f5295908ab",
     "storedFlowSha256": "59778cf6a4dd43d2cac304e2af0145fd6ffde695031e8154221832f5295908ab",
-    "verificationEndedAt": "2026-11-22T21:53:14.557Z",
+    "verificationEndedAt": "2026-11-22T21:59:31.970Z",
     "steps": {
       "reusedSteps": 11,
       "newlyExploredSteps": 11,
@@ -190,6 +190,261 @@
       }
     ]
   },
+  "canonicalOutputContainment": {
+    "legitimateNewNestedOutput": {
+      "candidatePath": ".walkcache/composed/sign-in-and-check-out-mochi-sticker-pack/candidate.yaml",
+      "candidateBytes": 701,
+      "candidateSha256": "59778cf6a4dd43d2cac304e2af0145fd6ffde695031e8154221832f5295908ab"
+    },
+    "runnerCallsDuringAdversarialCases": 0,
+    "cases": [
+      {
+        "case": "goal-directory-symlink",
+        "rejectedBeforeRunner": true,
+        "error": "Composition output path contains a symbolic link",
+        "externalBefore": {
+          "candidate.yaml": {
+            "sha256": "15e74983ad4e975d79b682a10279d8799d221ff9cf36b7c6e245167b75856c16",
+            "bytes": 23
+          }
+        },
+        "externalAfter": {
+          "candidate.yaml": {
+            "sha256": "15e74983ad4e975d79b682a10279d8799d221ff9cf36b7c6e245167b75856c16",
+            "bytes": 23
+          }
+        },
+        "externalUnchanged": true,
+        "storageBefore": {
+          ".walkcache/memory/walks.json": {
+            "sha256": "dd399fd2334d7dfa6b604be0cdd2261a250f17a08552c0e28b0151e6b088b7e3",
+            "bytes": 2512
+          },
+          ".walkcache/segments/index.json": {
+            "sha256": "1d4bf1b3dcbc30df8ee860dea52978355dd3bb68efad7a354f79b3d09f065658",
+            "bytes": 2217
+          },
+          ".walkcache/segments/login-v1/android-c415a62dae8b1346213ac1f92c5201d2a8c17e01d98c84e6ab979f4d785f3266.yaml": {
+            "sha256": "c415a62dae8b1346213ac1f92c5201d2a8c17e01d98c84e6ab979f4d785f3266",
+            "bytes": 473
+          },
+          ".walkcache/flows/checkout/android-e95532ce04a4e125d3bd56e1b9d5d367b31dd67eed4441c56271ca52f3c3d0a1.yaml": {
+            "sha256": "e95532ce04a4e125d3bd56e1b9d5d367b31dd67eed4441c56271ca52f3c3d0a1",
+            "bytes": 1025
+          }
+        },
+        "storageAfter": {
+          ".walkcache/memory/walks.json": {
+            "sha256": "dd399fd2334d7dfa6b604be0cdd2261a250f17a08552c0e28b0151e6b088b7e3",
+            "bytes": 2512
+          },
+          ".walkcache/segments/index.json": {
+            "sha256": "1d4bf1b3dcbc30df8ee860dea52978355dd3bb68efad7a354f79b3d09f065658",
+            "bytes": 2217
+          },
+          ".walkcache/segments/login-v1/android-c415a62dae8b1346213ac1f92c5201d2a8c17e01d98c84e6ab979f4d785f3266.yaml": {
+            "sha256": "c415a62dae8b1346213ac1f92c5201d2a8c17e01d98c84e6ab979f4d785f3266",
+            "bytes": 473
+          },
+          ".walkcache/flows/checkout/android-e95532ce04a4e125d3bd56e1b9d5d367b31dd67eed4441c56271ca52f3c3d0a1.yaml": {
+            "sha256": "e95532ce04a4e125d3bd56e1b9d5d367b31dd67eed4441c56271ca52f3c3d0a1",
+            "bytes": 1025
+          }
+        },
+        "storageUnchanged": true
+      },
+      {
+        "case": "composed-root-symlink",
+        "rejectedBeforeRunner": true,
+        "error": "Composition output directory escapes the canonical workspace",
+        "externalBefore": {
+          "sign-in-and-check-out-mochi-sticker-pack/candidate.yaml": {
+            "sha256": "3ed2becd50eb90b8396a3441717e1d142cce9bfdffdfa98fd561dbd7b7aee014",
+            "bytes": 23
+          }
+        },
+        "externalAfter": {
+          "sign-in-and-check-out-mochi-sticker-pack/candidate.yaml": {
+            "sha256": "3ed2becd50eb90b8396a3441717e1d142cce9bfdffdfa98fd561dbd7b7aee014",
+            "bytes": 23
+          }
+        },
+        "externalUnchanged": true,
+        "storageBefore": {
+          ".walkcache/memory/walks.json": {
+            "sha256": "dd399fd2334d7dfa6b604be0cdd2261a250f17a08552c0e28b0151e6b088b7e3",
+            "bytes": 2512
+          },
+          ".walkcache/segments/index.json": {
+            "sha256": "1d4bf1b3dcbc30df8ee860dea52978355dd3bb68efad7a354f79b3d09f065658",
+            "bytes": 2217
+          },
+          ".walkcache/segments/login-v1/android-c415a62dae8b1346213ac1f92c5201d2a8c17e01d98c84e6ab979f4d785f3266.yaml": {
+            "sha256": "c415a62dae8b1346213ac1f92c5201d2a8c17e01d98c84e6ab979f4d785f3266",
+            "bytes": 473
+          },
+          ".walkcache/flows/checkout/android-e95532ce04a4e125d3bd56e1b9d5d367b31dd67eed4441c56271ca52f3c3d0a1.yaml": {
+            "sha256": "e95532ce04a4e125d3bd56e1b9d5d367b31dd67eed4441c56271ca52f3c3d0a1",
+            "bytes": 1025
+          }
+        },
+        "storageAfter": {
+          ".walkcache/memory/walks.json": {
+            "sha256": "dd399fd2334d7dfa6b604be0cdd2261a250f17a08552c0e28b0151e6b088b7e3",
+            "bytes": 2512
+          },
+          ".walkcache/segments/index.json": {
+            "sha256": "1d4bf1b3dcbc30df8ee860dea52978355dd3bb68efad7a354f79b3d09f065658",
+            "bytes": 2217
+          },
+          ".walkcache/segments/login-v1/android-c415a62dae8b1346213ac1f92c5201d2a8c17e01d98c84e6ab979f4d785f3266.yaml": {
+            "sha256": "c415a62dae8b1346213ac1f92c5201d2a8c17e01d98c84e6ab979f4d785f3266",
+            "bytes": 473
+          },
+          ".walkcache/flows/checkout/android-e95532ce04a4e125d3bd56e1b9d5d367b31dd67eed4441c56271ca52f3c3d0a1.yaml": {
+            "sha256": "e95532ce04a4e125d3bd56e1b9d5d367b31dd67eed4441c56271ca52f3c3d0a1",
+            "bytes": 1025
+          }
+        },
+        "storageUnchanged": true
+      },
+      {
+        "case": "dangling-goal-directory-symlink",
+        "rejectedBeforeRunner": true,
+        "error": "Composition output path contains a symbolic link",
+        "externalBefore": null,
+        "externalAfter": null,
+        "externalUnchanged": true,
+        "storageBefore": {
+          ".walkcache/memory/walks.json": {
+            "sha256": "dd399fd2334d7dfa6b604be0cdd2261a250f17a08552c0e28b0151e6b088b7e3",
+            "bytes": 2512
+          },
+          ".walkcache/segments/index.json": {
+            "sha256": "1d4bf1b3dcbc30df8ee860dea52978355dd3bb68efad7a354f79b3d09f065658",
+            "bytes": 2217
+          },
+          ".walkcache/segments/login-v1/android-c415a62dae8b1346213ac1f92c5201d2a8c17e01d98c84e6ab979f4d785f3266.yaml": {
+            "sha256": "c415a62dae8b1346213ac1f92c5201d2a8c17e01d98c84e6ab979f4d785f3266",
+            "bytes": 473
+          },
+          ".walkcache/flows/checkout/android-e95532ce04a4e125d3bd56e1b9d5d367b31dd67eed4441c56271ca52f3c3d0a1.yaml": {
+            "sha256": "e95532ce04a4e125d3bd56e1b9d5d367b31dd67eed4441c56271ca52f3c3d0a1",
+            "bytes": 1025
+          }
+        },
+        "storageAfter": {
+          ".walkcache/memory/walks.json": {
+            "sha256": "dd399fd2334d7dfa6b604be0cdd2261a250f17a08552c0e28b0151e6b088b7e3",
+            "bytes": 2512
+          },
+          ".walkcache/segments/index.json": {
+            "sha256": "1d4bf1b3dcbc30df8ee860dea52978355dd3bb68efad7a354f79b3d09f065658",
+            "bytes": 2217
+          },
+          ".walkcache/segments/login-v1/android-c415a62dae8b1346213ac1f92c5201d2a8c17e01d98c84e6ab979f4d785f3266.yaml": {
+            "sha256": "c415a62dae8b1346213ac1f92c5201d2a8c17e01d98c84e6ab979f4d785f3266",
+            "bytes": 473
+          },
+          ".walkcache/flows/checkout/android-e95532ce04a4e125d3bd56e1b9d5d367b31dd67eed4441c56271ca52f3c3d0a1.yaml": {
+            "sha256": "e95532ce04a4e125d3bd56e1b9d5d367b31dd67eed4441c56271ca52f3c3d0a1",
+            "bytes": 1025
+          }
+        },
+        "storageUnchanged": true
+      },
+      {
+        "case": "non-directory-goal-traversal",
+        "rejectedBeforeRunner": true,
+        "error": "Composition output path must traverse directories",
+        "externalBefore": null,
+        "externalAfter": null,
+        "externalUnchanged": true,
+        "storageBefore": {
+          ".walkcache/memory/walks.json": {
+            "sha256": "dd399fd2334d7dfa6b604be0cdd2261a250f17a08552c0e28b0151e6b088b7e3",
+            "bytes": 2512
+          },
+          ".walkcache/segments/index.json": {
+            "sha256": "1d4bf1b3dcbc30df8ee860dea52978355dd3bb68efad7a354f79b3d09f065658",
+            "bytes": 2217
+          },
+          ".walkcache/segments/login-v1/android-c415a62dae8b1346213ac1f92c5201d2a8c17e01d98c84e6ab979f4d785f3266.yaml": {
+            "sha256": "c415a62dae8b1346213ac1f92c5201d2a8c17e01d98c84e6ab979f4d785f3266",
+            "bytes": 473
+          },
+          ".walkcache/flows/checkout/android-e95532ce04a4e125d3bd56e1b9d5d367b31dd67eed4441c56271ca52f3c3d0a1.yaml": {
+            "sha256": "e95532ce04a4e125d3bd56e1b9d5d367b31dd67eed4441c56271ca52f3c3d0a1",
+            "bytes": 1025
+          }
+        },
+        "storageAfter": {
+          ".walkcache/memory/walks.json": {
+            "sha256": "dd399fd2334d7dfa6b604be0cdd2261a250f17a08552c0e28b0151e6b088b7e3",
+            "bytes": 2512
+          },
+          ".walkcache/segments/index.json": {
+            "sha256": "1d4bf1b3dcbc30df8ee860dea52978355dd3bb68efad7a354f79b3d09f065658",
+            "bytes": 2217
+          },
+          ".walkcache/segments/login-v1/android-c415a62dae8b1346213ac1f92c5201d2a8c17e01d98c84e6ab979f4d785f3266.yaml": {
+            "sha256": "c415a62dae8b1346213ac1f92c5201d2a8c17e01d98c84e6ab979f4d785f3266",
+            "bytes": 473
+          },
+          ".walkcache/flows/checkout/android-e95532ce04a4e125d3bd56e1b9d5d367b31dd67eed4441c56271ca52f3c3d0a1.yaml": {
+            "sha256": "e95532ce04a4e125d3bd56e1b9d5d367b31dd67eed4441c56271ca52f3c3d0a1",
+            "bytes": 1025
+          }
+        },
+        "storageUnchanged": true
+      },
+      {
+        "case": "non-directory-composed-root-traversal",
+        "rejectedBeforeRunner": true,
+        "error": "Composition output path must traverse directories",
+        "externalBefore": null,
+        "externalAfter": null,
+        "externalUnchanged": true,
+        "storageBefore": {
+          ".walkcache/memory/walks.json": {
+            "sha256": "dd399fd2334d7dfa6b604be0cdd2261a250f17a08552c0e28b0151e6b088b7e3",
+            "bytes": 2512
+          },
+          ".walkcache/segments/index.json": {
+            "sha256": "1d4bf1b3dcbc30df8ee860dea52978355dd3bb68efad7a354f79b3d09f065658",
+            "bytes": 2217
+          },
+          ".walkcache/segments/login-v1/android-c415a62dae8b1346213ac1f92c5201d2a8c17e01d98c84e6ab979f4d785f3266.yaml": {
+            "sha256": "c415a62dae8b1346213ac1f92c5201d2a8c17e01d98c84e6ab979f4d785f3266",
+            "bytes": 473
+          },
+          ".walkcache/flows/checkout/android-e95532ce04a4e125d3bd56e1b9d5d367b31dd67eed4441c56271ca52f3c3d0a1.yaml": {
+            "sha256": "e95532ce04a4e125d3bd56e1b9d5d367b31dd67eed4441c56271ca52f3c3d0a1",
+            "bytes": 1025
+          }
+        },
+        "storageAfter": {
+          ".walkcache/memory/walks.json": {
+            "sha256": "dd399fd2334d7dfa6b604be0cdd2261a250f17a08552c0e28b0151e6b088b7e3",
+            "bytes": 2512
+          },
+          ".walkcache/segments/index.json": {
+            "sha256": "1d4bf1b3dcbc30df8ee860dea52978355dd3bb68efad7a354f79b3d09f065658",
+            "bytes": 2217
+          },
+          ".walkcache/segments/login-v1/android-c415a62dae8b1346213ac1f92c5201d2a8c17e01d98c84e6ab979f4d785f3266.yaml": {
+            "sha256": "c415a62dae8b1346213ac1f92c5201d2a8c17e01d98c84e6ab979f4d785f3266",
+            "bytes": 473
+          },
+          ".walkcache/flows/checkout/android-e95532ce04a4e125d3bd56e1b9d5d367b31dd67eed4441c56271ca52f3c3d0a1.yaml": {
+            "sha256": "e95532ce04a4e125d3bd56e1b9d5d367b31dd67eed4441c56271ca52f3c3d0a1",
+            "bytes": 1025
+          }
+        },
+        "storageUnchanged": true
+      }
+    ]
+  },
   "exactCacheReplay": {
     "cacheStatus": "hit",
     "outcome": "passed",
@@ -282,11 +537,11 @@
     "failureCategory": "selector",
     "before": {
       ".walkcache/memory/walks.json": {
-        "sha256": "bcd8271a38f8781f9a138e42116c1ca681fa6e1ab30bb34e670ed298014b1708",
+        "sha256": "dd399fd2334d7dfa6b604be0cdd2261a250f17a08552c0e28b0151e6b088b7e3",
         "bytes": 2512
       },
       ".walkcache/segments/index.json": {
-        "sha256": "534717739aff19243295c23f9e6c008527bfb45e83026772ed7cc3560b2a5748",
+        "sha256": "1d4bf1b3dcbc30df8ee860dea52978355dd3bb68efad7a354f79b3d09f065658",
         "bytes": 2217
       },
       ".walkcache/segments/login-v1/android-c415a62dae8b1346213ac1f92c5201d2a8c17e01d98c84e6ab979f4d785f3266.yaml": {
@@ -300,11 +555,11 @@
     },
     "after": {
       ".walkcache/memory/walks.json": {
-        "sha256": "bcd8271a38f8781f9a138e42116c1ca681fa6e1ab30bb34e670ed298014b1708",
+        "sha256": "dd399fd2334d7dfa6b604be0cdd2261a250f17a08552c0e28b0151e6b088b7e3",
         "bytes": 2512
       },
       ".walkcache/segments/index.json": {
-        "sha256": "534717739aff19243295c23f9e6c008527bfb45e83026772ed7cc3560b2a5748",
+        "sha256": "1d4bf1b3dcbc30df8ee860dea52978355dd3bb68efad7a354f79b3d09f065658",
         "bytes": 2217
       },
       ".walkcache/segments/login-v1/android-c415a62dae8b1346213ac1f92c5201d2a8c17e01d98c84e6ab979f4d785f3266.yaml": {
@@ -317,9 +572,9 @@
       }
     },
     "byteForByteUnchanged": true,
-    "segmentIndexSha256": "534717739aff19243295c23f9e6c008527bfb45e83026772ed7cc3560b2a5748",
+    "segmentIndexSha256": "1d4bf1b3dcbc30df8ee860dea52978355dd3bb68efad7a354f79b3d09f065658",
     "segmentFlowSha256": "c415a62dae8b1346213ac1f92c5201d2a8c17e01d98c84e6ab979f4d785f3266",
-    "lastKnownGoodMemorySha256": "bcd8271a38f8781f9a138e42116c1ca681fa6e1ab30bb34e670ed298014b1708",
+    "lastKnownGoodMemorySha256": "dd399fd2334d7dfa6b604be0cdd2261a250f17a08552c0e28b0151e6b088b7e3",
     "previousGoalStillUsable": true,
     "finalProductAssertionsUnchanged": true,
     "adversarialRegressions": {
@@ -329,11 +584,11 @@
         "failureCategory": "product_assertion",
         "before": {
           ".walkcache/memory/walks.json": {
-            "sha256": "bcd8271a38f8781f9a138e42116c1ca681fa6e1ab30bb34e670ed298014b1708",
+            "sha256": "dd399fd2334d7dfa6b604be0cdd2261a250f17a08552c0e28b0151e6b088b7e3",
             "bytes": 2512
           },
           ".walkcache/segments/index.json": {
-            "sha256": "534717739aff19243295c23f9e6c008527bfb45e83026772ed7cc3560b2a5748",
+            "sha256": "1d4bf1b3dcbc30df8ee860dea52978355dd3bb68efad7a354f79b3d09f065658",
             "bytes": 2217
           },
           ".walkcache/segments/login-v1/android-c415a62dae8b1346213ac1f92c5201d2a8c17e01d98c84e6ab979f4d785f3266.yaml": {
@@ -347,11 +602,11 @@
         },
         "after": {
           ".walkcache/memory/walks.json": {
-            "sha256": "bcd8271a38f8781f9a138e42116c1ca681fa6e1ab30bb34e670ed298014b1708",
+            "sha256": "dd399fd2334d7dfa6b604be0cdd2261a250f17a08552c0e28b0151e6b088b7e3",
             "bytes": 2512
           },
           ".walkcache/segments/index.json": {
-            "sha256": "534717739aff19243295c23f9e6c008527bfb45e83026772ed7cc3560b2a5748",
+            "sha256": "1d4bf1b3dcbc30df8ee860dea52978355dd3bb68efad7a354f79b3d09f065658",
             "bytes": 2217
           },
           ".walkcache/segments/login-v1/android-c415a62dae8b1346213ac1f92c5201d2a8c17e01d98c84e6ab979f4d785f3266.yaml": {
@@ -378,11 +633,11 @@
         ],
         "before": {
           ".walkcache/memory/walks.json": {
-            "sha256": "bcd8271a38f8781f9a138e42116c1ca681fa6e1ab30bb34e670ed298014b1708",
+            "sha256": "dd399fd2334d7dfa6b604be0cdd2261a250f17a08552c0e28b0151e6b088b7e3",
             "bytes": 2512
           },
           ".walkcache/segments/index.json": {
-            "sha256": "534717739aff19243295c23f9e6c008527bfb45e83026772ed7cc3560b2a5748",
+            "sha256": "1d4bf1b3dcbc30df8ee860dea52978355dd3bb68efad7a354f79b3d09f065658",
             "bytes": 2217
           },
           ".walkcache/segments/login-v1/android-c415a62dae8b1346213ac1f92c5201d2a8c17e01d98c84e6ab979f4d785f3266.yaml": {
@@ -396,11 +651,11 @@
         },
         "after": {
           ".walkcache/memory/walks.json": {
-            "sha256": "bcd8271a38f8781f9a138e42116c1ca681fa6e1ab30bb34e670ed298014b1708",
+            "sha256": "dd399fd2334d7dfa6b604be0cdd2261a250f17a08552c0e28b0151e6b088b7e3",
             "bytes": 2512
           },
           ".walkcache/segments/index.json": {
-            "sha256": "534717739aff19243295c23f9e6c008527bfb45e83026772ed7cc3560b2a5748",
+            "sha256": "1d4bf1b3dcbc30df8ee860dea52978355dd3bb68efad7a354f79b3d09f065658",
             "bytes": 2217
           },
           ".walkcache/segments/login-v1/android-c415a62dae8b1346213ac1f92c5201d2a8c17e01d98c84e6ab979f4d785f3266.yaml": {
@@ -422,6 +677,7 @@
     "exactReplay": "spikes/001-android-walkcache/evidence/walk018/walk018-exact-replay.log",
     "failedComposition": "spikes/001-android-walkcache/evidence/walk018/walk018-failed-composition.log",
     "wrongFinalText": "spikes/001-android-walkcache/evidence/walk018/walk018-wrong-final-text.log",
-    "lateSecondClearLaunch": "spikes/001-android-walkcache/evidence/walk018/walk018-late-second-clear-launch.log"
+    "lateSecondClearLaunch": "spikes/001-android-walkcache/evidence/walk018/walk018-late-second-clear-launch.log",
+    "canonicalOutputContainment": "spikes/001-android-walkcache/evidence/walk018/walk018-canonical-output-containment.log"
   }
 }

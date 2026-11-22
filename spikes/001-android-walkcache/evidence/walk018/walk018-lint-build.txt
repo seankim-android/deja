@@ -1,6 +1,6 @@
 $ oxlint
 Found 0 warnings and 0 errors.
-Finished in 28ms on 86 files with 116 rules using 10 threads.
+Finished in 45ms on 86 files with 116 rules using 10 threads.
 $ tsc -b && vite build
 vite v8.3.8 building client environment for production...
 transforming...

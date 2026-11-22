@@ -56,7 +56,11 @@ postcondition; a green process without a valid trace is rejected. `compose` read
 checksum-verified segment, emits one workspace-contained relative `runFlow` reference plus new
 suffix steps, executes the complete clean-state candidate with all expanded assertions and the same
 reused-boundary checks, and only then calls the ordinary `WalkStore` verified-persistence API.
-Failed execution or observation validation performs no goal write.
+Before any output mutation, canonical workspace and nearest-existing-ancestor checks reject escaping
+or dangling symlinks, non-directory traversal, and non-regular existing candidates; the destination
+is rechecked after `mkdir`, and temporary creation is exclusive. Legitimate new nested output remains
+supported. Failed execution, observation validation, or canonical output preflight performs no goal
+write and cannot overwrite an external candidate.
 
 `countFlowAssertions` follows relative `runFlow` references for complete accounting and returns `null`
 on unreadable, absolute, malformed, or cyclic references. The curated WALK-018 candidate/final flow

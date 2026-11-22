@@ -280,7 +280,7 @@ describe('bounded verified login composition', () => {
     }
   })
 
-  test('executable clean-state, exact-cache, and byte-preservation evidence matches curated YAML', async () => {
+  test('executable clean-state, exact-cache, canonical containment, and preservation evidence matches curated YAML', async () => {
     const { report, logs } = await runWalk018Verification()
     expect(report.newDeviceRunRecorded).toBe(false)
     expect(report.provenance).toMatchObject({
@@ -311,6 +311,27 @@ describe('bounded verified login composition', () => {
       cacheStatus: 'hit', outcome: 'passed', modelCalls: 0, explorerConstructions: 0, assertions: 14,
       cleanState: { clearStateLaunches: 1, finalProductAssertionPassed: true },
     })
+    expect(report.canonicalOutputContainment).toMatchObject({
+      legitimateNewNestedOutput: {
+        candidateBytes: 701,
+        candidateSha256: '59778cf6a4dd43d2cac304e2af0145fd6ffde695031e8154221832f5295908ab',
+      },
+      runnerCallsDuringAdversarialCases: 0,
+    })
+    expect(report.canonicalOutputContainment.cases.map(entry => entry.case)).toEqual([
+      'goal-directory-symlink',
+      'composed-root-symlink',
+      'dangling-goal-directory-symlink',
+      'non-directory-goal-traversal',
+      'non-directory-composed-root-traversal',
+    ])
+    for (const entry of report.canonicalOutputContainment.cases) {
+      expect(entry).toMatchObject({
+        rejectedBeforeRunner: true, externalUnchanged: true, storageUnchanged: true,
+      })
+      expect(entry.externalAfter).toEqual(entry.externalBefore)
+      expect(entry.storageAfter).toEqual(entry.storageBefore)
+    }
     expect(report.failedCompositionPreservation).toMatchObject({
       status: 'rejected', failureCategory: 'selector', byteForByteUnchanged: true,
       previousGoalStillUsable: true, finalProductAssertionsUnchanged: true,
@@ -348,5 +369,11 @@ describe('bounded verified login composition', () => {
     expect(logs['walk018-wrong-final-text.log']).toContain('"finalProductAssertionPassed":false')
     expect(logs['walk018-late-second-clear-launch.log']).toContain('"clearStateLaunches":2')
     expect(logs['walk018-late-second-clear-launch.log']).toContain('"screen":"login"')
+    const canonicalLog = logs['walk018-canonical-output-containment.log']
+    expect(canonicalLog.split('\n').filter(line => line.startsWith('CANONICAL_OUTPUT_CASE '))).toHaveLength(5)
+    expect(canonicalLog).toContain('"case":"goal-directory-symlink"')
+    expect(canonicalLog).toContain('15e74983ad4e975d79b682a10279d8799d221ff9cf36b7c6e245167b75856c16')
+    expect(canonicalLog).toContain('"case":"composed-root-symlink"')
+    expect(canonicalLog).toContain('3ed2becd50eb90b8396a3441717e1d142cce9bfdffdfa98fd561dbd7b7aee014')
   })
 })

@@ -60,6 +60,13 @@ oversized/unbounded suffixes are rejected. `countFlowAssertions` now follows bou
 references and detects reference cycles solely so reports count the complete expanded flow;
 existing flows without `runFlow` retain the same assertion behavior.
 
+Lexical containment is not the output-write guard. Before any `mkdir`, temporary-file write, or
+rename, the composer resolves the canonical workspace and validates the destination's nearest
+existing ancestor. It rechecks the canonical destination after directory creation, rejects direct
+symlinks, dangling links, escaping ancestors, existing non-regular candidates, and non-directory
+traversal, and creates its temporary file exclusively. Thus legitimate new nested directories work
+without following a preexisting goal-directory or composed-root link to an external candidate.
+
 Curated artifacts:
 
 - [Independently reusable login YAML](../spikes/001-android-walkcache/evidence/walk018/segments/login-v1/android-c415a62dae8b1346213ac1f92c5201d2a8c17e01d98c84e6ab979f4d785f3266.yaml), SHA-256 `c415a62dae8b1346213ac1f92c5201d2a8c17e01d98c84e6ab979f4d785f3266`;
@@ -80,7 +87,8 @@ WALK-018 used no explorer or model client for derivation, composition, verificat
 ## Clean-state proof and preservation
 
 [`walk018-verification.json`](../spikes/001-android-walkcache/evidence/walk018/walk018-verification.json)
-and its six raw deterministic runner logs record this independently runnable sequence in isolated
+and its six raw deterministic runner logs plus one canonical-output attack log record this
+independently runnable sequence in isolated
 temporary storage:
 
 1. Seed the accepted prior `checkout` goal memory and flow bytes.
@@ -106,6 +114,15 @@ temporary storage:
    the observation gate rejects the segment and writes no reusable storage. The same four snapshots
    again remain byte-identical.
 
+8. Replace the goal output directory with a symlink to an external directory containing a sentinel
+   `candidate.yaml`, then repeat with the composed root itself linked externally. Also test a
+   dangling goal-directory link, a regular file at the goal directory, and a regular file at the
+   composed root. All five cases reject during canonical output preflight with **zero runner calls**.
+   External trees remain exactly unchanged (including both sentinel hashes), the dangling target
+   remains absent, and goal memory, previous goal flow, segment index, and segment YAML remain
+   byte-for-byte unchanged. The initial accepted composition separately proves legitimate creation
+   of the previously absent nested output directory.
+
 The fixture does not infer success from `screen_confirmation` alone. Structured `assertVisible`
 steps match their declared text against actual visible fixture text, and the final success summary
 requires both confirmation assertions. The two retained final assertions in the verification report
@@ -121,7 +138,8 @@ Evidence logs: [login](../spikes/001-android-walkcache/evidence/walk018/walk018-
 [stored exact replay](../spikes/001-android-walkcache/evidence/walk018/walk018-exact-replay.log),
 [failed recomposition](../spikes/001-android-walkcache/evidence/walk018/walk018-failed-composition.log),
 [wrong final text](../spikes/001-android-walkcache/evidence/walk018/walk018-wrong-final-text.log), and
-[late second clean launch](../spikes/001-android-walkcache/evidence/walk018/walk018-late-second-clear-launch.log).
+[late second clean launch](../spikes/001-android-walkcache/evidence/walk018/walk018-late-second-clear-launch.log), and
+[canonical output containment](../spikes/001-android-walkcache/evidence/walk018/walk018-canonical-output-containment.log).
 
 ## Exact provenance and reproduction
 
@@ -149,9 +167,10 @@ bun test packages/core/test/subflow.test.ts \
 ```
 
 The verification `--check` performs fresh process execution and byte-preservation checks in temporary
-storage. Only wall-clock validation timestamps and hashes derived from those timestamps are excluded
-from cross-run report comparison; flow hashes, raw logs, identity, counters, final assertions, exact
-cache outcome, and every preservation decision must match curated evidence.
+storage. Wall-clock validation timestamps and storage snapshots/hashes derived from them are
+compared for equality within each fresh run, not across runs; flow hashes, deterministic raw logs,
+identity, counters, final assertions, exact cache outcome, and every preservation decision must
+match curated evidence.
 
 ## Acceptance limits
 
@@ -161,4 +180,6 @@ Maestro on a device currently supports this app build. WALK-017 remains diagnost
 used to authorize storage. There is no new real-device run, performance claim, new model exploration,
 or generalized semantic correctness claim. Only the shown Android `maestro/v1` clean-launch login and
 checkout suffix are demonstrated; Web/iOS composition and automatic recovery beyond existing cache
-behavior are not claimed.
+behavior are not claimed. Canonical output tests cover preexisting filesystem links and traversal;
+they do not claim protection from a concurrent privileged attacker replacing path components between
+preflight and rename.

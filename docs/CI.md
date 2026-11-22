@@ -22,7 +22,8 @@ graphs, and explicit login-subflow composition/preservation. The 25 route-graph 
 schema/failure fixtures and byte-exact re-derivation from curated WALK-020 evidence. WALK-018 tests
 add closed contracts, segment-store failures, reference containment, observation-gated launch and
 screen boundaries, complete clean-state `runFlow` execution, stored exact replay, wrong-text and
-late-launch rejection, and runner/filesystem failure preservation. Tests use fake process fixtures where appropriate
+late-launch rejection, canonical output ancestor/symlink/non-directory attacks with external-file
+preservation, and runner/filesystem failure preservation. Tests use fake process fixtures where appropriate
 and do not assert a real device result; the WALK-017 graph and WALK-018 split are derived from prior
 curated evidence, not a CI device run. The independently runnable WALK-018 deriver/verifier commands
 are documented in [`SUBFLOW_COMPOSITION.md`](SUBFLOW_COMPOSITION.md).

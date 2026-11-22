@@ -160,7 +160,10 @@ the stored segment with `runFlow`; it does not copy login YAML or invoke route p
 segment selection, an explorer, or a model.
 
 The candidate and final goal-flow directories are peers, so their relative segment reference is
-proved identical and workspace-contained before execution. The complete expanded candidate passes
+proved identical and workspace-contained before execution. Canonical workspace and nearest-existing
+output-ancestor validation runs before any directory/file mutation and again after `mkdir`; symlink,
+dangling-link, non-directory, and non-regular-candidate attacks fail before runner invocation without
+touching external files. The complete expanded candidate passes
 `WalkRunner` from clean state with every reused/new assertion before
 `WalkStore.persistVerifiedCandidate` can run. Bounded runner observations, not YAML alone, must prove
 one first-step clean launch, pre-action screen preconditions, and the trailing postcondition

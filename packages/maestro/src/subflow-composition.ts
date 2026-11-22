@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
+import { lstat, mkdir, readFile, realpath, rename, writeFile } from 'node:fs/promises'
 import { dirname, isAbsolute, normalize, relative, resolve, sep } from 'node:path'
 import {
   normalizeGoal,
@@ -111,6 +111,64 @@ function validateContinuation(contents: string): string {
 
 function inside(root: string, candidate: string) {
   return candidate !== root && candidate.startsWith(`${root}${sep}`)
+}
+
+function errorCode(error: unknown) {
+  return (error as NodeJS.ErrnoException).code
+}
+
+/**
+ * Validate output ancestry before mkdir and again before writing. Unlike the lexical runFlow check,
+ * this inspects the filesystem, including dangling links and non-directory traversal. New nested
+ * directories are supported by validating their nearest existing ancestor.
+ */
+async function assertCanonicalOutputDirectory(workspaceRoot: string, candidateDirectory: string) {
+  const lexicalRoot = resolve(workspaceRoot)
+  const candidate = resolve(candidateDirectory)
+  if (!inside(lexicalRoot, candidate)) {
+    throw new Error('Composition output directory escapes the lexical workspace')
+  }
+  const canonicalRoot = await realpath(lexicalRoot)
+  if (!(await lstat(canonicalRoot)).isDirectory()) {
+    throw new Error('Composition workspace must be a directory')
+  }
+  let ancestor = candidate
+  while (true) {
+    try {
+      const metadata = await lstat(ancestor)
+      if (metadata.isSymbolicLink()) {
+        throw new Error('Composition output path contains a symbolic link')
+      }
+      if (!metadata.isDirectory()) {
+        throw new Error('Composition output path must traverse directories')
+      }
+      const canonicalAncestor = await realpath(ancestor)
+      if (canonicalAncestor !== canonicalRoot && !inside(canonicalRoot, canonicalAncestor)) {
+        throw new Error('Composition output directory escapes the canonical workspace')
+      }
+      return
+    } catch (error) {
+      if (errorCode(error) === 'ENOTDIR') {
+        throw new Error('Composition output path must traverse directories', { cause: error })
+      }
+      if (errorCode(error) !== 'ENOENT') throw error
+      const parent = dirname(ancestor)
+      if (parent === ancestor) throw error
+      ancestor = parent
+    }
+  }
+}
+
+async function assertCanonicalCandidateFile(candidatePath: string) {
+  try {
+    const metadata = await lstat(candidatePath)
+    if (metadata.isSymbolicLink() || !metadata.isFile()) {
+      throw new Error('Composition candidate must be a regular file when it already exists')
+    }
+  } catch (error) {
+    if (errorCode(error) === 'ENOENT') return
+    throw error
+  }
 }
 
 export function validateMaestroFlowReference(
@@ -363,10 +421,17 @@ export class MaestroLoginComposer {
     })
     const candidateBytes = Buffer.from(yaml, 'utf8')
     const candidateSha256 = createHash('sha256').update(candidateBytes).digest('hex')
+    const candidateAbsolutePath = resolve(root, candidatePath)
+    // No filesystem mutation is permitted until the nearest existing output ancestor is proven
+    // canonical. Recheck after mkdir and before either write or rename.
+    await assertCanonicalOutputDirectory(root, candidateDirectory)
+    await assertCanonicalCandidateFile(candidateAbsolutePath)
     await mkdir(candidateDirectory, { recursive: true })
-    const temporary = `${resolve(candidateDirectory, 'candidate.yaml')}.${process.pid}.tmp`
-    await writeFile(temporary, candidateBytes)
-    await rename(temporary, resolve(root, candidatePath))
+    await assertCanonicalOutputDirectory(root, candidateDirectory)
+    await assertCanonicalCandidateFile(candidateAbsolutePath)
+    const temporary = `${candidateAbsolutePath}.${process.pid}.tmp`
+    await writeFile(temporary, candidateBytes, { flag: 'wx' })
+    await rename(temporary, candidateAbsolutePath)
 
     const execution = await this.options.runner.run({
       flowPath: candidatePath,

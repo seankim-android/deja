@@ -57,13 +57,18 @@ assertions and cache safety.
   segment index, and segment YAML byte-for-byte. Raw [wrong-text](../spikes/001-android-walkcache/evidence/walk018/walk018-wrong-final-text.log)
   and [late-launch](../spikes/001-android-walkcache/evidence/walk018/walk018-late-second-clear-launch.log)
   logs record `finalProductAssertionPassed: false` and two launches/final `login`, respectively.
-- [42 focused tests / 237 assertions](../spikes/001-android-walkcache/evidence/walk018/walk018-focused-tests.txt)
+  Canonical output evidence additionally replaces the goal directory and composed root with external
+  symlinks, tests a dangling link and two non-directory traversal cases, and proves all five reject
+  before runner invocation. External sentinel candidates remain unchanged and goal/segment storage
+  remains byte-identical; legitimate new nested output still succeeds. See the
+  [canonical-output log](../spikes/001-android-walkcache/evidence/walk018/walk018-canonical-output-containment.log).
+- [42 focused tests / 259 assertions](../spikes/001-android-walkcache/evidence/walk018/walk018-focused-tests.txt)
   cover schema/identity, rejected independent verification, contract-accounting mismatches, missing
   observation traces, containment-safe same-directory and nested references plus normalized,
   absolute and parent escapes, reference cycles, exact runner/storage integration, runner-failure
   preservation, and filesystem failure **after passing verification**. Separate segment-store cases
   prove index/flow replacement failures preserve the previous segment byte-for-byte.
-  [Full portable suite: 215 tests / 1,083 assertions](../spikes/001-android-walkcache/evidence/walk018/walk018-all-tests.txt);
+  [Full portable suite: 215 tests / 1,105 assertions](../spikes/001-android-walkcache/evidence/walk018/walk018-all-tests.txt);
   [lint/build](../spikes/001-android-walkcache/evidence/walk018/walk018-lint-build.txt) passed.
 - Independently runnable deriver/verifier: `bun scripts/derive-walk018-composition.ts --check` and
   `bun scripts/verify-walk018-composition.ts --check`; their fresh process executions passed in
@@ -86,6 +91,14 @@ For both execution regressions the report compares before/after SHA-256 and byte
 memory, segment index, segment YAML, and previous goal YAML; each pair is equal. The accepted
 composition still has one clean launch, 22 steps, 14 assertions, both exact final observations, and
 an exact zero-model cache replay.
+
+A second review of `199734f` replaced the goal output directory with an external symlink and observed
+an external candidate write before runner rejection. The current composer validates canonical
+workspace/output ancestry before `mkdir`, rechecks before writing, and exclusively creates its
+temporary file. Five executable filesystem cases now reject before the runner; both external
+sentinel candidates retain their exact SHA-256/byte length, nonexistent targets stay absent, and the
+same four storage snapshots remain equal. These are preexisting-path protections, not a claim of
+atomic immunity to concurrent path-component replacement.
 
 **Exact provenance:** existing accepted WALK-020 `walk020-android-checkout-06` cold evidence only:
 `cold-saved-checkout.yaml` SHA-256 `e95532ce04a4e125d3bd56e1b9d5d367b31dd67eed4441c56271ca52f3c3d0a1`,

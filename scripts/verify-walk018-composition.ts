@@ -1,6 +1,8 @@
 #!/usr/bin/env bun
 import { createHash } from 'node:crypto'
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
+import {
+  mkdir, mkdtemp, readFile, readdir, rm, symlink, unlink, writeFile,
+} from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { WalkCache, type RunReporter, type WalkIdentity } from '../packages/core/src/index.ts'
@@ -51,6 +53,33 @@ async function executionOutput(workspaceRoot: string, artifacts: { kind: string;
   const output = artifacts.find(artifact => artifact.kind === 'output' && artifact.path.endsWith('output.log'))
   if (!output) throw new Error('Runner output artifact is missing')
   return readFile(resolve(workspaceRoot, output.path), 'utf8')
+}
+
+async function optionalTreeSnapshot(root: string) {
+  const result: Record<string, { sha256: string; bytes: number }> = {}
+  async function visit(directory: string, prefix: string): Promise<boolean> {
+    let entries
+    try {
+      entries = await readdir(directory, { withFileTypes: true })
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT' && prefix === '') return false
+      throw error
+    }
+    for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
+      const path = join(directory, entry.name)
+      const key = `${prefix}${entry.name}`
+      if (entry.isDirectory()) {
+        await visit(path, `${key}/`)
+      } else if (entry.isFile()) {
+        const bytes = await readFile(path)
+        result[key] = { sha256: sha256(bytes), bytes: bytes.length }
+      } else {
+        throw new Error('Unexpected non-regular file in external canonical-output fixture')
+      }
+    }
+    return true
+  }
+  return await visit(root, '') ? result : null
 }
 
 async function snapshot(workspaceRoot: string, segmentFlowPath: string, previousFlowPath: string) {
@@ -221,6 +250,127 @@ export async function runWalk018Verification() {
       throw new Error('Late second clear launch changed reusable or last-known-good memory')
     }
 
+    const acceptedCandidatePath = composed.candidatePath
+    const verifiedLoginSegment = login.segment
+    if (!acceptedCandidatePath || !verifiedLoginSegment) {
+      throw new Error('Accepted composition or login segment path is missing')
+    }
+    const candidateDirectory = dirname(resolve(workspaceRoot, acceptedCandidatePath))
+    const composedRoot = dirname(candidateDirectory)
+    let canonicalRunnerCalls = 0
+    const canonicalComposer = new MaestroLoginComposer({
+      workspaceRoot, segments, walks,
+      runner: {
+        run: async options => {
+          canonicalRunnerCalls += 1
+          return runner.run(options)
+        },
+      },
+      artifactId: prefix => `${prefix}-canonical-${++artifactSequence}`,
+    })
+    const canonicalCases: {
+      case: string
+      rejectedBeforeRunner: boolean
+      error: string
+      externalBefore: unknown
+      externalAfter: unknown
+      externalUnchanged: boolean
+      storageBefore: unknown
+      storageAfter: unknown
+      storageUnchanged: boolean
+    }[] = []
+    async function canonicalCase(
+      name: string,
+      externalRoot: string,
+      install: () => Promise<void>,
+      restore: () => Promise<void>,
+    ) {
+      const externalBefore = await optionalTreeSnapshot(externalRoot)
+      await install()
+      const storageBefore = await snapshot(workspaceRoot, verifiedLoginSegment.flowPath, previousFlowPath)
+      try {
+        let rejection: unknown = null
+        try {
+          await canonicalComposer.compose(identity, 'login-v1', continuation)
+        } catch (error) {
+          rejection = error
+        }
+        if (!rejection) throw new Error(`${name} reached execution instead of canonical preflight rejection`)
+        if (canonicalRunnerCalls !== 0) throw new Error(`${name} invoked the runner`)
+        const storageAfter = await snapshot(workspaceRoot, verifiedLoginSegment.flowPath, previousFlowPath)
+        const storageUnchanged = JSON.stringify(storageAfter) === JSON.stringify(storageBefore) &&
+          (await readFile(resolve(workspaceRoot, VERIFIED_SUBFLOW_INDEX_PATH))).equals(segmentIndexBytes) &&
+          (await readFile(resolve(workspaceRoot, verifiedLoginSegment.flowPath))).equals(segmentFlowBytes) &&
+          (await readFile(resolve(workspaceRoot, LOCAL_MEMORY_PATH))).equals(lastKnownGoodMemory)
+        if (!storageUnchanged) throw new Error(`${name} changed goal or segment storage`)
+        const externalAfter = await optionalTreeSnapshot(externalRoot)
+        const externalUnchanged = JSON.stringify(externalAfter) === JSON.stringify(externalBefore)
+        if (!externalUnchanged) throw new Error(`${name} created or changed an external file`)
+        canonicalCases.push({
+          case: name,
+          rejectedBeforeRunner: true,
+          error: rejection instanceof Error ? rejection.message : String(rejection),
+          externalBefore,
+          externalAfter,
+          externalUnchanged,
+          storageBefore,
+          storageAfter,
+          storageUnchanged,
+        })
+      } finally {
+        await restore()
+      }
+    }
+
+    const externalGoal = join(temporary, 'outside-goal')
+    await mkdir(externalGoal)
+    await writeFile(join(externalGoal, 'candidate.yaml'), 'external goal sentinel\n')
+    await canonicalCase('goal-directory-symlink', externalGoal, async () => {
+      await rm(candidateDirectory, { recursive: true, force: true })
+      await symlink(externalGoal, candidateDirectory, 'dir')
+    }, async () => {
+      await unlink(candidateDirectory)
+      await mkdir(candidateDirectory, { recursive: true })
+    })
+
+    const externalComposed = join(temporary, 'outside-composed')
+    // The exact goal directory name is derived by the composer; locate it from the accepted path.
+    const goalDirectoryName = candidateDirectory.slice(composedRoot.length + 1)
+    await mkdir(join(externalComposed, goalDirectoryName), { recursive: true })
+    await writeFile(join(externalComposed, goalDirectoryName, 'candidate.yaml'), 'external root sentinel\n')
+    await canonicalCase('composed-root-symlink', externalComposed, async () => {
+      await rm(composedRoot, { recursive: true, force: true })
+      await symlink(externalComposed, composedRoot, 'dir')
+    }, async () => {
+      await unlink(composedRoot)
+      await mkdir(candidateDirectory, { recursive: true })
+    })
+
+    const externalDangling = join(temporary, 'outside-dangling')
+    await canonicalCase('dangling-goal-directory-symlink', externalDangling, async () => {
+      await rm(candidateDirectory, { recursive: true, force: true })
+      await symlink(externalDangling, candidateDirectory, 'dir')
+    }, async () => {
+      await unlink(candidateDirectory)
+      await mkdir(candidateDirectory, { recursive: true })
+    })
+
+    const externalNonDirectory = join(temporary, 'outside-non-directory')
+    await canonicalCase('non-directory-goal-traversal', externalNonDirectory, async () => {
+      await rm(candidateDirectory, { recursive: true, force: true })
+      await writeFile(candidateDirectory, 'not a directory\n')
+    }, async () => {
+      await rm(candidateDirectory, { force: true })
+      await mkdir(candidateDirectory, { recursive: true })
+    })
+    await canonicalCase('non-directory-composed-root-traversal', externalNonDirectory, async () => {
+      await rm(composedRoot, { recursive: true, force: true })
+      await writeFile(composedRoot, 'not a directory\n')
+    }, async () => {
+      await rm(composedRoot, { force: true })
+      await mkdir(candidateDirectory, { recursive: true })
+    })
+
     const previousIdentity: WalkIdentity = { ...identity, goal: previousSource.goal }
     const previousHit = await walks.lookup(previousIdentity)
     if (previousHit.status !== 'hit' || previousHit.walk.flowSha256 !== previousSource.flowSha256) {
@@ -287,6 +437,15 @@ export async function runWalk018Verification() {
         cleanState: cleanSummary,
         finalProductAssertionsRetained: retainedFinalAssertions,
       },
+      canonicalOutputContainment: {
+        legitimateNewNestedOutput: {
+          candidatePath: acceptedCandidatePath,
+          candidateBytes: persistedBytes.length,
+          candidateSha256: composed.candidateSha256,
+        },
+        runnerCallsDuringAdversarialCases: canonicalRunnerCalls,
+        cases: canonicalCases,
+      },
       exactCacheReplay: {
         cacheStatus: exact.cacheStatus,
         outcome: exact.outcome,
@@ -335,6 +494,7 @@ export async function runWalk018Verification() {
         failedComposition: `${evidenceRoot}/walk018-failed-composition.log`,
         wrongFinalText: `${evidenceRoot}/walk018-wrong-final-text.log`,
         lateSecondClearLaunch: `${evidenceRoot}/walk018-late-second-clear-launch.log`,
+        canonicalOutputContainment: `${evidenceRoot}/walk018-canonical-output-containment.log`,
       },
     }
     return {
@@ -346,6 +506,16 @@ export async function runWalk018Verification() {
         'walk018-failed-composition.log': failedOutput,
         'walk018-wrong-final-text.log': wrongFinalTextOutput,
         'walk018-late-second-clear-launch.log': lateLaunchOutput,
+        'walk018-canonical-output-containment.log': `${canonicalCases.map(entry =>
+          `CANONICAL_OUTPUT_CASE ${JSON.stringify({
+            case: entry.case,
+            rejectedBeforeRunner: entry.rejectedBeforeRunner,
+            error: entry.error,
+            externalBefore: entry.externalBefore,
+            externalAfter: entry.externalAfter,
+            externalUnchanged: entry.externalUnchanged,
+            storageUnchanged: entry.storageUnchanged,
+          })}`).join('\n')}\n`,
       },
     }
   } finally {
@@ -388,6 +558,10 @@ if (import.meta.main) {
         regression.before = 'validated-equal-within-run'
         regression.after = 'validated-equal-within-run'
       }
+      for (const entry of value.canonicalOutputContainment.cases) {
+        entry.storageBefore = 'validated-equal-within-run'
+        entry.storageAfter = 'validated-equal-within-run'
+      }
     }
     if (JSON.stringify(actual) !== JSON.stringify(expectedReport)) {
       throw new Error('Fresh deterministic execution differs from curated WALK-018 verification evidence')
@@ -410,5 +584,6 @@ if (import.meta.main) {
     failedCompositionPreservedByteForByte:
       report.failedCompositionPreservation.byteForByteUnchanged,
     adversarialRegressions: report.failedCompositionPreservation.adversarialRegressions,
+    canonicalOutputContainment: report.canonicalOutputContainment,
   }, null, 2))
 }
