@@ -1,0 +1,39 @@
+bun test v1.4.4-canary.1 (191755ec1)
+
+packages/agent-openclaw/test/openclaw-explorer.test.ts:
+(pass) self-contained OpenClaw cold exploration > pins an MCP-only explorer and persists only after independent verification [16.07ms]
+(pass) self-contained OpenClaw cold exploration > a rejected candidate cannot create or replace known-good memory [11.67ms]
+(pass) self-contained OpenClaw cold exploration > extracts fenced YAML and enforces the app plus a fresh clearState launch [11.00ms]
+(pass) self-contained OpenClaw cold exploration > leaves model and MCP metrics unknown when instrumentation is absent [10.67ms]
+
+packages/maestro/test/maestro-runner.test.ts:
+(pass) verified Maestro runner > preserves output, timing, configuration, exit status, and artifacts on success [10.53ms]
+(pass) verified Maestro runner > returns a structured execution error and preserves a nonzero exit code [9.93ms]
+(pass) verified Maestro runner > enforces the timeout and terminates only the spawned process tree [1461.71ms]
+(pass) verified Maestro runner > returns a structured launch error for a missing executable [4.17ms]
+(pass) verified Maestro runner > rejects a flow path that escapes the workspace before launching [2.48ms]
+(pass) verified Maestro runner > returns a structured artifact error without discarding process output [24.62ms]
+
+packages/store-local/test/local-store.test.ts:
+(pass) conservative local walk store > returns a first-run miss when no memory exists [1.42ms]
+(pass) conservative local walk store > normalizes the goal and returns a valid hit with the complete exact identity [3.18ms]
+(pass) conservative local walk store > returns a stale-build miss instead of replaying another APK fingerprint [1.97ms]
+(pass) conservative local walk store > returns a wrong-app miss without loosening app identity [1.67ms]
+(pass) conservative local walk store > returns a wrong-platform miss without sharing Android memory across platforms [1.64ms]
+(pass) conservative local walk store > returns a missing-flow miss and never treats metadata alone as a pass [1.59ms]
+(pass) conservative local walk store > rejects a flow checksum mismatch instead of executing changed bytes [1.71ms]
+(pass) conservative local walk store > rejects malformed JSON as invalid memory [0.93ms]
+(pass) conservative local walk store > rejects an unsupported memory schema [1.66ms]
+(pass) conservative local walk store > rejects invalid entries instead of filtering them out to produce a hit [1.48ms]
+(pass) conservative local walk store > rejects stored flow paths outside the canonical flow directory [1.56ms]
+(pass) conservative local walk store > rejects a symlink whose canonical flow path escapes the workspace [1.76ms]
+(pass) conservative local walk store > an interruption before flow rename leaves only ignored temporary files and a first-run miss [1.07ms]
+(pass) conservative local walk store > failed candidate verification preserves the known-good flow and metadata byte for byte [1.82ms]
+(pass) conservative local walk store > failed replacement preserves known-good flow and metadata and excludes the orphan and temp [2.39ms]
+(pass) conservative local walk store > failed validation remains in history and never remains a successful reusable hit [1.99ms]
+(pass) conservative local walk store > upgrades valid WALK-003 schema-one metadata without inventing validation success [1.93ms]
+
+ 27 pass
+ 0 fail
+ 151 expect() calls
+Ran 27 tests across 3 files. [1.63s]

@@ -100,6 +100,16 @@ Its asserted `Order #WC-9999` failed real WALK-002 verification (exit 1; wrapper
 [`preservation proof`](evidence/explore-rejection-preservation.json) show that successful flow and memory
 SHA-256 values were byte-for-byte unchanged.
 
+### Conservative local storage (WALK-004)
+
+[`packages/store-local`](../../packages/store-local/README.md) now owns lookup, verified persistence,
+and validation history. New successful flows are content-addressed; lookup additionally requires the
+flow schema and recomputed flow checksum, and a failed latest validation is not a reusable hit. Valid
+schema-1 WALK-003 metadata upgrades without inventing success. Malformed or unsafe memory fails closed;
+temporary/unreferenced files never become hits, and failed replacement preserves known-good bytes.
+The linked store README documents quarantine plus cold `explore` recovery and the emulator-free
+regression command. Existing curated WALK-001/002/003 evidence remains unchanged.
+
 ### Warm replay
 
 - `bun scripts/walkcache.ts run checkout` found an exact goal/app/platform/APK-fingerprint match,
@@ -133,7 +143,8 @@ repair can be verified before the cache is replaced.
   lifecycle has its own measurements, but no total cold-vs-warm speedup or cross-run comparison is claimed.
   `modelCalls` means OpenClaw `assistantTurns` (completed assistant/provider round trips), not network
   retries, tokens, or cost. MCP counts cover only proxied `tools/call` requests.
-- Cache lookup is exact/local. Semantic retrieval, route graphs, and subflow composition are future work.
+- Cache lookup is exact/local across normalized goal, app, platform, flow schema/checksum, and build.
+  Semantic retrieval, route graphs, and subflow composition are future work.
 - Selector failure vs product regression classification is not generalized yet. No autonomous repair
   loop is claimed, and a deliberate product-regression negative test remains in the root TODO.
 - Evidence is Android emulator only. Web and iOS have not been attempted by this spike.

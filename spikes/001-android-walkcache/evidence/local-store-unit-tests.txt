@@ -1,0 +1,25 @@
+bun test v1.4.4-canary.1 (191755ec1)
+
+packages/store-local/test/local-store.test.ts:
+(pass) conservative local walk store > returns a first-run miss when no memory exists [1.19ms]
+(pass) conservative local walk store > normalizes the goal and returns a valid hit with the complete exact identity [2.28ms]
+(pass) conservative local walk store > returns a stale-build miss instead of replaying another APK fingerprint [1.23ms]
+(pass) conservative local walk store > returns a wrong-app miss without loosening app identity [1.26ms]
+(pass) conservative local walk store > returns a wrong-platform miss without sharing Android memory across platforms [1.18ms]
+(pass) conservative local walk store > returns a missing-flow miss and never treats metadata alone as a pass [1.35ms]
+(pass) conservative local walk store > rejects a flow checksum mismatch instead of executing changed bytes [1.30ms]
+(pass) conservative local walk store > rejects malformed JSON as invalid memory [0.67ms]
+(pass) conservative local walk store > rejects an unsupported memory schema [1.17ms]
+(pass) conservative local walk store > rejects invalid entries instead of filtering them out to produce a hit [1.18ms]
+(pass) conservative local walk store > rejects stored flow paths outside the canonical flow directory [1.24ms]
+(pass) conservative local walk store > rejects a symlink whose canonical flow path escapes the workspace [1.44ms]
+(pass) conservative local walk store > an interruption before flow rename leaves only ignored temporary files and a first-run miss [0.84ms]
+(pass) conservative local walk store > failed candidate verification preserves the known-good flow and metadata byte for byte [1.22ms]
+(pass) conservative local walk store > failed replacement preserves known-good flow and metadata and excludes the orphan and temp [10.72ms]
+(pass) conservative local walk store > failed validation remains in history and never remains a successful reusable hit [12.90ms]
+(pass) conservative local walk store > upgrades valid WALK-003 schema-one metadata without inventing validation success [12.86ms]
+
+ 17 pass
+ 0 fail
+ 54 expect() calls
+Ran 17 tests across 1 file. [79.00ms]

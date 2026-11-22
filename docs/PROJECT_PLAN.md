@@ -95,16 +95,17 @@ Generated memory belongs in an ignored `.walkcache/` directory by default:
 
 ```text
 .walkcache/
-  flows/<goal>/<platform>.yaml
+  flows/<goal>/<platform>-<flow-sha256>.yaml
   memory/walks.json
   attempts.jsonl
   reports/latest.json
   patches/                 Proposed source diffs and verification evidence
 ```
 
-Each successful walk records its identity, app/build fingerprint, flow checksum, assertions,
-selector/source-patch history, timings, model-call count, and last validation result. Memory
-writes are atomic: a failed replacement never destroys the last known-good walk.
+Each successful walk records its identity, app/build fingerprint, flow schema/checksum, assertions,
+selector/source-patch history, timings, model-call count, last validation result, and validation
+history. Memory writes are atomic: a failed replacement never destroys the last known-good walk, and
+a failed latest validation is never reused as a successful hit.
 
 ## Time-boxed milestones
 

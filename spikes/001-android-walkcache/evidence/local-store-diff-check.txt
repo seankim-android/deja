@@ -1,0 +1,4 @@
+$ git diff --check
+PASS: unstaged patch has no whitespace errors or conflict markers
+$ git diff --cached --check
+PASS: complete staged patch has no whitespace errors or conflict markers

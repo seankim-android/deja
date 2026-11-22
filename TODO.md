@@ -19,8 +19,11 @@ Check an item only when its ticket is complete and its evidence is linked. All t
   Evidence: [`explore-android-report.json`](spikes/001-android-walkcache/evidence/explore-android-report.json),
   [`explore-candidate.yaml`](spikes/001-android-walkcache/evidence/explore-candidate.yaml), and
   [`explore-rejection-preservation.json`](spikes/001-android-walkcache/evidence/explore-rejection-preservation.json).
-- [ ] [WALK-004](tickets/WALK-004-local-store-regression-tests.md) — Test cache identity, corruption,
+- [x] [WALK-004](tickets/WALK-004-local-store-regression-tests.md) — Test cache identity, corruption,
   stale builds, path boundaries, and atomic replacement.
+  Evidence: [`local-store-unit-tests.txt`](spikes/001-android-walkcache/evidence/local-store-unit-tests.txt),
+  [`local-store-all-tests.txt`](spikes/001-android-walkcache/evidence/local-store-all-tests.txt), and the retained
+  [`WALK-001 stale-build summary`](spikes/001-android-walkcache/evidence/run-summary.json).
 - [ ] [WALK-006](tickets/WALK-006-selector-failure-classification.md) — Repeat selector invalidation and
   distinguish selector failures from meaningful product regressions.
 - [ ] [WALK-005](tickets/WALK-005-comparable-cold-warm-metrics.md) — Capture comparable cold/warm metrics

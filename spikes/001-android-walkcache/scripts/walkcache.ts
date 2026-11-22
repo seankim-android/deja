@@ -1,35 +1,20 @@
 #!/usr/bin/env bun
 import { createHash } from 'node:crypto'
-import { copyFile, mkdir, readFile, rename, writeFile } from 'node:fs/promises'
+import { mkdir, rename, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, relative, resolve } from 'node:path'
 import { runMaestro, resolveFlowPath, type MaestroRunResult } from '../../../packages/maestro/src/index.ts'
 import type { PersistenceDetails, VerificationDetails } from '../../../packages/agent-openclaw/src/index.ts'
+import {
+  InvalidWalkMemoryError,
+  LOCAL_MEMORY_PATH,
+  LocalWalkStore,
+  MAESTRO_FLOW_SCHEMA_VERSION,
+  type ExplorationDetails,
+} from '../../../packages/store-local/src/index.ts'
 import { exploreGoal } from './explore.ts'
 
-type Walk = {
-  goalKey: string
-  goal: string
-  appId: string
-  platform: 'android'
-  buildFingerprint: string
-  flowPath: string
-  lastValidation: { passed: boolean; at: string }
-  flowSha256?: string
-  origin?: 'remember' | 'explore'
-  exploration?: {
-    explorationDurationMs: number | null
-    verificationDurationMs: number | null
-    mcpCalls: number | null
-    modelCalls: number | null
-    modelCallBasis: string
-  }
-}
-
-type Memory = { schemaVersion: 1; walks: Walk[] }
-
 const root = process.cwd()
-const memoryPath = resolve(root, '.walkcache/memory/walks.json')
 const apkPath = resolve(root, 'app/build/outputs/apk/debug/app-debug.apk')
 const device = process.env.WALKCACHE_DEVICE ?? 'emulator-5554'
 const appId = 'dev.walkcache.checkout'
@@ -38,13 +23,10 @@ const openClawExecutable = process.env.WALKCACHE_OPENCLAW ?? 'openclaw'
 const androidHome = process.env.ANDROID_HOME ?? process.env.ANDROID_SDK_ROOT
 const javaHome = process.env.JAVA_HOME
 const timeoutMs = Number(process.env.WALKCACHE_TIMEOUT_MS ?? '120000')
+const walkStore = new LocalWalkStore({ workspaceRoot: root })
 
 function normalize(value: string) {
   return value.trim().toLowerCase().replace(/\s+/g, ' ')
-}
-
-function slug(value: string) {
-  return normalize(value).replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
 }
 
 async function atomicWrite(path: string, contents: string | Buffer) {
@@ -56,21 +38,6 @@ async function atomicWrite(path: string, contents: string | Buffer) {
 
 async function fingerprint() {
   return createHash('sha256').update(Buffer.from(await Bun.file(apkPath).arrayBuffer())).digest('hex')
-}
-
-async function loadMemory(): Promise<Memory> {
-  try {
-    const parsed = JSON.parse(await readFile(memoryPath, 'utf8')) as Memory
-    if (parsed.schemaVersion !== 1 || !Array.isArray(parsed.walks)) {
-      throw new Error('Unsupported walk memory schema')
-    }
-    return parsed
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-      return { schemaVersion: 1, walks: [] }
-    }
-    throw error
-  }
 }
 
 async function runFlow(flowPath: string, artifactDirectory: string) {
@@ -131,44 +98,32 @@ async function persistVerifiedCandidate(
   candidatePath: string,
   buildFingerprint: string,
   verification: VerificationDetails,
-  exploration?: Walk['exploration'],
+  exploration?: ExplorationDetails,
   origin: 'remember' | 'explore' = 'explore',
 ): Promise<PersistenceDetails> {
   if (!verification.passed || typeof verification.endedAt !== 'string') {
     throw new Error('Only an independently passing candidate can enter successful storage')
   }
-  const candidate = resolveFlowPath(root, candidatePath)
-  const flowSha256 = createHash('sha256').update(Buffer.from(await Bun.file(candidate).arrayBuffer())).digest('hex')
-  // Validate existing memory before touching the last known-good flow. Each final replacement below
-  // is a same-directory rename; failed candidate verification never reaches this helper.
-  const memory = await loadMemory()
-  const flowPath = `.walkcache/flows/${slug(goalKey)}/android.yaml`
-  await mkdir(dirname(resolve(root, flowPath)), { recursive: true })
-  const temporaryFlow = `${flowPath}.${process.pid}.tmp`
-  await copyFile(candidate, resolve(root, temporaryFlow))
-  await rename(resolve(root, temporaryFlow), resolve(root, flowPath))
-
-  const walk: Walk = {
-    goalKey: normalize(goalKey),
-    goal: goalKey,
-    appId,
-    platform: 'android',
-    buildFingerprint,
-    flowPath,
-    flowSha256,
+  // The verified candidate gets a content-addressed final flow before the atomic metadata rename.
+  // Existing good flow/metadata remain untouched if candidate verification or replacement fails.
+  const persisted = await walkStore.persistVerifiedCandidate({
+    identity: {
+      goal: goalKey,
+      appId,
+      platform: 'android',
+      flowSchemaVersion: MAESTRO_FLOW_SCHEMA_VERSION,
+      buildFingerprint,
+    },
+    candidatePath,
+    validation: { passed: verification.passed, at: verification.endedAt },
     origin,
     ...(exploration ? { exploration } : {}),
-    lastValidation: { passed: true, at: verification.endedAt },
-  }
-  const remaining = memory.walks.filter(item => !(
-    item.goalKey === walk.goalKey && item.appId === appId && item.platform === 'android'
-  ))
-  await atomicWrite(memoryPath, `${JSON.stringify({ schemaVersion: 1, walks: [...remaining, walk] }, null, 2)}\n`)
+  })
   return {
-    flowPath,
-    flowSha256,
-    storedMetadataPath: '.walkcache/memory/walks.json',
-    atomicWrite: true,
+    flowPath: persisted.flowPath,
+    flowSha256: persisted.flowSha256,
+    storedMetadataPath: LOCAL_MEMORY_PATH,
+    atomicWrite: persisted.atomicWrite,
   }
 }
 
@@ -238,30 +193,30 @@ async function explore(goalKey: string, configPath: string) {
 
 async function run(goalKey: string) {
   const buildFingerprint = await fingerprint()
-  const memory = await loadMemory()
-  const walk = memory.walks.find(item =>
-    item.goalKey === normalize(goalKey) &&
-    item.appId === appId &&
-    item.platform === 'android' &&
-    item.buildFingerprint === buildFingerprint
-  )
+  const identity = {
+    goal: goalKey,
+    appId,
+    platform: 'android',
+    flowSchemaVersion: MAESTRO_FLOW_SCHEMA_VERSION,
+    buildFingerprint,
+  }
+  const lookup = await walkStore.lookup(identity)
 
-  if (!walk) {
+  if (lookup.status !== 'hit') {
     await saveReport('run', {
       goalKey: normalize(goalKey), appId, platform: 'android', buildFingerprint,
-      cacheStatus: 'miss', modelCalls: 0, passed: false, durationMs: 0,
+      cacheStatus: 'miss', cacheMissReason: lookup.reason, recovery: 'explore-required',
+      modelCalls: 0, passed: false, durationMs: 0,
     })
     process.exitCode = 2
     return
   }
 
-  const flowPath = resolveFlowPath(root, walk.flowPath)
-  const result = await runFlow(flowPath, `.walkcache/reports/run-${Date.now()}`)
-  walk.lastValidation = { passed: result.passed, at: result.endedAt }
-  await atomicWrite(memoryPath, `${JSON.stringify(memory, null, 2)}\n`)
+  const result = await runFlow(lookup.flowPath, `.walkcache/reports/run-${Date.now()}`)
+  await walkStore.recordValidation(identity, { passed: result.passed, at: result.endedAt })
   await saveReport('run', {
-    goalKey: walk.goalKey, appId, platform: 'android', buildFingerprint,
-    flowPath: relative(root, flowPath), cacheStatus: 'hit', modelCalls: 0,
+    goalKey: lookup.walk.goalKey, appId, platform: 'android', buildFingerprint,
+    flowPath: relative(root, lookup.flowPath), cacheStatus: 'hit', modelCalls: 0,
     ...executionDetails(result),
   })
   if (!result.passed) process.exitCode = 1
@@ -281,6 +236,9 @@ try {
   else await run(goalKey)
 } catch (error) {
   console.error(error instanceof Error ? error.message : error)
+  if (error instanceof InvalidWalkMemoryError) {
+    console.error('Recovery: preserve or quarantine the invalid ignored .walkcache data, then run explore <goal>; never treat it as a passing walk.')
+  }
   process.exitCode = 1
 }
 
