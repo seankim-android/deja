@@ -9,8 +9,8 @@ model credentials, and simulator/model availability are not required to render i
 | --- | --- | --- |
 | 00:00–00:05 | WalkCache / Explore. Verify. Cache. Replay. | Learn a QA walk once; replay without a model; repair only bounded staleness. Android + verified Chromium. |
 | 00:05–00:13 | Cold exploration | Captured CLI `walk008-cold`: cache miss; 13 model round trips; 11 assertions; pass in 95.499 s; YAML persisted after independent verification. |
-| 00:13–00:20 | Saved YAML | The exact current reviewed Android YAML uses ordinary Maestro selectors and meaningful catalog/cart/order assertions. No WalkCache call is embedded in the YAML. |
-| 00:20–00:28 | Warm replay | Captured README runtime review: exact cache hit; 0 model calls; 12 assertions; pass in 29.023 s. The warm panel also visualizes exact goal/app/build/flow lookup. No instantaneous-replay claim. |
+| 00:13–00:20 | Saved YAML | An indented excerpt from the reviewed `repaired-checkout.yaml` uses ordinary Maestro selectors and meaningful catalog/cart/order assertions. No WalkCache call is embedded in the YAML. |
+| 00:20–00:28 | Warm replay | Captured README runtime review of a later different committed walk: exact cache hit; 0 model calls; 12 assertions; pass in 29.023 s. The warm panel visualizes exact goal/app/build/flow lookup and explicitly distinguishes the earlier 11-assertion cold/repair walks. No same-walk or instantaneous-replay claim. |
 | 00:28–00:38 | Stale selector → bounded repair | Captured CLI `walk008-stale-repair`: one failing checkout ID tap; exact Java/XML patch; 1 repair; 0 model calls; 11 assertions passed after rebuild/verification in 65.865 s; proposed diff only, never auto-committed. |
 | 00:38–00:45 | Product regression guard | Captured CLI `walk008-product-regression`: meaningful order assertion failed; `product_assertion`; 0 repair attempts; 0 model calls; exit 1. A failure is never repaired into a pass. |
 | 00:45–00:51 | Verified Chromium boundary | WALK-010 warm Chromium: cache hit; 12 assertions; 0 model calls in 42.634 s. Web cold exploration and Web repair are explicitly unsupported. Maestro Web is Beta/Experimental. |
@@ -20,6 +20,8 @@ Durations describe the complete captured processes identified in their evidence 
 controlled cross-commit speedup comparison. WALK-005 found historical cold command medians of
 96.5–97.0 s versus 24.3–25.9 s warm, but nested Maestro runner ranges overlapped; this video shows
 model avoidance and correctness gates rather than claiming universal faster execution.
+The assertion count differs because the evidence comes from different committed fixture revisions:
+the WALK-008 cold/repair captures have 11 assertions, while the later WALK-012 reviewed walk has 12.
 
 ## Raw sources
 

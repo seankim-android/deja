@@ -1,6 +1,6 @@
 {
   "video": "demo/walkcache-demo.mp4",
-  "sha256": "2a56664421cfb723a777d2da4495354736d56745f5c6b8a440d27028180a38d5",
+  "sha256": "3e6c9ec2f4040ec1a8e8bb1e4f8eee2bbe977d6e3f2a69e5b6503cf2f178e461",
   "probe": {
     "programs": [],
     "stream_groups": [],
@@ -15,14 +15,64 @@
     ],
     "format": {
       "duration": "58.000000",
-      "size": "1000553"
+      "size": "998408"
     }
   },
-  "reviewLimit": "Automated full-frame decode/pixel checks and all-caption evidence checks; contact sheet retained for human visual review. No audio or secrets are present by construction.",
+  "reviewLimit": "AI visual review of all eight static source scenes plus every encoded frame compared to its reviewed source at SSIM >= 0.95; two full decodes and all-caption evidence/secret-source checks. Not a human sign-off. No audio track or private fixture data is present.",
+  "encodedFramesComparedToReviewedSource": [
+    {
+      "scene": 1,
+      "encodedFramesComparedToReviewedSource": 150,
+      "minimumSSIM": 0.999861,
+      "passed": true
+    },
+    {
+      "scene": 2,
+      "encodedFramesComparedToReviewedSource": 240,
+      "minimumSSIM": 0.999698,
+      "passed": true
+    },
+    {
+      "scene": 3,
+      "encodedFramesComparedToReviewedSource": 210,
+      "minimumSSIM": 0.999696,
+      "passed": true
+    },
+    {
+      "scene": 4,
+      "encodedFramesComparedToReviewedSource": 240,
+      "minimumSSIM": 0.999774,
+      "passed": true
+    },
+    {
+      "scene": 5,
+      "encodedFramesComparedToReviewedSource": 300,
+      "minimumSSIM": 0.999641,
+      "passed": true
+    },
+    {
+      "scene": 6,
+      "encodedFramesComparedToReviewedSource": 210,
+      "minimumSSIM": 0.999333,
+      "passed": true
+    },
+    {
+      "scene": 7,
+      "encodedFramesComparedToReviewedSource": 180,
+      "minimumSSIM": 0.99961,
+      "passed": true
+    },
+    {
+      "scene": 8,
+      "encodedFramesComparedToReviewedSource": 210,
+      "minimumSSIM": 0.999871,
+      "passed": true
+    }
+  ],
   "rehearsals": [
     {
       "rehearsal": 1,
-      "reviewedAt": "2026-11-22T19:16:34.326920+00:00",
+      "reviewedAt": "2026-11-22T19:46:12.466737+00:00",
       "playbackDurationSeconds": 58.0,
       "within60Seconds": true,
       "encodedFramesDecoded": 1740,
@@ -62,12 +112,12 @@
       },
       "secretAndAbsolutePathSourceScanPassed": true,
       "audio": "none; all narration is visible in full on-screen captions",
-      "reviewWallSeconds": 7.988,
+      "reviewWallSeconds": 12.996,
       "result": "pass"
     },
     {
       "rehearsal": 2,
-      "reviewedAt": "2026-11-22T19:16:42.295659+00:00",
+      "reviewedAt": "2026-11-22T19:46:23.167997+00:00",
       "playbackDurationSeconds": 58.0,
       "within60Seconds": true,
       "encodedFramesDecoded": 1740,
@@ -107,7 +157,7 @@
       },
       "secretAndAbsolutePathSourceScanPassed": true,
       "audio": "none; all narration is visible in full on-screen captions",
-      "reviewWallSeconds": 7.969,
+      "reviewWallSeconds": 10.701,
       "result": "pass"
     }
   ]

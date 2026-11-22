@@ -22,9 +22,16 @@
   `rehearse.py`. Warm model calls are zero; cold round trips are identified as 13. Web cold/repair and
   iOS/general repair are not implied to work. No “instant” claim or universal speedup is made.
 - `rehearse.py` performs two complete decodes, one signal-statistics check per encoded frame, rejects
-  blank frames, extracts all eight scene midpoints, and writes `two-rehearsals.json` plus
-  `contact-sheet.png`. The frame checks are automated; the contact sheet is retained for human visual
-  review. This model run does not claim visual inspection it could not perform.
+  blank frames, extracts all eight scene midpoints, and compares **every one of the 1,740 encoded
+  frames** to its scene's reviewed source image. Every encoded-frame SSIM score is at least 0.95;
+  actual minimums are recorded in `two-rehearsals.json`. It writes that JSON plus `contact-sheet.png`.
+- AI visual inspection covered the contact sheet and full-resolution scenes, then rechecked the
+  corrected encoded scenes. No credentials, personal data, tokens or private absolute paths were
+  found; the public repository URL and synthetic fixture IDs are intentional. This is not represented
+  as human sign-off. The first inspection found Scene 3's YAML indentation was flattened by text
+  wrapping. The renderer now preserves semantic indentation; its subtitle, warm-walk labels,
+  regression wording, contrast and layout were corrected before final delivery. Final visual verdict:
+  **PASS, no blocking issues**. Source hyphens are ASCII; their monospace glyph merely looks wide.
 - Durations are complete captured-process values from the named evidence, not normalized cross-commit
   timing comparisons. The fallback is rendered from evidence rather than represented as a new live
   exploration or a simulator recording.

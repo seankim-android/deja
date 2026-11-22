@@ -67,8 +67,10 @@ for forbidden in ["/Users/", "Bearer ", "BEGIN " + "PRIVATE KEY", "cerebras_api_
 for claim_file in {entry[0] for entry in CLAIMS.values()}:
     assert Path(claim_file).name in source_text, f"Video/script does not cite {claim_file}"
 
-# Middle of each of the eight scenes; retained for human review in addition to all-frame decode checks.
+# Each scene is a static source image. The frame hash check below proves whether all encoded frames
+# reduce to exactly these eight images, so visual inspection covers every frame rather than a sample.
 times = [2.5, 9, 16.5, 24, 33, 41.5, 48, 54.5]
+scene_durations = [5, 8, 7, 8, 10, 7, 6, 7]
 scene_paths = []
 for index, timestamp in enumerate(times, 1):
     path = REVIEW / f"scene-{index:02d}.png"
@@ -90,6 +92,30 @@ for index, path in enumerate(scene_paths):
     contact.paste(image, (x, y))
     draw.text((x + 8, y + 270), f"Scene {index + 1} · {times[index]:.1f}s", fill="#eff6f2")
 contact.save(REVIEW / "contact-sheet.png")
+
+# Every encoded frame must closely match the visually reviewed source image for its scene. Unlike
+# a sample-only review, this accounts for all 1,740 frames while tolerating normal H.264 loss.
+frame_comparisons = []
+scene_start = 0
+for index, (image_path, scene_duration) in enumerate(zip(scene_paths, scene_durations), 1):
+    process = subprocess.run([
+        "ffmpeg", "-v", "info", "-loop", "1", "-framerate", "30", "-i", str(image_path),
+        "-i", str(VIDEO), "-filter_complex",
+        f"[0:v]trim=duration={scene_duration},setpts=PTS-STARTPTS[reference];"
+        f"[1:v]trim=start={scene_start}:duration={scene_duration},setpts=PTS-STARTPTS[encoded];"
+        "[reference][encoded]ssim,metadata=mode=print",
+        "-an", "-f", "null", "/dev/null",
+    ], check=True, capture_output=True, text=True)
+    scores = [float(value) for value in re.findall(r"lavfi\.ssim\.All=([0-9.]+)", process.stderr)]
+    expected_frames = scene_duration * 30
+    assert len(scores) == expected_frames, f"Scene {index}: compared {len(scores)}/{expected_frames} frames"
+    minimum = min(scores)
+    assert minimum >= 0.95, f"Scene {index}: encoded frame differs from reviewed image (SSIM {minimum})"
+    frame_comparisons.append({
+        "scene": index, "encodedFramesComparedToReviewedSource": len(scores),
+        "minimumSSIM": round(minimum, 6), "passed": True,
+    })
+    scene_start += scene_duration
 
 rehearsals = []
 for number in (1, 2):
@@ -123,7 +149,8 @@ summary = {
     "video": "demo/walkcache-demo.mp4",
     "sha256": hashlib.sha256(VIDEO.read_bytes()).hexdigest(),
     "probe": probe,
-    "reviewLimit": "Automated full-frame decode/pixel checks and all-caption evidence checks; contact sheet retained for human visual review. No audio or secrets are present by construction.",
+    "reviewLimit": "AI visual review of all eight static source scenes plus every encoded frame compared to its reviewed source at SSIM >= 0.95; two full decodes and all-caption evidence/secret-source checks. Not a human sign-off. No audio track or private fixture data is present.",
+    "encodedFramesComparedToReviewedSource": frame_comparisons,
     "rehearsals": rehearsals,
 }
 (REVIEW / "two-rehearsals.json").write_text(json.dumps(summary, indent=2) + "\n")

@@ -25,15 +25,17 @@ def text(draw, xy, value, size=34, color=TEXT, mono=False):
 
 
 def wrap(draw, value, width, size=34, mono=False):
-    lines, current = [], ""
+    # Terminal YAML indentation is semantic; str.split() must not flatten it.
+    indent = value[:len(value) - len(value.lstrip(" "))] if mono else ""
+    lines, current = [], indent
     for word in value.split():
-        trial = f"{current} {word}".strip()
+        trial = f"{current} {word}" if current.strip() else f"{current}{word}"
         if draw.textlength(trial, font=font(size, mono)) <= width:
             current = trial
         else:
             if current:
                 lines.append(current)
-            current = word
+            current = f"{indent}{word}"
     if current:
         lines.append(current)
     return lines
@@ -75,8 +77,9 @@ def base(index, kicker, title_value, subtitle):
     text(d, (64, 139), title_value, 72)
     paragraph(d, (66, 247), subtitle, 1740, 34, MUTED)
     d.line((64, 960, 1856, 960), fill="#31423b", width=2)
-    text(d, (64, 986), "Committed real-run excerpts · Durations are not a cross-commit speedup claim", 23, MUTED, True)
-    text(d, (1582, 986), f"{sum(DURATIONS[:index-1]):02d}s / 58s", 23, MUTED, True)
+    text(d, (64, 986), "Evidence-backed run summaries · Durations are not a cross-commit speedup claim", 23, MUTED, True)
+    timestamp = f"{sum(DURATIONS[:index-1]):02d}s / 58s"
+    text(d, (1856 - d.textlength(timestamp, font=font(23, True)), 986), timestamp, 23, MUTED, True)
     return im, d
 
 
@@ -109,9 +112,9 @@ terminal(d, (66, 342, 1818, 890), "walk008-cold-miss.transcript.txt", [
 slides.append(save(im, 2))
 
 # 03
-im, d = base(3, "VERIFIED YAML", "The memory is ordinary Maestro YAML.", "Stable selectors and product assertions stay executable without WalkCache or an LLM. Secrets and raw attempt artifacts stay ignored.")
+im, d = base(3, "VERIFIED YAML", "The memory is ordinary Maestro YAML.", "Plain YAML replays without WalkCache or a model; generated attempts are gitignored.")
 yaml_lines = [
-    "# excerpt: repaired-checkout.yaml",
+    "# excerpt: verified checkout YAML",
     "- tapOn:",
     "    id: dev.walkcache.checkout:id/add_to_cart",
     '- assertVisible: "Total: $5.00"',
@@ -120,26 +123,28 @@ yaml_lines = [
     "- assertVisible: Order confirmed",
     '- assertVisible: "Order #WC-1001 · Mochi sticker pack"',
 ]
-terminal(d, (66, 342, 1818, 890), "12 ASSERTIONS · SELECTORS + OUTCOME", [(line, MINT if line.startswith("- assert") else TEXT) for line in yaml_lines])
+terminal(d, (66, 342, 1818, 890), "EXCERPT · SELECTORS + OUTCOME", [(line, MINT if line.startswith("- assert") else TEXT) for line in yaml_lines])
 slides.append(save(im, 3))
 
 # 04
-im, d = base(4, "WARM REPLAY", "Cache HIT. Zero model calls.", "The exact stored walk goes directly to Maestro. Neither the explorer nor a model client is constructed.")
-terminal(d, (66, 350, 1020, 873), "walk012-readme-review.txt", [
+im, d = base(4, "WARM REPLAY", "Cache HIT. Zero model calls.", "This later exact stored walk goes directly to Maestro. Neither the explorer nor a model client is constructed.")
+terminal(d, (66, 350, 1020, 920), "walk012-readme-review.txt", [
     ("CACHE  HIT", MINT),
     ("PASS · 12 assertions", TEXT),
     ("MODEL CALLS  0", MINT),
     ("29.023 s · this captured run", TEXT),
-    ("Same meaningful order assertion", MUTED),
+    ("Same meaningful order assertion", TEXT),
 ])
-d.rounded_rectangle((1080, 350, 1818, 873), 18, fill=PANEL, outline="#30463e", width=2)
+d.rounded_rectangle((1080, 350, 1818, 920), 18, fill=PANEL, outline="#30463e", width=2)
 pill(d, 1130, 404, "EXACT LOCAL HIT")
 text(d, (1130, 506), "goal + app", 36, TEXT, True)
 text(d, (1130, 562), "build + flow", 36, TEXT, True)
 d.line((1130, 635, 1730, 635), fill="#52685d", width=3)
 text(d, (1130, 690), "MAESTRO", 43, MINT, True)
-text(d, (1130, 756), "12 checks passed", 30, TEXT, True)
-text(d, (1130, 813), "NO MODEL CLIENT", 25, MUTED, True)
+text(d, (1130, 746), "12 assertions in this walk", 26, TEXT, True)
+text(d, (1130, 791), "Different committed walk", 26, TEXT, True)
+text(d, (1130, 833), "Earlier cold/repair walks: 11", 24, TEXT, True)
+text(d, (1130, 875), "NO MODEL CLIENT", 25, TEXT, True)
 slides.append(save(im, 4))
 
 # 05
@@ -156,7 +161,7 @@ terminal(d, (66, 343, 1818, 890), "walk008-stale-repair.transcript.txt · PROPOS
 slides.append(save(im, 5))
 
 # 06
-im, d = base(6, "REGRESSION GUARD", "A real failure stays a failure.", "Meaningful product assertion failures are never rewritten or repaired into green. Unknown failures do not trigger the repair policy either.")
+im, d = base(6, "REGRESSION GUARD", "A real failure stays a failure.", "The meaningful order assertion failed. Repair was not attempted, and the original assertion and source stayed unchanged.")
 pill(d, 66, 365, "PRODUCT_REGRESSION", RED)
 terminal(d, (66, 442, 1818, 890), "walk008-product-regression.transcript.txt", [
     ("FAIL · exact Order #WC-1001 assertion", RED),
@@ -182,7 +187,7 @@ im, d = base(8, "ARCHITECTURE", "Verified memory. Honest boundaries.", "Exact go
 items = [
     ("VERIFY BEFORE PERSISTENCE", MINT),
     ("ATOMIC LOCAL CACHE + VALIDATION HISTORY", TEXT),
-    ("BOUNDED, VISIBLE REPAIR—NEVER AUTO-COMMIT", TEXT),
+    ("BOUNDED, VISIBLE REPAIR · NEVER AUTO-COMMIT", TEXT),
     ("NO iOS CLAIM · NO GENERAL REPAIR CLAIM", AMBER),
     ("NO INSTANT-REPLAY CLAIM", AMBER),
 ]

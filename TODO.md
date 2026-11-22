@@ -90,12 +90,13 @@ Check an item only when its ticket is complete and its evidence is linked. All t
   [`CI guide`](docs/CI.md), and
   [passing GitHub Actions run 45060550371](https://github.com/seankim-android/kimi-hackathon/actions/runs/45060550371)
   on `main` at `b827311` (every portable step green in 15 seconds).
-- [ ] [WALK-014](tickets/WALK-014-demo-assets-rehearsal.md) — Prepare deterministic demo assets and
+- [x] [WALK-014](tickets/WALK-014-demo-assets-rehearsal.md) — Prepare deterministic demo assets and
   complete two evidence-checked rehearsals before the 6:30 AM milestone gate.
   Evidence: [`58-second MP4`](demo/walkcache-demo.mp4), [`script`](demo/SCRIPT.md),
   [`two passing rehearsals`](demo/rehearsal/two-rehearsals.json), and
   [`rejected-take/review record`](demo/rehearsal/REVIEW.md). Uploaded in the authorized Slack thread
-  as `F0CKUL64YBD`. Human visual review and external submission remain open; the
+  as `F0CKUL64YBD`; the corrected final video follows in the same thread. AI visual review plus all
+  1,740 encoded-frame/source comparisons passed; this is not claimed as human sign-off. External submission remains open; the
   milestone/deadline passed before this late fallback was completed.
 - [ ] [WALK-015](tickets/WALK-015-video-submission.md) — Record/review a ≤60-second video, publish the
   required authorized social post, and confirm official submission by 9:00 AM. Keep 9:00–10:00 AM for
