@@ -31,8 +31,9 @@ Options:
 
 Exit codes:
   0  Successful run/explore/remember, list, inspect, or help.
-  1  Product/unknown failure, rejected candidate, or rejected/failed bounded repair.
-  2  Usage, configuration, report-inspection, executable, or I/O error.
+  1  Product/unknown/runner failure (including executable launch), rejected candidate,
+     or rejected/failed bounded repair.
+  2  Usage, configuration, report-inspection, or direct I/O error.
   3  Cold exploration did not produce a verified reusable walk.
   4  Invalid/corrupt local memory; quarantine it and use cold exploration to recover.
 

@@ -82,14 +82,15 @@ Check an item only when its ticket is complete and its evidence is linked. All t
 
 ## P0 — OSS release and submission
 
-- [ ] [WALK-012](tickets/WALK-012-oss-docs-metadata.md) — Add accurate quick start, architecture,
+- [x] [WALK-012](tickets/WALK-012-oss-docs-metadata.md) — Add accurate quick start, architecture,
   security/limitations, Apache-2.0 license, and package metadata.
   Evidence: [`README`](README.md), [`ARCHITECTURE`](docs/ARCHITECTURE.md), [`LICENSE`](LICENSE),
   [`package.json`](package.json), and the author-executed
-  [`README quick-start runtime review`](spikes/001-android-walkcache/evidence/walk012-readme-review.txt).
-  Checks: 101 tests / 599 assertions, lint, TypeScript/Vite build, and `git diff --check`.
-  The isolated clean-context reviewer failed before execution; independent documentation review
-  remains unverified and is the only unchecked acceptance step.
+  [`README quick-start runtime review`](spikes/001-android-walkcache/evidence/walk012-readme-review.txt),
+  and [`independent clean-context PASS review`](spikes/001-android-walkcache/evidence/walk012-independent-review.md).
+  The author fixed all broken ticket-evidence links, aligned executable-launch exit documentation
+  with the reproduced exit-1 runner result, removed dead starter SVGs, and the reviewer rechecked them.
+  Checks: 106 tests / 626 assertions, lint, TypeScript/Vite build, and `git diff --check`.
 - [x] [WALK-013](tickets/WALK-013-portable-tests-clean-ci.md) — Pass portable tests and clean-checkout CI.
   Evidence: [`clean clone`](spikes/001-android-walkcache/evidence/walk013-clean-checkout.txt),
   [`standalone Android YAML`](spikes/001-android-walkcache/evidence/walk013-standalone-android.txt),

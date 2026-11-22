@@ -3,7 +3,7 @@ id: WALK-012
 title: Prepare accurate OSS documentation and package metadata
 milestone: M7 documentation
 priority: P0
-status: in_progress
+status: done
 depends_on: [WALK-008]
 ---
 
@@ -35,28 +35,38 @@ and review notes; platform entries match WALK-010/WALK-011 evidence or are marke
 
 Evidence:
 
-- [Apache-2.0 license](../../LICENSE) and [root package metadata](../../package.json), including
+- [Apache-2.0 license](../LICENSE) and [root package metadata](../package.json), including
   package name/version/description, repository, homepage, issues, keywords, license, and Bun engine.
-- [Root README](../../README.md): WalkCache product boundary, prerequisites, model-free five-minute
+- [Root README](../README.md): WalkCache product boundary, prerequisites, model-free five-minute
   Android `remember` → warm replay path, all CLI commands/options/configuration/exit codes,
   artifact/clean-state handling, safety, support matrix, limitations, development, and evidence workflow.
-- [Architecture guide](../../docs/ARCHITECTURE.md): lifecycle, plugin/adapter boundaries, exact cache
+- [Architecture guide](../docs/ARCHITECTURE.md): lifecycle, plugin/adapter boundaries, exact cache
   identity, schema-2 memory and schema-1 run reports, atomic replacement, artifact boundaries, failure
   policy, metric scopes, and secret handling.
-- [README quick-start runtime review](../../spikes/001-android-walkcache/evidence/walk012-readme-review.txt):
+- [README quick-start runtime review](../spikes/001-android-walkcache/evidence/walk012-readme-review.txt):
   prerequisite/device versions and author-executed clean-cache build/install/`remember`/warm
   `run`/`inspect` commands with redacted results. No cold model run, Web run, iOS run, or comparative
   timing benchmark was part of this review.
-- Support entries match [WALK-010](WALK-010-verified-web-proof.md) and the unfinished
-  [WALK-011](WALK-011-verified-ios-proof.md): Android cold/warm/repair verified; Chromium only
-  remember/warm/invalidation/regression verified with cold exploration and repair unsupported;
-  iOS not claimed. No current-CLI measured wall-clock speedup is claimed; WALK-005 remains historical.
+- Support entries match [WALK-010](WALK-010-verified-web-proof.md) and
+  [WALK-011](WALK-011-verified-ios-proof.md): Android cold/warm/repair verified; Chromium and native
+  iOS reviewed-YAML `remember`/warm/invalidation/regression verified, with cold exploration and repair
+  explicitly unsupported on both. No current-CLI measured wall-clock speedup is claimed;
+  WALK-005 remains historical.
 - Local checks: `bun run lint` (0 warnings/errors), `bun test --timeout=10000`
-  (101 tests / 599 assertions passed; pre-existing React `act(...)` warnings), `bun run build`
+  (106 tests / 626 assertions passed; pre-existing React `act(...)` warnings), `bun run build`
   (TypeScript + Vite passed), and `git diff --check` passed.
 
-Review limitation: an isolated clean-context reviewer was started but failed with an AI-service
-error before producing output. The author then executed the exact README quick start. Therefore the
-runtime steps are verified, but an **independent clean-context documentation review remains
-unverified**; do not describe the author-executed run as that acceptance review.
+- [Independent clean-context review and fix verification](../spikes/001-android-walkcache/evidence/walk012-independent-review.md):
+  fresh reviewer independently built/installed Android, followed README from a quarantined cache,
+  and passed `remember` → warm `run` → `inspect` with 12 assertions and zero model calls. Initial
+  NOT-PASS findings were broken ticket links, executable-launch exit documentation, and dead starter
+  SVGs. The author fixed all seven affected ticket files, added local Markdown validation and a
+  focused missing-Maestro exit-1 test, and removed both unreferenced assets. Final reviewer verdict:
+  **PASS, all three findings and the WALK-012 acceptance gate resolved**. The earlier failed
+  clean-context attempt is superseded by this completed review; the author-executed quick start was
+  never counted as independent review.
+- Evidence: [focused CLI test](../spikes/001-android-walkcache/evidence/walk012-cli-tests.txt)
+  (5 tests / 64 assertions), [full suite](../spikes/001-android-walkcache/evidence/walk012-all-tests.txt)
+  (106 tests / 626 assertions), [lint](../spikes/001-android-walkcache/evidence/walk012-lint.txt),
+  and [build](../spikes/001-android-walkcache/evidence/walk012-build.txt).
 

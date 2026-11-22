@@ -32,30 +32,30 @@ proof of web support.
 
 Evidence:
 
-- [Fixture and supported-behavior matrix](../../spikes/002-web-walkcache/README.md): deliberately
+- [Fixture and supported-behavior matrix](../spikes/002-web-walkcache/README.md): deliberately
   supports independently reviewed YAML through `remember`, exact Chromium replay, build invalidation,
   and honest regression handling. Model-led cold Web exploration and Web repair are explicitly
   unsupported; no Android behavior is substituted. The cold-boundary command exits 3 with 0 model calls.
-- [Installed Maestro 2.12.0 / Chromium capabilities and exact flags](../../spikes/002-web-walkcache/evidence/walk010-maestro-web-support.txt)
-  and [the 12-assertion YAML](../../spikes/002-web-walkcache/evidence/checkout.yaml).
-- [Independent remember](../../spikes/002-web-walkcache/evidence/walk010-remember.txt): real Chromium
+- [Installed Maestro 2.12.0 / Chromium capabilities and exact flags](../spikes/002-web-walkcache/evidence/walk010-maestro-web-support.txt)
+  and [the 12-assertion YAML](../spikes/002-web-walkcache/evidence/checkout.yaml).
+- [Independent remember](../spikes/002-web-walkcache/evidence/walk010-remember.txt): real Chromium
   PASS, 43,660 ms, 12 assertions, 0 model calls, persisted only after verification.
-- [Warm replay](../../spikes/002-web-walkcache/evidence/walk010-warm.txt): real Chromium cache HIT,
+- [Warm replay](../spikes/002-web-walkcache/evidence/walk010-warm.txt): real Chromium cache HIT,
   42,634 ms, 12 assertions, 0 model calls and 0 repairs. This is not a claim of wall-clock speedup.
-- [Exact identity](../../spikes/002-web-walkcache/evidence/walk010-identity.json): platform `web`,
+- [Exact identity](../spikes/002-web-walkcache/evidence/walk010-identity.json): platform `web`,
   browser `chromium`, adapter `maestro-web@2.12.0`, static build-tree fingerprint, app, goal and flow schema.
-- [Explicit cold boundary](../../spikes/002-web-walkcache/evidence/walk010-cold-unsupported.txt):
+- [Explicit cold boundary](../spikes/002-web-walkcache/evidence/walk010-cold-unsupported.txt):
   `exploration-rejected`, 0 ms, 0 model calls, exit 3, and no YAML persisted.
-- [Build invalidation](../../spikes/002-web-walkcache/evidence/walk010-build-invalidation.txt): changed
+- [Build invalidation](../spikes/002-web-walkcache/evidence/walk010-build-invalidation.txt): changed
   static-tree fingerprint → stale-build miss → repair-rejected in 1 ms with 0 model calls, no cold fallback,
   and the probe restored byte-for-byte.
-- [Real product regression](../../spikes/002-web-walkcache/evidence/walk010-product-regression.txt):
+- [Real product regression](../spikes/002-web-walkcache/evidence/walk010-product-regression.txt):
   backend changed the exact order to `WC-9999` while frontend bytes/fingerprint remained unchanged;
   cached real Chromium replay failed the meaningful `WC-1001` assertion in 49,185 ms with 0 model calls,
-  0 repairs, and `product_assertion`. [Restored verification](../../spikes/002-web-walkcache/evidence/walk010-restored-after-regression.txt)
+  0 repairs, and `product_assertion`. [Restored verification](../spikes/002-web-walkcache/evidence/walk010-restored-after-regression.txt)
   independently proves the default fixture again after restoring `WC-1001`.
-- [Android replay after shared adapter changes](../../spikes/001-android-walkcache/evidence/walk010-android-warm.txt):
+- [Android replay after shared adapter changes](../spikes/001-android-walkcache/evidence/walk010-android-warm.txt):
   real cache HIT, 12 assertions, 30,421 ms, 0 model calls and 0 repairs, with the original YAML hash.
-- [101 tests / 599 assertions](../../spikes/002-web-walkcache/evidence/walk010-all-tests.txt) and
-  [lint, TypeScript and viewer production build](../../spikes/002-web-walkcache/evidence/walk010-lint-build.txt).
+- [101 tests / 599 assertions](../spikes/002-web-walkcache/evidence/walk010-all-tests.txt) and
+  [lint, TypeScript and viewer production build](../spikes/002-web-walkcache/evidence/walk010-lint-build.txt).
 

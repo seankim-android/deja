@@ -201,6 +201,29 @@ describe('production headless CLI', () => {
     }
   })
 
+  test('Maestro executable launch failure is a documented runner failure with exit 1', async () => {
+    const context = await workspace()
+    try {
+      const configPath = join(context.root, 'walkcache.config.json')
+      const config = JSON.parse(await readFile(configPath, 'utf8'))
+      config.maestro.executable = join(context.root, 'missing', 'maestro')
+      await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`)
+
+      const result = await execute(context.root, [
+        'remember', 'checkout', '--flow', 'flows/candidate.yaml',
+      ])
+      expect(result.exitCode).toBe(1)
+      expect(result.stdout).toContain('Outcome: rejected')
+      expect(result.stdout).toContain('Failure: runner')
+      expect(result.report).toMatchObject({
+        outcome: 'rejected', passed: false, failure: { category: 'runner', repairEligible: false },
+        execution: { exitCode: null },
+      })
+    } finally {
+      await cleanup(context.temporary)
+    }
+  })
+
   test('help, command errors, bad config, and inspection failures use documented exits', async () => {
     const context = await workspace()
     try {
@@ -208,6 +231,7 @@ describe('production headless CLI', () => {
       expect(help.exitCode).toBe(0)
       expect(help.stdout).toContain('walkcache explore <goal>')
       expect(help.stdout).toContain('Exit codes:')
+      expect(help.stdout).toContain('including executable launch')
       expect(help.report).toBeNull()
 
       const unknown = await execute(context.root, ['unknown-command'])

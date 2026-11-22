@@ -33,7 +33,7 @@ creation alone never marks this ticket done. If an external action is not comple
 blocker and keep the ticket open.
 
 Production evidence is complete under [WALK-014](WALK-014-demo-assets-rehearsal.md):
-[`demo/walkcache-demo.mp4`](../../demo/walkcache-demo.mp4), 58 seconds / 1,740 frames, with corrected
+[`demo/walkcache-demo.mp4`](../demo/walkcache-demo.mp4), 58 seconds / 1,740 frames, with corrected
 YAML indentation and explicit different-walk labeling, AI visual review, source-scene comparison for
 every encoded frame and two rehearsals. **No external post or official submission has been made.**
 The recorded November 22 deadline has passed. Remaining external requirements need Sean's exact

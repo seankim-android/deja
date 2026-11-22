@@ -42,7 +42,7 @@ Statuses: `in_progress`, `done`, `ready` (no incomplete dependencies), `queued` 
 
 | Ticket | Status | Depends on | Outcome |
 | --- | --- | --- | --- |
-| [WALK-012](WALK-012-oss-docs-metadata.md) | in_progress | 008 | Accurate quick start, architecture, license, limitations; independent README review pending |
+| [WALK-012](WALK-012-oss-docs-metadata.md) | done | 008 | Accurate docs/license; independent Android quick start and fix review passed |
 | [WALK-013](WALK-013-portable-tests-clean-ci.md) | done | 012 | Portable tests and clean-checkout CI evidence |
 | [WALK-014](WALK-014-demo-assets-rehearsal.md) | done | 005, 007, 008, 013 | Corrected 58-second fallback, AI visual/all-frame checks and two rehearsals |
 | [WALK-015](WALK-015-video-submission.md) | in_progress | 014 | Video complete; authorized external post/submission and deadline remain blocked |

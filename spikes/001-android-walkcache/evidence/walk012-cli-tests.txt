@@ -1,0 +1,13 @@
+bun test v1.4.4-canary.1 (191755ec1)
+
+apps/cli/test/cli.test.ts:
+(pass) production headless CLI > miss enters real cold lifecycle, then warm bypasses model construction and supports list/inspect [290.00ms]
+(pass) production headless CLI > remember verifies and persists; a genuine classified product failure stops with failed validation [64.83ms]
+(pass) production headless CLI > rejected cold verification exits 3 and never creates successful memory [160.92ms]
+(pass) production headless CLI > Maestro executable launch failure is a documented runner failure with exit 1 [18.39ms]
+(pass) production headless CLI > help, command errors, bad config, and inspection failures use documented exits [76.51ms]
+
+ 5 pass
+ 0 fail
+ 64 expect() calls
+Ran 5 tests across 1 file. [641.00ms]
