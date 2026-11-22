@@ -1,0 +1,43 @@
+# Deliberately wrong final product expectation for WALK-006 negative evidence.
+# All other proven steps and assertions are retained; this flow must always be rejected.
+appId: dev.walkcache.checkout
+---
+- launchApp:
+    appId: dev.walkcache.checkout
+    clearState: true
+
+# Login: confirm the cleared app starts at the expected screen.
+- assertVisible:
+    id: dev.walkcache.checkout:id/screen_login
+- assertVisible: WalkCache Shop
+- tapOn:
+    id: dev.walkcache.checkout:id/username_input
+- inputText: qa@walkcache.dev
+- assertVisible: qa@walkcache.dev
+- tapOn:
+    id: dev.walkcache.checkout:id/password_input
+- inputText: testing123
+- tapOn:
+    id: dev.walkcache.checkout:id/login_button
+
+# Catalog: verify the requested product before adding it.
+- assertVisible:
+    id: dev.walkcache.checkout:id/screen_catalog
+- assertVisible: Mochi sticker pack
+- assertVisible: $5.00 · 6 stickers
+- tapOn:
+    id: dev.walkcache.checkout:id/add_to_cart
+
+# Cart: verify quantity, product, and total before checkout.
+- assertVisible:
+    id: dev.walkcache.checkout:id/screen_cart
+- assertVisible: 1 × Mochi sticker pack
+- assertVisible: "Total: $5.00"
+- tapOn:
+    id: dev.walkcache.checkout:id/checkout_button
+
+# Confirmation: retain the real screen assertions and deliberately expect the wrong order.
+- assertVisible:
+    id: dev.walkcache.checkout:id/order_confirmation
+- assertVisible: Order confirmed
+- assertVisible: "Order #WC-9999 · Mochi sticker pack"

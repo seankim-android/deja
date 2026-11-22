@@ -1,0 +1,3 @@
+Assert that id: order_confirmation is visible... FAILED
+
+Element not found: Id matching regex: order_confirmation

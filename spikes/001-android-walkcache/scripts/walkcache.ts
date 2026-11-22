@@ -3,7 +3,12 @@ import { createHash } from 'node:crypto'
 import { mkdir, rename, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, relative, resolve } from 'node:path'
-import { runMaestro, resolveFlowPath, type MaestroRunResult } from '../../../packages/maestro/src/index.ts'
+import {
+  classifyMaestroFailure,
+  resolveFlowPath,
+  runMaestro,
+  type MaestroRunResult,
+} from '../../../packages/maestro/src/index.ts'
 import type { PersistenceDetails, VerificationDetails } from '../../../packages/agent-openclaw/src/index.ts'
 import {
   InvalidWalkMemoryError,
@@ -61,6 +66,7 @@ async function runFlow(flowPath: string, artifactDirectory: string) {
 }
 
 function executionDetails(result: MaestroRunResult) {
+  const outputPath = result.artifacts ? relative(root, result.artifacts.outputPath) : undefined
   return {
     startedAt: result.startedAt,
     endedAt: result.endedAt,
@@ -73,7 +79,14 @@ function executionDetails(result: MaestroRunResult) {
     errors: result.errors,
     stdoutPath: result.artifacts ? relative(root, result.artifacts.stdoutPath) : undefined,
     stderrPath: result.artifacts ? relative(root, result.artifacts.stderrPath) : undefined,
-    outputPath: result.artifacts ? relative(root, result.artifacts.outputPath) : undefined,
+    outputPath,
+    failureClassification: classifyMaestroFailure({
+      passed: result.passed,
+      timedOut: result.timedOut,
+      output: result.output,
+      errors: result.errors,
+      rawArtifactPath: outputPath ?? null,
+    }),
   }
 }
 

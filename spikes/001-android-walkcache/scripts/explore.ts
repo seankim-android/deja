@@ -9,7 +9,11 @@ import {
   type PersistenceDetails,
   type VerificationDetails,
 } from '../../../packages/agent-openclaw/src/index.ts'
-import { runMaestro, type MaestroRunResult } from '../../../packages/maestro/src/index.ts'
+import {
+  classifyMaestroFailure,
+  runMaestro,
+  type MaestroRunResult,
+} from '../../../packages/maestro/src/index.ts'
 
 type ExploreDependencies = {
   root: string
@@ -27,6 +31,7 @@ type ExploreDependencies = {
 }
 
 function executionDetails(result: MaestroRunResult, root: string): VerificationDetails {
+  const outputPath = result.artifacts ? relative(root, result.artifacts.outputPath) : null
   return {
     runner: 'WALK-002 runMaestro',
     freshClearStateLaunch: true,
@@ -41,7 +46,14 @@ function executionDetails(result: MaestroRunResult, root: string): VerificationD
     errors: result.errors,
     stdoutPath: result.artifacts ? relative(root, result.artifacts.stdoutPath) : null,
     stderrPath: result.artifacts ? relative(root, result.artifacts.stderrPath) : null,
-    outputPath: result.artifacts ? relative(root, result.artifacts.outputPath) : null,
+    outputPath,
+    failureClassification: classifyMaestroFailure({
+      passed: result.passed,
+      timedOut: result.timedOut,
+      output: result.output,
+      errors: result.errors,
+      rawArtifactPath: outputPath,
+    }),
   }
 }
 

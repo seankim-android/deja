@@ -1,0 +1,3 @@
+Assert that "Order #WC-9999" is visible... FAILED
+
+Assertion is false: "Order #WC-9999" is visible

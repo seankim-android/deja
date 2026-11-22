@@ -110,6 +110,49 @@ temporary/unreferenced files never become hits, and failed replacement preserves
 The linked store README documents quarantine plus cold `explore` recovery and the emulator-free
 regression command. Existing curated WALK-001/002/003 evidence remains unchanged.
 
+### Repeatable stale-selector and product-assertion failures (WALK-006)
+
+The fixture now has a device-local runtime switch, `walkcache_checkout_selector_stale`, controlled by
+`scripts/fixture-mode.sh`. In stale mode only the existing Checkout button's resource ID is omitted;
+its text, click behavior, every other view, the APK, cached YAML, and build fingerprint stay unchanged.
+The switch therefore reproduces a failing **cache hit**, not a stale-build miss, without editing
+ignored `.walkcache/` data or changing source between runs.
+
+From this directory, after `. ./scripts/env.sh`, the complete deterministic Android sequence is:
+
+```sh
+./gradlew clean :app:assembleDebug
+adb -s emulator-5554 install -r -g app/build/outputs/apk/debug/app-debug.apk
+sh scripts/fixture-mode.sh stable
+bun scripts/walkcache.ts remember checkout --flow evidence/repaired-checkout.yaml
+
+sh scripts/fixture-mode.sh stale
+bun scripts/walkcache.ts run checkout  # expected exit 1: only checkout_button is stale
+
+sh scripts/fixture-mode.sh stable
+bun scripts/walkcache.ts remember checkout --flow flows/product-regression.yaml  # expected exit 1
+
+# Restore a passing latest validation and leave the device in stable mode.
+bun scripts/walkcache.ts remember checkout --flow evidence/repaired-checkout.yaml
+```
+
+The recorded stale run was a cache hit with zero model calls, exit code 1, and exactly 16 completed
+steps before `Tap on id: dev.walkcache.checkout:id/checkout_button` failed. Its raw output and report
+are [`evidence/walk006-selector-android-output.log`](evidence/walk006-selector-android-output.log) and
+[`evidence/walk006-selector-android-report.json`](evidence/walk006-selector-android-report.json).
+The wrong-order flow retained every proven step, reached Checkout and both confirmation-screen
+assertions, and then failed only its deliberately wrong `Order #WC-9999 · Mochi sticker pack` text.
+It stayed `passed: false`, exit code 1, `cacheStatus: "rejected"`, and
+`failureClassification.category: "product_assertion"` with `repairEligible: false`; see
+[`its raw output`](evidence/walk006-product-assertion-android-output.log) and
+[`report`](evidence/walk006-product-assertion-android-report.json). No assertion was weakened or
+rewritten to make it pass. The final stable replay passed in 25,968 ms with zero model calls and the
+emulator remained running.
+
+[`evidence/walk006-classification-matrix.md`](evidence/walk006-classification-matrix.md) documents
+the positive/negative fixtures and conservative category boundaries. Classification is advisory only;
+WALK-006 does not generate a source patch or decide repairs.
+
 ### Warm replay
 
 - `bun scripts/walkcache.ts run checkout` found an exact goal/app/platform/APK-fingerprint match,
@@ -131,6 +174,9 @@ regression command. Existing curated WALK-001/002/003 evidence remains unchanged
 - Exact evidence is curated in `evidence/`: the original agent-authored flow, repaired flow, and
   minimal source diff. Larger generated logs remain ignored under `.walkcache/`.
 
+These bullets and `evidence/run-summary.json` are retained as WALK-001 historical evidence. Use the
+WALK-006 runtime-switch procedure above for repeatable invalidation; do not edit ignored memory.
+
 ## What this validates
 
 An OpenClaw/Kimi agent can learn an Android QA journey through Maestro MCP; a local learning layer
@@ -145,8 +191,8 @@ repair can be verified before the cache is replaced.
   retries, tokens, or cost. MCP counts cover only proxied `tools/call` requests.
 - Cache lookup is exact/local across normalized goal, app, platform, flow schema/checksum, and build.
   Semantic retrieval, route graphs, and subflow composition are future work.
-- Selector failure vs product regression classification is not generalized yet. No autonomous repair
-  loop is claimed, and a deliberate product-regression negative test remains in the root TODO.
+- Classification covers only the narrow deterministic runner-output shapes documented above. It does
+  not prove every root cause, and no autonomous repair loop is claimed. Bounded repair remains WALK-007.
 - Evidence is Android emulator only. Web and iOS have not been attempted by this spike.
 - The production step is to rewrite this proven path behind small runner/store/explorer interfaces,
   then connect cold exploration to the same CLI lifecycle without weakening verification gates.
@@ -172,9 +218,7 @@ bun scripts/walkcache.ts run checkout
 cat .walkcache/reports/latest.json
 ```
 
-The final checked-in fixture already includes the repair. To reproduce the original stale-selector
-failure, remove `checkout_button` from `ids.xml`, pass `null` for the Checkout button ID in
-`MainActivity.java`, rebuild/install, and run `evidence/agent-cold-checkout.yaml` after changing its
-Checkout step to target the full `checkout_button` resource ID. Reapply
-`evidence/checkout-selector-repair.diff` to return to the repaired state.
+The final checked-in fixture includes the WALK-001 repair. Its historical manual source-edit
+instructions are superseded by the WALK-006 `fixture-mode.sh` runtime switch above; the original
+curated diff and summary remain unchanged.
 

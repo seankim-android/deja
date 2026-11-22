@@ -24,8 +24,11 @@ Check an item only when its ticket is complete and its evidence is linked. All t
   Evidence: [`local-store-unit-tests.txt`](spikes/001-android-walkcache/evidence/local-store-unit-tests.txt),
   [`local-store-all-tests.txt`](spikes/001-android-walkcache/evidence/local-store-all-tests.txt), and the retained
   [`WALK-001 stale-build summary`](spikes/001-android-walkcache/evidence/run-summary.json).
-- [ ] [WALK-006](tickets/WALK-006-selector-failure-classification.md) — Repeat selector invalidation and
+- [x] [WALK-006](tickets/WALK-006-selector-failure-classification.md) — Repeat selector invalidation and
   distinguish selector failures from meaningful product regressions.
+  Evidence: [`walk006-classification-matrix.md`](spikes/001-android-walkcache/evidence/walk006-classification-matrix.md),
+  [`walk006-android-evidence.json`](spikes/001-android-walkcache/evidence/walk006-android-evidence.json), and
+  [`walk006-all-tests.txt`](spikes/001-android-walkcache/evidence/walk006-all-tests.txt).
 - [ ] [WALK-005](tickets/WALK-005-comparable-cold-warm-metrics.md) — Capture comparable cold/warm metrics
   after the explore lifecycle and store tests are reliable.
 - [ ] [WALK-007](tickets/WALK-007-bounded-repair-regression-guard.md) — Enforce bounded repair and prove

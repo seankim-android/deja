@@ -43,3 +43,32 @@ Run focused tests from the repository root:
 ```sh
 bun test packages/maestro/test/maestro-runner.test.ts --timeout=10000
 ```
+
+## Advisory failure classification (WALK-006)
+
+`classifyMaestroFailure` adds a deterministic `selector`, `navigation`, `product_assertion`,
+`runner`, `timeout`, or `unknown` category, the single explicitly failed step, and the raw combined
+output artifact path. It also marks every result `advisory: true`; only narrow selector/navigation
+shapes are `repairEligible`. This field is an input to the later bounded-repair ticket, not an
+automatic repair or generalized diagnosis.
+
+The boundaries are deliberately conservative:
+
+- Structured runner timeout/launch/path/artifact failures take precedence over output text.
+- A selector requires one failed tap/long-press/input step and Maestro's explicit `Element not found:`
+  diagnostic. Navigation requires a failed launch/open-link step and an explicit launch diagnostic.
+- A product assertion requires one failed **quoted text** assertion and Maestro's explicit
+  `Assertion is false:` diagnostic. ID assertions are not assumed to be product regressions.
+- Mixed diagnostics, multiple failed steps, unrecognized steps, and generic nonzero exits stay
+  `unknown` with `repairEligible: false`. Product assertions are also never repair-eligible.
+
+Positive and negative raw-output fixtures cover all six categories. Passing runs return `null`.
+The CLI adds the classification to run, remember, and explore-verification reports without changing
+runner exit codes or pass/fail. Cache-hit failures still invoke no explorer/model and record
+`modelCalls: 0`; the failed-validation store behavior remains unchanged.
+
+```sh
+bun test packages/maestro/test/failure-classification.test.ts \
+  packages/maestro/test/cache-replay-classification.test.ts \
+  packages/maestro/test/maestro-runner.test.ts --timeout=10000 --check
+```

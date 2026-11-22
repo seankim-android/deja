@@ -1,0 +1,71 @@
+{
+  "schemaVersion": 1,
+  "ticket": "WALK-006",
+  "platform": "android",
+  "device": "emulator-5554",
+  "avd": "walkcache_api_34",
+  "maestroVersion": "2.12.0",
+  "build": {
+    "command": "./gradlew clean :app:assembleDebug && adb -s emulator-5554 install -r -g app/build/outputs/apk/debug/app-debug.apk",
+    "result": "BUILD SUCCESSFUL; Streamed Install Success",
+    "buildFingerprint": "47ad33ba3cab8d4c1c268b1522e5ee7fd2d799fc3da6fdc884f99a40b7a166aa"
+  },
+  "selectorRun": {
+    "modeCommand": "sh scripts/fixture-mode.sh stale",
+    "runCommand": "bun scripts/walkcache.ts run checkout",
+    "exitCode": 1,
+    "cacheStatus": "hit",
+    "modelCalls": 0,
+    "passed": false,
+    "durationMs": 39287,
+    "completedStepsBeforeFailure": 16,
+    "failedStepCount": 1,
+    "failingStep": "Tap on id: dev.walkcache.checkout:id/checkout_button",
+    "classification": "selector",
+    "report": "evidence/walk006-selector-android-report.json",
+    "curatedRawOutput": "evidence/walk006-selector-android-output.log",
+    "generatedRawOutput": ".walkcache/reports/run-1795329420756/output.log",
+    "rawOutputSha256": "5e7767483aed4f96a014885acec9722b2c6f13aa30206935840202d7a7b964a5"
+  },
+  "productAssertionRun": {
+    "modeCommand": "sh scripts/fixture-mode.sh stable",
+    "runCommand": "bun scripts/walkcache.ts remember checkout --flow flows/product-regression.yaml",
+    "exitCode": 1,
+    "cacheStatus": "rejected",
+    "modelCalls": 0,
+    "passed": false,
+    "durationMs": 42040,
+    "completedStepsBeforeFailure": 19,
+    "failedStepCount": 1,
+    "failingStep": "Assert that \"Order #WC-9999 · Mochi sticker pack\" is visible",
+    "classification": "product_assertion",
+    "repairEligible": false,
+    "report": "evidence/walk006-product-assertion-android-report.json",
+    "curatedRawOutput": "evidence/walk006-product-assertion-android-output.log",
+    "generatedRawOutput": ".walkcache/attempts/remember-1795329472873/output.log",
+    "rawOutputSha256": "dd25f67bf561b30ed2edbe0465254d922fe5adabc79b5faf3b5a23ce23316813"
+  },
+  "restoredStableRun": {
+    "report": "evidence/walk006-restored-stable-android-report.json",
+    "cacheStatus": "recorded",
+    "modelCalls": 0,
+    "passed": true,
+    "durationMs": 25968,
+    "failureClassification": null
+  },
+  "preservedWalk001EvidenceSha256": {
+    "evidence/run-summary.json": "e96113fa9821917fe9f04c934c465c8e27eac18ac92f20f71b0bfe9b513e546b",
+    "evidence/agent-cold-checkout.yaml": "6518f0e609f1b6fe92623005ecf5b9f65a85f3b17c8e9279e6d514488bd1746f",
+    "evidence/repaired-checkout.yaml": "e09660f45502b720f79f95a65c78ad5f48a4e11ae1ff5f52c6cb99972b12b478",
+    "evidence/checkout-selector-repair.diff": "33a5ba612b7bcba40bbc1e09e4ac05501b0f670eec12e938c4c089d3ff9f2f11"
+  },
+  "safety": {
+    "ignoredMemoryHandEdited": false,
+    "existingAssertionsWeakenedOrRewritten": false,
+    "modelGeneratedSourcePatch": false,
+    "emulatorStopped": false,
+    "stableFixtureSettingAfterRun": null,
+    "deviceStateAfterRun": "device",
+    "generatedArtifactsRemainIgnored": true
+  }
+}

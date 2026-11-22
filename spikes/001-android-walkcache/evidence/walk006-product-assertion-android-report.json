@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "command": "remember",
+  "goalKey": "checkout",
+  "appId": "dev.walkcache.checkout",
+  "platform": "android",
+  "buildFingerprint": "47ad33ba3cab8d4c1c268b1522e5ee7fd2d799fc3da6fdc884f99a40b7a166aa",
+  "cacheStatus": "rejected",
+  "modelCalls": 0,
+  "verificationOnly": true,
+  "startedAt": "2026-11-22T06:37:52.873Z",
+  "endedAt": "2026-11-22T06:38:34.913Z",
+  "durationMs": 42040,
+  "monotonicDurationMs": 42040,
+  "exitCode": 1,
+  "signal": null,
+  "timedOut": false,
+  "passed": false,
+  "errors": [
+    {
+      "kind": "execution",
+      "message": "Maestro exited with code 1",
+      "code": "MAESTRO_EXIT"
+    }
+  ],
+  "stdoutPath": ".walkcache/attempts/remember-1795329472873/stdout.log",
+  "stderrPath": ".walkcache/attempts/remember-1795329472873/stderr.log",
+  "outputPath": ".walkcache/attempts/remember-1795329472873/output.log",
+  "failureClassification": {
+    "category": "product_assertion",
+    "failingStep": "Assert that \"Order #WC-9999 · Mochi sticker pack\" is visible",
+    "rawArtifactPath": ".walkcache/attempts/remember-1795329472873/output.log",
+    "advisory": true,
+    "repairEligible": false
+  }
+}

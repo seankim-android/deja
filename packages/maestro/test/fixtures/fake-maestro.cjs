@@ -24,6 +24,16 @@ if (modeArgument === 'grandchild' || modeArgument === 'bystander') {
   console.log('fake stdout')
   console.error('fake stderr')
 
+  if (process.env.WALKCACHE_FAKE_MAESTRO_MODE === 'selector') {
+    console.log('Running on fixture')
+    console.log('Launch app "dev.walkcache.checkout" with clear state... COMPLETED')
+    console.log('Assert that id: screen_cart is visible... COMPLETED')
+    console.log('Tap on id: checkout_button... FAILED')
+    console.log('')
+    console.log('Element not found: Id matching regex: checkout_button')
+    process.exitCode = 1
+  }
+
   if (mode === 'nonzero') process.exitCode = 7
   if (mode === 'timeout') {
     const markerPath = join(dirname(flowPath), 'timed-out-process-survived.txt')

@@ -1,0 +1,34 @@
+bun test v1.4.4-canary.1 (191755ec1)
+
+packages/maestro/test/cache-replay-classification.test.ts:
+(pass) a failing cache hit stays at zero model calls and its failed validation is not reused [56.25ms]
+
+packages/maestro/test/maestro-runner.test.ts:
+(pass) verified Maestro runner > preserves output, timing, configuration, exit status, and artifacts on success [11.00ms]
+(pass) verified Maestro runner > returns a structured execution error and preserves a nonzero exit code [10.68ms]
+(pass) verified Maestro runner > enforces the timeout and terminates only the spawned process tree [1462.03ms]
+(pass) verified Maestro runner > returns a structured launch error for a missing executable [4.02ms]
+(pass) verified Maestro runner > rejects a flow path that escapes the workspace before launching [2.13ms]
+(pass) verified Maestro runner > returns a structured artifact error without discarding process output [25.45ms]
+
+packages/maestro/test/failure-classification.test.ts:
+(pass) advisory Maestro failure classification fixtures > selector-positive remains deterministic and conservative [0.60ms]
+(pass) advisory Maestro failure classification fixtures > selector-negative remains deterministic and conservative [0.26ms]
+(pass) advisory Maestro failure classification fixtures > navigation-positive remains deterministic and conservative [0.78ms]
+(pass) advisory Maestro failure classification fixtures > navigation-negative remains deterministic and conservative [0.16ms]
+(pass) advisory Maestro failure classification fixtures > product-assertion-positive remains deterministic and conservative [0.17ms]
+(pass) advisory Maestro failure classification fixtures > product-assertion-negative remains deterministic and conservative [0.68ms]
+(pass) advisory Maestro failure classification fixtures > runner-positive remains deterministic and conservative [0.09ms]
+(pass) advisory Maestro failure classification fixtures > runner-negative remains deterministic and conservative [0.11ms]
+(pass) advisory Maestro failure classification fixtures > timeout-positive remains deterministic and conservative [0.13ms]
+(pass) advisory Maestro failure classification fixtures > timeout-negative remains deterministic and conservative [0.10ms]
+(pass) advisory Maestro failure classification fixtures > unknown-positive remains deterministic and conservative [0.10ms]
+(pass) advisory Maestro failure classification fixtures > unknown-negative remains deterministic and conservative [0.10ms]
+(pass) advisory Maestro failure classification fixtures > a passing runner result has no failure classification [0.03ms]
+(pass) advisory Maestro failure classification fixtures > mixed selector and assertion diagnostics stay unknown and ineligible for repair [0.03ms]
+(pass) advisory Maestro failure classification fixtures > multiple failing steps stay ambiguous and retain the raw artifact reference [0.02ms]
+
+ 22 pass
+ 0 fail
+ 83 expect() calls
+Ran 22 tests across 3 files. [1.65s]

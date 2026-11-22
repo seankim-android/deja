@@ -1,6 +1,9 @@
 # Logs
 logs
 *.log
+# Checked-in deterministic classifier inputs and curated secret-free Android evidence.
+!packages/maestro/test/fixtures/classification/*.log
+!spikes/001-android-walkcache/evidence/walk006-*-output.log
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*

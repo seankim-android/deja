@@ -3,6 +3,7 @@ package dev.walkcache.checkout;
 import android.app.Activity;
 import android.graphics.Color;
 import android.os.Bundle;
+import android.provider.Settings;
 import android.text.InputType;
 import android.view.View;
 import android.view.ViewGroup;
@@ -14,6 +15,7 @@ import android.widget.TextView;
 
 /** A deterministic, dependency-free Android app used only by the WalkCache PoC. */
 public final class MainActivity extends Activity {
+    private static final String CHECKOUT_SELECTOR_STALE_SETTING = "walkcache_checkout_selector_stale";
     private EditText usernameInput;
     private EditText passwordInput;
 
@@ -67,7 +69,10 @@ public final class MainActivity extends Activity {
         content.addView(body("1 × Mochi sticker pack"));
         content.addView(body("Total: $5.00"));
 
-        Button checkout = button("Checkout", R.id.checkout_button);
+        Integer checkoutId = Settings.Global.getInt(
+            getContentResolver(), CHECKOUT_SELECTOR_STALE_SETTING, 0
+        ) == 1 ? null : R.id.checkout_button;
+        Button checkout = button("Checkout", checkoutId);
         checkout.setOnClickListener(view -> showConfirmation());
         content.addView(checkout);
         setContentView(scroll(content));

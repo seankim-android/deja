@@ -3,6 +3,13 @@ import { realpathSync, statSync } from 'node:fs'
 import { mkdir, realpath, writeFile } from 'node:fs/promises'
 import { delimiter, dirname, resolve, sep } from 'node:path'
 
+export {
+  classifyMaestroFailure,
+  type MaestroFailureCategory,
+  type MaestroFailureClassification,
+  type MaestroFailureInput,
+} from './failure-classification.ts'
+
 export type MaestroRunnerErrorKind =
   | 'configuration'
   | 'flow-path'
