@@ -1,0 +1,43 @@
+{
+  "schemaVersion": 1,
+  "ticket": "WALK-020",
+  "runId": "walk020-20261122T195607-94392",
+  "playbackCompression": 2.5,
+  "speedupClaim": false,
+  "segments": [
+    {
+      "label": "BEFORE CACHE",
+      "segmentFile": "demo/generated/live-edit/browser-remember.mp4",
+      "rawVideo": "demo/generated/browser/walk020-20261122T195607-94392/remember.mp4",
+      "rawRangeSeconds": [
+        0.0,
+        19.733333
+      ],
+      "rawFramesDecoded": 592,
+      "playbackCompression": 2.5,
+      "segmentDurationSeconds": 7.866667,
+      "segmentFramesDecoded": 236,
+      "receipt": "demo/live-evidence/chromium/remember-receipt.json",
+      "runReport": "demo/live-evidence/chromium/remember-run-report.json",
+      "savedYaml": "demo/live-evidence/chromium/remember-saved-checkout.yaml",
+      "edit": "Uniformly time-compressed entire uncut take; no wait or failure frames removed"
+    },
+    {
+      "label": "AFTER CACHE",
+      "segmentFile": "demo/generated/live-edit/browser-run.mp4",
+      "rawVideo": "demo/generated/browser/walk020-20261122T195607-94392/run.mp4",
+      "rawRangeSeconds": [
+        0.0,
+        18.9
+      ],
+      "rawFramesDecoded": 567,
+      "playbackCompression": 2.5,
+      "segmentDurationSeconds": 7.533333,
+      "segmentFramesDecoded": 226,
+      "receipt": "demo/live-evidence/chromium/run-receipt.json",
+      "runReport": "demo/live-evidence/chromium/run-run-report.json",
+      "savedYaml": "demo/live-evidence/chromium/run-saved-checkout.yaml",
+      "edit": "Uniformly time-compressed entire uncut take; no wait or failure frames removed"
+    }
+  ]
+}

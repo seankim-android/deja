@@ -1,0 +1,83 @@
+{
+  "schemaVersion": 1,
+  "command": "remember",
+  "identity": {
+    "goal": "checkout live walk020 walk020-20261122T195607-94392",
+    "appId": "http://127.0.0.1:4174",
+    "platform": "web",
+    "flowSchemaVersion": "maestro/v1",
+    "buildFingerprint": "85bc4f070a43cd3be046bd1adc5df9c22195f5c2ad15a6c1ea57944944dbb4ee",
+    "adapter": "maestro-web@2.12.0",
+    "browser": "chromium"
+  },
+  "goalKey": "checkout live walk020 walk020-20261122t195607-94392",
+  "cacheStatus": "not-checked",
+  "startedAt": "2026-11-22T19:56:07.051Z",
+  "outcome": "remembered",
+  "passed": true,
+  "modelCalls": 0,
+  "modelCallBasis": "remember performs independent verification only",
+  "assertions": 12,
+  "repairCount": 0,
+  "yamlPath": ".walkcache/flows/checkout-live-walk020-walk020-20261122t195607-94392/web-944d55991d28716f3da90e71546227a946cd02b02c88ed52edb62600e2167aff.yaml",
+  "yamlSha256": "944d55991d28716f3da90e71546227a946cd02b02c88ed52edb62600e2167aff",
+  "failure": null,
+  "artifacts": [
+    {
+      "kind": "yaml",
+      "path": "evidence/checkout.yaml"
+    },
+    {
+      "kind": "output",
+      "path": ".walkcache/attempts/remember-1795377367051-iohckenu/output.log"
+    },
+    {
+      "kind": "output",
+      "path": ".walkcache/attempts/remember-1795377367051-iohckenu/stdout.log"
+    },
+    {
+      "kind": "output",
+      "path": ".walkcache/attempts/remember-1795377367051-iohckenu/stderr.log"
+    },
+    {
+      "kind": "yaml",
+      "path": ".walkcache/flows/checkout-live-walk020-walk020-20261122t195607-94392/web-944d55991d28716f3da90e71546227a946cd02b02c88ed52edb62600e2167aff.yaml",
+      "sha256": "944d55991d28716f3da90e71546227a946cd02b02c88ed52edb62600e2167aff"
+    },
+    {
+      "kind": "memory",
+      "path": ".walkcache/memory/walks.json"
+    }
+  ],
+  "diffs": [],
+  "errors": [],
+  "execution": {
+    "passed": true,
+    "startedAt": "2026-11-22T19:56:07.051Z",
+    "endedAt": "2026-11-22T19:56:49.370Z",
+    "durationMs": 42319,
+    "exitCode": 0,
+    "assertions": 12,
+    "failure": null,
+    "artifacts": [
+      {
+        "kind": "yaml",
+        "path": "evidence/checkout.yaml"
+      },
+      {
+        "kind": "output",
+        "path": ".walkcache/attempts/remember-1795377367051-iohckenu/output.log"
+      },
+      {
+        "kind": "output",
+        "path": ".walkcache/attempts/remember-1795377367051-iohckenu/stdout.log"
+      },
+      {
+        "kind": "output",
+        "path": ".walkcache/attempts/remember-1795377367051-iohckenu/stderr.log"
+      }
+    ]
+  },
+  "endedAt": "2026-11-22T19:56:49.375Z",
+  "durationMs": 42324
+}

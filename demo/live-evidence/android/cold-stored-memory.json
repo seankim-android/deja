@@ -1,0 +1,29 @@
+{
+  "goal": "checkout",
+  "appId": "dev.walkcache.checkout",
+  "platform": "android",
+  "flowSchemaVersion": "maestro/v1",
+  "buildFingerprint": "6aec5fea876938db14007ba3dbcb91f698832fe855886abd9dea1e7b28861759",
+  "goalKey": "checkout",
+  "flowPath": ".walkcache/flows/checkout/android-e95532ce04a4e125d3bd56e1b9d5d367b31dd67eed4441c56271ca52f3c3d0a1.yaml",
+  "flowSha256": "e95532ce04a4e125d3bd56e1b9d5d367b31dd67eed4441c56271ca52f3c3d0a1",
+  "lastValidation": {
+    "passed": true,
+    "at": "2026-11-22T20:27:33.668Z"
+  },
+  "validationHistory": [
+    {
+      "passed": true,
+      "at": "2026-11-22T20:27:33.668Z",
+      "flowSha256": "e95532ce04a4e125d3bd56e1b9d5d367b31dd67eed4441c56271ca52f3c3d0a1"
+    }
+  ],
+  "origin": "explore",
+  "exploration": {
+    "explorationDurationMs": 71474,
+    "verificationDurationMs": 26302,
+    "mcpCalls": 12,
+    "modelCalls": 13,
+    "modelCallBasis": "openclaw agent exec assistantTurns (completed round trips)"
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "sourceRunId": "walk020-android-20261122T200956-97974",
+  "sourceGoal": "checkout live walk020 walk020-android-20261122T200956-97974",
+  "sourceModelCalls": 12,
+  "sourceYamlSha256": "2b863bb62021ec93370ada0a626c90f8b6ee07a8a380c545589f81237060e76f",
+  "candidateBytesCopiedExactly": true,
+  "baselineGoal": "checkout",
+  "baselineCommand": "remember",
+  "separateFromFreshColdWarmLifecycle": true
+}

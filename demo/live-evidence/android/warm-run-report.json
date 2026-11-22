@@ -1,0 +1,72 @@
+{
+  "schemaVersion": 1,
+  "command": "run",
+  "identity": {
+    "goal": "checkout",
+    "appId": "dev.walkcache.checkout",
+    "platform": "android",
+    "flowSchemaVersion": "maestro/v1",
+    "buildFingerprint": "6aec5fea876938db14007ba3dbcb91f698832fe855886abd9dea1e7b28861759"
+  },
+  "goalKey": "checkout",
+  "cacheStatus": "hit",
+  "startedAt": "2026-11-22T20:28:11.524Z",
+  "execution": {
+    "passed": true,
+    "startedAt": "2026-11-22T20:28:11.526Z",
+    "endedAt": "2026-11-22T20:28:37.591Z",
+    "durationMs": 26065,
+    "exitCode": 0,
+    "assertions": 14,
+    "failure": null,
+    "artifacts": [
+      {
+        "kind": "yaml",
+        "path": ".walkcache/flows/checkout/android-e95532ce04a4e125d3bd56e1b9d5d367b31dd67eed4441c56271ca52f3c3d0a1.yaml"
+      },
+      {
+        "kind": "output",
+        "path": ".walkcache/reports/run-1795379291525-kbaejuok/output.log"
+      },
+      {
+        "kind": "output",
+        "path": ".walkcache/reports/run-1795379291525-kbaejuok/stdout.log"
+      },
+      {
+        "kind": "output",
+        "path": ".walkcache/reports/run-1795379291525-kbaejuok/stderr.log"
+      }
+    ]
+  },
+  "outcome": "passed",
+  "passed": true,
+  "modelCalls": 0,
+  "modelCallBasis": "exact local hit: explorer and model factories were not invoked",
+  "assertions": 14,
+  "repairCount": 0,
+  "yamlPath": ".walkcache/flows/checkout/android-e95532ce04a4e125d3bd56e1b9d5d367b31dd67eed4441c56271ca52f3c3d0a1.yaml",
+  "yamlSha256": "e95532ce04a4e125d3bd56e1b9d5d367b31dd67eed4441c56271ca52f3c3d0a1",
+  "failure": null,
+  "artifacts": [
+    {
+      "kind": "yaml",
+      "path": ".walkcache/flows/checkout/android-e95532ce04a4e125d3bd56e1b9d5d367b31dd67eed4441c56271ca52f3c3d0a1.yaml"
+    },
+    {
+      "kind": "output",
+      "path": ".walkcache/reports/run-1795379291525-kbaejuok/output.log"
+    },
+    {
+      "kind": "output",
+      "path": ".walkcache/reports/run-1795379291525-kbaejuok/stdout.log"
+    },
+    {
+      "kind": "output",
+      "path": ".walkcache/reports/run-1795379291525-kbaejuok/stderr.log"
+    }
+  ],
+  "diffs": [],
+  "errors": [],
+  "endedAt": "2026-11-22T20:28:37.594Z",
+  "durationMs": 26070
+}

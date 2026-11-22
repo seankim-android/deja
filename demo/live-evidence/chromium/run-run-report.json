@@ -1,0 +1,74 @@
+{
+  "schemaVersion": 1,
+  "command": "run",
+  "identity": {
+    "goal": "checkout live walk020 walk020-20261122T195607-94392",
+    "appId": "http://127.0.0.1:4174",
+    "platform": "web",
+    "flowSchemaVersion": "maestro/v1",
+    "buildFingerprint": "85bc4f070a43cd3be046bd1adc5df9c22195f5c2ad15a6c1ea57944944dbb4ee",
+    "adapter": "maestro-web@2.12.0",
+    "browser": "chromium"
+  },
+  "goalKey": "checkout live walk020 walk020-20261122t195607-94392",
+  "cacheStatus": "hit",
+  "startedAt": "2026-11-22T19:57:56.319Z",
+  "execution": {
+    "passed": true,
+    "startedAt": "2026-11-22T19:57:56.320Z",
+    "endedAt": "2026-11-22T19:58:32.874Z",
+    "durationMs": 36554,
+    "exitCode": 0,
+    "assertions": 12,
+    "failure": null,
+    "artifacts": [
+      {
+        "kind": "yaml",
+        "path": ".walkcache/flows/checkout-live-walk020-walk020-20261122t195607-94392/web-944d55991d28716f3da90e71546227a946cd02b02c88ed52edb62600e2167aff.yaml"
+      },
+      {
+        "kind": "output",
+        "path": ".walkcache/reports/run-1795377476320-xrswlgcs/output.log"
+      },
+      {
+        "kind": "output",
+        "path": ".walkcache/reports/run-1795377476320-xrswlgcs/stdout.log"
+      },
+      {
+        "kind": "output",
+        "path": ".walkcache/reports/run-1795377476320-xrswlgcs/stderr.log"
+      }
+    ]
+  },
+  "outcome": "passed",
+  "passed": true,
+  "modelCalls": 0,
+  "modelCallBasis": "exact local hit: explorer and model factories were not invoked",
+  "assertions": 12,
+  "repairCount": 0,
+  "yamlPath": ".walkcache/flows/checkout-live-walk020-walk020-20261122t195607-94392/web-944d55991d28716f3da90e71546227a946cd02b02c88ed52edb62600e2167aff.yaml",
+  "yamlSha256": "944d55991d28716f3da90e71546227a946cd02b02c88ed52edb62600e2167aff",
+  "failure": null,
+  "artifacts": [
+    {
+      "kind": "yaml",
+      "path": ".walkcache/flows/checkout-live-walk020-walk020-20261122t195607-94392/web-944d55991d28716f3da90e71546227a946cd02b02c88ed52edb62600e2167aff.yaml"
+    },
+    {
+      "kind": "output",
+      "path": ".walkcache/reports/run-1795377476320-xrswlgcs/output.log"
+    },
+    {
+      "kind": "output",
+      "path": ".walkcache/reports/run-1795377476320-xrswlgcs/stdout.log"
+    },
+    {
+      "kind": "output",
+      "path": ".walkcache/reports/run-1795377476320-xrswlgcs/stderr.log"
+    }
+  ],
+  "diffs": [],
+  "errors": [],
+  "endedAt": "2026-11-22T19:58:32.876Z",
+  "durationMs": 36557
+}

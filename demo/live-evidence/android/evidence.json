@@ -1,0 +1,302 @@
+{
+  "schemaVersion": 1,
+  "ticket": "WALK-020",
+  "runId": "walk020-android-checkout-06",
+  "validatedAt": "2026-11-22T20:35:43.451670+00:00",
+  "resource": {
+    "avd": "walkcache_api_34",
+    "device": "emulator-5554",
+    "api": 34
+  },
+  "phases": {
+    "cold": {
+      "command": "explore",
+      "outcome": "cold-recorded",
+      "passed": true,
+      "cacheStatus": "not-checked",
+      "modelCalls": 13,
+      "modelCallBasis": "openclaw agent exec assistantTurns (completed round trips)",
+      "durationMs": 97897,
+      "assertions": 14,
+      "repairCount": 0,
+      "yamlSha256": "e95532ce04a4e125d3bd56e1b9d5d367b31dd67eed4441c56271ca52f3c3d0a1"
+    },
+    "warm": {
+      "command": "run",
+      "outcome": "passed",
+      "passed": true,
+      "cacheStatus": "hit",
+      "modelCalls": 0,
+      "modelCallBasis": "exact local hit: explorer and model factories were not invoked",
+      "durationMs": 26070,
+      "assertions": 14,
+      "repairCount": 0,
+      "yamlSha256": "e95532ce04a4e125d3bd56e1b9d5d367b31dd67eed4441c56271ca52f3c3d0a1"
+    },
+    "repair-baseline": {
+      "command": "remember",
+      "outcome": "remembered",
+      "passed": true,
+      "cacheStatus": "not-checked",
+      "modelCalls": 0,
+      "modelCallBasis": "remember performs independent verification only",
+      "durationMs": 26745,
+      "assertions": 12,
+      "repairCount": 0,
+      "yamlSha256": "2b863bb62021ec93370ada0a626c90f8b6ee07a8a380c545589f81237060e76f"
+    },
+    "repair-warm": {
+      "command": "run",
+      "outcome": "passed",
+      "passed": true,
+      "cacheStatus": "hit",
+      "modelCalls": 0,
+      "modelCallBasis": "exact local hit: explorer and model factories were not invoked",
+      "durationMs": 25396,
+      "assertions": 12,
+      "repairCount": 0,
+      "yamlSha256": "2b863bb62021ec93370ada0a626c90f8b6ee07a8a380c545589f81237060e76f"
+    },
+    "stale-repair": {
+      "command": "run",
+      "outcome": "repaired",
+      "passed": true,
+      "cacheStatus": "miss",
+      "modelCalls": 0,
+      "modelCallBasis": "bounded selector repair uses the verified deterministic policy only",
+      "durationMs": 66879,
+      "assertions": 12,
+      "repairCount": 1,
+      "yamlSha256": "2b863bb62021ec93370ada0a626c90f8b6ee07a8a380c545589f81237060e76f"
+    },
+    "replay": {
+      "command": "run",
+      "outcome": "passed",
+      "passed": true,
+      "cacheStatus": "hit",
+      "modelCalls": 0,
+      "modelCallBasis": "exact local hit: explorer and model factories were not invoked",
+      "durationMs": 25676,
+      "assertions": 12,
+      "repairCount": 0,
+      "yamlSha256": "2b863bb62021ec93370ada0a626c90f8b6ee07a8a380c545589f81237060e76f"
+    }
+  },
+  "rawUncut": {
+    "cold": [
+      {
+        "index": 1,
+        "file": "demo/generated/android/walk020-android-checkout-06/cold-clip-001.mp4",
+        "sha256": "ce75ff9df9427eeaa1131b5172b18426892e9e336a5fa7f06e3c56e84fa0655d",
+        "durationSeconds": 99.032822,
+        "decodedFrames": 1348,
+        "decodeExitCode": 0,
+        "duplicateDtsWarnings": 6,
+        "probe": {
+          "programs": [],
+          "stream_groups": [],
+          "streams": [
+            {
+              "codec_name": "h264",
+              "width": 1080,
+              "height": 2400,
+              "nb_read_frames": "1348"
+            },
+            {},
+            {}
+          ],
+          "format": {
+            "duration": "99.032822",
+            "size": "17055076"
+          }
+        }
+      }
+    ],
+    "warm": [
+      {
+        "index": 1,
+        "file": "demo/generated/android/walk020-android-checkout-06/warm-clip-001.mp4",
+        "sha256": "8ec91e345315160463faa795a5ae4a1ede7f623eda2a19cd5eeb21343d5ba178",
+        "durationSeconds": 26.986933,
+        "decodedFrames": 411,
+        "decodeExitCode": 0,
+        "duplicateDtsWarnings": 0,
+        "probe": {
+          "programs": [],
+          "stream_groups": [],
+          "streams": [
+            {
+              "codec_name": "h264",
+              "width": 1080,
+              "height": 2400,
+              "nb_read_frames": "411"
+            },
+            {},
+            {}
+          ],
+          "format": {
+            "duration": "26.986933",
+            "size": "3042828"
+          }
+        }
+      }
+    ],
+    "repair-baseline": [
+      {
+        "index": 1,
+        "file": "demo/generated/android/walk020-android-checkout-06/repair-baseline-clip-001.mp4",
+        "sha256": "9f5258eac09b528b49f11373c4dbbe7326d91ee0d8433c0ae21f67ec9e4b7b6b",
+        "durationSeconds": 27.656978,
+        "decodedFrames": 398,
+        "decodeExitCode": 0,
+        "duplicateDtsWarnings": 48,
+        "probe": {
+          "programs": [],
+          "stream_groups": [],
+          "streams": [
+            {
+              "codec_name": "h264",
+              "width": 1080,
+              "height": 2400,
+              "nb_read_frames": "398"
+            },
+            {},
+            {}
+          ],
+          "format": {
+            "duration": "27.656978",
+            "size": "3040764"
+          }
+        }
+      }
+    ],
+    "repair-warm": [
+      {
+        "index": 1,
+        "file": "demo/generated/android/walk020-android-checkout-06/repair-warm-clip-001.mp4",
+        "sha256": "52cdb1b2a40691ba249210ef5be6e9cf50aa8f13d2e25ef19b6f6f4ba69cb971",
+        "durationSeconds": 26.438556,
+        "decodedFrames": 397,
+        "decodeExitCode": 0,
+        "duplicateDtsWarnings": 4,
+        "probe": {
+          "programs": [],
+          "stream_groups": [],
+          "streams": [
+            {
+              "codec_name": "h264",
+              "width": 1080,
+              "height": 2400,
+              "nb_read_frames": "397"
+            },
+            {},
+            {}
+          ],
+          "format": {
+            "duration": "26.438556",
+            "size": "2707374"
+          }
+        }
+      }
+    ],
+    "stale-repair": [
+      {
+        "index": 1,
+        "file": "demo/generated/android/walk020-android-checkout-06/stale-repair-clip-001.mp4",
+        "sha256": "2a4fd4e40f6fe619a9b090a0f6b937ba3db277d73ac2986ff6ad16c53f5b1245",
+        "durationSeconds": 68.1257,
+        "decodedFrames": 869,
+        "decodeExitCode": 0,
+        "duplicateDtsWarnings": 51,
+        "probe": {
+          "programs": [],
+          "stream_groups": [],
+          "streams": [
+            {
+              "codec_name": "h264",
+              "width": 1080,
+              "height": 2400,
+              "nb_read_frames": "869"
+            },
+            {},
+            {}
+          ],
+          "format": {
+            "duration": "68.125700",
+            "size": "12633407"
+          }
+        }
+      }
+    ],
+    "replay": [
+      {
+        "index": 1,
+        "file": "demo/generated/android/walk020-android-checkout-06/replay-clip-001.mp4",
+        "sha256": "55f5207e3793a365ac37ef131cc0cb1c4eec5259b3098ab07338daba5b1f9a34",
+        "durationSeconds": 27.041022,
+        "decodedFrames": 404,
+        "decodeExitCode": 0,
+        "duplicateDtsWarnings": 7,
+        "probe": {
+          "programs": [],
+          "stream_groups": [],
+          "streams": [
+            {
+              "codec_name": "h264",
+              "width": 1080,
+              "height": 2400,
+              "nb_read_frames": "404"
+            },
+            {},
+            {}
+          ],
+          "format": {
+            "duration": "27.041022",
+            "size": "2732798"
+          }
+        }
+      }
+    ]
+  },
+  "independentColdVerification": true,
+  "atomicColdPersistence": true,
+  "coldWarmIdentityExactMatch": true,
+  "repairBaselineWarmIdentityExactMatch": true,
+  "freshColdAndRepairFixtureAreSeparateLifecycles": true,
+  "repairBaseline": {
+    "command": "remember",
+    "passed": true,
+    "modelCalls": 0,
+    "yamlSha256": "2b863bb62021ec93370ada0a626c90f8b6ee07a8a380c545589f81237060e76f",
+    "assertions": 12,
+    "sourceRunId": "walk020-android-20261122T200956-97974",
+    "sourceGoal": "checkout live walk020 walk020-android-20261122T200956-97974",
+    "sourceModelCalls": 12,
+    "candidateBytesCopiedExactly": true
+  },
+  "repairDiagnosisEndRawSeconds": 41.696578,
+  "repairLifecycle": {
+    "oneAttemptOnly": true,
+    "autoCommit": false,
+    "pullRequest": false,
+    "timeBudgetMs": 240000,
+    "affectedFiles": [
+      "app/src/main/java/dev/walkcache/checkout/MainActivity.java",
+      "app/src/main/res/values/ids.xml"
+    ],
+    "diagnosisDurationMs": 40659,
+    "buildDurationMs": 689,
+    "verificationDurationMs": 25519,
+    "assertionsUnchangedByteForByte": true,
+    "atomicWrite": true,
+    "diagnosisBuildFingerprint": "6498293ae1d610dee34d0d5719e05032edab132062302cc374a638503c3b6ae0",
+    "repairedBuildFingerprint": "1de8864ea046b64d124ece93ca97b0ae69d11d1fc3d39a89ff405f0e2dd2262d"
+  },
+  "normalSelectorRestored": true,
+  "finalAssertion": "Order #WC-1001 \u00b7 Mochi sticker pack",
+  "fallbackSha256Unchanged": "3e6c9ec2f4040ec1a8e8bb1e4f8eee2bbe977d6e3f2a69e5b6503cf2f178e461",
+  "visualReview": "AI visual review passed for raw contact sheet and corrected full-resolution cold/warm/repair/replay segment frames; human sign-off is not claimed",
+  "visualReviewRecord": "demo/live-evidence/android/REVIEW.md",
+  "humanSignOffClaimed": false,
+  "secretAndPrivatePathScanPassed": true
+}

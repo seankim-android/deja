@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "ticket": "WALK-020",
+  "phase": "repair-baseline",
+  "avd": "walkcache_api_34",
+  "device": "emulator-5554",
+  "captureScope": "Continuous real emulator UI via adb screenrecord; sequential clips at the 180-second platform limit",
+  "startedAt": "2026-11-22T20:28:41.249087+00:00",
+  "endedAt": "2026-11-22T20:29:09.375606+00:00",
+  "clipCount": 1,
+  "clips": [
+    {
+      "index": 1,
+      "remoteName": "clip-001.mp4",
+      "startedAt": "2026-11-22T20:28:41.265970+00:00",
+      "durationLimitSeconds": 180,
+      "exitCode": 0,
+      "endedAt": "2026-11-22T20:29:09.300528+00:00",
+      "recorderWallSeconds": 28.034417,
+      "localFile": "demo/generated/android/walk020-android-checkout-06/repair-baseline-clip-001.mp4",
+      "bytes": 3040764,
+      "sha256": "9f5258eac09b528b49f11373c4dbbe7326d91ee0d8433c0ae21f67ec9e4b7b6b"
+    }
+  ]
+}

@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "captureScope": "real Chromium CDP screencast; not macOS desktop/window recording",
+  "label": "BEFORE CACHE",
+  "startedAt": "2026-11-22T19:56:09.010856+00:00",
+  "endedAt": "2026-11-22T19:56:28.832332+00:00",
+  "durationSeconds": 19.82134,
+  "fps": 30,
+  "maxWidth": 1280,
+  "maxHeight": 800,
+  "targetUrlAtAttachment": "data:,",
+  "screencastEventCount": 45,
+  "emittedFrameCount": 592,
+  "heldFrameCount": 549,
+  "browserDisconnected": true
+}

@@ -1,0 +1,28 @@
+WALK-020 Android live capture commands
+Only walkcache_api_34 / emulator-5554 is used. Run from spike unless noted.
+
+. ./scripts/env.sh
+emulator -avd walkcache_api_34 -no-boot-anim
+adb -s emulator-5554 wait-for-device
+sh scripts/fixture-mode.sh stable
+./gradlew :app:assembleDebug
+adb -s emulator-5554 install -r -g app/build/outputs/apk/debug/app-debug.apk
+
+# Repository root. Fresh cold/warm are one lifecycle. The separate repair fixture
+# is a byte-preserved model-authored candidate independently remembered next.
+python3 demo/live/record_android.py --phase cold --goal checkout --run-id walk020-android-checkout-06
+python3 demo/live/record_android.py --phase warm --run-id walk020-android-checkout-06
+python3 demo/live/record_android.py --phase repair-baseline --run-id walk020-android-checkout-06   --repair-flow demo/generated/android/walk020-android-20261122T200956-97974/cold-saved-checkout.yaml
+python3 demo/live/record_android.py --phase repair-warm --run-id walk020-android-checkout-06
+python3 demo/live/record_android.py --phase stale-repair --run-id walk020-android-checkout-06
+python3 demo/live/record_android.py --phase replay --run-id walk020-android-checkout-06
+python3 demo/live/review_android.py --run-id walk020-android-checkout-06
+
+The repair baseline transparently revalidates a separate, hash-preserved model-
+authored candidate; its YAML hash is intentionally distinct from the fresh cold/
+warm lifecycle. The stale-repair driver alone performs the exact experiment-only
+reversal of evidence/walk007-repair.diff, builds/installs it, and runs production
+`run`. The configured repairer restores only MainActivity.java/ids.xml, rebuilds
+and independently verifies. Baseline bytes are restored automatically on failure.
+No repair is committed. Raw uncut screenrecord clips remain ignored under:
+demo/generated/android/walk020-android-checkout-06/

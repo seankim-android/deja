@@ -1,0 +1,151 @@
+{
+  "schemaVersion": 1,
+  "ticket": "WALK-020",
+  "runId": "walk020-android-checkout-06",
+  "freshColdWarmAndRepairLifecyclesSeparate": true,
+  "speedupClaim": false,
+  "segments": [
+    {
+      "name": "android-cold",
+      "label": "BEFORE CACHE",
+      "segmentFile": "demo/generated/live-edit/android-cold.mp4",
+      "rawPhase": "cold",
+      "rawRangeSeconds": [
+        0.0,
+        99.032822
+      ],
+      "rawTotalSeconds": 99.032822,
+      "rawClips": [
+        {
+          "file": "demo/generated/android/walk020-android-checkout-06/cold-clip-001.mp4",
+          "sha256": "ce75ff9df9427eeaa1131b5172b18426892e9e336a5fa7f06e3c56e84fa0655d",
+          "startSeconds": 0.0,
+          "endSeconds": 99.032822
+        }
+      ],
+      "playbackCompression": 8.252735166666666,
+      "segmentDurationSeconds": 11.966667,
+      "segmentFramesDecoded": 359,
+      "receipt": "demo/live-evidence/android/cold-receipt.json",
+      "runReport": "demo/live-evidence/android/cold-run-report.json",
+      "savedYaml": "demo/live-evidence/android/cold-saved-checkout.yaml",
+      "edit": "Uniformly time-compressed stated raw range; source frames normalized to 30 fps; no waits/failures selectively removed within range"
+    },
+    {
+      "name": "android-warm",
+      "label": "AFTER CACHE",
+      "segmentFile": "demo/generated/live-edit/android-warm.mp4",
+      "rawPhase": "warm",
+      "rawRangeSeconds": [
+        0.0,
+        26.986933
+      ],
+      "rawTotalSeconds": 26.986933,
+      "rawClips": [
+        {
+          "file": "demo/generated/android/walk020-android-checkout-06/warm-clip-001.mp4",
+          "sha256": "8ec91e345315160463faa795a5ae4a1ede7f623eda2a19cd5eeb21343d5ba178",
+          "startSeconds": 0.0,
+          "endSeconds": 26.986933
+        }
+      ],
+      "playbackCompression": 3.855276142857143,
+      "segmentDurationSeconds": 6.966667,
+      "segmentFramesDecoded": 209,
+      "receipt": "demo/live-evidence/android/warm-receipt.json",
+      "runReport": "demo/live-evidence/android/warm-run-report.json",
+      "savedYaml": "demo/live-evidence/android/warm-saved-checkout.yaml",
+      "edit": "Uniformly time-compressed stated raw range; source frames normalized to 30 fps; no waits/failures selectively removed within range"
+    },
+    {
+      "name": "android-before-repair",
+      "label": "BEFORE REPAIR",
+      "segmentFile": "demo/generated/live-edit/android-before-repair.mp4",
+      "rawPhase": "stale-repair",
+      "rawRangeSeconds": [
+        0.0,
+        41.696578
+      ],
+      "rawTotalSeconds": 68.1257,
+      "rawClips": [
+        {
+          "file": "demo/generated/android/walk020-android-checkout-06/stale-repair-clip-001.mp4",
+          "sha256": "2a4fd4e40f6fe619a9b090a0f6b937ba3db277d73ac2986ff6ad16c53f5b1245",
+          "startSeconds": 0.0,
+          "endSeconds": 68.1257
+        }
+      ],
+      "playbackCompression": 5.956654,
+      "segmentDurationSeconds": 6.966667,
+      "segmentFramesDecoded": 209,
+      "receipt": "demo/live-evidence/android/stale-repair-receipt.json",
+      "runReport": "demo/live-evidence/android/stale-repair-run-report.json",
+      "savedYaml": "demo/live-evidence/android/stale-repair-saved-checkout.yaml",
+      "edit": "Uniformly time-compressed stated raw range; source frames normalized to 30 fps; no waits/failures selectively removed within range",
+      "baselineReceipt": "demo/live-evidence/android/repair-baseline-receipt.json",
+      "baselineRunReport": "demo/live-evidence/android/repair-baseline-run-report.json",
+      "baselineSavedYaml": "demo/live-evidence/android/repair-baseline-saved-checkout.yaml",
+      "baselineProvenance": "demo/live-evidence/android/repair-fixture-provenance.json"
+    },
+    {
+      "name": "android-after-repair",
+      "label": "AFTER REPAIR",
+      "segmentFile": "demo/generated/live-edit/android-after-repair.mp4",
+      "rawPhase": "stale-repair",
+      "rawRangeSeconds": [
+        41.696578,
+        68.1257
+      ],
+      "rawTotalSeconds": 68.1257,
+      "rawClips": [
+        {
+          "file": "demo/generated/android/walk020-android-checkout-06/stale-repair-clip-001.mp4",
+          "sha256": "2a4fd4e40f6fe619a9b090a0f6b937ba3db277d73ac2986ff6ad16c53f5b1245",
+          "startSeconds": 0.0,
+          "endSeconds": 68.1257
+        }
+      ],
+      "playbackCompression": 2.93656911111111,
+      "segmentDurationSeconds": 8.966667,
+      "segmentFramesDecoded": 269,
+      "receipt": "demo/live-evidence/android/stale-repair-receipt.json",
+      "runReport": "demo/live-evidence/android/stale-repair-run-report.json",
+      "savedYaml": "demo/live-evidence/android/stale-repair-saved-checkout.yaml",
+      "edit": "Uniformly time-compressed stated raw range; source frames normalized to 30 fps; no waits/failures selectively removed within range",
+      "baselineReceipt": "demo/live-evidence/android/repair-baseline-receipt.json",
+      "baselineRunReport": "demo/live-evidence/android/repair-baseline-run-report.json",
+      "baselineSavedYaml": "demo/live-evidence/android/repair-baseline-saved-checkout.yaml",
+      "baselineProvenance": "demo/live-evidence/android/repair-fixture-provenance.json"
+    },
+    {
+      "name": "android-replay",
+      "label": "GREEN REPLAY",
+      "segmentFile": "demo/generated/live-edit/android-replay.mp4",
+      "rawPhase": "replay",
+      "rawRangeSeconds": [
+        0.0,
+        27.041022
+      ],
+      "rawTotalSeconds": 27.041022,
+      "rawClips": [
+        {
+          "file": "demo/generated/android/walk020-android-checkout-06/replay-clip-001.mp4",
+          "sha256": "55f5207e3793a365ac37ef131cc0cb1c4eec5259b3098ab07338daba5b1f9a34",
+          "startSeconds": 0.0,
+          "endSeconds": 27.041022
+        }
+      ],
+      "playbackCompression": 4.506837,
+      "segmentDurationSeconds": 5.966667,
+      "segmentFramesDecoded": 179,
+      "receipt": "demo/live-evidence/android/replay-receipt.json",
+      "runReport": "demo/live-evidence/android/replay-run-report.json",
+      "savedYaml": "demo/live-evidence/android/replay-saved-checkout.yaml",
+      "edit": "Uniformly time-compressed stated raw range; source frames normalized to 30 fps; no waits/failures selectively removed within range",
+      "baselineReceipt": "demo/live-evidence/android/repair-baseline-receipt.json",
+      "baselineRunReport": "demo/live-evidence/android/repair-baseline-run-report.json",
+      "baselineSavedYaml": "demo/live-evidence/android/repair-baseline-saved-checkout.yaml",
+      "baselineProvenance": "demo/live-evidence/android/repair-fixture-provenance.json"
+    }
+  ]
+}

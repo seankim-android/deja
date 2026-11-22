@@ -1,0 +1,64 @@
+{
+  "schemaVersion": 1,
+  "ticket": "WALK-020",
+  "runId": "walk020-android-checkout-06",
+  "phase": "warm",
+  "goal": "checkout",
+  "avd": "walkcache_api_34",
+  "device": "emulator-5554",
+  "startedAt": "2026-11-22T20:28:11.492468+00:00",
+  "endedAt": "2026-11-22T20:28:37.941211+00:00",
+  "workingDirectory": "spikes/001-android-walkcache",
+  "command": [
+    "bun",
+    "../../apps/cli/walkcache.ts",
+    "run",
+    "checkout",
+    "--config",
+    "walkcache.config.json",
+    "--json"
+  ],
+  "cliExitCode": 0,
+  "receipt": {
+    "command": "run",
+    "outcome": "passed",
+    "passed": true,
+    "cacheStatus": "hit",
+    "modelCalls": 0,
+    "modelCallBasis": "exact local hit: explorer and model factories were not invoked",
+    "durationMs": 26070,
+    "assertions": 14,
+    "repairCount": 0,
+    "yamlPath": ".walkcache/flows/checkout/android-e95532ce04a4e125d3bd56e1b9d5d367b31dd67eed4441c56271ca52f3c3d0a1.yaml",
+    "yamlSha256": "e95532ce04a4e125d3bd56e1b9d5d367b31dd67eed4441c56271ca52f3c3d0a1",
+    "report": {
+      "reportPath": ".walkcache/reports/run-1795379317594-3269.json",
+      "latestPath": ".walkcache/reports/latest.json"
+    }
+  },
+  "capture": {
+    "schemaVersion": 1,
+    "ticket": "WALK-020",
+    "phase": "warm",
+    "avd": "walkcache_api_34",
+    "device": "emulator-5554",
+    "captureScope": "Continuous real emulator UI via adb screenrecord; sequential clips at the 180-second platform limit",
+    "startedAt": "2026-11-22T20:28:10.470502+00:00",
+    "endedAt": "2026-11-22T20:28:37.940649+00:00",
+    "clipCount": 1,
+    "clips": [
+      {
+        "index": 1,
+        "remoteName": "clip-001.mp4",
+        "startedAt": "2026-11-22T20:28:10.487358+00:00",
+        "durationLimitSeconds": 180,
+        "exitCode": 0,
+        "endedAt": "2026-11-22T20:28:37.870693+00:00",
+        "recorderWallSeconds": 27.383199,
+        "localFile": "demo/generated/android/walk020-android-checkout-06/warm-clip-001.mp4",
+        "bytes": 3042828,
+        "sha256": "8ec91e345315160463faa795a5ae4a1ede7f623eda2a19cd5eeb21343d5ba178"
+      }
+    ]
+  }
+}

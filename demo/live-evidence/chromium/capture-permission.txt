@@ -1,0 +1,14 @@
+WALK-020 macOS capture permission probe
+
+ffmpeg -hide_banner -f avfoundation -list_devices true -i ''
+Result: AVFoundation listed no video devices and returned Input/output error.
+
+ffmpeg -f avfoundation -i '0:none' -t 0.5 out.mp4
+ffmpeg -f avfoundation -i '1:none' -t 0.5 out.mp4
+Result: both returned Invalid device index / Input/output error.
+
+screencapture -x screen.png
+Result: could not create image from display.
+
+Consequence: no desktop/window-video claim is made. Browser evidence is the real
+Chromium CDP screencast from the same headed Maestro browser process instead.

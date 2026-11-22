@@ -1,0 +1,22 @@
+{
+  "goal": "checkout",
+  "appId": "dev.walkcache.checkout",
+  "platform": "android",
+  "flowSchemaVersion": "maestro/v1",
+  "buildFingerprint": "6aec5fea876938db14007ba3dbcb91f698832fe855886abd9dea1e7b28861759",
+  "goalKey": "checkout",
+  "flowPath": ".walkcache/flows/checkout/android-2b863bb62021ec93370ada0a626c90f8b6ee07a8a380c545589f81237060e76f.yaml",
+  "flowSha256": "2b863bb62021ec93370ada0a626c90f8b6ee07a8a380c545589f81237060e76f",
+  "lastValidation": {
+    "passed": true,
+    "at": "2026-11-22T20:29:09.044Z"
+  },
+  "validationHistory": [
+    {
+      "passed": true,
+      "at": "2026-11-22T20:29:09.044Z",
+      "flowSha256": "2b863bb62021ec93370ada0a626c90f8b6ee07a8a380c545589f81237060e76f"
+    }
+  ],
+  "origin": "remember"
+}

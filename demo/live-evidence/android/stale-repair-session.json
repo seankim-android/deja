@@ -1,0 +1,64 @@
+{
+  "schemaVersion": 1,
+  "ticket": "WALK-020",
+  "runId": "walk020-android-checkout-06",
+  "phase": "stale-repair",
+  "goal": "checkout",
+  "avd": "walkcache_api_34",
+  "device": "emulator-5554",
+  "startedAt": "2026-11-22T20:29:46.306066+00:00",
+  "endedAt": "2026-11-22T20:30:53.542238+00:00",
+  "workingDirectory": "spikes/001-android-walkcache",
+  "command": [
+    "bun",
+    "../../apps/cli/walkcache.ts",
+    "run",
+    "checkout",
+    "--config",
+    "walkcache.config.json",
+    "--json"
+  ],
+  "cliExitCode": 0,
+  "receipt": {
+    "command": "run",
+    "outcome": "repaired",
+    "passed": true,
+    "cacheStatus": "miss",
+    "modelCalls": 0,
+    "modelCallBasis": "bounded selector repair uses the verified deterministic policy only",
+    "durationMs": 66879,
+    "assertions": 12,
+    "repairCount": 1,
+    "yamlPath": ".walkcache/flows/checkout/android-2b863bb62021ec93370ada0a626c90f8b6ee07a8a380c545589f81237060e76f.yaml",
+    "yamlSha256": "2b863bb62021ec93370ada0a626c90f8b6ee07a8a380c545589f81237060e76f",
+    "report": {
+      "reportPath": ".walkcache/reports/run-1795379453201-3795.json",
+      "latestPath": ".walkcache/reports/latest.json"
+    }
+  },
+  "capture": {
+    "schemaVersion": 1,
+    "ticket": "WALK-020",
+    "phase": "stale-repair",
+    "avd": "walkcache_api_34",
+    "device": "emulator-5554",
+    "captureScope": "Continuous real emulator UI via adb screenrecord; sequential clips at the 180-second platform limit",
+    "startedAt": "2026-11-22T20:29:45.284422+00:00",
+    "endedAt": "2026-11-22T20:30:53.541655+00:00",
+    "clipCount": 1,
+    "clips": [
+      {
+        "index": 1,
+        "remoteName": "clip-001.mp4",
+        "startedAt": "2026-11-22T20:29:45.303225+00:00",
+        "durationLimitSeconds": 180,
+        "exitCode": 0,
+        "endedAt": "2026-11-22T20:30:53.434864+00:00",
+        "recorderWallSeconds": 68.13129,
+        "localFile": "demo/generated/android/walk020-android-checkout-06/stale-repair-clip-001.mp4",
+        "bytes": 12633407,
+        "sha256": "2a4fd4e40f6fe619a9b090a0f6b937ba3db277d73ac2986ff6ad16c53f5b1245"
+      }
+    ]
+  }
+}

@@ -1,0 +1,53 @@
+{
+  "schemaVersion": 1,
+  "ticket": "WALK-020",
+  "runId": "walk020-20261122T195607-94392",
+  "validatedAt": "2026-11-22T19:58:38.125928+00:00",
+  "captureScope": "Exact headed Maestro Chromium browser via CDP screencast; not desktop capture",
+  "rawUncut": {
+    "remember": {
+      "video": "demo/generated/browser/walk020-20261122T195607-94392/remember.mp4",
+      "sha256": "e4716b3afa5d005b387c147ea425db77c12bb5fa2f65dba67d02885e47d198ef",
+      "durationSeconds": 19.733333,
+      "screencastEvents": 45,
+      "emittedFrames": 592
+    },
+    "run": {
+      "video": "demo/generated/browser/walk020-20261122T195607-94392/run.mp4",
+      "sha256": "122deab0709de1d9c58166210b2245206320de46db4df95347772606848a0fbe",
+      "durationSeconds": 18.9,
+      "screencastEvents": 44,
+      "emittedFrames": 567
+    }
+  },
+  "beforeCache": {
+    "outcome": "remembered",
+    "passed": true,
+    "cacheStatus": "not-checked",
+    "modelCalls": 0,
+    "modelCallBasis": "remember performs independent verification only",
+    "durationMs": 42324,
+    "assertions": 12,
+    "repairCount": 0,
+    "yamlSha256": "944d55991d28716f3da90e71546227a946cd02b02c88ed52edb62600e2167aff"
+  },
+  "afterCache": {
+    "outcome": "passed",
+    "passed": true,
+    "cacheStatus": "hit",
+    "modelCalls": 0,
+    "modelCallBasis": "exact local hit: explorer and model factories were not invoked",
+    "durationMs": 36557,
+    "assertions": 12,
+    "repairCount": 0,
+    "yamlSha256": "944d55991d28716f3da90e71546227a946cd02b02c88ed52edb62600e2167aff"
+  },
+  "identityExactMatch": true,
+  "finalAssertion": "Order WC-1001 \u00b7 Mochi sticker pack",
+  "fallbackSha256Unchanged": "3e6c9ec2f4040ec1a8e8bb1e4f8eee2bbe977d6e3f2a69e5b6503cf2f178e461",
+  "fullDecodePassed": true,
+  "visualReview": "AI visual review passed for raw evidence and final corrected headed-Chromium segment frames, including panel bounds, capture labels, footers and final order states; human sign-off is not claimed",
+  "visualReviewRecord": "demo/live-evidence/chromium/REVIEW.md",
+  "humanSignOffClaimed": false,
+  "secretAndPrivatePathScanPassed": true
+}

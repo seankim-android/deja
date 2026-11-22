@@ -1,0 +1,16 @@
+{
+  "avd": "walkcache_api_34",
+  "device": "emulator-5554",
+  "api": 34,
+  "state": "device",
+  "selectorSetting": "null",
+  "regressionSetting": "null",
+  "selectorSourceHashes": {
+    "app/src/main/java/dev/walkcache/checkout/MainActivity.java": "cd4578674bb4a28a554b2a56180d1bc2acf1b8f35e51443e3cab30692e61615d",
+    "app/src/main/res/values/ids.xml": "04d41f4a45e46e777e3c7e9bc0d86ec510ef77a308a9778f22ac3d2b9808d827"
+  },
+  "selectorDiffBytes": 0,
+  "normalSelectorRestored": true,
+  "finalReplayPassed": true,
+  "repairedBuildFingerprint": "1de8864ea046b64d124ece93ca97b0ae69d11d1fc3d39a89ff405f0e2dd2262d"
+}

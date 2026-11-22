@@ -1,0 +1,46 @@
+appId: dev.walkcache.checkout
+---
+- launchApp:
+    clearState: true
+- assertVisible:
+    id: dev.walkcache.checkout:id/screen_login
+    text: WalkCache Shop
+- assertVisible:
+    id: dev.walkcache.checkout:id/username_input
+- assertVisible:
+    id: dev.walkcache.checkout:id/password_input
+- assertVisible:
+    id: dev.walkcache.checkout:id/login_button
+    text: Sign in
+- tapOn:
+    id: dev.walkcache.checkout:id/username_input
+- inputText: qa@walkcache.dev
+- tapOn:
+    id: dev.walkcache.checkout:id/password_input
+- inputText: testing123
+- tapOn:
+    id: dev.walkcache.checkout:id/login_button
+- assertVisible:
+    id: dev.walkcache.checkout:id/screen_catalog
+    text: Catalog
+- assertVisible:
+    text: Mochi sticker pack
+- assertVisible:
+    text: "$5.00 · 6 stickers"
+- tapOn:
+    id: dev.walkcache.checkout:id/add_to_cart
+- assertVisible:
+    id: dev.walkcache.checkout:id/screen_cart
+    text: Your cart
+- assertVisible:
+    text: 1 × Mochi sticker pack
+- assertVisible:
+    text: "Total: $5.00"
+- tapOn:
+    id: dev.walkcache.checkout:id/checkout_button
+- assertVisible:
+    id: dev.walkcache.checkout:id/order_confirmation
+    text: Order confirmed
+- assertVisible:
+    id: dev.walkcache.checkout:id/screen_confirmation
+    text: "Order #WC-1001 · Mochi sticker pack"

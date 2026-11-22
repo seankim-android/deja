@@ -1,0 +1,20 @@
+WALK-020 Chromium live capture commands
+All paths below are relative to the repository unless noted. Fixture server: loopback only.
+
+# Terminal 1
+cd spikes/002-web-walkcache
+bun server.ts
+
+# Terminal 2, repository root; real headed Maestro --device chromium
+python3 demo/live/record_chromium.py --phase remember --run-id walk020-20261122T195607-94392
+python3 demo/live/record_chromium.py --phase run --run-id walk020-20261122T195607-94392
+python3 demo/live/review_browser.py --run-id walk020-20261122T195607-94392
+
+Raw uncut recordings (ignored):
+demo/generated/browser/walk020-20261122T195607-94392/remember.mp4
+demo/generated/browser/walk020-20261122T195607-94392/run.mp4
+
+Capture method:
+Real Chromium Page.startScreencast frames from the exact Maestro browser process,
+held during static waits at 30 fps. This is not desktop/window capture; direct
+AVFoundation and screencapture probes were blocked by macOS screen permissions.

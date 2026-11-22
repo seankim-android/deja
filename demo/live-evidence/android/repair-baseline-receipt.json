@@ -1,0 +1,85 @@
+{
+  "schemaVersion": 1,
+  "command": "remember",
+  "identity": {
+    "goal": "checkout",
+    "appId": "dev.walkcache.checkout",
+    "platform": "android",
+    "flowSchemaVersion": "maestro/v1",
+    "buildFingerprint": "6aec5fea876938db14007ba3dbcb91f698832fe855886abd9dea1e7b28861759"
+  },
+  "goalKey": "checkout",
+  "cacheStatus": "not-checked",
+  "startedAt": "2026-11-22T20:28:42.302Z",
+  "outcome": "remembered",
+  "passed": true,
+  "modelCalls": 0,
+  "modelCallBasis": "remember performs independent verification only",
+  "assertions": 12,
+  "repairCount": 0,
+  "yamlPath": ".walkcache/flows/checkout/android-2b863bb62021ec93370ada0a626c90f8b6ee07a8a380c545589f81237060e76f.yaml",
+  "yamlSha256": "2b863bb62021ec93370ada0a626c90f8b6ee07a8a380c545589f81237060e76f",
+  "failure": null,
+  "artifacts": [
+    {
+      "kind": "yaml",
+      "path": ".walkcache/attempts/walk020-walk020-android-checkout-06-repair-fixture/candidate.yaml"
+    },
+    {
+      "kind": "output",
+      "path": ".walkcache/attempts/remember-1795379322302-ny5dmsnf/output.log"
+    },
+    {
+      "kind": "output",
+      "path": ".walkcache/attempts/remember-1795379322302-ny5dmsnf/stdout.log"
+    },
+    {
+      "kind": "output",
+      "path": ".walkcache/attempts/remember-1795379322302-ny5dmsnf/stderr.log"
+    },
+    {
+      "kind": "yaml",
+      "path": ".walkcache/flows/checkout/android-2b863bb62021ec93370ada0a626c90f8b6ee07a8a380c545589f81237060e76f.yaml",
+      "sha256": "2b863bb62021ec93370ada0a626c90f8b6ee07a8a380c545589f81237060e76f"
+    },
+    {
+      "kind": "memory",
+      "path": ".walkcache/memory/walks.json"
+    }
+  ],
+  "diffs": [],
+  "errors": [],
+  "execution": {
+    "passed": true,
+    "startedAt": "2026-11-22T20:28:42.303Z",
+    "endedAt": "2026-11-22T20:29:09.044Z",
+    "durationMs": 26741,
+    "exitCode": 0,
+    "assertions": 12,
+    "failure": null,
+    "artifacts": [
+      {
+        "kind": "yaml",
+        "path": ".walkcache/attempts/walk020-walk020-android-checkout-06-repair-fixture/candidate.yaml"
+      },
+      {
+        "kind": "output",
+        "path": ".walkcache/attempts/remember-1795379322302-ny5dmsnf/output.log"
+      },
+      {
+        "kind": "output",
+        "path": ".walkcache/attempts/remember-1795379322302-ny5dmsnf/stdout.log"
+      },
+      {
+        "kind": "output",
+        "path": ".walkcache/attempts/remember-1795379322302-ny5dmsnf/stderr.log"
+      }
+    ]
+  },
+  "endedAt": "2026-11-22T20:29:09.047Z",
+  "durationMs": 26745,
+  "report": {
+    "reportPath": ".walkcache/reports/remember-1795379349047-3439.json",
+    "latestPath": ".walkcache/reports/latest.json"
+  }
+}

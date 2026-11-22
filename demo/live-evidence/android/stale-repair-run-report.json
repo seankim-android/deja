@@ -1,0 +1,203 @@
+{
+  "schemaVersion": 1,
+  "command": "run",
+  "identity": {
+    "goal": "checkout",
+    "appId": "dev.walkcache.checkout",
+    "platform": "android",
+    "flowSchemaVersion": "maestro/v1",
+    "buildFingerprint": "6498293ae1d610dee34d0d5719e05032edab132062302cc374a638503c3b6ae0"
+  },
+  "goalKey": "checkout",
+  "cacheStatus": "miss",
+  "startedAt": "2026-11-22T20:29:46.322Z",
+  "cacheMissReason": "stale-build",
+  "outcome": "repaired",
+  "passed": true,
+  "modelCalls": 0,
+  "modelCallBasis": "bounded selector repair uses the verified deterministic policy only",
+  "assertions": 12,
+  "repairCount": 1,
+  "yamlPath": ".walkcache/flows/checkout/android-2b863bb62021ec93370ada0a626c90f8b6ee07a8a380c545589f81237060e76f.yaml",
+  "yamlSha256": "2b863bb62021ec93370ada0a626c90f8b6ee07a8a380c545589f81237060e76f",
+  "failure": {
+    "category": "selector",
+    "failingStep": "Tap on id: dev.walkcache.checkout:id/checkout_button",
+    "rawArtifactPath": ".walkcache/patches/repair-1795379386322-3795/diagnosis/output.log",
+    "advisory": true,
+    "repairEligible": true
+  },
+  "artifacts": [
+    {
+      "kind": "attempt",
+      "path": ".walkcache/patches/repair-1795379386322-3795"
+    },
+    {
+      "kind": "repair-report",
+      "path": ".walkcache/patches/repair-1795379386322-3795/repair-report.json"
+    },
+    {
+      "kind": "memory",
+      "path": ".walkcache/memory/walks.json"
+    },
+    {
+      "kind": "output",
+      "path": ".walkcache/patches/repair-1795379386322-3795/diagnosis/output.log"
+    },
+    {
+      "kind": "output",
+      "path": ".walkcache/patches/repair-1795379386322-3795/build/output.log"
+    },
+    {
+      "kind": "output",
+      "path": ".walkcache/patches/repair-1795379386322-3795/verification/output.log"
+    },
+    {
+      "kind": "diff",
+      "path": ".walkcache/patches/repair-1795379386322-3795/proposed.patch"
+    }
+  ],
+  "diffs": [
+    {
+      "path": ".walkcache/patches/repair-1795379386322-3795/proposed.patch",
+      "affectedFiles": [
+        "app/src/main/java/dev/walkcache/checkout/MainActivity.java",
+        "app/src/main/res/values/ids.xml"
+      ],
+      "contents": "--- a/app/src/main/java/dev/walkcache/checkout/MainActivity.java\n+++ b/app/src/main/java/dev/walkcache/checkout/MainActivity.java\n@@ -70,7 +70,10 @@\n         content.addView(body(\"1 × Mochi sticker pack\"));\n         content.addView(body(\"Total: $5.00\"));\n \n-        Button checkout = button(\"Checkout\", null);\n+        Integer checkoutId = Settings.Global.getInt(\n+            getContentResolver(), CHECKOUT_SELECTOR_STALE_SETTING, 0\n+        ) == 1 ? null : R.id.checkout_button;\n+        Button checkout = button(\"Checkout\", checkoutId);\n         checkout.setOnClickListener(view -> showConfirmation());\n         content.addView(checkout);\n         setContentView(scroll(content));\n--- a/app/src/main/res/values/ids.xml\n+++ b/app/src/main/res/values/ids.xml\n@@ -7,9 +7,10 @@\n     <item name=\"screen_catalog\" type=\"id\" />\n     <item name=\"add_to_cart\" type=\"id\" />\n     <item name=\"screen_cart\" type=\"id\" />\n-    <item name=\"screen_confirmation\" type=\"id\" />\n-    <item name=\"order_confirmation\" type=\"id\" />\n-    <!-- checkout_button is deliberately absent for the selector-repair spike. -->\n+    <item name=\"checkout_button\" type=\"id\" />\n+    <item name=\"screen_confirmation\" type=\"id\" />\n+    <item name=\"order_confirmation\" type=\"id\" />\n+    <!-- checkout_button was added by the verified selector-repair spike. -->\n </resources>\n \n \n",
+      "autoCommit": false
+    }
+  ],
+  "errors": [],
+  "repair": {
+    "status": "repaired",
+    "passed": true,
+    "durationMs": 66876,
+    "modelCalls": 0,
+    "repairCount": 1,
+    "assertions": 12,
+    "flowPath": ".walkcache/flows/checkout/android-2b863bb62021ec93370ada0a626c90f8b6ee07a8a380c545589f81237060e76f.yaml",
+    "flowSha256": "2b863bb62021ec93370ada0a626c90f8b6ee07a8a380c545589f81237060e76f",
+    "failure": {
+      "category": "selector",
+      "failingStep": "Tap on id: dev.walkcache.checkout:id/checkout_button",
+      "rawArtifactPath": ".walkcache/patches/repair-1795379386322-3795/diagnosis/output.log",
+      "advisory": true,
+      "repairEligible": true
+    },
+    "artifacts": [
+      {
+        "kind": "attempt",
+        "path": ".walkcache/patches/repair-1795379386322-3795"
+      },
+      {
+        "kind": "repair-report",
+        "path": ".walkcache/patches/repair-1795379386322-3795/repair-report.json"
+      },
+      {
+        "kind": "memory",
+        "path": ".walkcache/memory/walks.json"
+      },
+      {
+        "kind": "output",
+        "path": ".walkcache/patches/repair-1795379386322-3795/diagnosis/output.log"
+      },
+      {
+        "kind": "output",
+        "path": ".walkcache/patches/repair-1795379386322-3795/build/output.log"
+      },
+      {
+        "kind": "output",
+        "path": ".walkcache/patches/repair-1795379386322-3795/verification/output.log"
+      },
+      {
+        "kind": "diff",
+        "path": ".walkcache/patches/repair-1795379386322-3795/proposed.patch"
+      }
+    ],
+    "diffs": [
+      {
+        "path": ".walkcache/patches/repair-1795379386322-3795/proposed.patch",
+        "affectedFiles": [
+          "app/src/main/java/dev/walkcache/checkout/MainActivity.java",
+          "app/src/main/res/values/ids.xml"
+        ],
+        "contents": "--- a/app/src/main/java/dev/walkcache/checkout/MainActivity.java\n+++ b/app/src/main/java/dev/walkcache/checkout/MainActivity.java\n@@ -70,7 +70,10 @@\n         content.addView(body(\"1 × Mochi sticker pack\"));\n         content.addView(body(\"Total: $5.00\"));\n \n-        Button checkout = button(\"Checkout\", null);\n+        Integer checkoutId = Settings.Global.getInt(\n+            getContentResolver(), CHECKOUT_SELECTOR_STALE_SETTING, 0\n+        ) == 1 ? null : R.id.checkout_button;\n+        Button checkout = button(\"Checkout\", checkoutId);\n         checkout.setOnClickListener(view -> showConfirmation());\n         content.addView(checkout);\n         setContentView(scroll(content));\n--- a/app/src/main/res/values/ids.xml\n+++ b/app/src/main/res/values/ids.xml\n@@ -7,9 +7,10 @@\n     <item name=\"screen_catalog\" type=\"id\" />\n     <item name=\"add_to_cart\" type=\"id\" />\n     <item name=\"screen_cart\" type=\"id\" />\n-    <item name=\"screen_confirmation\" type=\"id\" />\n-    <item name=\"order_confirmation\" type=\"id\" />\n-    <!-- checkout_button is deliberately absent for the selector-repair spike. -->\n+    <item name=\"checkout_button\" type=\"id\" />\n+    <item name=\"screen_confirmation\" type=\"id\" />\n+    <item name=\"order_confirmation\" type=\"id\" />\n+    <!-- checkout_button was added by the verified selector-repair spike. -->\n </resources>\n \n \n",
+        "autoCommit": false
+      }
+    ],
+    "errors": [],
+    "details": {
+      "attemptId": "repair-1795379386322-3795",
+      "timeBudgetMs": 240000,
+      "oneAttemptOnly": true,
+      "autoCommit": false,
+      "pullRequest": false,
+      "previous": {
+        "buildFingerprint": "6aec5fea876938db14007ba3dbcb91f698832fe855886abd9dea1e7b28861759",
+        "flowPath": ".walkcache/flows/checkout/android-2b863bb62021ec93370ada0a626c90f8b6ee07a8a380c545589f81237060e76f.yaml",
+        "flowSha256": "2b863bb62021ec93370ada0a626c90f8b6ee07a8a380c545589f81237060e76f",
+        "memoryPath": ".walkcache/memory/walks.json",
+        "memorySha256": "835d7591dc5d683283c4d0fe028b0eb594b35a8c9f95df5bf24c89b023049173"
+      },
+      "diagnosisBuildFingerprint": "6498293ae1d610dee34d0d5719e05032edab132062302cc374a638503c3b6ae0",
+      "buildFingerprintAfter": "1de8864ea046b64d124ece93ca97b0ae69d11d1fc3d39a89ff405f0e2dd2262d",
+      "buildIdentityRecomputed": true,
+      "diagnosis": {
+        "passed": false,
+        "durationMs": 40659,
+        "failureClassification": {
+          "category": "selector",
+          "failingStep": "Tap on id: dev.walkcache.checkout:id/checkout_button",
+          "rawArtifactPath": ".walkcache/patches/repair-1795379386322-3795/diagnosis/output.log",
+          "advisory": true,
+          "repairEligible": true
+        }
+      },
+      "build": {
+        "passed": true,
+        "durationMs": 689
+      },
+      "verification": {
+        "passed": true,
+        "durationMs": 25519,
+        "failureClassification": null
+      },
+      "persistence": {
+        "flowPath": ".walkcache/flows/checkout/android-2b863bb62021ec93370ada0a626c90f8b6ee07a8a380c545589f81237060e76f.yaml",
+        "flowSha256": "2b863bb62021ec93370ada0a626c90f8b6ee07a8a380c545589f81237060e76f",
+        "storedMetadataPath": ".walkcache/memory/walks.json",
+        "atomicWrite": true,
+        "origin": "repair",
+        "repairHistory": [
+          {
+            "attemptId": "repair-1795379386322-3795",
+            "patchPath": ".walkcache/patches/repair-1795379386322-3795/proposed.patch",
+            "previousBuildFingerprint": "6aec5fea876938db14007ba3dbcb91f698832fe855886abd9dea1e7b28861759",
+            "previousFlowSha256": "2b863bb62021ec93370ada0a626c90f8b6ee07a8a380c545589f81237060e76f"
+          }
+        ],
+        "preservedValidationHistoryEntries": 3
+      },
+      "preservation": {
+        "memoryBeforeSha256": "835d7591dc5d683283c4d0fe028b0eb594b35a8c9f95df5bf24c89b023049173",
+        "memoryAfterSha256": "4d5310fb1fc82c973826311c0e3fc02721eec2719db6b7e42501bc01f1649e82",
+        "memoryUnchangedByteForByte": false,
+        "flowBeforeSha256": "2b863bb62021ec93370ada0a626c90f8b6ee07a8a380c545589f81237060e76f",
+        "flowAfterSha256": "2b863bb62021ec93370ada0a626c90f8b6ee07a8a380c545589f81237060e76f",
+        "assertionsUnchangedByteForByte": true,
+        "sourceBeforeSha256": {
+          "app/src/main/java/dev/walkcache/checkout/MainActivity.java": "04ba02c66d2e7ed5c632942d2c084ba10622d244be236389d9f624c3457d76c5",
+          "app/src/main/res/values/ids.xml": "1c04352ff793843c01fa85df454d81c478d91e35f62a832f25dd767cc30b2e34"
+        },
+        "sourceAfterSha256": {
+          "app/src/main/java/dev/walkcache/checkout/MainActivity.java": "cd4578674bb4a28a554b2a56180d1bc2acf1b8f35e51443e3cab30692e61615d",
+          "app/src/main/res/values/ids.xml": "04d41f4a45e46e777e3c7e9bc0d86ec510ef77a308a9778f22ac3d2b9808d827"
+        },
+        "sourceUnchangedByteForByte": false
+      }
+    }
+  },
+  "endedAt": "2026-11-22T20:30:53.201Z",
+  "durationMs": 66879
+}

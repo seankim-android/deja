@@ -1,0 +1,20 @@
+{
+  "status": "PASS",
+  "ticket": "WALK-020",
+  "finalSha256": "d834bda3b156137df2693d11297855180e8e5c681fc870417fa05a0647aec945",
+  "durationSeconds": 59.733333,
+  "decodedFrames": 1792,
+  "dimensions": [
+    1920,
+    1080
+  ],
+  "fps": 30,
+  "codec": "h264",
+  "evidenceSegments": 7,
+  "privatePathAndSecretTextScanPassed": true,
+  "textFilesScanned": 72,
+  "rawHashAndDecodeChecked": true,
+  "slackUploadReceiptChecked": false,
+  "fallbackSha256Unchanged": "3e6c9ec2f4040ec1a8e8bb1e4f8eee2bbe977d6e3f2a69e5b6503cf2f178e461",
+  "humanSignOffClaimed": false
+}

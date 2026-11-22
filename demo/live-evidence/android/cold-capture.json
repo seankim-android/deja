@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "ticket": "WALK-020",
+  "phase": "cold",
+  "avd": "walkcache_api_34",
+  "device": "emulator-5554",
+  "captureScope": "Continuous real emulator UI via adb screenrecord; sequential clips at the 180-second platform limit",
+  "startedAt": "2026-11-22T20:25:54.732103+00:00",
+  "endedAt": "2026-11-22T20:27:33.979030+00:00",
+  "clipCount": 1,
+  "clips": [
+    {
+      "index": 1,
+      "remoteName": "clip-001.mp4",
+      "startedAt": "2026-11-22T20:25:54.749470+00:00",
+      "durationLimitSeconds": 180,
+      "exitCode": 0,
+      "endedAt": "2026-11-22T20:27:33.838497+00:00",
+      "recorderWallSeconds": 99.088535,
+      "localFile": "demo/generated/android/walk020-android-checkout-06/cold-clip-001.mp4",
+      "bytes": 17055076,
+      "sha256": "ce75ff9df9427eeaa1131b5172b18426892e9e336a5fa7f06e3c56e84fa0655d"
+    }
+  ]
+}
