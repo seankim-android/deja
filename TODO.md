@@ -51,8 +51,13 @@ Check an item only when its ticket is complete and its evidence is linked. All t
   [`stale repair`](spikes/001-android-walkcache/evidence/walk008-stale-repair.transcript.txt),
   [`regression guard`](spikes/001-android-walkcache/evidence/walk008-product-regression.transcript.txt),
   and [`80 tests / 500 assertions`](spikes/001-android-walkcache/evidence/walk008-all-tests.txt).
-- [ ] [WALK-009](tickets/WALK-009-local-run-viewer.md) — Replace the Vite starter with an optional local
+- [x] [WALK-009](tickets/WALK-009-local-run-viewer.md) — Replace the Vite starter with an optional local
   run/artifact viewer only after the CLI is reliable.
+  Evidence: [`viewer guide`](viewer/README.md),
+  [`warm screenshot`](spikes/001-android-walkcache/evidence/walk009-warm.png),
+  [`16 focused tests`](spikes/001-android-walkcache/evidence/walk009-ui-test-artifacts.txt),
+  [`no-viewer warm replay`](spikes/001-android-walkcache/evidence/walk009-headless-no-viewer.txt),
+  and [`96 tests / 569 assertions`](spikes/001-android-walkcache/evidence/walk009-all-tests.txt).
 
 ## P0 — Additional platform evidence (cut before weakening Android)
 

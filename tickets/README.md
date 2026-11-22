@@ -34,7 +34,7 @@ Statuses: `in_progress`, `done`, `ready` (no incomplete dependencies), `queued` 
 | Ticket | Status | Depends on | Outcome |
 | --- | --- | --- | --- |
 | [WALK-008](WALK-008-production-cli-plugin-contracts.md) | done | 003–007 | Headless CLI around plugin interfaces |
-| [WALK-009](WALK-009-local-run-viewer.md) | ready | 008 | Optional local dashboard for runs and artifacts |
+| [WALK-009](WALK-009-local-run-viewer.md) | done | 008 | Optional local dashboard for runs and artifacts |
 | [WALK-010](WALK-010-verified-web-proof.md) | ready | 005, 007, 008 | Real Chromium evidence or named blocker |
 | [WALK-011](WALK-011-verified-ios-proof.md) | ready | 005, 007, 008 | Real iOS simulator evidence or named blocker |
 

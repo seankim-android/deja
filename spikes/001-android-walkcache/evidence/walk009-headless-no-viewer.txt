@@ -1,0 +1,24 @@
+Viewer processes before warm run: (none)
+
+$ bun ../../apps/cli/walkcache.ts run checkout --config walkcache.config.json
+Command: run
+Goal: checkout
+Outcome: passed
+Passed: yes
+Cache status: hit
+Model calls: 0 (exact local hit: explorer and model factories were not invoked)
+Duration: 27714 ms
+Assertions: 12
+Repair count: 0
+YAML: .walkcache/flows/checkout/android-e09660f45502b720f79f95a65c78ad5f48a4e11ae1ff5f52c6cb99972b12b478.yaml
+YAML SHA-256: e09660f45502b720f79f95a65c78ad5f48a4e11ae1ff5f52c6cb99972b12b478
+Report: .walkcache/reports/run-1795341994471-61150.json
+Latest report: .walkcache/reports/latest.json
+Artifacts:
+- [yaml] .walkcache/flows/checkout/android-e09660f45502b720f79f95a65c78ad5f48a4e11ae1ff5f52c6cb99972b12b478.yaml
+- [output] .walkcache/reports/run-1795341966757-d14369zm/output.log
+- [output] .walkcache/reports/run-1795341966757-d14369zm/stdout.log
+- [output] .walkcache/reports/run-1795341966757-d14369zm/stderr.log
+Source diffs: none
+
+Exit code: 0

@@ -1,0 +1,60 @@
+$ bun test src/App.test.tsx viewer/test/local-viewer.test.ts
+
+bun test v1.4.4-canary.1 (191755ec1)
+
+src/App.test.tsx:
+(pass) WalkCache local viewer fixtures > cold discovery shows exploration metrics without suggesting a warm hit [19.33ms]
+(pass) WalkCache local viewer fixtures > warm replay makes the zero-model cache hit explicit [8.12ms]
+(pass) WalkCache local viewer fixtures > bounded repair exposes its proposed diff and preserved assertions [5.38ms]
+An update to App inside a test was not wrapped in act(...).
+
+When testing, code that causes React state updates should be wrapped into act(...):
+
+act(() => {
+  /* fire events that update state */
+});
+/* assert on the output */
+
+This ensures that you're testing the behavior the user would see in the browser. Learn more at https://react.dev/link/wrap-tests-with-act
+An update to App inside a test was not wrapped in act(...).
+
+When testing, code that causes React state updates should be wrapped into act(...):
+
+act(() => {
+  /* fire events that update state */
+});
+/* assert on the output */
+
+This ensures that you're testing the behavior the user would see in the browser. Learn more at https://react.dev/link/wrap-tests-with-act
+An update to App inside a test was not wrapped in act(...).
+
+When testing, code that causes React state updates should be wrapped into act(...):
+
+act(() => {
+  /* fire events that update state */
+});
+/* assert on the output */
+
+This ensures that you're testing the behavior the user would see in the browser. Learn more at https://react.dev/link/wrap-tests-with-act
+(pass) WalkCache local viewer fixtures > a product regression stays failed with no repair or success fabrication [3.53ms]
+(pass) viewer availability and safety > empty local memory is empty, not a pass, and the CLI fallback remains visible [4.54ms]
+(pass) viewer availability and safety > malformed, missing, and in-progress reports never become successful states [18.20ms]
+(pass) viewer availability and safety > client path checks restrict arbitrary files, traversal, and credential-like paths [0.06ms]
+(pass) viewer availability and safety > an unavailable viewer API leaves the headless fallback intact [3.73ms]
+
+viewer/test/local-viewer.test.ts:
+(pass) read-only local viewer API > a missing report directory is an empty index, never a fabricated pass [0.48ms]
+(pass) read-only local viewer API > valid, malformed, missing, and in-progress reports retain their states [1.88ms]
+(pass) read-only local viewer API > only an artifact declared by its authorizing report can be read [1.36ms]
+(pass) read-only local viewer API > arbitrary paths, traversal, raw logs, and credential-like paths are rejected [0.26ms]
+(pass) read-only local viewer API > a declared symlink that escapes .walkcache is never followed [1.00ms]
+(pass) read-only local viewer API > validation history returns recorded outcomes and rejects malformed memory [0.91ms]
+(pass) viewer redaction > sensitive keys, bearer values, CLI secrets, and local paths are redacted [0.18ms]
+(pass) viewer redaction > JSON redaction recursively protects credential-bearing fields [0.14ms]
+
+ 16 pass
+ 0 fail
+ 69 expect() calls
+Ran 16 tests across 2 files. [153.00ms]
+
+Exit code: 0
