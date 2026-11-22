@@ -124,7 +124,11 @@ Check an item only when its ticket is complete and its evidence is linked. All t
   required authorized social post, and confirm official submission by 9:00 AM. Keep 9:00–10:00 AM for
   upload/submission failures; the recorded deadline is 10:00 AM on November 22, 2026.
 
-## P1 — Deferred until all relevant P0 gates pass
+## P1 — Local platform depth
+
+Integrated evidence: [221 tests / 1,129 assertions and executable composition checks](spikes/001-android-walkcache/evidence/p1-final-integration.md),
+with [independent final review PASS](spikes/001-android-walkcache/evidence/p1-final-review.md). These
+portable/curated-evidence proofs do not claim new device execution or generalized semantic/route planning.
 
 - [x] [WALK-016](tickets/WALK-016-semantic-goal-retrieval.md) — Exact-match-first semantic retrieval.
   Evidence: [acceptance matrix/limitations](spikes/001-android-walkcache/evidence/walk016-semantic-retrieval.md),

@@ -48,7 +48,7 @@ Statuses: `in_progress`, `done`, `ready` (no incomplete dependencies), `queued` 
 | [WALK-020](WALK-020-live-device-demo.md) | done | 014 | Reviewed live cut delivered to Slack; mapped raw evidence and zero-model replay/repair proof |
 | [WALK-015](WALK-015-video-submission.md) | in_progress | 014 | Video complete; authorized external post/submission and deadline remain blocked |
 
-## P1 — Only after relevant P0 gates pass
+## P1 — Local platform depth
 
 | Ticket | Status | Outcome |
 | --- | --- | --- |
