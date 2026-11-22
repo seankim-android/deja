@@ -25,7 +25,7 @@ Statuses: `in_progress`, `done`, `ready` (no incomplete dependencies), `queued` 
 | [WALK-002](WALK-002-verified-maestro-runner.md) | done | 001 | Portable, bounded runner with structured results |
 | [WALK-003](WALK-003-self-contained-cold-explore.md) | done | 002 | One-command cold exploration and verified persistence |
 | [WALK-004](WALK-004-local-store-regression-tests.md) | done | 002 | Cache identity, corruption, and atomic-write tests |
-| [WALK-005](WALK-005-comparable-cold-warm-metrics.md) | queued | 003, 004 | Honest end-to-end cold/warm measurements |
+| [WALK-005](WALK-005-comparable-cold-warm-metrics.md) | done | 003, 004 | Honest end-to-end cold/warm measurements |
 | [WALK-006](WALK-006-selector-failure-classification.md) | done | 002 | Repeatable invalidation and regression classification |
 | [WALK-007](WALK-007-bounded-repair-regression-guard.md) | queued | 006 | Safe one-attempt repair and negative regression proof |
 

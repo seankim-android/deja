@@ -1,0 +1,65 @@
+bun test v1.4.4-canary.1 (191755ec1)
+
+packages/agent-openclaw/test/openclaw-explorer.test.ts:
+(pass) self-contained OpenClaw cold exploration > pins an MCP-only explorer and persists only after independent verification [16.08ms]
+(pass) self-contained OpenClaw cold exploration > a rejected candidate cannot create or replace known-good memory [12.94ms]
+(pass) self-contained OpenClaw cold exploration > extracts fenced YAML and enforces the app plus a fresh clearState launch [24.91ms]
+(pass) self-contained OpenClaw cold exploration > leaves model and MCP metrics unknown when instrumentation is absent [27.29ms]
+
+packages/metrics/test/cold-warm.test.ts:
+(pass) cold/warm comparison aggregation > retains every raw sample and reports deterministic variability and paired medians [0.42ms]
+(pass) cold/warm comparison aggregation > does not turn missing model instrumentation into zero or infer it from MCP calls [1.16ms]
+(pass) cold/warm comparison aggregation > rejects incomparable builds and missing meaningful outcome assertions [0.07ms]
+(pass) cold/warm comparison aggregation > failed samples remain visible and block a wall-clock reduction claim [0.20ms]
+
+packages/maestro/test/cache-replay-classification.test.ts:
+(pass) a failing cache hit stays at zero model calls and its failed validation is not reused [48.62ms]
+
+packages/maestro/test/maestro-runner.test.ts:
+(pass) verified Maestro runner > preserves output, timing, configuration, exit status, and artifacts on success [12.73ms]
+(pass) verified Maestro runner > returns a structured execution error and preserves a nonzero exit code [11.68ms]
+(pass) verified Maestro runner > enforces the timeout and terminates only the spawned process tree [1460.99ms]
+(pass) verified Maestro runner > returns a structured launch error for a missing executable [4.75ms]
+(pass) verified Maestro runner > rejects a flow path that escapes the workspace before launching [2.13ms]
+(pass) verified Maestro runner > returns a structured artifact error without discarding process output [23.44ms]
+
+packages/maestro/test/failure-classification.test.ts:
+(pass) advisory Maestro failure classification fixtures > selector-positive remains deterministic and conservative [0.64ms]
+(pass) advisory Maestro failure classification fixtures > selector-negative remains deterministic and conservative [0.30ms]
+(pass) advisory Maestro failure classification fixtures > navigation-positive remains deterministic and conservative [0.77ms]
+(pass) advisory Maestro failure classification fixtures > navigation-negative remains deterministic and conservative [0.18ms]
+(pass) advisory Maestro failure classification fixtures > product-assertion-positive remains deterministic and conservative [0.19ms]
+(pass) advisory Maestro failure classification fixtures > product-assertion-negative remains deterministic and conservative [0.60ms]
+(pass) advisory Maestro failure classification fixtures > runner-positive remains deterministic and conservative [0.08ms]
+(pass) advisory Maestro failure classification fixtures > runner-negative remains deterministic and conservative [0.10ms]
+(pass) advisory Maestro failure classification fixtures > timeout-positive remains deterministic and conservative [0.10ms]
+(pass) advisory Maestro failure classification fixtures > timeout-negative remains deterministic and conservative [0.12ms]
+(pass) advisory Maestro failure classification fixtures > unknown-positive remains deterministic and conservative [0.10ms]
+(pass) advisory Maestro failure classification fixtures > unknown-negative remains deterministic and conservative [0.10ms]
+(pass) advisory Maestro failure classification fixtures > a passing runner result has no failure classification [0.02ms]
+(pass) advisory Maestro failure classification fixtures > mixed selector and assertion diagnostics stay unknown and ineligible for repair [0.03ms]
+(pass) advisory Maestro failure classification fixtures > multiple failing steps stay ambiguous and retain the raw artifact reference [0.02ms]
+
+packages/store-local/test/local-store.test.ts:
+(pass) conservative local walk store > returns a first-run miss when no memory exists [1.17ms]
+(pass) conservative local walk store > normalizes the goal and returns a valid hit with the complete exact identity [2.49ms]
+(pass) conservative local walk store > returns a stale-build miss instead of replaying another APK fingerprint [1.65ms]
+(pass) conservative local walk store > returns a wrong-app miss without loosening app identity [1.62ms]
+(pass) conservative local walk store > returns a wrong-platform miss without sharing Android memory across platforms [1.57ms]
+(pass) conservative local walk store > returns a missing-flow miss and never treats metadata alone as a pass [1.63ms]
+(pass) conservative local walk store > rejects a flow checksum mismatch instead of executing changed bytes [1.72ms]
+(pass) conservative local walk store > rejects malformed JSON as invalid memory [0.88ms]
+(pass) conservative local walk store > rejects an unsupported memory schema [1.68ms]
+(pass) conservative local walk store > rejects invalid entries instead of filtering them out to produce a hit [1.68ms]
+(pass) conservative local walk store > rejects stored flow paths outside the canonical flow directory [1.67ms]
+(pass) conservative local walk store > rejects a symlink whose canonical flow path escapes the workspace [1.78ms]
+(pass) conservative local walk store > an interruption before flow rename leaves only ignored temporary files and a first-run miss [1.02ms]
+(pass) conservative local walk store > failed candidate verification preserves the known-good flow and metadata byte for byte [1.86ms]
+(pass) conservative local walk store > failed replacement preserves known-good flow and metadata and excludes the orphan and temp [2.50ms]
+(pass) conservative local walk store > failed validation remains in history and never remains a successful reusable hit [1.87ms]
+(pass) conservative local walk store > upgrades valid WALK-003 schema-one metadata without inventing validation success [1.86ms]
+
+ 47 pass
+ 0 fail
+ 208 expect() calls
+Ran 47 tests across 6 files. [1.75s]

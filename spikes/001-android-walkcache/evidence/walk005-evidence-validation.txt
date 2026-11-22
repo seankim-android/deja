@@ -1,0 +1,5 @@
+PASS: all 8 raw sample reports and side-by-side JSON/Markdown regenerate byte-for-byte
+Samples: 2 cold + 6 warm; all passed: true
+APK: 47ad33ba3cab8d4c1c268b1522e5ee7fd2d799fc3da6fdc884f99a40b7a166aa
+79ccb45a4dd3232a79cb928b4b6b4fa2fad9275942d76f01d456b0362d4847c5  spikes/001-android-walkcache/evidence/walk005-comparison.json
+8e2145ae0ce35562f9b722553e3edc3aca384c26009f5b4ee62a7d28339a4bf2  spikes/001-android-walkcache/evidence/walk005-comparison.md

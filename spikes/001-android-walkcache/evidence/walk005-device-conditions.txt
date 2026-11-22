@@ -1,0 +1,13 @@
+WALK-005 device/build conditions observed with the measured series
+Device serial: emulator-5554
+ADB state: device
+AVD name: walkcache_api_34
+Android release: 14
+Android API: 34
+Maestro: 2.12.0
+APK SHA-256: 47ad33ba3cab8d4c1c268b1522e5ee7fd2d799fc3da6fdc884f99a40b7a166aa
+Installed fixture package: dev.walkcache.checkout (pm path confirmed)
+Selector fixture setting (null = stable): null
+Model: cerebras/moonshotai-kimi-k3.1-pro-trial (per-sample OpenClaw envelopes)
+Goal: checkout
+Build/install/emulator boot: shared preconditions, excluded from both measured commands

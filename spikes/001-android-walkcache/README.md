@@ -110,6 +110,36 @@ temporary/unreferenced files never become hits, and failed replacement preserves
 The linked store README documents quarantine plus cold `explore` recovery and the emulator-free
 regression command. Existing curated WALK-001/002/003 evidence remains unchanged.
 
+### Comparable cold/warm metrics (WALK-005)
+
+[`evidence/walk005-comparison.md`](evidence/walk005-comparison.md) and
+[`evidence/walk005-comparison.json`](evidence/walk005-comparison.json) contain two independent real cold
+explorations and six paired warm replays against the same APK, goal, emulator, stable fixture, clearState
+launch, and meaningful final outcome assertion. Every sample passed. Complete measured-command wall was
+96,997 / 96,518 ms cold and 24,309–25,864 ms across the warm series. Nested runner ranges overlap:
+25,215 / 25,796 ms for cold verification and 24,288–25,845 ms warm. This supports model avoidance and an
+observed end-to-end wall reduction in the series, not a claim of dramatically faster Maestro execution.
+
+The measurement wrapper preserves the existing lifecycle and adds an outer monotonic timer. A cold
+measurement requires no successful cache entry; a warm measurement requires an exact hit:
+
+```sh
+# After build/install, stable fixture selection, and the cold cache reset described in the ticket:
+WALKCACHE_OPENCLAW="$(command -v openclaw)" \
+  bun scripts/measure-sample.ts --sample cold-01 --pair pair-1 --mode cold
+bun scripts/measure-sample.ts --sample warm-01 --pair pair-1 --mode warm
+bun scripts/walkcache.ts run checkout  # unchanged lifecycle remains directly runnable
+
+# After all paired samples, regenerate curated reports and JSON/Markdown comparisons:
+bun scripts/compare-metrics.ts
+```
+
+The wrapper checks the device/package/stable fixture before starting its timer and validates cold model
+calls against the actual OpenClaw `assistantTurns` envelope. Raw attempts and command output stay ignored;
+only secret-free structured reports and aggregate evidence are curated. The ticket links all eight raw
+reports, exact start/end boundaries, quality gates, and final fixture-restoration evidence. Historical
+24.824 / 24.510 second samples remain excluded from these aggregates.
+
 ### Repeatable stale-selector and product-assertion failures (WALK-006)
 
 The fixture now has a device-local runtime switch, `walkcache_checkout_selector_stale`, controlled by
@@ -185,10 +215,10 @@ repair can be verified before the cache is replaced.
 
 ## Known limitations / next production step
 
-- The original manual cold session's total duration/model-call count remains unknown. The WALK-003
-  lifecycle has its own measurements, but no total cold-vs-warm speedup or cross-run comparison is claimed.
-  `modelCalls` means OpenClaw `assistantTurns` (completed assistant/provider round trips), not network
-  retries, tokens, or cost. MCP counts cover only proxied `tools/call` requests.
+- The original manual cold session's total duration/model-call count remains unknown and historical.
+  WALK-005 separately provides the comparable series linked above; its observed wall delta is not a
+  universal speedup guarantee. `modelCalls` means OpenClaw `assistantTurns` (completed assistant/provider
+  round trips), not network retries, tokens, or cost. MCP counts cover only proxied `tools/call` requests.
 - Cache lookup is exact/local across normalized goal, app, platform, flow schema/checksum, and build.
   Semantic retrieval, route graphs, and subflow composition are future work.
 - Classification covers only the narrow deterministic runner-output shapes documented above. It does

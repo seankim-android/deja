@@ -1,0 +1,82 @@
+{
+  "schemaVersion": 1,
+  "sampleId": "warm-06",
+  "pairId": "pair-2",
+  "mode": "warm",
+  "startedAt": "2026-11-22T06:55:03.722Z",
+  "endedAt": "2026-11-22T06:55:28.868Z",
+  "commandWallDurationMs": 25146,
+  "commandExitCode": 0,
+  "command": [
+    "bun",
+    "scripts/walkcache.ts",
+    "run",
+    "checkout"
+  ],
+  "conditions": {
+    "goal": "checkout",
+    "appId": "dev.walkcache.checkout",
+    "platform": "android",
+    "device": "emulator-5554",
+    "deviceState": "device",
+    "fixtureMode": "stable",
+    "buildPath": "app/build/outputs/apk/debug/app-debug.apk",
+    "buildFingerprint": "47ad33ba3cab8d4c1c268b1522e5ee7fd2d799fc3da6fdc884f99a40b7a166aa",
+    "buildInstalledBeforeSeries": true,
+    "emulatorBootIncluded": false,
+    "buildOrInstallIncluded": false
+  },
+  "cacheBefore": {
+    "status": "hit"
+  },
+  "metrics": {
+    "runnerDurationMs": 25127,
+    "lifecycleDurationMs": null,
+    "explorationDurationMs": null,
+    "verificationWrapperDurationMs": null,
+    "mcpCalls": 0,
+    "mcpCallBasis": "direct cache-hit run spawns no Maestro MCP process",
+    "modelCalls": 0,
+    "modelCallBasis": "direct cache-hit run spawns no OpenClaw/model process",
+    "cacheStatus": "hit",
+    "passed": true
+  },
+  "modelInstrumentation": {
+    "source": "direct-cache-hit-contract"
+  },
+  "flow": {
+    "path": ".walkcache/flows/checkout/android-ead41946a34727e37e6fd7d68c9ca96e55b3fc873bdd6ced0bb40454b8828c51.yaml",
+    "sha256": null,
+    "assertVisibleCount": 14,
+    "finalProductOutcomeAssertion": true
+  },
+  "artifacts": {
+    "commandStdoutPath": ".walkcache/metrics/walk005/warm-06/command.stdout.log",
+    "commandStderrPath": ".walkcache/metrics/walk005/warm-06/command.stderr.log",
+    "lifecycleReportPath": ".walkcache/reports/run-1795330528866.json"
+  },
+  "runReport": {
+    "schemaVersion": 1,
+    "command": "run",
+    "goalKey": "checkout",
+    "appId": "dev.walkcache.checkout",
+    "platform": "android",
+    "buildFingerprint": "47ad33ba3cab8d4c1c268b1522e5ee7fd2d799fc3da6fdc884f99a40b7a166aa",
+    "flowPath": ".walkcache/flows/checkout/android-ead41946a34727e37e6fd7d68c9ca96e55b3fc873bdd6ced0bb40454b8828c51.yaml",
+    "cacheStatus": "hit",
+    "modelCalls": 0,
+    "startedAt": "2026-11-22T06:55:03.737Z",
+    "endedAt": "2026-11-22T06:55:28.864Z",
+    "durationMs": 25127,
+    "monotonicDurationMs": 25128,
+    "exitCode": 0,
+    "signal": null,
+    "timedOut": false,
+    "passed": true,
+    "errors": [],
+    "stdoutPath": ".walkcache/reports/run-1795330503737/stdout.log",
+    "stderrPath": ".walkcache/reports/run-1795330503737/stderr.log",
+    "outputPath": ".walkcache/reports/run-1795330503737/output.log",
+    "failureClassification": null
+  }
+}

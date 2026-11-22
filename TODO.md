@@ -29,8 +29,11 @@ Check an item only when its ticket is complete and its evidence is linked. All t
   Evidence: [`walk006-classification-matrix.md`](spikes/001-android-walkcache/evidence/walk006-classification-matrix.md),
   [`walk006-android-evidence.json`](spikes/001-android-walkcache/evidence/walk006-android-evidence.json), and
   [`walk006-all-tests.txt`](spikes/001-android-walkcache/evidence/walk006-all-tests.txt).
-- [ ] [WALK-005](tickets/WALK-005-comparable-cold-warm-metrics.md) — Capture comparable cold/warm metrics
+- [x] [WALK-005](tickets/WALK-005-comparable-cold-warm-metrics.md) — Capture comparable cold/warm metrics
   after the explore lifecycle and store tests are reliable.
+  Evidence: [`walk005-comparison.md`](spikes/001-android-walkcache/evidence/walk005-comparison.md),
+  [`walk005-comparison.json`](spikes/001-android-walkcache/evidence/walk005-comparison.json), and all eight
+  linked raw reports in the ticket (two cold, six warm; every sample passed).
 - [ ] [WALK-007](tickets/WALK-007-bounded-repair-regression-guard.md) — Enforce bounded repair and prove
   a genuine product regression is never repaired into a pass.
 

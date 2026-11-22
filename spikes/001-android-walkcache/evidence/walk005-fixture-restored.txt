@@ -1,0 +1,12 @@
+Checkout fixture mode on emulator-5554: stable
+Verified fixture setting after restoration (null = stable): null
+ADB state after restoration: device
+Latest lifecycle report after warm-06:
+{
+  "command": "run",
+  "cacheStatus": "hit",
+  "passed": true,
+  "durationMs": 25127,
+  "buildFingerprint": "47ad33ba3cab8d4c1c268b1522e5ee7fd2d799fc3da6fdc884f99a40b7a166aa",
+  "failureClassification": null
+}

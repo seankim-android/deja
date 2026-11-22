@@ -1,0 +1,1088 @@
+{
+  "schemaVersion": 1,
+  "metricBoundaries": {
+    "sharedPreconditions": [
+      "The same already-built and already-installed APK, emulator, stable selector fixture, app, and normalized goal are established before the measured series.",
+      "Emulator boot, Gradle build, APK installation, and fixture-mode selection are outside both measured commands.",
+      "Every executed Maestro flow launches the fixture with clearState: true and asserts the exact Order #WC-1001 product outcome."
+    ],
+    "cold": {
+      "start": "Immediately before spawning bun scripts/walkcache.ts explore checkout --config explore.config.json.",
+      "end": "After that CLI process exits, including its final report write.",
+      "included": [
+        "Bun/CLI startup, configuration loading, APK fingerprinting, and attempt setup.",
+        "The exploration-phase adb pm clear device setup.",
+        "The complete OpenClaw/Kimi exploration, Maestro MCP activity, and candidate authoring.",
+        "The verification-phase adb pm clear and independent WALK-002 clearState Maestro execution.",
+        "Atomic verified-flow persistence and report writing."
+      ],
+      "internalTimers": "runReport.durationMs is the internal lifecycle; explorationDurationMs and verificationDurationMs are nested components, not alternatives to command wall time."
+    },
+    "warm": {
+      "start": "Immediately before spawning bun scripts/walkcache.ts run checkout.",
+      "end": "After that CLI process exits, including validation-history persistence and its final report write.",
+      "included": [
+        "Bun/CLI startup, APK fingerprinting, exact cache lookup, and stored-flow loading.",
+        "The WALK-002 Maestro process and its flow-level clearState app launch.",
+        "Validation-history persistence and report writing."
+      ],
+      "excluded": [
+        "OpenClaw/model startup and Maestro MCP transport: the direct cache-hit path never invokes either."
+      ],
+      "internalTimers": "runReport.durationMs is the nested Maestro runner time only; commandWallDurationMs is the complete warm boundary."
+    }
+  },
+  "comparableConditions": {
+    "goal": "checkout",
+    "appId": "dev.walkcache.checkout",
+    "platform": "android",
+    "device": "emulator-5554",
+    "deviceState": "device",
+    "fixtureMode": "stable",
+    "buildPath": "app/build/outputs/apk/debug/app-debug.apk",
+    "buildFingerprint": "47ad33ba3cab8d4c1c268b1522e5ee7fd2d799fc3da6fdc884f99a40b7a166aa",
+    "buildInstalledBeforeSeries": true,
+    "emulatorBootIncluded": false,
+    "buildOrInstallIncluded": false
+  },
+  "allSamplesPassed": true,
+  "cold": {
+    "sampleIds": [
+      "cold-01",
+      "cold-02"
+    ],
+    "pairIds": [
+      "pair-1",
+      "pair-2"
+    ],
+    "samples": 2,
+    "passing": 2,
+    "cacheStatuses": [
+      "recorded",
+      "recorded"
+    ],
+    "verificationResults": [
+      true,
+      true
+    ],
+    "commandWallMs": {
+      "values": [
+        96997,
+        96518
+      ],
+      "count": 2,
+      "min": 96518,
+      "max": 96997,
+      "range": 479,
+      "mean": 96757.5,
+      "median": 96757.5
+    },
+    "internalLifecycleMs": {
+      "values": [
+        96981,
+        96502
+      ],
+      "count": 2,
+      "min": 96502,
+      "max": 96981,
+      "range": 479,
+      "mean": 96741.5,
+      "median": 96741.5
+    },
+    "runnerMs": {
+      "values": [
+        25215,
+        25796
+      ],
+      "count": 2,
+      "min": 25215,
+      "max": 25796,
+      "range": 581,
+      "mean": 25505.5,
+      "median": 25505.5
+    },
+    "explorationMs": {
+      "values": [
+        71572,
+        70495
+      ],
+      "count": 2,
+      "min": 70495,
+      "max": 71572,
+      "range": 1077,
+      "mean": 71033.5,
+      "median": 71033.5
+    },
+    "verificationWrapperMs": {
+      "values": [
+        25217,
+        25797
+      ],
+      "count": 2,
+      "min": 25217,
+      "max": 25797,
+      "range": 580,
+      "mean": 25507,
+      "median": 25507
+    },
+    "mcpCalls": {
+      "values": [
+        11,
+        12
+      ],
+      "count": 2,
+      "min": 11,
+      "max": 12,
+      "range": 1,
+      "mean": 11.5,
+      "median": 11.5
+    },
+    "modelCalls": {
+      "values": [
+        13,
+        13
+      ],
+      "count": 2,
+      "min": 13,
+      "max": 13,
+      "range": 0,
+      "mean": 13,
+      "median": 13
+    }
+  },
+  "warm": {
+    "sampleIds": [
+      "warm-01",
+      "warm-02",
+      "warm-03",
+      "warm-04",
+      "warm-05",
+      "warm-06"
+    ],
+    "pairIds": [
+      "pair-1",
+      "pair-1",
+      "pair-1",
+      "pair-2",
+      "pair-2",
+      "pair-2"
+    ],
+    "samples": 6,
+    "passing": 6,
+    "cacheStatuses": [
+      "hit",
+      "hit",
+      "hit",
+      "hit",
+      "hit",
+      "hit"
+    ],
+    "verificationResults": [
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    ],
+    "commandWallMs": {
+      "values": [
+        24461,
+        24309,
+        25589,
+        25112,
+        25864,
+        25146
+      ],
+      "count": 6,
+      "min": 24309,
+      "max": 25864,
+      "range": 1555,
+      "mean": 25080.167,
+      "median": 25129
+    },
+    "internalLifecycleMs": {
+      "values": [
+        null,
+        null,
+        null,
+        null,
+        null,
+        null
+      ],
+      "count": null,
+      "min": null,
+      "max": null,
+      "range": null,
+      "mean": null,
+      "median": null
+    },
+    "runnerMs": {
+      "values": [
+        24442,
+        24288,
+        25568,
+        25094,
+        25845,
+        25127
+      ],
+      "count": 6,
+      "min": 24288,
+      "max": 25845,
+      "range": 1557,
+      "mean": 25060.667,
+      "median": 25110.5
+    },
+    "explorationMs": {
+      "values": [
+        null,
+        null,
+        null,
+        null,
+        null,
+        null
+      ],
+      "count": null,
+      "min": null,
+      "max": null,
+      "range": null,
+      "mean": null,
+      "median": null
+    },
+    "verificationWrapperMs": {
+      "values": [
+        null,
+        null,
+        null,
+        null,
+        null,
+        null
+      ],
+      "count": null,
+      "min": null,
+      "max": null,
+      "range": null,
+      "mean": null,
+      "median": null
+    },
+    "mcpCalls": {
+      "values": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "count": 6,
+      "min": 0,
+      "max": 0,
+      "range": 0,
+      "mean": 0,
+      "median": 0
+    },
+    "modelCalls": {
+      "values": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "count": 6,
+      "min": 0,
+      "max": 0,
+      "range": 0,
+      "mean": 0,
+      "median": 0
+    }
+  },
+  "comparison": {
+    "medianCommandWallDeltaMs": 71628.5,
+    "medianCommandWallRatioColdOverWarm": 3.85,
+    "medianRunnerDeltaMs": 395,
+    "wallClockReductionSupported": true,
+    "modelAvoidanceObserved": true,
+    "interpretation": "Model avoidance and wall-clock duration are separate outcomes. The observed median delta describes only these controlled samples; ranges retain setup and provider variability. No universal speedup is claimed.",
+    "setupNoise": {
+      "coldWallRangeMs": 479,
+      "coldExplorationRangeMs": 1077,
+      "coldVerificationRangeMs": 580,
+      "coldRunnerRangeMs": 581,
+      "warmWallRangeMs": 1555,
+      "warmRunnerRangeMs": 1557
+    }
+  },
+  "historicalOnly": {
+    "source": "spikes/001-android-walkcache/evidence/run-summary.json",
+    "samplesMs": [
+      24824,
+      24510
+    ],
+    "excludedFromComparableAggregates": true,
+    "reason": "Historical WALK-001 warm runs used earlier/non-series conditions and have no matching full cold command-wall measurement."
+  },
+  "rawSamples": [
+    {
+      "schemaVersion": 1,
+      "sampleId": "cold-01",
+      "pairId": "pair-1",
+      "mode": "cold",
+      "startedAt": "2026-11-22T06:49:19.362Z",
+      "endedAt": "2026-11-22T06:50:56.360Z",
+      "commandWallDurationMs": 96997,
+      "commandExitCode": 0,
+      "command": [
+        "bun",
+        "scripts/walkcache.ts",
+        "explore",
+        "checkout",
+        "--config",
+        "explore.config.json"
+      ],
+      "conditions": {
+        "goal": "checkout",
+        "appId": "dev.walkcache.checkout",
+        "platform": "android",
+        "device": "emulator-5554",
+        "deviceState": "device",
+        "fixtureMode": "stable",
+        "buildPath": "app/build/outputs/apk/debug/app-debug.apk",
+        "buildFingerprint": "47ad33ba3cab8d4c1c268b1522e5ee7fd2d799fc3da6fdc884f99a40b7a166aa",
+        "buildInstalledBeforeSeries": true,
+        "emulatorBootIncluded": false,
+        "buildOrInstallIncluded": false
+      },
+      "cacheBefore": {
+        "status": "miss",
+        "reason": "not-found"
+      },
+      "metrics": {
+        "runnerDurationMs": 25215,
+        "lifecycleDurationMs": 96981,
+        "explorationDurationMs": 71572,
+        "verificationWrapperDurationMs": 25217,
+        "mcpCalls": 11,
+        "mcpCallBasis": "maestro-mcp-proxy tools/call requests",
+        "modelCalls": 13,
+        "modelCallBasis": "openclaw agent exec assistantTurns (completed round trips)",
+        "cacheStatus": "recorded",
+        "passed": true
+      },
+      "modelInstrumentation": {
+        "source": "openclaw-result",
+        "sourcePath": ".walkcache/attempts/explore-1795330159374-12312/openclaw-result.json",
+        "sourceSha256": "e297f26289fe5e83239c4e6d41510a0e7288de0d79440c5708a2d48679d4ee6d",
+        "assistantTurns": 13,
+        "model": "moonshotai-kimi-k3.1-pro-trial",
+        "provider": "cerebras"
+      },
+      "flow": {
+        "path": ".walkcache/flows/checkout/android-2dc978422060b21fcf7647362391ea3951ec12ae8830e6b74ff754f0ce465179.yaml",
+        "sha256": "2dc978422060b21fcf7647362391ea3951ec12ae8830e6b74ff754f0ce465179",
+        "assertVisibleCount": 11,
+        "finalProductOutcomeAssertion": true
+      },
+      "artifacts": {
+        "commandStdoutPath": ".walkcache/metrics/walk005/cold-01/command.stdout.log",
+        "commandStderrPath": ".walkcache/metrics/walk005/cold-01/command.stderr.log",
+        "lifecycleReportPath": ".walkcache/reports/explore-1795330256357.json"
+      },
+      "runReport": {
+        "schemaVersion": 1,
+        "command": "explore",
+        "goalKey": "checkout",
+        "goal": "checkout",
+        "appId": "dev.walkcache.checkout",
+        "platform": "android",
+        "buildFingerprint": "47ad33ba3cab8d4c1c268b1522e5ee7fd2d799fc3da6fdc884f99a40b7a166aa",
+        "buildPath": "app/build/outputs/apk/debug/app-debug.apk",
+        "workspaceRoot": "/Users/seankim/.openclaw/workspace/kimi-hackathon/spikes/001-android-walkcache",
+        "cacheStatus": "recorded",
+        "passed": true,
+        "durationMs": 96981,
+        "explorationDurationMs": 71572,
+        "verificationDurationMs": 25217,
+        "mcpCalls": 11,
+        "mcpCallBasis": "maestro-mcp-proxy tools/call requests",
+        "modelCalls": 13,
+        "modelCallBasis": "openclaw agent exec assistantTurns (completed round trips)",
+        "model": "moonshotai-kimi-k3.1-pro-trial",
+        "provider": "cerebras",
+        "explorerExitCode": 0,
+        "attemptDirectory": ".walkcache/attempts/explore-1795330159374-12312",
+        "candidatePath": ".walkcache/attempts/explore-1795330159374-12312/candidate.yaml",
+        "activityPath": ".walkcache/attempts/explore-1795330159374-12312/activity.jsonl",
+        "mcpActivityPath": ".walkcache/attempts/explore-1795330159374-12312/mcp-activity.jsonl",
+        "openClawResultPath": ".walkcache/attempts/explore-1795330159374-12312/openclaw-result.json",
+        "flowPath": ".walkcache/flows/checkout/android-2dc978422060b21fcf7647362391ea3951ec12ae8830e6b74ff754f0ce465179.yaml",
+        "flowSha256": "2dc978422060b21fcf7647362391ea3951ec12ae8830e6b74ff754f0ce465179",
+        "transport": "maestro-mcp-stdio",
+        "accessPolicy": {
+          "allowedTools": [
+            "maestro__*"
+          ],
+          "referenceFlow": "denied",
+          "appSource": "denied",
+          "candidateDestination": "attempt-only"
+        },
+        "cleanState": {
+          "exploration": true,
+          "independentVerification": true,
+          "candidateClearStateLaunch": true
+        },
+        "verification": {
+          "runner": "WALK-002 runMaestro",
+          "freshClearStateLaunch": true,
+          "startedAt": "2026-11-22T06:50:31.133Z",
+          "endedAt": "2026-11-22T06:50:56.348Z",
+          "durationMs": 25215,
+          "monotonicDurationMs": 25216,
+          "exitCode": 0,
+          "signal": null,
+          "timedOut": false,
+          "passed": true,
+          "errors": [],
+          "stdoutPath": ".walkcache/attempts/explore-1795330159374-12312/verification/stdout.log",
+          "stderrPath": ".walkcache/attempts/explore-1795330159374-12312/verification/stderr.log",
+          "outputPath": ".walkcache/attempts/explore-1795330159374-12312/verification/output.log",
+          "failureClassification": null
+        },
+        "persistence": {
+          "flowPath": ".walkcache/flows/checkout/android-2dc978422060b21fcf7647362391ea3951ec12ae8830e6b74ff754f0ce465179.yaml",
+          "flowSha256": "2dc978422060b21fcf7647362391ea3951ec12ae8830e6b74ff754f0ce465179",
+          "storedMetadataPath": ".walkcache/memory/walks.json",
+          "atomicWrite": true
+        },
+        "errors": []
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "sampleId": "cold-02",
+      "pairId": "pair-2",
+      "mode": "cold",
+      "startedAt": "2026-11-22T06:52:29.941Z",
+      "endedAt": "2026-11-22T06:54:06.459Z",
+      "commandWallDurationMs": 96518,
+      "commandExitCode": 0,
+      "command": [
+        "bun",
+        "scripts/walkcache.ts",
+        "explore",
+        "checkout",
+        "--config",
+        "explore.config.json"
+      ],
+      "conditions": {
+        "goal": "checkout",
+        "appId": "dev.walkcache.checkout",
+        "platform": "android",
+        "device": "emulator-5554",
+        "deviceState": "device",
+        "fixtureMode": "stable",
+        "buildPath": "app/build/outputs/apk/debug/app-debug.apk",
+        "buildFingerprint": "47ad33ba3cab8d4c1c268b1522e5ee7fd2d799fc3da6fdc884f99a40b7a166aa",
+        "buildInstalledBeforeSeries": true,
+        "emulatorBootIncluded": false,
+        "buildOrInstallIncluded": false
+      },
+      "cacheBefore": {
+        "status": "miss",
+        "reason": "not-found"
+      },
+      "metrics": {
+        "runnerDurationMs": 25796,
+        "lifecycleDurationMs": 96502,
+        "explorationDurationMs": 70495,
+        "verificationWrapperDurationMs": 25797,
+        "mcpCalls": 12,
+        "mcpCallBasis": "maestro-mcp-proxy tools/call requests",
+        "modelCalls": 13,
+        "modelCallBasis": "openclaw agent exec assistantTurns (completed round trips)",
+        "cacheStatus": "recorded",
+        "passed": true
+      },
+      "modelInstrumentation": {
+        "source": "openclaw-result",
+        "sourcePath": ".walkcache/attempts/explore-1795330349952-13970/openclaw-result.json",
+        "sourceSha256": "c203630656741c8ff3b1eb1c50f708d2e4c27d5973a0a0beb7d081dbc04c8e37",
+        "assistantTurns": 13,
+        "model": "moonshotai-kimi-k3.1-pro-trial",
+        "provider": "cerebras"
+      },
+      "flow": {
+        "path": ".walkcache/flows/checkout/android-ead41946a34727e37e6fd7d68c9ca96e55b3fc873bdd6ced0bb40454b8828c51.yaml",
+        "sha256": "ead41946a34727e37e6fd7d68c9ca96e55b3fc873bdd6ced0bb40454b8828c51",
+        "assertVisibleCount": 14,
+        "finalProductOutcomeAssertion": true
+      },
+      "artifacts": {
+        "commandStdoutPath": ".walkcache/metrics/walk005/cold-02/command.stdout.log",
+        "commandStderrPath": ".walkcache/metrics/walk005/cold-02/command.stderr.log",
+        "lifecycleReportPath": ".walkcache/reports/explore-1795330446455.json"
+      },
+      "runReport": {
+        "schemaVersion": 1,
+        "command": "explore",
+        "goalKey": "checkout",
+        "goal": "checkout",
+        "appId": "dev.walkcache.checkout",
+        "platform": "android",
+        "buildFingerprint": "47ad33ba3cab8d4c1c268b1522e5ee7fd2d799fc3da6fdc884f99a40b7a166aa",
+        "buildPath": "app/build/outputs/apk/debug/app-debug.apk",
+        "workspaceRoot": "/Users/seankim/.openclaw/workspace/kimi-hackathon/spikes/001-android-walkcache",
+        "cacheStatus": "recorded",
+        "passed": true,
+        "durationMs": 96502,
+        "explorationDurationMs": 70495,
+        "verificationDurationMs": 25797,
+        "mcpCalls": 12,
+        "mcpCallBasis": "maestro-mcp-proxy tools/call requests",
+        "modelCalls": 13,
+        "modelCallBasis": "openclaw agent exec assistantTurns (completed round trips)",
+        "model": "moonshotai-kimi-k3.1-pro-trial",
+        "provider": "cerebras",
+        "explorerExitCode": 0,
+        "attemptDirectory": ".walkcache/attempts/explore-1795330349952-13970",
+        "candidatePath": ".walkcache/attempts/explore-1795330349952-13970/candidate.yaml",
+        "activityPath": ".walkcache/attempts/explore-1795330349952-13970/activity.jsonl",
+        "mcpActivityPath": ".walkcache/attempts/explore-1795330349952-13970/mcp-activity.jsonl",
+        "openClawResultPath": ".walkcache/attempts/explore-1795330349952-13970/openclaw-result.json",
+        "flowPath": ".walkcache/flows/checkout/android-ead41946a34727e37e6fd7d68c9ca96e55b3fc873bdd6ced0bb40454b8828c51.yaml",
+        "flowSha256": "ead41946a34727e37e6fd7d68c9ca96e55b3fc873bdd6ced0bb40454b8828c51",
+        "transport": "maestro-mcp-stdio",
+        "accessPolicy": {
+          "allowedTools": [
+            "maestro__*"
+          ],
+          "referenceFlow": "denied",
+          "appSource": "denied",
+          "candidateDestination": "attempt-only"
+        },
+        "cleanState": {
+          "exploration": true,
+          "independentVerification": true,
+          "candidateClearStateLaunch": true
+        },
+        "verification": {
+          "runner": "WALK-002 runMaestro",
+          "freshClearStateLaunch": true,
+          "startedAt": "2026-11-22T06:53:40.655Z",
+          "endedAt": "2026-11-22T06:54:06.451Z",
+          "durationMs": 25796,
+          "monotonicDurationMs": 25796,
+          "exitCode": 0,
+          "signal": null,
+          "timedOut": false,
+          "passed": true,
+          "errors": [],
+          "stdoutPath": ".walkcache/attempts/explore-1795330349952-13970/verification/stdout.log",
+          "stderrPath": ".walkcache/attempts/explore-1795330349952-13970/verification/stderr.log",
+          "outputPath": ".walkcache/attempts/explore-1795330349952-13970/verification/output.log",
+          "failureClassification": null
+        },
+        "persistence": {
+          "flowPath": ".walkcache/flows/checkout/android-ead41946a34727e37e6fd7d68c9ca96e55b3fc873bdd6ced0bb40454b8828c51.yaml",
+          "flowSha256": "ead41946a34727e37e6fd7d68c9ca96e55b3fc873bdd6ced0bb40454b8828c51",
+          "storedMetadataPath": ".walkcache/memory/walks.json",
+          "atomicWrite": true
+        },
+        "errors": []
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "sampleId": "warm-01",
+      "pairId": "pair-1",
+      "mode": "warm",
+      "startedAt": "2026-11-22T06:50:58.149Z",
+      "endedAt": "2026-11-22T06:51:22.610Z",
+      "commandWallDurationMs": 24461,
+      "commandExitCode": 0,
+      "command": [
+        "bun",
+        "scripts/walkcache.ts",
+        "run",
+        "checkout"
+      ],
+      "conditions": {
+        "goal": "checkout",
+        "appId": "dev.walkcache.checkout",
+        "platform": "android",
+        "device": "emulator-5554",
+        "deviceState": "device",
+        "fixtureMode": "stable",
+        "buildPath": "app/build/outputs/apk/debug/app-debug.apk",
+        "buildFingerprint": "47ad33ba3cab8d4c1c268b1522e5ee7fd2d799fc3da6fdc884f99a40b7a166aa",
+        "buildInstalledBeforeSeries": true,
+        "emulatorBootIncluded": false,
+        "buildOrInstallIncluded": false
+      },
+      "cacheBefore": {
+        "status": "hit"
+      },
+      "metrics": {
+        "runnerDurationMs": 24442,
+        "lifecycleDurationMs": null,
+        "explorationDurationMs": null,
+        "verificationWrapperDurationMs": null,
+        "mcpCalls": 0,
+        "mcpCallBasis": "direct cache-hit run spawns no Maestro MCP process",
+        "modelCalls": 0,
+        "modelCallBasis": "direct cache-hit run spawns no OpenClaw/model process",
+        "cacheStatus": "hit",
+        "passed": true
+      },
+      "modelInstrumentation": {
+        "source": "direct-cache-hit-contract"
+      },
+      "flow": {
+        "path": ".walkcache/flows/checkout/android-2dc978422060b21fcf7647362391ea3951ec12ae8830e6b74ff754f0ce465179.yaml",
+        "sha256": null,
+        "assertVisibleCount": 11,
+        "finalProductOutcomeAssertion": true
+      },
+      "artifacts": {
+        "commandStdoutPath": ".walkcache/metrics/walk005/warm-01/command.stdout.log",
+        "commandStderrPath": ".walkcache/metrics/walk005/warm-01/command.stderr.log",
+        "lifecycleReportPath": ".walkcache/reports/run-1795330282607.json"
+      },
+      "runReport": {
+        "schemaVersion": 1,
+        "command": "run",
+        "goalKey": "checkout",
+        "appId": "dev.walkcache.checkout",
+        "platform": "android",
+        "buildFingerprint": "47ad33ba3cab8d4c1c268b1522e5ee7fd2d799fc3da6fdc884f99a40b7a166aa",
+        "flowPath": ".walkcache/flows/checkout/android-2dc978422060b21fcf7647362391ea3951ec12ae8830e6b74ff754f0ce465179.yaml",
+        "cacheStatus": "hit",
+        "modelCalls": 0,
+        "startedAt": "2026-11-22T06:50:58.163Z",
+        "endedAt": "2026-11-22T06:51:22.605Z",
+        "durationMs": 24442,
+        "monotonicDurationMs": 24443,
+        "exitCode": 0,
+        "signal": null,
+        "timedOut": false,
+        "passed": true,
+        "errors": [],
+        "stdoutPath": ".walkcache/reports/run-1795330258162/stdout.log",
+        "stderrPath": ".walkcache/reports/run-1795330258162/stderr.log",
+        "outputPath": ".walkcache/reports/run-1795330258162/output.log",
+        "failureClassification": null
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "sampleId": "warm-02",
+      "pairId": "pair-1",
+      "mode": "warm",
+      "startedAt": "2026-11-22T06:51:22.704Z",
+      "endedAt": "2026-11-22T06:51:47.013Z",
+      "commandWallDurationMs": 24309,
+      "commandExitCode": 0,
+      "command": [
+        "bun",
+        "scripts/walkcache.ts",
+        "run",
+        "checkout"
+      ],
+      "conditions": {
+        "goal": "checkout",
+        "appId": "dev.walkcache.checkout",
+        "platform": "android",
+        "device": "emulator-5554",
+        "deviceState": "device",
+        "fixtureMode": "stable",
+        "buildPath": "app/build/outputs/apk/debug/app-debug.apk",
+        "buildFingerprint": "47ad33ba3cab8d4c1c268b1522e5ee7fd2d799fc3da6fdc884f99a40b7a166aa",
+        "buildInstalledBeforeSeries": true,
+        "emulatorBootIncluded": false,
+        "buildOrInstallIncluded": false
+      },
+      "cacheBefore": {
+        "status": "hit"
+      },
+      "metrics": {
+        "runnerDurationMs": 24288,
+        "lifecycleDurationMs": null,
+        "explorationDurationMs": null,
+        "verificationWrapperDurationMs": null,
+        "mcpCalls": 0,
+        "mcpCallBasis": "direct cache-hit run spawns no Maestro MCP process",
+        "modelCalls": 0,
+        "modelCallBasis": "direct cache-hit run spawns no OpenClaw/model process",
+        "cacheStatus": "hit",
+        "passed": true
+      },
+      "modelInstrumentation": {
+        "source": "direct-cache-hit-contract"
+      },
+      "flow": {
+        "path": ".walkcache/flows/checkout/android-2dc978422060b21fcf7647362391ea3951ec12ae8830e6b74ff754f0ce465179.yaml",
+        "sha256": null,
+        "assertVisibleCount": 11,
+        "finalProductOutcomeAssertion": true
+      },
+      "artifacts": {
+        "commandStdoutPath": ".walkcache/metrics/walk005/warm-02/command.stdout.log",
+        "commandStderrPath": ".walkcache/metrics/walk005/warm-02/command.stderr.log",
+        "lifecycleReportPath": ".walkcache/reports/run-1795330307009.json"
+      },
+      "runReport": {
+        "schemaVersion": 1,
+        "command": "run",
+        "goalKey": "checkout",
+        "appId": "dev.walkcache.checkout",
+        "platform": "android",
+        "buildFingerprint": "47ad33ba3cab8d4c1c268b1522e5ee7fd2d799fc3da6fdc884f99a40b7a166aa",
+        "flowPath": ".walkcache/flows/checkout/android-2dc978422060b21fcf7647362391ea3951ec12ae8830e6b74ff754f0ce465179.yaml",
+        "cacheStatus": "hit",
+        "modelCalls": 0,
+        "startedAt": "2026-11-22T06:51:22.719Z",
+        "endedAt": "2026-11-22T06:51:47.007Z",
+        "durationMs": 24288,
+        "monotonicDurationMs": 24289,
+        "exitCode": 0,
+        "signal": null,
+        "timedOut": false,
+        "passed": true,
+        "errors": [],
+        "stdoutPath": ".walkcache/reports/run-1795330282718/stdout.log",
+        "stderrPath": ".walkcache/reports/run-1795330282718/stderr.log",
+        "outputPath": ".walkcache/reports/run-1795330282718/output.log",
+        "failureClassification": null
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "sampleId": "warm-03",
+      "pairId": "pair-1",
+      "mode": "warm",
+      "startedAt": "2026-11-22T06:51:47.114Z",
+      "endedAt": "2026-11-22T06:52:12.704Z",
+      "commandWallDurationMs": 25589,
+      "commandExitCode": 0,
+      "command": [
+        "bun",
+        "scripts/walkcache.ts",
+        "run",
+        "checkout"
+      ],
+      "conditions": {
+        "goal": "checkout",
+        "appId": "dev.walkcache.checkout",
+        "platform": "android",
+        "device": "emulator-5554",
+        "deviceState": "device",
+        "fixtureMode": "stable",
+        "buildPath": "app/build/outputs/apk/debug/app-debug.apk",
+        "buildFingerprint": "47ad33ba3cab8d4c1c268b1522e5ee7fd2d799fc3da6fdc884f99a40b7a166aa",
+        "buildInstalledBeforeSeries": true,
+        "emulatorBootIncluded": false,
+        "buildOrInstallIncluded": false
+      },
+      "cacheBefore": {
+        "status": "hit"
+      },
+      "metrics": {
+        "runnerDurationMs": 25568,
+        "lifecycleDurationMs": null,
+        "explorationDurationMs": null,
+        "verificationWrapperDurationMs": null,
+        "mcpCalls": 0,
+        "mcpCallBasis": "direct cache-hit run spawns no Maestro MCP process",
+        "modelCalls": 0,
+        "modelCallBasis": "direct cache-hit run spawns no OpenClaw/model process",
+        "cacheStatus": "hit",
+        "passed": true
+      },
+      "modelInstrumentation": {
+        "source": "direct-cache-hit-contract"
+      },
+      "flow": {
+        "path": ".walkcache/flows/checkout/android-2dc978422060b21fcf7647362391ea3951ec12ae8830e6b74ff754f0ce465179.yaml",
+        "sha256": null,
+        "assertVisibleCount": 11,
+        "finalProductOutcomeAssertion": true
+      },
+      "artifacts": {
+        "commandStdoutPath": ".walkcache/metrics/walk005/warm-03/command.stdout.log",
+        "commandStderrPath": ".walkcache/metrics/walk005/warm-03/command.stderr.log",
+        "lifecycleReportPath": ".walkcache/reports/run-1795330332700.json"
+      },
+      "runReport": {
+        "schemaVersion": 1,
+        "command": "run",
+        "goalKey": "checkout",
+        "appId": "dev.walkcache.checkout",
+        "platform": "android",
+        "buildFingerprint": "47ad33ba3cab8d4c1c268b1522e5ee7fd2d799fc3da6fdc884f99a40b7a166aa",
+        "flowPath": ".walkcache/flows/checkout/android-2dc978422060b21fcf7647362391ea3951ec12ae8830e6b74ff754f0ce465179.yaml",
+        "cacheStatus": "hit",
+        "modelCalls": 0,
+        "startedAt": "2026-11-22T06:51:47.129Z",
+        "endedAt": "2026-11-22T06:52:12.697Z",
+        "durationMs": 25568,
+        "monotonicDurationMs": 25569,
+        "exitCode": 0,
+        "signal": null,
+        "timedOut": false,
+        "passed": true,
+        "errors": [],
+        "stdoutPath": ".walkcache/reports/run-1795330307129/stdout.log",
+        "stderrPath": ".walkcache/reports/run-1795330307129/stderr.log",
+        "outputPath": ".walkcache/reports/run-1795330307129/output.log",
+        "failureClassification": null
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "sampleId": "warm-04",
+      "pairId": "pair-2",
+      "mode": "warm",
+      "startedAt": "2026-11-22T06:54:12.553Z",
+      "endedAt": "2026-11-22T06:54:37.666Z",
+      "commandWallDurationMs": 25112,
+      "commandExitCode": 0,
+      "command": [
+        "bun",
+        "scripts/walkcache.ts",
+        "run",
+        "checkout"
+      ],
+      "conditions": {
+        "goal": "checkout",
+        "appId": "dev.walkcache.checkout",
+        "platform": "android",
+        "device": "emulator-5554",
+        "deviceState": "device",
+        "fixtureMode": "stable",
+        "buildPath": "app/build/outputs/apk/debug/app-debug.apk",
+        "buildFingerprint": "47ad33ba3cab8d4c1c268b1522e5ee7fd2d799fc3da6fdc884f99a40b7a166aa",
+        "buildInstalledBeforeSeries": true,
+        "emulatorBootIncluded": false,
+        "buildOrInstallIncluded": false
+      },
+      "cacheBefore": {
+        "status": "hit"
+      },
+      "metrics": {
+        "runnerDurationMs": 25094,
+        "lifecycleDurationMs": null,
+        "explorationDurationMs": null,
+        "verificationWrapperDurationMs": null,
+        "mcpCalls": 0,
+        "mcpCallBasis": "direct cache-hit run spawns no Maestro MCP process",
+        "modelCalls": 0,
+        "modelCallBasis": "direct cache-hit run spawns no OpenClaw/model process",
+        "cacheStatus": "hit",
+        "passed": true
+      },
+      "modelInstrumentation": {
+        "source": "direct-cache-hit-contract"
+      },
+      "flow": {
+        "path": ".walkcache/flows/checkout/android-ead41946a34727e37e6fd7d68c9ca96e55b3fc873bdd6ced0bb40454b8828c51.yaml",
+        "sha256": null,
+        "assertVisibleCount": 14,
+        "finalProductOutcomeAssertion": true
+      },
+      "artifacts": {
+        "commandStdoutPath": ".walkcache/metrics/walk005/warm-04/command.stdout.log",
+        "commandStderrPath": ".walkcache/metrics/walk005/warm-04/command.stderr.log",
+        "lifecycleReportPath": ".walkcache/reports/run-1795330477663.json"
+      },
+      "runReport": {
+        "schemaVersion": 1,
+        "command": "run",
+        "goalKey": "checkout",
+        "appId": "dev.walkcache.checkout",
+        "platform": "android",
+        "buildFingerprint": "47ad33ba3cab8d4c1c268b1522e5ee7fd2d799fc3da6fdc884f99a40b7a166aa",
+        "flowPath": ".walkcache/flows/checkout/android-ead41946a34727e37e6fd7d68c9ca96e55b3fc873bdd6ced0bb40454b8828c51.yaml",
+        "cacheStatus": "hit",
+        "modelCalls": 0,
+        "startedAt": "2026-11-22T06:54:12.567Z",
+        "endedAt": "2026-11-22T06:54:37.661Z",
+        "durationMs": 25094,
+        "monotonicDurationMs": 25095,
+        "exitCode": 0,
+        "signal": null,
+        "timedOut": false,
+        "passed": true,
+        "errors": [],
+        "stdoutPath": ".walkcache/reports/run-1795330452566/stdout.log",
+        "stderrPath": ".walkcache/reports/run-1795330452566/stderr.log",
+        "outputPath": ".walkcache/reports/run-1795330452566/output.log",
+        "failureClassification": null
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "sampleId": "warm-05",
+      "pairId": "pair-2",
+      "mode": "warm",
+      "startedAt": "2026-11-22T06:54:37.765Z",
+      "endedAt": "2026-11-22T06:55:03.629Z",
+      "commandWallDurationMs": 25864,
+      "commandExitCode": 0,
+      "command": [
+        "bun",
+        "scripts/walkcache.ts",
+        "run",
+        "checkout"
+      ],
+      "conditions": {
+        "goal": "checkout",
+        "appId": "dev.walkcache.checkout",
+        "platform": "android",
+        "device": "emulator-5554",
+        "deviceState": "device",
+        "fixtureMode": "stable",
+        "buildPath": "app/build/outputs/apk/debug/app-debug.apk",
+        "buildFingerprint": "47ad33ba3cab8d4c1c268b1522e5ee7fd2d799fc3da6fdc884f99a40b7a166aa",
+        "buildInstalledBeforeSeries": true,
+        "emulatorBootIncluded": false,
+        "buildOrInstallIncluded": false
+      },
+      "cacheBefore": {
+        "status": "hit"
+      },
+      "metrics": {
+        "runnerDurationMs": 25845,
+        "lifecycleDurationMs": null,
+        "explorationDurationMs": null,
+        "verificationWrapperDurationMs": null,
+        "mcpCalls": 0,
+        "mcpCallBasis": "direct cache-hit run spawns no Maestro MCP process",
+        "modelCalls": 0,
+        "modelCallBasis": "direct cache-hit run spawns no OpenClaw/model process",
+        "cacheStatus": "hit",
+        "passed": true
+      },
+      "modelInstrumentation": {
+        "source": "direct-cache-hit-contract"
+      },
+      "flow": {
+        "path": ".walkcache/flows/checkout/android-ead41946a34727e37e6fd7d68c9ca96e55b3fc873bdd6ced0bb40454b8828c51.yaml",
+        "sha256": null,
+        "assertVisibleCount": 14,
+        "finalProductOutcomeAssertion": true
+      },
+      "artifacts": {
+        "commandStdoutPath": ".walkcache/metrics/walk005/warm-05/command.stdout.log",
+        "commandStderrPath": ".walkcache/metrics/walk005/warm-05/command.stderr.log",
+        "lifecycleReportPath": ".walkcache/reports/run-1795330503627.json"
+      },
+      "runReport": {
+        "schemaVersion": 1,
+        "command": "run",
+        "goalKey": "checkout",
+        "appId": "dev.walkcache.checkout",
+        "platform": "android",
+        "buildFingerprint": "47ad33ba3cab8d4c1c268b1522e5ee7fd2d799fc3da6fdc884f99a40b7a166aa",
+        "flowPath": ".walkcache/flows/checkout/android-ead41946a34727e37e6fd7d68c9ca96e55b3fc873bdd6ced0bb40454b8828c51.yaml",
+        "cacheStatus": "hit",
+        "modelCalls": 0,
+        "startedAt": "2026-11-22T06:54:37.779Z",
+        "endedAt": "2026-11-22T06:55:03.624Z",
+        "durationMs": 25845,
+        "monotonicDurationMs": 25846,
+        "exitCode": 0,
+        "signal": null,
+        "timedOut": false,
+        "passed": true,
+        "errors": [],
+        "stdoutPath": ".walkcache/reports/run-1795330477779/stdout.log",
+        "stderrPath": ".walkcache/reports/run-1795330477779/stderr.log",
+        "outputPath": ".walkcache/reports/run-1795330477779/output.log",
+        "failureClassification": null
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "sampleId": "warm-06",
+      "pairId": "pair-2",
+      "mode": "warm",
+      "startedAt": "2026-11-22T06:55:03.722Z",
+      "endedAt": "2026-11-22T06:55:28.868Z",
+      "commandWallDurationMs": 25146,
+      "commandExitCode": 0,
+      "command": [
+        "bun",
+        "scripts/walkcache.ts",
+        "run",
+        "checkout"
+      ],
+      "conditions": {
+        "goal": "checkout",
+        "appId": "dev.walkcache.checkout",
+        "platform": "android",
+        "device": "emulator-5554",
+        "deviceState": "device",
+        "fixtureMode": "stable",
+        "buildPath": "app/build/outputs/apk/debug/app-debug.apk",
+        "buildFingerprint": "47ad33ba3cab8d4c1c268b1522e5ee7fd2d799fc3da6fdc884f99a40b7a166aa",
+        "buildInstalledBeforeSeries": true,
+        "emulatorBootIncluded": false,
+        "buildOrInstallIncluded": false
+      },
+      "cacheBefore": {
+        "status": "hit"
+      },
+      "metrics": {
+        "runnerDurationMs": 25127,
+        "lifecycleDurationMs": null,
+        "explorationDurationMs": null,
+        "verificationWrapperDurationMs": null,
+        "mcpCalls": 0,
+        "mcpCallBasis": "direct cache-hit run spawns no Maestro MCP process",
+        "modelCalls": 0,
+        "modelCallBasis": "direct cache-hit run spawns no OpenClaw/model process",
+        "cacheStatus": "hit",
+        "passed": true
+      },
+      "modelInstrumentation": {
+        "source": "direct-cache-hit-contract"
+      },
+      "flow": {
+        "path": ".walkcache/flows/checkout/android-ead41946a34727e37e6fd7d68c9ca96e55b3fc873bdd6ced0bb40454b8828c51.yaml",
+        "sha256": null,
+        "assertVisibleCount": 14,
+        "finalProductOutcomeAssertion": true
+      },
+      "artifacts": {
+        "commandStdoutPath": ".walkcache/metrics/walk005/warm-06/command.stdout.log",
+        "commandStderrPath": ".walkcache/metrics/walk005/warm-06/command.stderr.log",
+        "lifecycleReportPath": ".walkcache/reports/run-1795330528866.json"
+      },
+      "runReport": {
+        "schemaVersion": 1,
+        "command": "run",
+        "goalKey": "checkout",
+        "appId": "dev.walkcache.checkout",
+        "platform": "android",
+        "buildFingerprint": "47ad33ba3cab8d4c1c268b1522e5ee7fd2d799fc3da6fdc884f99a40b7a166aa",
+        "flowPath": ".walkcache/flows/checkout/android-ead41946a34727e37e6fd7d68c9ca96e55b3fc873bdd6ced0bb40454b8828c51.yaml",
+        "cacheStatus": "hit",
+        "modelCalls": 0,
+        "startedAt": "2026-11-22T06:55:03.737Z",
+        "endedAt": "2026-11-22T06:55:28.864Z",
+        "durationMs": 25127,
+        "monotonicDurationMs": 25128,
+        "exitCode": 0,
+        "signal": null,
+        "timedOut": false,
+        "passed": true,
+        "errors": [],
+        "stdoutPath": ".walkcache/reports/run-1795330503737/stdout.log",
+        "stderrPath": ".walkcache/reports/run-1795330503737/stderr.log",
+        "outputPath": ".walkcache/reports/run-1795330503737/output.log",
+        "failureClassification": null
+      }
+    }
+  ]
+}
