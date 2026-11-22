@@ -1,0 +1,244 @@
+bun test v1.4.4-canary.1 (191755ec1)
+
+src/App.test.tsx:
+(pass) WalkCache local viewer fixtures > cold discovery shows exploration metrics without suggesting a warm hit [19.41ms]
+(pass) WalkCache local viewer fixtures > warm replay makes the zero-model cache hit explicit [8.14ms]
+(pass) WalkCache local viewer fixtures > bounded repair exposes its proposed diff and preserved assertions [5.55ms]
+An update to App inside a test was not wrapped in act(...).
+
+When testing, code that causes React state updates should be wrapped into act(...):
+
+act(() => {
+  /* fire events that update state */
+});
+/* assert on the output */
+
+This ensures that you're testing the behavior the user would see in the browser. Learn more at https://react.dev/link/wrap-tests-with-act
+An update to App inside a test was not wrapped in act(...).
+
+When testing, code that causes React state updates should be wrapped into act(...):
+
+act(() => {
+  /* fire events that update state */
+});
+/* assert on the output */
+
+This ensures that you're testing the behavior the user would see in the browser. Learn more at https://react.dev/link/wrap-tests-with-act
+An update to App inside a test was not wrapped in act(...).
+
+When testing, code that causes React state updates should be wrapped into act(...):
+
+act(() => {
+  /* fire events that update state */
+});
+/* assert on the output */
+
+This ensures that you're testing the behavior the user would see in the browser. Learn more at https://react.dev/link/wrap-tests-with-act
+(pass) WalkCache local viewer fixtures > a product regression stays failed with no repair or success fabrication [3.63ms]
+(pass) viewer availability and safety > empty local memory is empty, not a pass, and the CLI fallback remains visible [4.56ms]
+(pass) viewer availability and safety > malformed, missing, and in-progress reports never become successful states [17.73ms]
+(pass) viewer availability and safety > client path checks restrict arbitrary files, traversal, and credential-like paths [0.05ms]
+(pass) viewer availability and safety > an unavailable viewer API leaves the headless fallback intact [3.80ms]
+
+viewer/test/local-viewer.test.ts:
+(pass) read-only local viewer API > a missing report directory is an empty index, never a fabricated pass [0.49ms]
+(pass) read-only local viewer API > valid, malformed, missing, and in-progress reports retain their states [1.67ms]
+(pass) read-only local viewer API > only an artifact declared by its authorizing report can be read [1.24ms]
+(pass) read-only local viewer API > arbitrary paths, traversal, raw logs, and credential-like paths are rejected [0.21ms]
+(pass) read-only local viewer API > a declared symlink that escapes .walkcache is never followed [0.77ms]
+(pass) read-only local viewer API > validation history returns recorded outcomes and rejects malformed memory [0.83ms]
+(pass) viewer redaction > sensitive keys, bearer values, CLI secrets, and local paths are redacted [0.14ms]
+(pass) viewer redaction > JSON redaction recursively protects credential-bearing fields [0.12ms]
+
+apps/cli/test/web-adapter.test.ts:
+(pass) production Web adapter CLI > verified remember/warm replay works without a model; unsupported cold and stale/product failures stay honest [151.57ms]
+
+apps/cli/test/ios-adapter.test.ts:
+(pass) production iOS adapter CLI > reviewed remember/warm replay works without a model; cold/stale/product failures stay honest [112.96ms]
+(pass) production iOS adapter CLI > iOS config never accepts the Android repair plugin [13.69ms]
+
+apps/cli/test/cli.test.ts:
+(pass) production headless CLI > miss enters real cold lifecycle, then warm bypasses model construction and supports list/inspect [244.96ms]
+(pass) production headless CLI > remember verifies and persists; a genuine classified product failure stops with failed validation [67.89ms]
+(pass) production headless CLI > rejected cold verification exits 3 and never creates successful memory [156.05ms]
+(pass) production headless CLI > opt-in local semantic fallback is exact-first, reports selection, and replays stored YAML [94.59ms]
+(pass) production headless CLI > a configured but missing embedding provider uses ordinary cold then exact behavior [228.91ms]
+(pass) production headless CLI > Maestro executable launch failure is a documented runner failure with exit 1 [18.45ms]
+(pass) production headless CLI > help, command errors, bad config, and inspection failures use documented exits [78.94ms]
+
+packages/agent-openclaw/test/openclaw-explorer.test.ts:
+(pass) self-contained OpenClaw cold exploration > pins an MCP-only explorer and persists only after independent verification [12.13ms]
+(pass) self-contained OpenClaw cold exploration > a rejected candidate cannot create or replace known-good memory [10.97ms]
+(pass) self-contained OpenClaw cold exploration > extracts fenced YAML and enforces the app plus a fresh clearState launch [10.01ms]
+(pass) self-contained OpenClaw cold exploration > leaves model and MCP metrics unknown when instrumentation is absent [10.14ms]
+
+packages/metrics/test/cold-warm.test.ts:
+(pass) cold/warm comparison aggregation > retains every raw sample and reports deterministic variability and paired medians [0.31ms]
+(pass) cold/warm comparison aggregation > does not turn missing model instrumentation into zero or infer it from MCP calls [0.26ms]
+(pass) cold/warm comparison aggregation > rejects incomparable builds and missing meaningful outcome assertions [0.05ms]
+(pass) cold/warm comparison aggregation > failed samples remain visible and block a wall-clock reduction claim [0.06ms]
+
+packages/core/test/orchestration.test.ts:
+(pass) vendor-independent orchestration > core source has no platform, demo, UI, filesystem, or vendor imports [0.40ms]
+(pass) vendor-independent orchestration > a warm constructor/spy proves no explorer or repairer is constructed or invoked [0.59ms]
+(pass) vendor-independent orchestration > a normal miss invokes the cold explorer once and returns its verified metrics [0.07ms]
+(pass) vendor-independent orchestration > explicit explore also uses the injected cold lifecycle and times the whole command [0.06ms]
+(pass) vendor-independent orchestration > a stale-build miss uses exactly one bounded repair and no explorer [0.04ms]
+(pass) vendor-independent orchestration > a stale selector on an exact hit enters only the bounded repair plugin [0.04ms]
+(pass) vendor-independent orchestration > product_assertion reports and stops without constructing a repairer or explorer [0.04ms]
+(pass) vendor-independent orchestration > unknown reports and stops without constructing a repairer or explorer
+(pass) vendor-independent orchestration > remember independently verifies before persistence and rejects failures without exploration [0.10ms]
+(pass) vendor-independent orchestration > rejected exploration and repair remain failures rather than falling through to a pass [0.04ms]
+(pass) vendor-independent orchestration > an exact hit never constructs or calls an opt-in embedding provider [0.03ms]
+(pass) vendor-independent orchestration > a semantic selection replays its stored flow and validates the selected exact identity [0.37ms]
+(pass) vendor-independent orchestration > a failed semantic replay stays failed and never uses exploration or semantic repair [0.12ms]
+(pass) vendor-independent orchestration > a semantic winner changed after embedding is revalidated before any replay [0.07ms]
+(pass) vendor-independent orchestration > missing embedding service preserves the ordinary miss/explore lifecycle [0.05ms]
+(pass) vendor-independent orchestration > an adversarial goal stops before provider or explorer construction [0.07ms]
+
+packages/core/test/semantic.test.ts:
+(pass) exact-first semantic retrieval > exact identity returns before provider construction and without listing candidates [0.13ms]
+(pass) exact-first semantic retrieval > an equivalent goal selects only a store-reverified candidate and exposes similarity [0.11ms]
+(pass) exact-first semantic retrieval > an unrelated/low-similarity goal fails below the confidence floor [0.04ms]
+(pass) exact-first semantic retrieval > two high-scoring candidates without a sufficient margin are ambiguous [0.19ms]
+(pass) exact-first semantic retrieval > a clear winner above both thresholds is deterministic [0.04ms]
+(pass) exact-first semantic retrieval > negated/contradictory requests never reach candidate embedding or selection [0.03ms]
+(pass) exact-first semantic retrieval > an adversarial request fails before provider construction or candidate reads [0.06ms]
+(pass) exact-first semantic retrieval > missing factories, throwing factories, and failed embedding calls become unavailable misses [0.09ms]
+(pass) exact-first semantic retrieval > a candidate removed between listing and exact relookup is never embedded [0.03ms]
+(pass) exact-first semantic retrieval > checksum/verification errors propagate rather than becoming provider fallback [0.03ms]
+(pass) exact-first semantic retrieval > all non-goal identity and latest-pass gates precede candidate embedding and ranking [0.08ms]
+(pass) exact-first semantic retrieval > non-not-found exact misses never enter the semantic provider [0.03ms]
+(pass) exact-first semantic retrieval > confidence and ambiguity floors cannot be lowered or disabled [0.09ms]
+(pass) exact-first semantic retrieval > invalid or incompatible provider vectors fail unavailable, never a manufactured score [0.07ms]
+
+packages/maestro/test/cache-replay-classification.test.ts:
+(pass) a failing cache hit stays at zero model calls and its failed validation is not reused [39.08ms]
+
+packages/maestro/test/maestro-runner.test.ts:
+(pass) verified Maestro runner > preserves output, timing, configuration, exit status, and artifacts on success [10.59ms]
+(pass) verified Maestro runner > returns a structured execution error and preserves a nonzero exit code [9.03ms]
+(pass) verified Maestro runner > enforces the timeout and terminates only the spawned process tree [1462.99ms]
+(pass) verified Maestro runner > returns a structured launch error for a missing executable [2.25ms]
+(pass) verified Maestro runner > rejects a flow path that escapes the workspace before launching [1.21ms]
+(pass) verified Maestro runner > returns a structured artifact error without discarding process output [17.51ms]
+
+packages/maestro/test/failure-classification.test.ts:
+(pass) advisory Maestro failure classification fixtures > selector-positive remains deterministic and conservative [0.34ms]
+(pass) advisory Maestro failure classification fixtures > selector-negative remains deterministic and conservative [0.08ms]
+(pass) advisory Maestro failure classification fixtures > navigation-positive remains deterministic and conservative [0.07ms]
+(pass) advisory Maestro failure classification fixtures > navigation-negative remains deterministic and conservative [0.06ms]
+(pass) advisory Maestro failure classification fixtures > product-assertion-positive remains deterministic and conservative [0.06ms]
+(pass) advisory Maestro failure classification fixtures > product-assertion-negative remains deterministic and conservative [0.05ms]
+(pass) advisory Maestro failure classification fixtures > runner-positive remains deterministic and conservative [0.06ms]
+(pass) advisory Maestro failure classification fixtures > runner-negative remains deterministic and conservative [0.05ms]
+(pass) advisory Maestro failure classification fixtures > timeout-positive remains deterministic and conservative [0.05ms]
+(pass) advisory Maestro failure classification fixtures > timeout-negative remains deterministic and conservative [0.05ms]
+(pass) advisory Maestro failure classification fixtures > unknown-positive remains deterministic and conservative [0.05ms]
+(pass) advisory Maestro failure classification fixtures > unknown-negative remains deterministic and conservative [0.04ms]
+(pass) advisory Maestro failure classification fixtures > a passing runner result has no failure classification [0.03ms]
+(pass) advisory Maestro failure classification fixtures > mixed selector and assertion diagnostics stay unknown and ineligible for repair [0.03ms]
+(pass) advisory Maestro failure classification fixtures > multiple failing steps stay ambiguous and retain the raw artifact reference [0.02ms]
+
+packages/maestro/test/platform-adapter.test.ts:
+(pass) Maestro execution platform adapters > Web identity and command include Chromium, adapter, build, and bounded browser settings [0.13ms]
+(pass) Maestro execution platform adapters > Android runner and cache identity remain compatible with validated pre-Web walks [0.04ms]
+(pass) Maestro execution platform adapters > iOS identity and command include adapter, simulator, build, and explicit platform [0.05ms]
+(pass) Maestro execution platform adapters > iOS app fingerprint covers bundle paths and contents [1.54ms]
+(pass) Maestro execution platform adapters > Web build fingerprint covers paths and every deterministic static file [1.43ms]
+
+packages/store-local/test/semantic-retrieval.test.ts:
+(pass) local-store semantic retrieval integration > equivalent goals hit; unrelated, contradictory, and adversarial goals return closed misses [3.78ms]
+(pass) local-store semantic retrieval integration > two locally equivalent verified walks fail ambiguous instead of choosing storage order [2.37ms]
+(pass) local-store semantic retrieval integration > real store partitions semantic candidates by app, platform, schema, build, adapter, and browser [1.63ms]
+(pass) local-store semantic retrieval integration > latest failed validation and missing flow exclude candidates before embedding [2.88ms]
+(pass) local-store semantic retrieval integration > a checksum mismatch remains invalid memory, never an ordinary semantic miss or hit [1.32ms]
+
+packages/store-local/test/local-store.test.ts:
+(pass) upgrades valid WALK-003 schema-one metadata without inventing validation success [1.84ms]
+
+packages/semantic-local/test/local-embeddings.test.ts:
+(pass) deterministic local lexical embedding proof > produces stable bounded vectors without configuration or a service [0.07ms]
+(pass) deterministic local lexical embedding proof > recognizes only the explicitly documented narrow paraphrase normalizations [0.08ms]
+(pass) deterministic local lexical embedding proof > unrelated goals remain below the default retrieval confidence floor [0.04ms]
+(pass) deterministic local lexical embedding proof > extra unconstrained intent reduces similarity instead of being discarded [0.07ms]
+(pass) deterministic local lexical embedding proof > raw hash collisions cannot pass the local canonical-token equivalence guard [0.05ms]
+
+packages/store-sqlite/test/sqlite-store.test.ts:
+(pass) a real SQLite error rolls back the entire metadata replacement and retains the known-good walk [6.13ms]
+
+packages/store-conformance/test/conformance.test.ts:
+(pass) LocalWalkStore (filesystem + JSON): shared WalkStore behavioral contract > returns a first-run miss without creating metadata [0.63ms]
+(pass) LocalWalkStore (filesystem + JSON): shared WalkStore behavioral contract > persists across instances, normalizes the goal, and returns the complete exact identity [1.41ms]
+(pass) LocalWalkStore (filesystem + JSON): shared WalkStore behavioral contract > returns stale-build instead of replaying another build fingerprint [1.10ms]
+(pass) LocalWalkStore (filesystem + JSON): shared WalkStore behavioral contract > returns wrong-app without loosening app identity [1.39ms]
+(pass) LocalWalkStore (filesystem + JSON): shared WalkStore behavioral contract > returns wrong-platform without sharing memory across platforms [1.40ms]
+(pass) LocalWalkStore (filesystem + JSON): shared WalkStore behavioral contract > partitions Web identity by both adapter and browser [1.58ms]
+(pass) LocalWalkStore (filesystem + JSON): shared WalkStore behavioral contract > returns missing-flow and never treats metadata alone as a pass [1.46ms]
+(pass) LocalWalkStore (filesystem + JSON): shared WalkStore behavioral contract > rejects a tampered flow checksum instead of executing changed YAML [1.34ms]
+(pass) LocalWalkStore (filesystem + JSON): shared WalkStore behavioral contract > rejects malformed metadata as invalid memory [2.36ms]
+(pass) LocalWalkStore (filesystem + JSON): shared WalkStore behavioral contract > rejects an unsupported metadata schema [1.12ms]
+(pass) LocalWalkStore (filesystem + JSON): shared WalkStore behavioral contract > rejects an invalid entry instead of filtering it out to produce a hit [1.16ms]
+(pass) LocalWalkStore (filesystem + JSON): shared WalkStore behavioral contract > rejects duplicate exact identities as ambiguous [1.35ms]
+(pass) LocalWalkStore (filesystem + JSON): shared WalkStore behavioral contract > rejects stored flow paths outside the canonical flow directory [1.52ms]
+(pass) LocalWalkStore (filesystem + JSON): shared WalkStore behavioral contract > rejects a symlink whose canonical flow path escapes the workspace [1.56ms]
+(pass) LocalWalkStore (filesystem + JSON): shared WalkStore behavioral contract > an interruption before flow rename leaves only ignored temporary files and a first-run miss [0.92ms]
+(pass) LocalWalkStore (filesystem + JSON): shared WalkStore behavioral contract > failed candidate verification preserves known-good YAML and metadata byte for byte [1.18ms]
+(pass) LocalWalkStore (filesystem + JSON): shared WalkStore behavioral contract > failed metadata replacement preserves last-known-good bytes and ignores orphan and temporary YAML [1.55ms]
+(pass) LocalWalkStore (filesystem + JSON): shared WalkStore behavioral contract > failed validation remains append-only history and blocks subsequent reuse without changing YAML [1.36ms]
+(pass) LocalWalkStore (filesystem + JSON): shared WalkStore behavioral contract > verified repair retains history and exploration, adds provenance, and selects its diagnostic base [1.75ms]
+(pass) LocalWalkStore (filesystem + JSON): shared WalkStore behavioral contract > a changed repair base fails closed and preserves last-known-good metadata and YAML [1.20ms]
+(pass) SQLiteWalkStore (Bun SQLite + YAML): shared WalkStore behavioral contract > returns a first-run miss without creating metadata [0.40ms]
+(pass) SQLiteWalkStore (Bun SQLite + YAML): shared WalkStore behavioral contract > persists across instances, normalizes the goal, and returns the complete exact identity [2.36ms]
+(pass) SQLiteWalkStore (Bun SQLite + YAML): shared WalkStore behavioral contract > returns stale-build instead of replaying another build fingerprint [2.72ms]
+(pass) SQLiteWalkStore (Bun SQLite + YAML): shared WalkStore behavioral contract > returns wrong-app without loosening app identity [2.53ms]
+(pass) SQLiteWalkStore (Bun SQLite + YAML): shared WalkStore behavioral contract > returns wrong-platform without sharing memory across platforms [2.10ms]
+(pass) SQLiteWalkStore (Bun SQLite + YAML): shared WalkStore behavioral contract > partitions Web identity by both adapter and browser [2.90ms]
+(pass) SQLiteWalkStore (Bun SQLite + YAML): shared WalkStore behavioral contract > returns missing-flow and never treats metadata alone as a pass [6.71ms]
+(pass) SQLiteWalkStore (Bun SQLite + YAML): shared WalkStore behavioral contract > rejects a tampered flow checksum instead of executing changed YAML [2.32ms]
+(pass) SQLiteWalkStore (Bun SQLite + YAML): shared WalkStore behavioral contract > rejects malformed metadata as invalid memory [2.52ms]
+(pass) SQLiteWalkStore (Bun SQLite + YAML): shared WalkStore behavioral contract > rejects an unsupported metadata schema [2.74ms]
+(pass) SQLiteWalkStore (Bun SQLite + YAML): shared WalkStore behavioral contract > rejects an invalid entry instead of filtering it out to produce a hit [3.19ms]
+(pass) SQLiteWalkStore (Bun SQLite + YAML): shared WalkStore behavioral contract > rejects duplicate exact identities as ambiguous [2.57ms]
+(pass) SQLiteWalkStore (Bun SQLite + YAML): shared WalkStore behavioral contract > rejects stored flow paths outside the canonical flow directory [2.45ms]
+(pass) SQLiteWalkStore (Bun SQLite + YAML): shared WalkStore behavioral contract > rejects a symlink whose canonical flow path escapes the workspace [2.42ms]
+(pass) SQLiteWalkStore (Bun SQLite + YAML): shared WalkStore behavioral contract > an interruption before flow rename leaves only ignored temporary files and a first-run miss [0.85ms]
+(pass) SQLiteWalkStore (Bun SQLite + YAML): shared WalkStore behavioral contract > failed candidate verification preserves known-good YAML and metadata byte for byte [2.17ms]
+(pass) SQLiteWalkStore (Bun SQLite + YAML): shared WalkStore behavioral contract > failed metadata replacement preserves last-known-good bytes and ignores orphan and temporary YAML [2.90ms]
+(pass) SQLiteWalkStore (Bun SQLite + YAML): shared WalkStore behavioral contract > failed validation remains append-only history and blocks subsequent reuse without changing YAML [3.57ms]
+(pass) SQLiteWalkStore (Bun SQLite + YAML): shared WalkStore behavioral contract > verified repair retains history and exploration, adds provenance, and selects its diagnostic base [4.28ms]
+(pass) SQLiteWalkStore (Bun SQLite + YAML): shared WalkStore behavioral contract > a changed repair base fails closed and preserves last-known-good metadata and YAML [2.54ms]
+WALK019_ORCHESTRATION {"store":"LocalWalkStore (filesystem + JSON)","runner":"MaestroWalkRunner (real child process, deterministic local executable fixture)","cacheStatus":"hit","outcome":"passed","modelCalls":0,"explorerConstructions":0,"repairerConstructions":0,"childProcessExitCode":0,"assertions":1,"validationHistoryEntries":2,"platformExecutionClaim":"none; this is runner/store orchestration, not a device result"}
+(pass) LocalWalkStore (filesystem + JSON): actual orchestration conformance > one production-runner cache hit performs zero model calls and appends passing validation [13.26ms]
+WALK019_ORCHESTRATION {"store":"SQLiteWalkStore (Bun SQLite + YAML)","runner":"MaestroWalkRunner (real child process, deterministic local executable fixture)","cacheStatus":"hit","outcome":"passed","modelCalls":0,"explorerConstructions":0,"repairerConstructions":0,"childProcessExitCode":0,"assertions":1,"validationHistoryEntries":2,"platformExecutionClaim":"none; this is runner/store orchestration, not a device result"}
+(pass) SQLiteWalkStore (Bun SQLite + YAML): actual orchestration conformance > one production-runner cache hit performs zero model calls and appends passing validation [13.22ms]
+
+packages/repair/test/build-install.test.ts:
+(pass) bounded Gradle build and device install > installs the exact rebuilt APK on the configured device within the shared lifecycle [128.87ms]
+(pass) bounded Gradle build and device install > never installs a failed build [35.54ms]
+
+packages/repair/test/bounded-repair.test.ts:
+(pass) bounded checkout selector repair > verifies the exact two-file patch, new build identity, no Git action, and atomic replacement [12.21ms]
+(pass) bounded checkout selector repair > refuses product_assertion without source, assertion, build, or memory changes [4.17ms]
+(pass) bounded checkout selector repair > refuses navigation without source, assertion, build, or memory changes [3.66ms]
+(pass) bounded checkout selector repair > refuses unknown without source, assertion, build, or memory changes [3.85ms]
+(pass) bounded checkout selector repair > refuses timeout without source, assertion, build, or memory changes [4.61ms]
+(pass) bounded checkout selector repair > refuses runner without source, assertion, build, or memory changes [3.83ms]
+(pass) bounded checkout selector repair > refuses other-selector without source, assertion, build, or memory changes [3.48ms]
+(pass) bounded checkout selector repair > failed full-journey verification rolls back source and preserves last-known-good memory and failed artifacts [6.36ms]
+(pass) bounded checkout selector repair > rejects an unchanged rebuilt fingerprint before verification or persistence [5.27ms]
+(pass) bounded checkout selector repair > enforces one overall time budget and rolls back a partial attempt without retrying [46.46ms]
+
+packages/repair/test/repair-policy.test.ts:
+(pass) canonical two-file repair policy > produces a minimal exact diff only for the affected component and selector files [1.71ms]
+(pass) canonical two-file repair policy > rejects writes outside the configured affected files [1.24ms]
+(pass) canonical two-file repair policy > rejects unpermitted assertion/file types [1.44ms]
+(pass) canonical two-file repair policy > rejects lexical source-root escapes [1.10ms]
+(pass) canonical two-file repair policy > rejects a symlinked source root even when its target is inside the workspace [1.51ms]
+(pass) canonical two-file repair policy > rejects a source-file symlink escape and leaves the outside target unchanged [1.89ms]
+(pass) canonical two-file repair policy > fails closed if the validated stale selector text is absent or ambiguous [1.70ms]
+
+ 164 pass
+ 0 fail
+ 867 expect() calls
+Ran 164 tests across 21 files. [3.38s]
