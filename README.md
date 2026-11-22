@@ -198,6 +198,16 @@ belong in committed evidence.
 See [Architecture](docs/ARCHITECTURE.md) for exact cache identity, memory schemas, plugin contracts,
 failure classification, and atomic-write ordering.
 
+## Demo
+
+[`demo/walkcache-demo.mp4`](demo/walkcache-demo.mp4) is a **58-second, 1080p captioned fallback**
+built from committed real-run evidence. It covers Android cold exploration, verified YAML, exact
+zero-model warm replay, bounded repair, the product-regression guard, and the explicit Chromium
+support boundary. It does not claim instant replay. [`demo/SCRIPT.md`](demo/SCRIPT.md) links every
+claim to raw artifacts; [`demo/rehearsal/`](demo/rehearsal/REVIEW.md) records the rejected 65-second
+take and two complete 58-second decode/evidence rehearsals. Regenerate with
+`python3 demo/generate_video.py && python3 demo/rehearse.py` (Pillow and FFmpeg required).
+
 ## Development
 
 ```sh

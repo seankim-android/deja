@@ -1,0 +1,114 @@
+{
+  "video": "demo/walkcache-demo.mp4",
+  "sha256": "2a56664421cfb723a777d2da4495354736d56745f5c6b8a440d27028180a38d5",
+  "probe": {
+    "programs": [],
+    "stream_groups": [],
+    "streams": [
+      {
+        "codec_name": "h264",
+        "width": 1920,
+        "height": 1080,
+        "r_frame_rate": "30/1",
+        "nb_frames": "1740"
+      }
+    ],
+    "format": {
+      "duration": "58.000000",
+      "size": "1000553"
+    }
+  },
+  "reviewLimit": "Automated full-frame decode/pixel checks and all-caption evidence checks; contact sheet retained for human visual review. No audio or secrets are present by construction.",
+  "rehearsals": [
+    {
+      "rehearsal": 1,
+      "reviewedAt": "2026-11-22T19:16:34.326920+00:00",
+      "playbackDurationSeconds": 58.0,
+      "within60Seconds": true,
+      "encodedFramesDecoded": 1740,
+      "blankFrames": [],
+      "eightSceneContactSheetReviewed": "rehearsal/contact-sheet.png",
+      "captionClaimsChecked": {
+        "cold": {
+          "evidence": "spikes/001-android-walkcache/evidence/walk008-cold-miss.transcript.txt",
+          "needlesChecked": 4,
+          "passed": true
+        },
+        "warm": {
+          "evidence": "spikes/001-android-walkcache/evidence/walk012-readme-review.txt",
+          "needlesChecked": 5,
+          "passed": true
+        },
+        "repair": {
+          "evidence": "spikes/001-android-walkcache/evidence/walk008-stale-repair.transcript.txt",
+          "needlesChecked": 8,
+          "passed": true
+        },
+        "regression": {
+          "evidence": "spikes/001-android-walkcache/evidence/walk008-product-regression.transcript.txt",
+          "needlesChecked": 7,
+          "passed": true
+        },
+        "web": {
+          "evidence": "spikes/002-web-walkcache/evidence/walk010-warm.txt",
+          "needlesChecked": 5,
+          "passed": true
+        },
+        "web-cold": {
+          "evidence": "spikes/002-web-walkcache/evidence/walk010-cold-unsupported.txt",
+          "needlesChecked": 3,
+          "passed": true
+        }
+      },
+      "secretAndAbsolutePathSourceScanPassed": true,
+      "audio": "none; all narration is visible in full on-screen captions",
+      "reviewWallSeconds": 7.988,
+      "result": "pass"
+    },
+    {
+      "rehearsal": 2,
+      "reviewedAt": "2026-11-22T19:16:42.295659+00:00",
+      "playbackDurationSeconds": 58.0,
+      "within60Seconds": true,
+      "encodedFramesDecoded": 1740,
+      "blankFrames": [],
+      "eightSceneContactSheetReviewed": "rehearsal/contact-sheet.png",
+      "captionClaimsChecked": {
+        "cold": {
+          "evidence": "spikes/001-android-walkcache/evidence/walk008-cold-miss.transcript.txt",
+          "needlesChecked": 4,
+          "passed": true
+        },
+        "warm": {
+          "evidence": "spikes/001-android-walkcache/evidence/walk012-readme-review.txt",
+          "needlesChecked": 5,
+          "passed": true
+        },
+        "repair": {
+          "evidence": "spikes/001-android-walkcache/evidence/walk008-stale-repair.transcript.txt",
+          "needlesChecked": 8,
+          "passed": true
+        },
+        "regression": {
+          "evidence": "spikes/001-android-walkcache/evidence/walk008-product-regression.transcript.txt",
+          "needlesChecked": 7,
+          "passed": true
+        },
+        "web": {
+          "evidence": "spikes/002-web-walkcache/evidence/walk010-warm.txt",
+          "needlesChecked": 5,
+          "passed": true
+        },
+        "web-cold": {
+          "evidence": "spikes/002-web-walkcache/evidence/walk010-cold-unsupported.txt",
+          "needlesChecked": 3,
+          "passed": true
+        }
+      },
+      "secretAndAbsolutePathSourceScanPassed": true,
+      "audio": "none; all narration is visible in full on-screen captions",
+      "reviewWallSeconds": 7.969,
+      "result": "pass"
+    }
+  ]
+}

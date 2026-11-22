@@ -16,6 +16,8 @@ dist
 dist-ssr
 .tmp/
 .walkcache/
+demo/assets/
+demo/rehearsal/scene-*.png
 *.local
 .env
 .env.*
