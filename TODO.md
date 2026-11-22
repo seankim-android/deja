@@ -95,7 +95,7 @@ Check an item only when its ticket is complete and its evidence is linked. All t
   Evidence: [`58-second MP4`](demo/walkcache-demo.mp4), [`script`](demo/SCRIPT.md),
   [`two passing rehearsals`](demo/rehearsal/two-rehearsals.json), and
   [`rejected-take/review record`](demo/rehearsal/REVIEW.md). Uploaded in the authorized Slack thread
-  as `F0CKUL64YBD`; the corrected final video follows in the same thread. AI visual review plus all
+  as `F0CKVLY06F7` (superseding `F0CKUL64YBD`). AI visual review plus all
   1,740 encoded-frame/source comparisons passed; this is not claimed as human sign-off. External submission remains open; the
   milestone/deadline passed before this late fallback was completed.
 - [ ] [WALK-015](tickets/WALK-015-video-submission.md) — Record/review a ≤60-second video, publish the

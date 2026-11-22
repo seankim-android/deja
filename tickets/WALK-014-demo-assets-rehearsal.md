@@ -48,7 +48,8 @@ Evidence and remaining gate:
   accurately identified as automated/AI review, not a claim of human sign-off. The first visual pass
   rejected flattened YAML indentation and ambiguous fixture-count wording; the renderer was corrected
   and the encoded scenes were re-inspected before delivery. See [review record](../../demo/rehearsal/REVIEW.md).
-- Delivery: uploaded to the authorized Slack thread as file `F0CKUL64YBD` on 2026-11-22. Upload is not
-  an external social post or hackathon submission. WALK-013 is complete; WALK-015 external/publication gates
+- Delivery: corrected video uploaded to the authorized Slack thread as file `F0CKVLY06F7` on
+  2026-11-22, replacing superseded review upload `F0CKUL64YBD`. Upload is not an external social post
+  or hackathon submission. WALK-013 is complete; WALK-015 external/publication gates
   also remain open under WALK-015; they are not demo-production acceptance steps for this ticket.
 
