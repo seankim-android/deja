@@ -1,0 +1,224 @@
+Clean clone (no ignored files carried over)
+Commit: b8273117ca671b1fb70b4d56f3c2d2b42e12ed28
+
+$ bun install --frozen-lockfile
+bun install v1.4.4-canary.1 (191755ec1)
+
++ @happy-dom/global-registrator@21.0.4
++ @testing-library/react@16.3.3
++ @types/bun@1.4.5
++ @types/node@24.19.2
++ @types/react@19.3.0
++ @types/react-dom@19.3.0
++ @vitejs/plugin-react@6.3.0
++ oxlint@1.94.0
++ typescript@7.0.2
++ vite@8.3.8
++ @modelcontextprotocol/sdk@1.32.2
++ react@19.3.1
++ react-dom@19.3.1
+
+146 packages installed [162.00ms]
+
+$ bun run lint
+$ oxlint
+Found 0 warnings and 0 errors.
+Finished in 17ms on 60 files with 116 rules using 10 threads.
+
+$ bun test --timeout=10000
+bun test v1.4.4-canary.1 (191755ec1)
+
+src/App.test.tsx:
+(pass) WalkCache local viewer fixtures > cold discovery shows exploration metrics without suggesting a warm hit [18.74ms]
+(pass) WalkCache local viewer fixtures > warm replay makes the zero-model cache hit explicit [8.36ms]
+(pass) WalkCache local viewer fixtures > bounded repair exposes its proposed diff and preserved assertions [5.44ms]
+An update to App inside a test was not wrapped in act(...).
+
+When testing, code that causes React state updates should be wrapped into act(...):
+
+act(() => {
+  /* fire events that update state */
+});
+/* assert on the output */
+
+This ensures that you're testing the behavior the user would see in the browser. Learn more at https://react.dev/link/wrap-tests-with-act
+An update to App inside a test was not wrapped in act(...).
+
+When testing, code that causes React state updates should be wrapped into act(...):
+
+act(() => {
+  /* fire events that update state */
+});
+/* assert on the output */
+
+This ensures that you're testing the behavior the user would see in the browser. Learn more at https://react.dev/link/wrap-tests-with-act
+An update to App inside a test was not wrapped in act(...).
+
+When testing, code that causes React state updates should be wrapped into act(...):
+
+act(() => {
+  /* fire events that update state */
+});
+/* assert on the output */
+
+This ensures that you're testing the behavior the user would see in the browser. Learn more at https://react.dev/link/wrap-tests-with-act
+(pass) WalkCache local viewer fixtures > a product regression stays failed with no repair or success fabrication [3.62ms]
+(pass) viewer availability and safety > empty local memory is empty, not a pass, and the CLI fallback remains visible [4.51ms]
+(pass) viewer availability and safety > malformed, missing, and in-progress reports never become successful states [17.70ms]
+(pass) viewer availability and safety > client path checks restrict arbitrary files, traversal, and credential-like paths [0.04ms]
+(pass) viewer availability and safety > an unavailable viewer API leaves the headless fallback intact [3.76ms]
+
+viewer/test/local-viewer.test.ts:
+(pass) read-only local viewer API > a missing report directory is an empty index, never a fabricated pass [0.48ms]
+(pass) read-only local viewer API > valid, malformed, missing, and in-progress reports retain their states [1.62ms]
+(pass) read-only local viewer API > only an artifact declared by its authorizing report can be read [1.15ms]
+(pass) read-only local viewer API > arbitrary paths, traversal, raw logs, and credential-like paths are rejected [0.21ms]
+(pass) read-only local viewer API > a declared symlink that escapes .walkcache is never followed [0.75ms]
+(pass) read-only local viewer API > validation history returns recorded outcomes and rejects malformed memory [0.67ms]
+(pass) viewer redaction > sensitive keys, bearer values, CLI secrets, and local paths are redacted [0.12ms]
+(pass) viewer redaction > JSON redaction recursively protects credential-bearing fields [0.11ms]
+
+apps/cli/test/web-adapter.test.ts:
+(pass) production Web adapter CLI > verified remember/warm replay works without a model; unsupported cold and stale/product failures stay honest [215.54ms]
+
+apps/cli/test/cli.test.ts:
+(pass) production headless CLI > miss enters real cold lifecycle, then warm bypasses model construction and supports list/inspect [328.96ms]
+(pass) production headless CLI > remember verifies and persists; a genuine classified product failure stops with failed validation [65.56ms]
+(pass) production headless CLI > rejected cold verification exits 3 and never creates successful memory [159.78ms]
+(pass) production headless CLI > help, command errors, bad config, and inspection failures use documented exits [78.36ms]
+
+packages/agent-openclaw/test/openclaw-explorer.test.ts:
+(pass) self-contained OpenClaw cold exploration > pins an MCP-only explorer and persists only after independent verification [12.39ms]
+(pass) self-contained OpenClaw cold exploration > a rejected candidate cannot create or replace known-good memory [10.78ms]
+(pass) self-contained OpenClaw cold exploration > extracts fenced YAML and enforces the app plus a fresh clearState launch [10.63ms]
+(pass) self-contained OpenClaw cold exploration > leaves model and MCP metrics unknown when instrumentation is absent [10.35ms]
+
+packages/metrics/test/cold-warm.test.ts:
+(pass) cold/warm comparison aggregation > retains every raw sample and reports deterministic variability and paired medians [0.31ms]
+(pass) cold/warm comparison aggregation > does not turn missing model instrumentation into zero or infer it from MCP calls [0.26ms]
+(pass) cold/warm comparison aggregation > rejects incomparable builds and missing meaningful outcome assertions [0.05ms]
+(pass) cold/warm comparison aggregation > failed samples remain visible and block a wall-clock reduction claim [0.06ms]
+
+packages/core/test/orchestration.test.ts:
+(pass) vendor-independent orchestration > core source has no platform, demo, UI, filesystem, or vendor imports [0.21ms]
+(pass) vendor-independent orchestration > a warm constructor/spy proves no explorer or repairer is constructed or invoked [0.34ms]
+(pass) vendor-independent orchestration > a normal miss invokes the cold explorer once and returns its verified metrics [0.06ms]
+(pass) vendor-independent orchestration > explicit explore also uses the injected cold lifecycle and times the whole command [0.06ms]
+(pass) vendor-independent orchestration > a stale-build miss uses exactly one bounded repair and no explorer [0.05ms]
+(pass) vendor-independent orchestration > a stale selector on an exact hit enters only the bounded repair plugin [0.03ms]
+(pass) vendor-independent orchestration > product_assertion reports and stops without constructing a repairer or explorer [0.03ms]
+(pass) vendor-independent orchestration > unknown reports and stops without constructing a repairer or explorer
+(pass) vendor-independent orchestration > remember independently verifies before persistence and rejects failures without exploration [0.10ms]
+(pass) vendor-independent orchestration > rejected exploration and repair remain failures rather than falling through to a pass [0.05ms]
+
+packages/maestro/test/cache-replay-classification.test.ts:
+(pass) a failing cache hit stays at zero model calls and its failed validation is not reused [39.19ms]
+
+packages/maestro/test/maestro-runner.test.ts:
+(pass) verified Maestro runner > preserves output, timing, configuration, exit status, and artifacts on success [11.23ms]
+(pass) verified Maestro runner > returns a structured execution error and preserves a nonzero exit code [9.16ms]
+(pass) verified Maestro runner > enforces the timeout and terminates only the spawned process tree [1464.75ms]
+(pass) verified Maestro runner > returns a structured launch error for a missing executable [3.40ms]
+(pass) verified Maestro runner > rejects a flow path that escapes the workspace before launching [1.88ms]
+(pass) verified Maestro runner > returns a structured artifact error without discarding process output [21.28ms]
+
+packages/maestro/test/failure-classification.test.ts:
+(pass) advisory Maestro failure classification fixtures > selector-positive remains deterministic and conservative [0.45ms]
+(pass) advisory Maestro failure classification fixtures > selector-negative remains deterministic and conservative [0.10ms]
+(pass) advisory Maestro failure classification fixtures > navigation-positive remains deterministic and conservative [0.11ms]
+(pass) advisory Maestro failure classification fixtures > navigation-negative remains deterministic and conservative [0.08ms]
+(pass) advisory Maestro failure classification fixtures > product-assertion-positive remains deterministic and conservative [0.06ms]
+(pass) advisory Maestro failure classification fixtures > product-assertion-negative remains deterministic and conservative [0.09ms]
+(pass) advisory Maestro failure classification fixtures > runner-positive remains deterministic and conservative [0.08ms]
+(pass) advisory Maestro failure classification fixtures > runner-negative remains deterministic and conservative [0.08ms]
+(pass) advisory Maestro failure classification fixtures > timeout-positive remains deterministic and conservative [0.06ms]
+(pass) advisory Maestro failure classification fixtures > timeout-negative remains deterministic and conservative [0.06ms]
+(pass) advisory Maestro failure classification fixtures > unknown-positive remains deterministic and conservative [0.06ms]
+(pass) advisory Maestro failure classification fixtures > unknown-negative remains deterministic and conservative [0.05ms]
+(pass) advisory Maestro failure classification fixtures > a passing runner result has no failure classification [0.02ms]
+(pass) advisory Maestro failure classification fixtures > mixed selector and assertion diagnostics stay unknown and ineligible for repair [0.02ms]
+(pass) advisory Maestro failure classification fixtures > multiple failing steps stay ambiguous and retain the raw artifact reference [0.02ms]
+
+packages/maestro/test/platform-adapter.test.ts:
+(pass) Maestro execution platform adapters > Web identity and command include Chromium, adapter, build, and bounded browser settings [0.14ms]
+(pass) Maestro execution platform adapters > Android runner and cache identity remain compatible with validated pre-Web walks [0.04ms]
+(pass) Maestro execution platform adapters > Web build fingerprint covers paths and every deterministic static file [2.02ms]
+
+packages/store-local/test/local-store.test.ts:
+(pass) conservative local walk store > returns a first-run miss when no memory exists [0.92ms]
+(pass) conservative local walk store > normalizes the goal and returns a valid hit with the complete exact identity [2.26ms]
+(pass) conservative local walk store > returns a stale-build miss instead of replaying another APK fingerprint [1.51ms]
+(pass) conservative local walk store > returns a wrong-app miss without loosening app identity [1.42ms]
+(pass) conservative local walk store > returns a wrong-platform miss without sharing Android memory across platforms [1.36ms]
+(pass) conservative local walk store > returns a missing-flow miss and never treats metadata alone as a pass [1.42ms]
+(pass) conservative local walk store > rejects a flow checksum mismatch instead of executing changed bytes [1.49ms]
+(pass) conservative local walk store > rejects malformed JSON as invalid memory [0.76ms]
+(pass) conservative local walk store > rejects an unsupported memory schema [1.36ms]
+(pass) conservative local walk store > rejects invalid entries instead of filtering them out to produce a hit [1.30ms]
+(pass) conservative local walk store > rejects stored flow paths outside the canonical flow directory [1.42ms]
+(pass) conservative local walk store > rejects a symlink whose canonical flow path escapes the workspace [1.60ms]
+(pass) conservative local walk store > an interruption before flow rename leaves only ignored temporary files and a first-run miss [0.94ms]
+(pass) conservative local walk store > failed candidate verification preserves the known-good flow and metadata byte for byte [1.46ms]
+(pass) conservative local walk store > failed replacement preserves known-good flow and metadata and excludes the orphan and temp [1.97ms]
+(pass) conservative local walk store > failed validation remains in history and never remains a successful reusable hit [1.86ms]
+(pass) conservative local walk store > upgrades valid WALK-003 schema-one metadata without inventing validation success [2.14ms]
+
+packages/store-local/test/web-identity.test.ts:
+(pass) Web walk identity persistence > persists browser/adapter identity and partitions exact lookup by both fields [1.49ms]
+
+packages/repair/test/build-install.test.ts:
+(pass) bounded Gradle build and device install > installs the exact rebuilt APK on the configured device within the shared lifecycle [122.59ms]
+(pass) bounded Gradle build and device install > never installs a failed build [25.04ms]
+
+packages/repair/test/bounded-repair.test.ts:
+(pass) bounded checkout selector repair > verifies the exact two-file patch, new build identity, no Git action, and atomic replacement [11.66ms]
+(pass) bounded checkout selector repair > refuses product_assertion without source, assertion, build, or memory changes [4.59ms]
+(pass) bounded checkout selector repair > refuses navigation without source, assertion, build, or memory changes [3.92ms]
+(pass) bounded checkout selector repair > refuses unknown without source, assertion, build, or memory changes [3.78ms]
+(pass) bounded checkout selector repair > refuses timeout without source, assertion, build, or memory changes [3.56ms]
+(pass) bounded checkout selector repair > refuses runner without source, assertion, build, or memory changes [4.32ms]
+(pass) bounded checkout selector repair > refuses other-selector without source, assertion, build, or memory changes [4.70ms]
+(pass) bounded checkout selector repair > failed full-journey verification rolls back source and preserves last-known-good memory and failed artifacts [7.15ms]
+(pass) bounded checkout selector repair > rejects an unchanged rebuilt fingerprint before verification or persistence [5.28ms]
+(pass) bounded checkout selector repair > enforces one overall time budget and rolls back a partial attempt without retrying [45.64ms]
+
+packages/repair/test/repair-policy.test.ts:
+(pass) canonical two-file repair policy > produces a minimal exact diff only for the affected component and selector files [1.74ms]
+(pass) canonical two-file repair policy > rejects writes outside the configured affected files [1.50ms]
+(pass) canonical two-file repair policy > rejects unpermitted assertion/file types [1.89ms]
+(pass) canonical two-file repair policy > rejects lexical source-root escapes [1.38ms]
+(pass) canonical two-file repair policy > rejects a symlinked source root even when its target is inside the workspace [1.34ms]
+(pass) canonical two-file repair policy > rejects a source-file symlink escape and leaves the outside target unchanged [1.62ms]
+(pass) canonical two-file repair policy > fails closed if the validated stale selector text is absent or ambiguous [1.60ms]
+
+ 101 pass
+ 0 fail
+ 599 expect() calls
+Ran 101 tests across 16 files. [2.94s]
+
+$ bun run build
+$ tsc -b && vite build
+vite v8.3.8 building client environment for production...
+transforming...
+✓ 19 modules transformed.
+rendering chunks...
+computing gzip size...
+dist/index.html                   0.62 kB │ gzip:  0.38 kB
+dist/assets/index-CDxoLlET.css   13.75 kB │ gzip:  3.50 kB
+dist/assets/index-DgGQAA-C.js   241.77 kB │ gzip: 75.27 kB
+
+✓ built in 153ms
+
+$ bun scripts/validate-release-artifacts.ts
+{
+  "result": "pass",
+  "head": "b8273117ca671b1fb70b4d56f3c2d2b42e12ed28",
+  "trackedFiles": 287,
+  "textFiles": 279,
+  "jsonFiles": 51,
+  "generatedArtifactsAbsent": true,
+  "secretAndMachinePathScan": "pass",
+  "checkoutUnchanged": true
+}
+
+Final git status:

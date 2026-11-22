@@ -1,0 +1,10 @@
+{
+  "result": "pass",
+  "head": "b8273117ca671b1fb70b4d56f3c2d2b42e12ed28",
+  "trackedFiles": 287,
+  "textFiles": 279,
+  "jsonFiles": 51,
+  "generatedArtifactsAbsent": true,
+  "secretAndMachinePathScan": "pass",
+  "checkoutUnchanged": true
+}

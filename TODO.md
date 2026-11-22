@@ -83,13 +83,19 @@ Check an item only when its ticket is complete and its evidence is linked. All t
   Checks: 101 tests / 599 assertions, lint, TypeScript/Vite build, and `git diff --check`.
   The isolated clean-context reviewer failed before execution; independent documentation review
   remains unverified and is the only unchecked acceptance step.
-- [ ] [WALK-013](tickets/WALK-013-portable-tests-clean-ci.md) — Pass portable tests and clean-checkout CI.
+- [x] [WALK-013](tickets/WALK-013-portable-tests-clean-ci.md) — Pass portable tests and clean-checkout CI.
+  Evidence: [`clean clone`](spikes/001-android-walkcache/evidence/walk013-clean-checkout.txt),
+  [`standalone Android YAML`](spikes/001-android-walkcache/evidence/walk013-standalone-android.txt),
+  [`artifact validation`](spikes/001-android-walkcache/evidence/walk013-artifact-validation.txt),
+  [`CI guide`](docs/CI.md), and
+  [passing GitHub Actions run 45060550371](https://github.com/seankim-android/kimi-hackathon/actions/runs/45060550371)
+  on `main` at `b827311` (every portable step green in 15 seconds).
 - [ ] [WALK-014](tickets/WALK-014-demo-assets-rehearsal.md) — Prepare deterministic demo assets and
   complete two evidence-checked rehearsals before the 6:30 AM milestone gate.
   Evidence: [`58-second MP4`](demo/walkcache-demo.mp4), [`script`](demo/SCRIPT.md),
   [`two passing rehearsals`](demo/rehearsal/two-rehearsals.json), and
   [`rejected-take/review record`](demo/rehearsal/REVIEW.md). Uploaded in the authorized Slack thread
-  as `F0CKUL64YBD`. Human visual review, WALK-013 CI, and external submission remain open; the
+  as `F0CKUL64YBD`. Human visual review and external submission remain open; the
   milestone/deadline passed before this late fallback was completed.
 - [ ] [WALK-015](tickets/WALK-015-video-submission.md) — Record/review a ≤60-second video, publish the
   required authorized social post, and confirm official submission by 9:00 AM. Keep 9:00–10:00 AM for

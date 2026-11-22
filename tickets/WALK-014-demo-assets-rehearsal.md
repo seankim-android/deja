@@ -45,6 +45,6 @@ Evidence and remaining gate:
   Automated source scans, all-frame decode/pixel checks, and caption evidence checks passed; this model
   run does not claim human visual inspection. The every-frame visual/credential review remains open.
 - Delivery: uploaded to the authorized Slack thread as file `F0CKUL64YBD` on 2026-11-22. Upload is not
-  an external social post or hackathon submission. WALK-013 CI and WALK-015 external/publication gates
+  an external social post or hackathon submission. WALK-013 is complete; WALK-015 external/publication gates
   also remain open, so this ticket stays `in_progress`.
 
