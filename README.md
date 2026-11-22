@@ -1,6 +1,14 @@
-# Kimi Hackathon
+# WalkCache (Kimi Hackathon)
 
-A lightweight React and TypeScript starter for the hackathon, built with Vite.
+Explore once. Replay instantly. Repair only when needed.
+
+WalkCache is a planned learning layer around Maestro: an OpenClaw agent explores a new QA
+journey, saves a verified Maestro flow, and replays later runs without model calls. The current
+repository is still a React and TypeScript starter; implementation status is tracked in
+[`TODO.md`](TODO.md).
+
+Read [`docs/PROJECT_PLAN.md`](docs/PROJECT_PLAN.md) for the MVP contract, architecture,
+time-boxed milestones, demo script, and scope cut line.
 
 ## Quick start
 
