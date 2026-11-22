@@ -3,7 +3,7 @@ id: WALK-013
 title: Pass portable tests and clean-checkout CI
 milestone: M7 quality gate
 priority: P0
-status: queued
+status: in_progress
 depends_on: [WALK-012]
 ---
 

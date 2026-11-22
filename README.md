@@ -1,5 +1,7 @@
 # WalkCache
 
+[![Portable checks](https://github.com/seankim-android/kimi-hackathon/actions/workflows/portable-checks.yml/badge.svg)](https://github.com/seankim-android/kimi-hackathon/actions/workflows/portable-checks.yml)
+
 **Explore once. Replay without a model. Repair only bounded staleness.**
 
 WalkCache is a local, headless learning layer around [Maestro](https://maestro.dev/). On Android,
@@ -216,7 +218,12 @@ bun run lint                  # Oxlint
 bun test --timeout=10000      # deterministic unit/component/integration suite
 bun run build                 # TypeScript project build + optional viewer production bundle
 bun run dev -- --host 127.0.0.1 --port 4173
+bun scripts/validate-release-artifacts.ts  # run in a committed, clean tree
 ```
+
+[`Portable checks`](docs/CI.md) additionally documents the GitHub Actions Linux job, its exact
+clean-checkout commands and artifact scans, and why real Android/Chromium flows remain separately
+evident local integration gates. CI makes no device, model, or iOS claim.
 
 The Vite app is an **optional read-only local viewer**, not the WalkCache runtime. It cannot start
 runs or repair and is unnecessary for headless use. See [viewer/README.md](viewer/README.md).

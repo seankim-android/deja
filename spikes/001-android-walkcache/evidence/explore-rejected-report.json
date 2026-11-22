@@ -7,7 +7,7 @@
   "platform": "android",
   "buildFingerprint": "4746296fa8aa84ae85761915f651b1488c38ef8f5f4e89af0e9ad19784cfcb05",
   "buildPath": "app/build/outputs/apk/debug/app-debug.apk",
-  "workspaceRoot": "/Users/seankim/.openclaw/workspace/kimi-hackathon/spikes/001-android-walkcache",
+  "workspaceRoot": "<workspace>",
   "cacheStatus": "rejected",
   "passed": false,
   "durationMs": 22707,

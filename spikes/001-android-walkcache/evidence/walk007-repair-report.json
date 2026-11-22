@@ -61,7 +61,7 @@
   },
   "build": {
     "command": [
-      "/Users/seankim/.openclaw/workspace/kimi-hackathon-walk-007/spikes/001-android-walkcache/gradlew",
+      "<worktree>/spikes/001-android-walkcache/gradlew",
       "clean",
       ":app:assembleDebug"
     ],

@@ -44,8 +44,8 @@ Link unit-test output plus one passing Android report containing `cacheStatus`, 
 
 ### Exact Android configuration and command
 
-- Workspace: `/Users/seankim/.openclaw/workspace/kimi-hackathon/spikes/001-android-walkcache`.
-- Maestro 2.12.0: `/Users/seankim/.maestro/bin/maestro` (also overridable with
+- Workspace: `<workspace>`.
+- Maestro 2.12.0: `<maestro-home>/bin/maestro` (also overridable with
   `WALKCACHE_MAESTRO`).
 - Device: `emulator-5554`, AVD `walkcache_api_34`; its `adb` state was still `device` after the run.
 - Platform: Android; flow: `.walkcache/flows/checkout/android.yaml`.
