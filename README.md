@@ -273,6 +273,8 @@ The package scripts also include `preview` for the built viewer.
 ## Repository guide and evidence workflow
 
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — implementation and persistence contracts.
+- [`docs/ROUTE_GRAPH.md`](docs/ROUTE_GRAPH.md) — diagnostic-only bounded Android route graphs, exact
+  WALK-020 evidence provenance, conservative screen matching, and acceptance limits.
 - [`apps/cli/README.md`](apps/cli/README.md) — CLI adapter details and Web boundary.
 - [`spikes/001-android-walkcache/`](spikes/001-android-walkcache/README.md) — preserved Android fixture/evidence.
 - [`spikes/002-web-walkcache/`](spikes/002-web-walkcache/README.md) — bounded Chromium fixture/evidence.

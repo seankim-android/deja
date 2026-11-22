@@ -136,6 +136,20 @@ additive schema-1 `semantic` report, which exposes status/reason, provider, embe
 candidate counts, thresholds, top/runner-up similarity, and selected goal/flow/checksum. Reports
 without that optional field remain compatible.
 
+## Diagnostic route graphs (WALK-017)
+
+Route graphs are separate from exact walk memory and are not consulted by orchestration or storage.
+The closed Android-only schema stores bounded curated resource IDs, canonical SHA-256 screen
+fingerprints, app/build identity, validation timestamps, verified taps, separate failed branches, and
+hashed curated-evidence provenance. It has no fields for visible text, credentials, personal data,
+screenshots, raw UI dumps, or environment state. Matching reports repeated, ambiguous, changed, and
+unknown observations conservatively and always returns `cacheHit: false`; unsafe/unrecognized states
+fall back to the existing exact replay/exploration lifecycle rather than weakening identity.
+
+The [route-graph guide](ROUTE_GRAPH.md) links the four-node Android graph derived solely from accepted
+curated WALK-020 cold/warm evidence. No new device run is claimed. This diagnostic memory does not
+make transitions independently executable or establish complete app coverage.
+
 ## Memory schema
 
 The CLI-default `LocalWalkStore` uses the `.walkcache/memory/walks.json` envelope at schema **2**.

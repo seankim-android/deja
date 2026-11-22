@@ -15,10 +15,12 @@ bun scripts/validate-release-artifacts.ts
 git rev-parse HEAD
 ```
 
-The 164 deterministic unit/component/contract tests (867 assertions) cover orchestration, exact/corrupt storage,
+The deterministic unit/component/contract tests cover orchestration, exact/corrupt storage,
 runner behavior and platform adapters, OpenClaw exploration boundaries, bounded repair, failure
-classification, cold/warm metrics, CLI/report behavior, and the local viewer. They use fake process
-fixtures where appropriate and do not assert a real device result.
+classification, cold/warm metrics, CLI/report behavior, the local viewer, and diagnostic-only route
+graphs. The 25 route-graph tests include schema/failure fixtures and byte-exact re-derivation from
+curated WALK-020 evidence. Tests use fake process fixtures where appropriate and do not assert a real
+device result; the WALK-017 graph is derived from prior curated evidence, not a CI device run.
 
 The artifact validator parses every strict tracked JSON file (compiler-owned JSONC `tsconfig` files are
 separately validated by `bun run build`), rejects generated cache/build/dependency/binary artifacts, scans text for private keys/token shapes and machine-specific home paths, and fails if the

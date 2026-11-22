@@ -1,0 +1,116 @@
+{
+  "schemaVersion": 1,
+  "appId": "dev.walkcache.checkout",
+  "platform": "android",
+  "buildFingerprint": "6aec5fea876938db14007ba3dbcb91f698832fe855886abd9dea1e7b28861759",
+  "screenFingerprintVersion": 1,
+  "validatedAt": "2026-11-22T20:27:33.668Z",
+  "replayValidatedAt": "2026-11-22T20:28:37.591Z",
+  "nodes": [
+    {
+      "nodeId": "login",
+      "observations": [
+        {
+          "kind": "android-resource-id",
+          "value": "screen_login"
+        }
+      ],
+      "fingerprint": "259ed54ec983d515d40c7dafdeb27e66dd14e69daaf328acdf22e468b52d6c1a",
+      "validatedAt": "2026-11-22T20:27:33.668Z"
+    },
+    {
+      "nodeId": "catalog",
+      "observations": [
+        {
+          "kind": "android-resource-id",
+          "value": "screen_catalog"
+        }
+      ],
+      "fingerprint": "67f7924198f7156907fcf42ab8b72aab982c74425b9fec6e683eecaee78516b2",
+      "validatedAt": "2026-11-22T20:27:33.668Z"
+    },
+    {
+      "nodeId": "cart",
+      "observations": [
+        {
+          "kind": "android-resource-id",
+          "value": "screen_cart"
+        }
+      ],
+      "fingerprint": "b0b2e3bf7c21b0367591efa6fa90571ae00e6d601239ab644c4df99ab1d29473",
+      "validatedAt": "2026-11-22T20:27:33.668Z"
+    },
+    {
+      "nodeId": "confirmation",
+      "observations": [
+        {
+          "kind": "android-resource-id",
+          "value": "screen_confirmation"
+        }
+      ],
+      "fingerprint": "1d611606bb3e59de4ebde2102100b8a3bf887ba96f292ae9445fb8953b265772",
+      "validatedAt": "2026-11-22T20:27:33.668Z"
+    }
+  ],
+  "transitions": [
+    {
+      "transitionId": "login-to-catalog",
+      "fromNodeId": "login",
+      "action": {
+        "kind": "tap",
+        "targetResourceId": "login_button"
+      },
+      "toNodeId": "catalog",
+      "validatedAt": "2026-11-22T20:27:33.668Z"
+    },
+    {
+      "transitionId": "catalog-to-cart",
+      "fromNodeId": "catalog",
+      "action": {
+        "kind": "tap",
+        "targetResourceId": "add_to_cart"
+      },
+      "toNodeId": "cart",
+      "validatedAt": "2026-11-22T20:27:33.668Z"
+    },
+    {
+      "transitionId": "cart-to-confirmation",
+      "fromNodeId": "cart",
+      "action": {
+        "kind": "tap",
+        "targetResourceId": "checkout_button"
+      },
+      "toNodeId": "confirmation",
+      "validatedAt": "2026-11-22T20:27:33.668Z"
+    }
+  ],
+  "failedBranches": [],
+  "provenance": {
+    "kind": "curated-android-evidence",
+    "ticket": "WALK-020",
+    "runId": "walk020-android-checkout-06",
+    "newDeviceRunRecorded": false,
+    "artifacts": [
+      {
+        "path": "demo/live-evidence/android/cold-saved-checkout.yaml",
+        "sha256": "e95532ce04a4e125d3bd56e1b9d5d367b31dd67eed4441c56271ca52f3c3d0a1"
+      },
+      {
+        "path": "demo/live-evidence/android/warm-saved-checkout.yaml",
+        "sha256": "e95532ce04a4e125d3bd56e1b9d5d367b31dd67eed4441c56271ca52f3c3d0a1"
+      },
+      {
+        "path": "demo/live-evidence/android/cold-stored-memory.json",
+        "sha256": "ee2afdb4d6e4eda848d3a9d2ba6b4524000b5f032c841a486334884b252481cd"
+      },
+      {
+        "path": "demo/live-evidence/android/cold-run-report.json",
+        "sha256": "f17ac91926e16b7566829b798b5de5855f1b0fe667f39a9aef01b9edb9a18283"
+      },
+      {
+        "path": "demo/live-evidence/android/warm-run-report.json",
+        "sha256": "59da060f822fdf659aec6211307a9edc82f79a72cd5421f4cc9004997c0e2b11"
+      }
+    ]
+  }
+}

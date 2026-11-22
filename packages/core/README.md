@@ -25,6 +25,15 @@ confidence/ambiguous/contradictory/narrow adversarial goals, and returns provide
 misses. A semantic hit still requires runner replay and records validation on the selected stored
 identity. Core has no Maestro/OpenClaw/React imports.
 
+`src/route-graph.ts` is a separate diagnostic-only contract for bounded Android navigation memory.
+It validates stable curated resource-ID observations, recomputed screen fingerprints, app/build and
+validation identity, verified transitions, separate failed branches, and hashed evidence provenance.
+`matchScreen` conservatively distinguishes matched, repeated, ambiguous, changed, and unknown screens.
+Every result has `cacheHit: false`; unsafe or unrecognized states name the existing exact
+replay/exploration fallback. Neither orchestration nor `WalkStore` calls this module, so route graphs
+cannot broaden cache identity or the P0 execution path. See
+[`docs/ROUTE_GRAPH.md`](../../docs/ROUTE_GRAPH.md).
+
 Concrete wiring lives at the edges: `store-local`, `store-sqlite`, `maestro`, `agent-openclaw`,
 `repair`, and the headless CLI's local JSON reporter. Their richer vendor-specific records are
 translated into the shared result contract without weakening their original safety gates. WALK-019
