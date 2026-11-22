@@ -1,8 +1,8 @@
 import { Database } from 'bun:sqlite'
 import { createHash, randomUUID } from 'node:crypto'
-import { existsSync, mkdirSync } from 'node:fs'
+import { lstatSync, mkdirSync, realpathSync, statSync } from 'node:fs'
 import { mkdir, readFile, realpath, rename, stat, writeFile } from 'node:fs/promises'
-import { dirname, isAbsolute, resolve, sep } from 'node:path'
+import { dirname, isAbsolute, relative, resolve, sep } from 'node:path'
 import {
   normalizeGoal as normalizeGoalContract,
   type ExplorationDetails,
@@ -56,6 +56,57 @@ function errorCode(error: unknown) {
 
 function inside(root: string, candidate: string) {
   return candidate !== root && candidate.startsWith(`${root}${sep}`)
+}
+
+/** Resolve metadata without following an unchecked path outside the canonical workspace. */
+function canonicalMetadataTarget(workspaceRoot: string, memoryPath: string) {
+  try {
+    const lexicalRoot = resolve(workspaceRoot)
+    const root = realpathSync(lexicalRoot)
+    if (!statSync(root).isDirectory()) {
+      throw new InvalidWalkMemoryError('workspace root is not a directory')
+    }
+    const candidate = resolve(root, relative(lexicalRoot, memoryPath))
+    let ancestor = candidate
+    while (true) {
+      try {
+        lstatSync(ancestor)
+        break
+      } catch (error) {
+        if (errorCode(error) === 'ENOTDIR') {
+          throw new InvalidWalkMemoryError('metadata path traverses a non-directory', { cause: error })
+        }
+        if (errorCode(error) !== 'ENOENT') throw error
+        const parent = dirname(ancestor)
+        if (parent === ancestor || (parent !== root && !inside(root, parent))) {
+          throw new InvalidWalkMemoryError('metadata path has no safe existing parent')
+        }
+        ancestor = parent
+      }
+    }
+    const canonicalAncestor = realpathSync(ancestor)
+    if (canonicalAncestor !== root && !inside(root, canonicalAncestor)) {
+      throw new InvalidWalkMemoryError('metadata path escapes workspace')
+    }
+    const canonicalStat = statSync(canonicalAncestor)
+    if (ancestor === candidate) {
+      if (!canonicalStat.isFile()) {
+        throw new InvalidWalkMemoryError('metadata target is not a regular file')
+      }
+      return { path: canonicalAncestor, exists: true }
+    }
+    if (!canonicalStat.isDirectory()) {
+      throw new InvalidWalkMemoryError('metadata path traverses a non-directory')
+    }
+    const projected = resolve(canonicalAncestor, relative(ancestor, candidate))
+    if (!inside(root, projected)) {
+      throw new InvalidWalkMemoryError('metadata path escapes workspace')
+    }
+    return { path: projected, exists: false }
+  } catch (error) {
+    if (error instanceof InvalidWalkMemoryError) throw error
+    throw new InvalidWalkMemoryError('metadata path cannot be resolved safely', { cause: error })
+  }
 }
 
 function sha256(contents: Buffer) {
@@ -164,10 +215,10 @@ export class SQLiteWalkStore implements WalkStore {
     this.database = null
   }
 
-  private openExisting() {
+  private openExisting(path: string) {
     if (this.database) return this.database
     try {
-      this.database = new Database(this.memoryPath, { readonly: true, readwrite: false, create: false })
+      this.database = new Database(path, { readonly: true, readwrite: false, create: false })
       this.database.exec('PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 1000;')
       return this.database
     } catch (error) {
@@ -176,18 +227,15 @@ export class SQLiteWalkStore implements WalkStore {
   }
 
   private openWritable() {
-    if (this.database && !existsSync(this.memoryPath)) {
-      this.database.close()
-      this.database = null
-    }
+    const metadata = canonicalMetadataTarget(this.workspaceRoot, this.memoryPath)
     if (this.database) {
-      // A readonly handle opened by lookup cannot be upgraded. Reopen it read/write.
+      // A readonly handle opened by lookup cannot be upgraded. Reopen only the checked target.
       this.database.close()
       this.database = null
     }
     try {
-      mkdirSync(dirname(this.memoryPath), { recursive: true })
-      this.database = new Database(this.memoryPath, { create: true, readwrite: true })
+      mkdirSync(dirname(metadata.path), { recursive: true })
+      this.database = new Database(metadata.path, { create: true, readwrite: true })
       this.database.exec(`
         PRAGMA foreign_keys = ON;
         PRAGMA busy_timeout = 1000;
@@ -236,10 +284,11 @@ export class SQLiteWalkStore implements WalkStore {
   }
 
   private loadMemory(): StoredWalk[] {
-    if (!existsSync(this.memoryPath)) return []
+    const metadata = canonicalMetadataTarget(this.workspaceRoot, this.memoryPath)
+    if (!metadata.exists) return []
     let database: Database
     try {
-      database = this.openExisting()
+      database = this.openExisting(metadata.path)
       const schema = database.query('PRAGMA user_version').get() as { user_version: number }
       if (schema.user_version !== SQLITE_MEMORY_SCHEMA_VERSION) {
         throw new InvalidWalkMemoryError(`unsupported memory schemaVersion: ${schema.user_version}`)

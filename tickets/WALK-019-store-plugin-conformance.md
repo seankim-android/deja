@@ -25,7 +25,7 @@ Validate the `WalkStore` boundary using the same behavior tests against two impl
 ## Implementation
 
 [`packages/store-conformance/src/walk-store-contract.ts`](../packages/store-conformance/src/walk-store-contract.ts)
-exports one 20-case behavioral suite. [`conformance.test.ts`](../packages/store-conformance/test/conformance.test.ts)
+exports one 23-case behavioral suite. [`conformance.test.ts`](../packages/store-conformance/test/conformance.test.ts)
 invokes that exact function twice with thin real-backend adapters:
 
 - existing `LocalWalkStore` (JSON metadata + canonical content-addressed YAML);
@@ -38,9 +38,10 @@ failure, and tamper with real state for corruption cases. They do not implement 
 replace checksum/schema behavior, or fake persistence. The suite verifies first-run misses, reopen
 durability, normalized/exact goal/app/platform/schema/build/adapter/browser identity, all named miss
 reasons, missing/tampered YAML, malformed/unsupported/invalid/duplicate metadata, lexical and
-canonical path escapes, interrupted flow rename, rejected verification, failed metadata replacement,
-append-only validation history, diagnostic repair lookup, repair provenance/history, changed repair
-bases, and last-known-good YAML/metadata snapshots.
+canonical flow-path escapes, external metadata-directory symlinks, non-directory metadata traversal,
+interrupted flow rename, rejected verification, failed metadata replacement, append-only validation
+history, diagnostic repair lookup, repair provenance/history, changed repair bases, and
+last-known-good YAML/metadata snapshots.
 
 SQLite metadata replacement is one real `BEGIN IMMEDIATE` transaction. The backend-specific
 [`sqlite-store.test.ts`](../packages/store-sqlite/test/sqlite-store.test.ts) installs a SQLite trigger
@@ -64,9 +65,9 @@ bun test packages/store-conformance/test/conformance.test.ts \
 ```
 
 [`walk019-store-conformance.txt`](../spikes/001-android-walkcache/evidence/walk019-store-conformance.txt)
-records **44 tests / 153 assertions / 0 failures** across three files:
+records **50 tests / 177 assertions / 0 failures** across three files:
 
-- the identical 20 shared cases pass against each store (40 tests);
+- the identical 23 shared cases pass against each store (46 tests);
 - the local legacy-schema and real SQLite rollback cases pass (2 tests); and
 - one warm `WalkCache.run` passes per store (2 tests).
 
@@ -88,11 +89,36 @@ bun run build 2>&1 | tee spikes/001-android-walkcache/evidence/walk019-build.txt
 ```
 
 [`walk019-all-tests.txt`](../spikes/001-android-walkcache/evidence/walk019-all-tests.txt) passes
-**132 tests / 719 assertions / 0 failures across 18 files**.
+**138 tests / 743 assertions / 0 failures across 18 files**.
 [`walk019-lint.txt`](../spikes/001-android-walkcache/evidence/walk019-lint.txt) reports 0 warnings and
 0 errors, and [`walk019-build.txt`](../spikes/001-android-walkcache/evidence/walk019-build.txt) passes
 `tsc -b && vite build`. No emulator, viewer server, model credential, hosted account, or remote
 service is needed. No emulator was started or changed by this ticket.
+
+## Integration review follow-up — metadata symlink containment
+
+Integration review of commit `9f39bb2` returned **NOT-PASS**: `SQLiteWalkStore` used its lexical
+`.walkcache/memory/walks.sqlite` path directly, so a `.walkcache/memory` symlink could create or
+replace an external database. The reviewer reproduced external creation through
+`persistVerifiedCandidate`; a replacement could also delete external rows.
+
+The follow-up adds the same canonical metadata-path resolver boundary to both stores. For an existing
+target it validates the canonical regular file; for a pending target it canonicalizes the nearest
+existing ancestor without ascending above the workspace, requires directory traversal, and confirms
+the projected target stays inside. Every lookup/list/persistence/validation operation checks
+the metadata path again; SQLite checks before reusing a cached connection and before opening a
+read/write handle. The file/database actually opened is the checked canonical target, not the
+unverified lexical path.
+
+Three new **unchanged shared cases per store** verify: a missing target behind an external directory
+symlink is rejected without outside creation; non-directory traversal is rejected on read and write;
+and an existing valid metadata directory moved outside and replaced by a symlink is rejected on both
+lookup and persistence while its metadata stays byte-identical, its YAML stays unchanged, and no
+external SQLite journal/sidecar files appear. These regressions initially reproduced four failures
+across the two stores and now pass in the focused evidence above. Normal first-run persistence,
+SQLite reopen/readwrite upgrades, transactional rollback, both orchestration runs, and the full suite
+continue to pass. Per-operation checks do not claim to eliminate hostile concurrent symlink-replacement
+races between inspection and open; that boundary is documented rather than overstated.
 
 ## Durability, atomicity, concurrency, and unresolved limitations
 

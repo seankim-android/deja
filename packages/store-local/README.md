@@ -26,6 +26,12 @@ latest validation failed are never hits. A checksum mismatch, malformed JSON, un
 invalid entry, duplicate exact identity, or path escape raises `InvalidWalkMemoryError`; entries are
 never silently filtered to manufacture a hit.
 
+Metadata reads and writes use the same canonical workspace containment rule as YAML. Each operation
+canonicalizes the nearest existing ancestor of `.walkcache/memory/walks.json`, validates any existing
+target as a regular file and pending-path ancestors as directories, and rejects an external symlink or
+non-directory traversal before reading, creating, or replacing metadata. The check applies even when
+the metadata file does not exist yet.
+
 Current memory uses schema 2. Valid WALK-003 schema-1 metadata is read conservatively when it already
 has a flow checksum: its flow schema is the known `maestro/v1`, and its existing `lastValidation`
 becomes the one history entry. The next validation/persistence write emits schema 2. A failed latest

@@ -1,8 +1,8 @@
 import { describe, expect, test } from 'bun:test'
 import { existsSync } from 'node:fs'
-import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, readdir, rename, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { basename, join, resolve } from 'node:path'
 import type { WalkIdentity, WalkStore } from '../../core/src/index.ts'
 
 export const initialValidation = '2026-11-22T00:00:00.000Z'
@@ -279,6 +279,75 @@ export function runWalkStoreContractTests(implementation: WalkStoreContractImple
         await symlink(outside, join(linkDirectory, 'android.yaml'))
         await implementation.setFirstFlowPath(ctx.workspaceRoot, '.walkcache/flows/escape/android.yaml')
         await expect(store.lookup(contractIdentity())).rejects.toThrow()
+      } finally {
+        await ctx.cleanup()
+      }
+    })
+
+    test('rejects a symlinked metadata-directory escape before creating outside files', async () => {
+      if (process.platform === 'win32') return
+      const ctx = await context()
+      try {
+        const outside = join(ctx.temporary, 'outside-memory')
+        const memoryDirectory = join(ctx.workspaceRoot, '.walkcache/memory')
+        await mkdir(outside, { recursive: true })
+        await symlink(outside, memoryDirectory)
+        const store = ctx.makeStore()
+        await expect(store.lookup(contractIdentity())).rejects.toThrow('metadata path escapes workspace')
+        await expect(store.persistVerifiedCandidate({
+          identity: contractIdentity(), candidatePath: ctx.candidatePath,
+          validation: { passed: true, at: initialValidation }, origin: 'explore',
+        })).rejects.toThrow('metadata path escapes workspace')
+        expect(await readdir(outside)).toEqual([])
+        expect(existsSync(join(
+          outside, basename(implementation.metadataPath(ctx.workspaceRoot)),
+        ))).toBe(false)
+      } finally {
+        await ctx.cleanup()
+      }
+    })
+
+    test('rejects metadata paths that traverse a non-directory on reads and writes', async () => {
+      const ctx = await context()
+      try {
+        const metadataFile = join(ctx.workspaceRoot, '.walkcache/memory')
+        await writeFile(metadataFile, '# not a directory\n')
+        const store = ctx.makeStore()
+        await expect(store.lookup(contractIdentity())).rejects.toThrow('metadata path')
+        await expect(store.persistVerifiedCandidate({
+          identity: contractIdentity(), candidatePath: ctx.candidatePath,
+          validation: { passed: true, at: initialValidation }, origin: 'explore',
+        })).rejects.toThrow('metadata path')
+        expect(await readFile(metadataFile, 'utf8')).toBe('# not a directory\n')
+      } finally {
+        await ctx.cleanup()
+      }
+    })
+
+    test('rejects an existing valid metadata directory swapped to an external symlink without modifying it', async () => {
+      if (process.platform === 'win32') return
+      const ctx = await context()
+      try {
+        const { store, persisted } = await ctx.seed()
+        const outside = join(ctx.temporary, 'outside-valid-memory')
+        const memoryDirectory = join(ctx.workspaceRoot, '.walkcache/memory')
+        await rename(memoryDirectory, outside)
+        await symlink(outside, memoryDirectory)
+        const outsideMetadata = join(
+          outside, basename(implementation.metadataPath(ctx.workspaceRoot)),
+        )
+        const beforeMetadata = await readFile(outsideMetadata)
+        const beforeEntries = await readdir(outside)
+        const beforeFlow = await readFile(join(ctx.workspaceRoot, persisted.flowPath))
+        await expect(store.lookup(contractIdentity())).rejects.toThrow('metadata path escapes workspace')
+        await expect(store.persistVerifiedCandidate({
+          identity: contractIdentity({ buildFingerprint: 'b'.repeat(64) }),
+          candidatePath: ctx.candidatePath,
+          validation: { passed: true, at: laterValidation }, origin: 'remember',
+        })).rejects.toThrow('metadata path escapes workspace')
+        expect(await readFile(outsideMetadata)).toEqual(beforeMetadata)
+        expect(await readdir(outside)).toEqual(beforeEntries)
+        expect(await readFile(join(ctx.workspaceRoot, persisted.flowPath))).toEqual(beforeFlow)
       } finally {
         await ctx.cleanup()
       }

@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
+import { lstatSync, realpathSync, statSync } from 'node:fs'
 import { mkdir, readFile, realpath, rename, stat, writeFile } from 'node:fs/promises'
-import { dirname, isAbsolute, resolve, sep } from 'node:path'
+import { dirname, isAbsolute, relative, resolve, sep } from 'node:path'
 import {
   normalizeGoal as normalizeGoalContract,
   type ExplorationDetails,
@@ -61,6 +62,57 @@ function errorCode(error: unknown) {
 
 function inside(root: string, candidate: string) {
   return candidate !== root && candidate.startsWith(`${root}${sep}`)
+}
+
+/** Resolve metadata without following an unchecked path outside the canonical workspace. */
+function canonicalMetadataTarget(workspaceRoot: string, memoryPath: string) {
+  try {
+    const lexicalRoot = resolve(workspaceRoot)
+    const root = realpathSync(lexicalRoot)
+    if (!statSync(root).isDirectory()) {
+      throw new InvalidWalkMemoryError('workspace root is not a directory')
+    }
+    const candidate = resolve(root, relative(lexicalRoot, memoryPath))
+    let ancestor = candidate
+    while (true) {
+      try {
+        lstatSync(ancestor)
+        break
+      } catch (error) {
+        if (errorCode(error) === 'ENOTDIR') {
+          throw new InvalidWalkMemoryError('metadata path traverses a non-directory', { cause: error })
+        }
+        if (errorCode(error) !== 'ENOENT') throw error
+        const parent = dirname(ancestor)
+        if (parent === ancestor || (parent !== root && !inside(root, parent))) {
+          throw new InvalidWalkMemoryError('metadata path has no safe existing parent')
+        }
+        ancestor = parent
+      }
+    }
+    const canonicalAncestor = realpathSync(ancestor)
+    if (canonicalAncestor !== root && !inside(root, canonicalAncestor)) {
+      throw new InvalidWalkMemoryError('metadata path escapes workspace')
+    }
+    const canonicalStat = statSync(canonicalAncestor)
+    if (ancestor === candidate) {
+      if (!canonicalStat.isFile()) {
+        throw new InvalidWalkMemoryError('metadata target is not a regular file')
+      }
+      return { path: canonicalAncestor, exists: true }
+    }
+    if (!canonicalStat.isDirectory()) {
+      throw new InvalidWalkMemoryError('metadata path traverses a non-directory')
+    }
+    const projected = resolve(canonicalAncestor, relative(ancestor, candidate))
+    if (!inside(root, projected)) {
+      throw new InvalidWalkMemoryError('metadata path escapes workspace')
+    }
+    return { path: projected, exists: false }
+  } catch (error) {
+    if (error instanceof InvalidWalkMemoryError) throw error
+    throw new InvalidWalkMemoryError('metadata path cannot be resolved safely', { cause: error })
+  }
 }
 
 function sha256(contents: Buffer) {
@@ -249,8 +301,10 @@ export class LocalWalkStore implements WalkStore {
   }
 
   private async loadMemory(): Promise<WalkMemory> {
+    const metadata = canonicalMetadataTarget(this.workspaceRoot, this.memoryPath)
+    if (!metadata.exists) return { schemaVersion: LOCAL_MEMORY_SCHEMA_VERSION, walks: [] }
     try {
-      return parseMemory(await readFile(this.memoryPath, 'utf8'))
+      return parseMemory(await readFile(metadata.path, 'utf8'))
     } catch (error) {
       if (errorCode(error) === 'ENOENT') {
         return { schemaVersion: LOCAL_MEMORY_SCHEMA_VERSION, walks: [] }
@@ -314,7 +368,8 @@ export class LocalWalkStore implements WalkStore {
   }
 
   private async writeMemory(memory: WalkMemory) {
-    await this.atomicWrite(this.memoryPath, `${JSON.stringify(memory, null, 2)}\n`)
+    const metadata = canonicalMetadataTarget(this.workspaceRoot, this.memoryPath)
+    await this.atomicWrite(metadata.path, `${JSON.stringify(memory, null, 2)}\n`)
   }
 
   private async persistVerified(

@@ -48,6 +48,16 @@ YAML is a miss, while changed YAML, malformed metadata, unsupported schema versi
 duplicate identities, unsafe paths, and inconsistent history fail closed. Database schema 2 is the
 only accepted SQLite schema. There is no JSON-schema-1-to-SQLite importer.
 
+Every metadata read and write separately resolves a safe canonical `walks.sqlite` target before using
+a cached connection or opening a database. If any path component does not exist yet, resolution stops
+at the nearest existing ancestor within the workspace, canonicalizes only that ancestor, and projects
+the remaining path without walking above the workspace. Existing targets must be regular files and
+existing ancestors for pending paths must be directories. A symlink or path escape outside the
+workspace, a dangling/unresolvable link, or non-directory traversal raises `InvalidWalkMemoryError`.
+Consequently an external database cannot be read, created, replaced, or deleted through
+`.walkcache/memory`; the shared regression also proves an already valid external database remains
+byte-identical with no new journal/sidecar files after rejected lookup and persistence.
+
 ## Persistence, durability, and replacement
 
 A verified candidate follows these steps:
@@ -87,7 +97,9 @@ base to match at the initial check. A busy database can fail rather than wait in
 
 The store is for one local workspace and local filesystem semantics. It is not a network database,
 cross-machine lock, remote cache, backup system, or semantic retrieval implementation. Existing
-repair/explorer policy remains outside storage and unchanged.
+repair/explorer policy remains outside storage and unchanged. Canonical checks are repeated per
+operation, but do not claim protection against a hostile process racing symlink/path-component
+replacement between the check and the subsequent filesystem open.
 
 ## Verification
 

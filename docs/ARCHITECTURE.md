@@ -201,6 +201,11 @@ conservatively and emits schema 2 on their next validation/persistence write. Up
 failed validation into a success. Unsupported or incomplete legacy entries fail closed. The SQLite
 store accepts only its schema 2; it does not import JSON schema 1. Both implementations validate all
 identities, checksums, history, origins, and exploration/repair metadata before lookup or replacement.
+Both stores also canonicalize metadata reads/writes within the workspace on every operation. They
+resolve the nearest existing ancestor for not-yet-created targets without walking above the workspace,
+require regular-file targets and directory traversal, and reject external symlinks and non-directory
+traversal before opening, creating, or replacing metadata. SQLite performs this check before using an
+already-open connection as well as before opening read/write handles.
 
 `validationHistory` is append-only. A replay failure is recorded as the latest failed validation;
 flow bytes stay available for diagnosis but cannot produce a subsequent hit until independently

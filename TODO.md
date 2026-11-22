@@ -139,8 +139,9 @@ Check an item only when its ticket is complete and its evidence is linked. All t
 - [ ] [WALK-018](tickets/WALK-018-reusable-login-subflow.md) — Reuse a verified login subflow.
 - [x] [WALK-019](tickets/WALK-019-store-plugin-conformance.md) — Second local Bun SQLite store,
   transactional metadata replacement, actual YAML persistence, and one unchanged contract suite against
-  both stores. Evidence: [`44 focused tests / 153 assertions and both zero-model orchestrations`](spikes/001-android-walkcache/evidence/walk019-store-conformance.txt),
-  [`132 full tests / 719 assertions`](spikes/001-android-walkcache/evidence/walk019-all-tests.txt),
+  both stores, including canonical metadata symlink/containment regressions from integration review.
+  Evidence: [`50 focused tests / 177 assertions and both zero-model orchestrations`](spikes/001-android-walkcache/evidence/walk019-store-conformance.txt),
+  [`138 full tests / 743 assertions`](spikes/001-android-walkcache/evidence/walk019-all-tests.txt),
   [`lint`](spikes/001-android-walkcache/evidence/walk019-lint.txt), and
   [`build`](spikes/001-android-walkcache/evidence/walk019-build.txt). Setup, atomicity, single-writer,
   and durability boundaries are documented in [`packages/store-sqlite/README.md`](packages/store-sqlite/README.md).

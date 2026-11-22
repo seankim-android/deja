@@ -12,7 +12,7 @@ actual stores and production lifecycle—not in-memory type mocks.
 
 ## Shared behavioral coverage
 
-The 20 cases exercised against each store cover:
+The 23 cases exercised against each store cover:
 
 1. first-run misses without creating metadata;
 2. durable reopen, goal normalization, complete exact identity, and flow-schema partitioning;
@@ -26,14 +26,17 @@ The 20 cases exercised against each store cover:
 10. duplicate exact identities;
 11. lexical flow-path escape;
 12. canonical symlink escape;
-13. interruption before YAML rename and ignored temporary files;
-14. failed candidate verification with byte-identical last-known-good YAML and metadata;
-15. failed metadata replacement with byte-identical last-known-good state and ignored orphans;
-16. append-only failed validation history and blocked reuse;
-17. repair diagnostic lookup, validation/exploration continuity, and provenance;
-18. changed repair-base rejection with preserved known-good state.
+13. a missing metadata target behind an external directory symlink, with no outside creation;
+14. metadata paths that traverse a non-directory on both reads and writes;
+15. an existing valid external metadata directory swap, preserving bytes and preventing sidecars;
+16. interruption before YAML rename and ignored temporary files;
+17. failed candidate verification with byte-identical last-known-good YAML and metadata;
+18. failed metadata replacement with byte-identical last-known-good state and ignored orphans;
+19. append-only failed validation history and blocked reuse;
+20. repair diagnostic lookup, validation/exploration continuity, and provenance;
+21. changed repair-base rejection with preserved known-good state.
 
-These are grouped into 20 `bun:test` cases because exact identity and repair assertions share one
+These are grouped into 23 `bun:test` cases because exact identity and repair assertions share one
 case each. The shared tests perform no device operations and require no model/account/service.
 
 ## Actual warm orchestration
