@@ -1,0 +1,35 @@
+$ maestro --version
+2.12.0
+
+$ "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --version
+Google Chrome 158.0.8127.37
+
+$ maestro --platform web list-devices (Web section)
+Web
+  chromium   default
+
+$ maestro test --help (Web-only options)
+Usage: maestro test [-ch] [--analyze] [--flatten-debug-output] [--headless] [--[no-]ansi] [--[no-]reinstall-driver] [--api-key=<apiKey>] [--api-url=<apiUrl>]
+                    [--config=<configFile>] [--debug-output=<debugOutput>] [--format=<format>] [--output=<output>] [-p=<platform>] [-s=<legacyShardCount>]
+                    [--screen-size=<screenSize>] [--shard-all=<shardAll>] [--shard-split=<shardSplit>] [--test-output-dir=<testOutputDir>]
+                    [--test-suite-name=<testSuiteName>] [--udid=<deviceId>] [-e=<String=String>]... [--exclude-tags=<excludeTags>[,<excludeTags>...]]...
+                    [--include-tags=<includeTags>[,<includeTags>...]]... <flowFiles>...
+Test a Flow or set of Flows on a local iOS Simulator or Android Emulator
+      <flowFiles>...       One or more flow files or folders containing flow files
+--
+  -h, --help               Display help message
+      --headless           (Web only) Run the tests in headless mode
+      --include-tags=<includeTags>[,<includeTags>...]
+                           List of tags that will remove the Flows that does not have the provided tags
+      --[no-]ansi, --[no-]color
+                           Enable / disable colors and ansi output
+--
+                           Number of parallel shards to distribute tests across
+      --screen-size=<screenSize>
+                           (Web only) Set the size of the headless browser. Use the format {Width}x{Height}. Usage is --screen-size 1920x1080
+      --shard-all=<shardAll>
+                           Run all the tests across N connected devices
+      --shard-split=<shardSplit>
+                           Run the tests across N connected devices, splitting the tests evenly across them
+
+Web flow requirements verified in WALK-010: url: declaration and --device chromium.

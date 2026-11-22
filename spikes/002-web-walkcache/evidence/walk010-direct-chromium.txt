@@ -1,0 +1,26 @@
+
+Web support is in Beta. We would appreciate your feedback!
+
+ > Flow checkout
+Open http://127.0.0.1:4174... COMPLETED
+Assert that id: screen_login is visible... COMPLETED
+Assert that "WalkCache Web Shop" is visible... COMPLETED
+Tap on id: username... COMPLETED
+Input text qa@walkcache.dev... COMPLETED
+Assert that "qa@walkcache.dev" is visible... COMPLETED
+Tap on id: password... COMPLETED
+Input text testing123... COMPLETED
+Tap on id: login_button... COMPLETED
+Assert that id: screen_catalog is visible... COMPLETED
+Assert that "Mochi sticker pack" is visible... COMPLETED
+Assert that "$5.00 · 6 stickers" is visible... COMPLETED
+Tap on id: add_to_cart... COMPLETED
+Assert that id: screen_cart is visible... COMPLETED
+Assert that "1 × Mochi sticker pack" is visible... COMPLETED
+Assert that "Total: $5.00" is visible... COMPLETED
+Tap on id: checkout_button... COMPLETED
+Assert that id: order_confirmation is visible... COMPLETED
+Assert that "Order confirmed" is visible... COMPLETED
+Assert that "Order #WC-1001 · Mochi sticker pack" is visible... COMPLETED
+
+Exit code: 0

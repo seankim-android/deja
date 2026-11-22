@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process'
+import type { MaestroExecutionAdapter } from './platform-adapter.ts'
 import { realpathSync, statSync } from 'node:fs'
 import { mkdir, realpath, writeFile } from 'node:fs/promises'
 import { delimiter, dirname, resolve, sep } from 'node:path'
@@ -8,6 +9,17 @@ export {
   countFlowAssertions,
   type MaestroWalkRunnerOptions,
 } from './walk-runner.ts'
+
+export {
+  androidMaestroAdapter,
+  webMaestroAdapter,
+  type AdapterCacheIdentity,
+  type AdapterIdentityInput,
+  type AndroidAdapterOptions,
+  type MaestroExecutionAdapter,
+  type MaestroPlatform,
+  type WebAdapterOptions,
+} from './platform-adapter.ts'
 
 export {
   classifyMaestroFailure,
@@ -41,7 +53,8 @@ export type MaestroArtifactPaths = {
 export type RunMaestroOptions = {
   executable: string
   device: string
-  platform: 'android'
+  platform: 'android' | 'web'
+  adapter?: MaestroExecutionAdapter
   workspaceRoot: string
   flowPath: string
   timeoutMs: number
@@ -53,7 +66,7 @@ export type RunMaestroOptions = {
 }
 
 export type MaestroRunResult = {
-  platform: 'android'
+  platform: 'android' | 'web'
   device: string
   flowPath: string
   startedAt: string
@@ -260,7 +273,8 @@ export async function runMaestro(options: RunMaestroOptions): Promise<MaestroRun
 
   const child = spawn(
     options.executable,
-    ['--no-ansi', '--device', options.device, 'test', flowPath],
+    options.adapter?.commandArguments(flowPath) ??
+      ['--no-ansi', '--device', options.device, 'test', flowPath],
     {
       cwd: resolve(options.workspaceRoot),
       env: maestroEnvironment(options),

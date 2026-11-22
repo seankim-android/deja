@@ -1,0 +1,17 @@
+{
+  "identity": {
+    "goal": "checkout",
+    "appId": "http://127.0.0.1:4174",
+    "platform": "web",
+    "flowSchemaVersion": "maestro/v1",
+    "buildFingerprint": "85bc4f070a43cd3be046bd1adc5df9c22195f5c2ad15a6c1ea57944944dbb4ee",
+    "adapter": "maestro-web@2.12.0",
+    "browser": "chromium"
+  },
+  "cacheStatus": "hit",
+  "outcome": "passed",
+  "modelCalls": 0,
+  "repairCount": 0,
+  "assertions": 12,
+  "passed": true
+}

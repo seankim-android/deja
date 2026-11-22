@@ -18,6 +18,9 @@ export type WalkIdentity = {
   platform: string
   flowSchemaVersion: string
   buildFingerprint: string
+  /** Optional for legacy cached walks; required by the Web adapter. Part of exact cache identity. */
+  adapter?: string
+  browser?: string
 }
 
 export type WalkValidation = {
@@ -62,7 +65,8 @@ export type LookupHit = {
 }
 
 export type CacheMissReason = 'not-found' | 'wrong-app' | 'wrong-platform' |
-  'wrong-flow-schema' | 'stale-build' | 'missing-flow' | 'failed-validation'
+  'wrong-flow-schema' | 'wrong-adapter' | 'wrong-browser' | 'stale-build' |
+  'missing-flow' | 'failed-validation'
 
 export type LookupMiss = {
   status: 'miss'

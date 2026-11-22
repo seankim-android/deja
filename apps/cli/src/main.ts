@@ -6,7 +6,7 @@ import {
   LocalWalkStore,
   MAESTRO_FLOW_SCHEMA_VERSION,
 } from '../../../packages/store-local/src/index.ts'
-import { MaestroWalkRunner } from '../../../packages/maestro/src/index.ts'
+import { MaestroWalkRunner, androidMaestroAdapter, webMaestroAdapter } from '../../../packages/maestro/src/index.ts'
 import { BoundedSelectorRepairer } from '../../../packages/repair/src/index.ts'
 import {
   buildFingerprint,
@@ -18,6 +18,7 @@ import {
 import { HELP, renderResult, renderWalks } from './output.ts'
 import { createRedactor, redactJson } from './redaction.ts'
 import { JsonRunReporter, readRunReport } from './reporter.ts'
+import { UnsupportedWebExplorer } from './unsupported-web-explorer.ts'
 
 export type CliIo = {
   stdout: (text: string) => void
@@ -83,10 +84,18 @@ function createOrchestration(
   reporter: JsonRunReporter,
 ) {
   const store = new LocalWalkStore({ workspaceRoot: configuration.workspaceRoot })
+  const executionAdapter = configuration.explore.platform === 'web'
+    ? webMaestroAdapter({
+      adapterId: configuration.explore.adapter,
+      headless: configuration.explore.headless,
+      screenSize: configuration.explore.screenSize,
+    })
+    : androidMaestroAdapter({ device: configuration.explore.device })
   const runner = new MaestroWalkRunner({
     workspaceRoot: configuration.workspaceRoot,
     executable: configuration.maestro.executable,
-    device: configuration.explore.device,
+    device: executionAdapter.device,
+    adapter: executionAdapter,
     timeoutMs: configuration.maestro.timeoutMs,
     ...(process.env.ANDROID_HOME || process.env.ANDROID_SDK_ROOT
       ? { androidSdkRoot: process.env.ANDROID_HOME ?? process.env.ANDROID_SDK_ROOT }
@@ -97,15 +106,18 @@ function createOrchestration(
     store,
     runner,
     reporter,
-    createExplorer: () => new OpenClawWalkExplorer({
-      configuration: configuration.explore,
-      buildFingerprint: currentFingerprint,
-      openClawExecutable: configuration.openClaw.executable,
-      maestroMcpProxy: configuration.openClaw.mcpProxy,
-      runner,
-      store,
-    }),
-    ...(configuration.repair ? {
+    createExplorer: () => {
+      if (configuration.explore.platform !== 'android') return new UnsupportedWebExplorer()
+      return new OpenClawWalkExplorer({
+        configuration: configuration.explore,
+        buildFingerprint: currentFingerprint,
+        openClawExecutable: configuration.openClaw!.executable,
+        maestroMcpProxy: configuration.openClaw!.mcpProxy,
+        runner,
+        store,
+      })
+    },
+    ...(configuration.repair && configuration.explore.platform === 'android' ? {
       createRepairer: () => new BoundedSelectorRepairer({
         workspaceRoot: configuration.workspaceRoot,
         policy: configuration.repair!.policy,
@@ -114,7 +126,7 @@ function createOrchestration(
         device: configuration.explore.device,
         store,
         runner,
-        fingerprint: () => buildFingerprint(configuration),
+        fingerprint: () => buildFingerprint(configuration, executionAdapter),
         ...(process.env.ANDROID_HOME || process.env.ANDROID_SDK_ROOT
           ? { androidSdkRoot: process.env.ANDROID_HOME ?? process.env.ANDROID_SDK_ROOT }
           : {}),
@@ -127,13 +139,13 @@ function createOrchestration(
     store,
     orchestration,
     identity: async (goalText: string) => {
-      currentFingerprint = await buildFingerprint(configuration)
+      currentFingerprint = await buildFingerprint(configuration, executionAdapter)
       return {
         goal: goalText,
         appId: configuration.explore.appId,
         platform: configuration.explore.platform,
         flowSchemaVersion: MAESTRO_FLOW_SCHEMA_VERSION,
-        buildFingerprint: currentFingerprint,
+        ...executionAdapter.cacheIdentity({ buildFingerprint: currentFingerprint }),
       }
     },
   }

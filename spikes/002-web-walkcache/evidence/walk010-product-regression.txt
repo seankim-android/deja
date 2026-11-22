@@ -1,0 +1,28 @@
+Backend variant: {"orderNumber":"WC-9999"}
+Unchanged frontend build fingerprint: 85bc4f070a43cd3be046bd1adc5df9c22195f5c2ad15a6c1ea57944944dbb4ee
+
+$ bun ../../apps/cli/walkcache.ts run checkout --config walkcache.config.json
+Command: run
+Goal: checkout
+Outcome: product-regression
+Passed: no
+Cache status: hit
+Model calls: 0 (exact local hit: explorer and model factories were not invoked)
+Duration: 49185 ms
+Assertions: 12
+Repair count: 0
+YAML: .walkcache/flows/checkout/web-944d55991d28716f3da90e71546227a946cd02b02c88ed52edb62600e2167aff.yaml
+YAML SHA-256: 944d55991d28716f3da90e71546227a946cd02b02c88ed52edb62600e2167aff
+Failure: product_assertion (repair eligible: false)
+Failing step: Assert that "Order WC-1001 · Mochi sticker pack" is visible
+Error: Meaningful product assertion failed; repair was not attempted
+Report: .walkcache/reports/run-1795346327199-71387.json
+Latest report: .walkcache/reports/latest.json
+Artifacts:
+- [yaml] .walkcache/flows/checkout/web-944d55991d28716f3da90e71546227a946cd02b02c88ed52edb62600e2167aff.yaml
+- [output] .walkcache/reports/run-1795346278014-ku5ph9o5/output.log
+- [output] .walkcache/reports/run-1795346278014-ku5ph9o5/stdout.log
+- [output] .walkcache/reports/run-1795346278014-ku5ph9o5/stderr.log
+Source diffs: none
+
+Exit code: 1 (expected 1: genuine product regression; no repair)

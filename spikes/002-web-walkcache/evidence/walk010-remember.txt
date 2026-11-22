@@ -1,0 +1,24 @@
+$ bun ../../apps/cli/walkcache.ts remember checkout --flow evidence/checkout.yaml --config walkcache.config.json
+Command: remember
+Goal: checkout
+Outcome: remembered
+Passed: yes
+Cache status: not-checked
+Model calls: 0 (remember performs independent verification only)
+Duration: 43660 ms
+Assertions: 12
+Repair count: 0
+YAML: .walkcache/flows/checkout/web-944d55991d28716f3da90e71546227a946cd02b02c88ed52edb62600e2167aff.yaml
+YAML SHA-256: 944d55991d28716f3da90e71546227a946cd02b02c88ed52edb62600e2167aff
+Report: .walkcache/reports/remember-1795345759143-69278.json
+Latest report: .walkcache/reports/latest.json
+Artifacts:
+- [yaml] evidence/checkout.yaml
+- [output] .walkcache/attempts/remember-1795345715483-sd58byij/output.log
+- [output] .walkcache/attempts/remember-1795345715483-sd58byij/stdout.log
+- [output] .walkcache/attempts/remember-1795345715483-sd58byij/stderr.log
+- [yaml] .walkcache/flows/checkout/web-944d55991d28716f3da90e71546227a946cd02b02c88ed52edb62600e2167aff.yaml
+- [memory] .walkcache/memory/walks.json
+Source diffs: none
+
+Exit code: 0

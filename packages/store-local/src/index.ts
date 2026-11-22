@@ -130,6 +130,14 @@ function normalizeIdentity(identity: WalkIdentity) {
       !nonEmptyString(identity.flowSchemaVersion) || !fingerprint(identity.buildFingerprint)) {
     throw new TypeError('A goal, app, platform, flow schema, and SHA-256 build fingerprint are required')
   }
+  if (identity.platform === 'web' &&
+      (!nonEmptyString(identity.adapter) || !nonEmptyString(identity.browser))) {
+    throw new TypeError('Web cache identity requires explicit adapter and browser names')
+  }
+  if ((identity.adapter !== undefined && !nonEmptyString(identity.adapter)) ||
+      (identity.browser !== undefined && !nonEmptyString(identity.browser))) {
+    throw new TypeError('Adapter and browser identity must be non-empty when present')
+  }
   return { ...identity, goal, goalKey }
 }
 
@@ -137,11 +145,15 @@ function validateWalk(value: unknown, legacy = false): StoredWalk {
   if (!object(value) || !nonEmptyString(value.goal) || value.goalKey !== normalizeGoal(value.goal) ||
       !nonEmptyString(value.appId) || !nonEmptyString(value.platform) ||
       !fingerprint(value.buildFingerprint) || !nonEmptyString(value.flowPath) ||
-      !fingerprint(value.flowSha256)) {
-    throw new InvalidWalkMemoryError('walk entry has missing or malformed identity fields')
+      !fingerprint(value.flowSha256)) {    throw new InvalidWalkMemoryError('walk entry has missing or malformed identity fields')
   }
   if (legacy && value.flowSchemaVersion !== undefined && value.flowSchemaVersion !== MAESTRO_FLOW_SCHEMA_VERSION) {
     throw new InvalidWalkMemoryError('legacy walk has an incompatible flow schema')
+  }
+  if ((value.adapter !== undefined && !nonEmptyString(value.adapter)) ||
+      (value.browser !== undefined && !nonEmptyString(value.browser)) ||
+      (value.platform === 'web' && (!nonEmptyString(value.adapter) || !nonEmptyString(value.browser)))) {
+    throw new InvalidWalkMemoryError('walk adapter/browser identity is missing or malformed')
   }
   if (!legacy && value.flowSchemaVersion !== MAESTRO_FLOW_SCHEMA_VERSION) {
     throw new InvalidWalkMemoryError(`unsupported flow schema in walk entry: ${String(value.flowSchemaVersion)}`)
@@ -180,6 +192,8 @@ function validateWalk(value: unknown, legacy = false): StoredWalk {
     platform: value.platform,
     flowSchemaVersion: MAESTRO_FLOW_SCHEMA_VERSION,
     buildFingerprint: value.buildFingerprint,
+    ...(value.adapter !== undefined ? { adapter: value.adapter as string } : {}),
+    ...(value.browser !== undefined ? { browser: value.browser as string } : {}),
     flowPath: value.flowPath,
     flowSha256: value.flowSha256,
     lastValidation,
@@ -209,6 +223,7 @@ function parseMemory(contents: string): WalkMemory {
   for (const walk of walks) {
     const identity = JSON.stringify([
       walk.goalKey, walk.appId, walk.platform, walk.flowSchemaVersion, walk.buildFingerprint,
+      walk.adapter ?? null, walk.browser ?? null,
     ])
     if (identities.has(identity)) throw new InvalidWalkMemoryError('duplicate exact walk identities are ambiguous')
     identities.add(identity)
@@ -322,6 +337,8 @@ export class LocalWalkStore implements WalkStore {
     const previous = repair ? memory.walks.find(item =>
       item.goalKey === identity.goalKey && item.appId === identity.appId &&
       item.platform === identity.platform && item.flowSchemaVersion === identity.flowSchemaVersion &&
+      (item.adapter ?? null) === (identity.adapter ?? null) &&
+      (item.browser ?? null) === (identity.browser ?? null) &&
       item.buildFingerprint === repair.previous.buildFingerprint &&
       item.flowSha256 === repair.previous.flowSha256 && item.lastValidation.passed,
     ) : undefined
@@ -350,7 +367,9 @@ export class LocalWalkStore implements WalkStore {
         ? { repairHistory: [...(previous.repairHistory ?? []), repair.repair] } : {}),
     }
     const remaining = memory.walks.filter(item => !(
-      item.goalKey === identity.goalKey && item.appId === identity.appId && item.platform === identity.platform
+      item.goalKey === identity.goalKey && item.appId === identity.appId && item.platform === identity.platform &&
+      (item.adapter ?? null) === (identity.adapter ?? null) &&
+      (item.browser ?? null) === (identity.browser ?? null)
     ))
     await this.writeMemory({ schemaVersion: LOCAL_MEMORY_SCHEMA_VERSION, walks: [...remaining, walk] })
     return {
@@ -385,7 +404,11 @@ export class LocalWalkStore implements WalkStore {
     if (samePlatform.length === 0) return { status: 'miss', reason: 'wrong-platform' }
     const sameSchema = samePlatform.filter(item => item.flowSchemaVersion === identity.flowSchemaVersion)
     if (sameSchema.length === 0) return { status: 'miss', reason: 'wrong-flow-schema' }
-    const walk = sameSchema.find(item => item.buildFingerprint === identity.buildFingerprint)
+    const sameAdapter = sameSchema.filter(item => (item.adapter ?? null) === (identity.adapter ?? null))
+    if (sameAdapter.length === 0) return { status: 'miss', reason: 'wrong-adapter' }
+    const sameBrowser = sameAdapter.filter(item => (item.browser ?? null) === (identity.browser ?? null))
+    if (sameBrowser.length === 0) return { status: 'miss', reason: 'wrong-browser' }
+    const walk = sameBrowser.find(item => item.buildFingerprint === identity.buildFingerprint)
     if (!walk) return { status: 'miss', reason: 'stale-build' }
     if (!walk.lastValidation.passed) return { status: 'miss', reason: 'failed-validation' }
     const flowPath = await this.storedFlowPath(walk)
@@ -430,6 +453,8 @@ export class LocalWalkStore implements WalkStore {
     const index = memory.walks.findIndex(item =>
       item.goalKey === identity.goalKey && item.appId === identity.appId &&
       item.platform === identity.platform && item.flowSchemaVersion === identity.flowSchemaVersion &&
+      (item.adapter ?? null) === (identity.adapter ?? null) &&
+      (item.browser ?? null) === (identity.browser ?? null) &&
       item.buildFingerprint === identity.buildFingerprint && item.flowSha256 === hit.walk.flowSha256,
     )
     if (index < 0) throw new InvalidWalkMemoryError('stored walk changed while validation was running')

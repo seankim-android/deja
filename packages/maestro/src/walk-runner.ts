@@ -8,6 +8,7 @@ import type {
 import {
   classifyMaestroFailure,
   runMaestro,
+  type MaestroExecutionAdapter,
   type MaestroRunResult,
 } from './index.ts'
 
@@ -16,6 +17,7 @@ export type MaestroWalkRunnerOptions = {
   executable: string
   device: string
   timeoutMs: number
+  adapter?: MaestroExecutionAdapter
   androidSdkRoot?: string
   javaHome?: string
 }
@@ -50,7 +52,8 @@ export class MaestroWalkRunner implements WalkRunner {
     return runMaestro({
       executable: this.options.executable,
       device: this.options.device,
-      platform: 'android',
+      platform: this.options.adapter?.platform ?? 'android',
+      ...(this.options.adapter ? { adapter: this.options.adapter } : {}),
       workspaceRoot: this.options.workspaceRoot,
       flowPath,
       timeoutMs,

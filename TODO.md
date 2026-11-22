@@ -61,8 +61,15 @@ Check an item only when its ticket is complete and its evidence is linked. All t
 
 ## P0 — Additional platform evidence (cut before weakening Android)
 
-- [ ] [WALK-010](tickets/WALK-010-verified-web-proof.md) — Run the journey in Chromium through the web
+- [x] [WALK-010](tickets/WALK-010-verified-web-proof.md) — Run the journey in Chromium through the web
   adapter, or document the concrete blocker and make no support claim.
+  Evidence: [`support matrix`](spikes/002-web-walkcache/README.md),
+  [`12-assertion warm replay / 0 model calls`](spikes/002-web-walkcache/evidence/walk010-warm.txt),
+  [`build invalidation`](spikes/002-web-walkcache/evidence/walk010-build-invalidation.txt),
+  [`genuine backend regression`](spikes/002-web-walkcache/evidence/walk010-product-regression.txt),
+  [`Android compatibility replay`](spikes/001-android-walkcache/evidence/walk010-android-warm.txt), and
+  [`101 tests / 599 assertions`](spikes/002-web-walkcache/evidence/walk010-all-tests.txt).
+  Cold Web exploration and Web repair are explicitly unsupported, not silently substituted.
 - [ ] [WALK-011](tickets/WALK-011-verified-ios-proof.md) — Run the journey on an iOS simulator through
   the iOS adapter, or document the concrete blocker and make no support claim.
 

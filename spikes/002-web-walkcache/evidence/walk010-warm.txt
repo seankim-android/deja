@@ -1,0 +1,22 @@
+$ bun ../../apps/cli/walkcache.ts run checkout --config walkcache.config.json
+Command: run
+Goal: checkout
+Outcome: passed
+Passed: yes
+Cache status: hit
+Model calls: 0 (exact local hit: explorer and model factories were not invoked)
+Duration: 42634 ms
+Assertions: 12
+Repair count: 0
+YAML: .walkcache/flows/checkout/web-944d55991d28716f3da90e71546227a946cd02b02c88ed52edb62600e2167aff.yaml
+YAML SHA-256: 944d55991d28716f3da90e71546227a946cd02b02c88ed52edb62600e2167aff
+Report: .walkcache/reports/run-1795345859807-70094.json
+Latest report: .walkcache/reports/latest.json
+Artifacts:
+- [yaml] .walkcache/flows/checkout/web-944d55991d28716f3da90e71546227a946cd02b02c88ed52edb62600e2167aff.yaml
+- [output] .walkcache/reports/run-1795345817173-eijfcf1a/output.log
+- [output] .walkcache/reports/run-1795345817173-eijfcf1a/stdout.log
+- [output] .walkcache/reports/run-1795345817173-eijfcf1a/stderr.log
+Source diffs: none
+
+Exit code: 0

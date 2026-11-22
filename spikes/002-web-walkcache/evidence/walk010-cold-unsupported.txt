@@ -1,0 +1,17 @@
+$ bun ../../apps/cli/walkcache.ts run a-new-web-journey --config walkcache.config.json
+Command: run
+Goal: a-new-web-journey
+Outcome: exploration-rejected
+Passed: no
+Cache status: miss (not-found)
+Model calls: 0 (WALK-010 Web exploration is disabled; no explorer or model was invoked)
+Duration: 0 ms
+Assertions: unknown
+Repair count: 0
+YAML: none
+Error: Cold Web exploration is not supported in WALK-010. Independently verified Chromium YAML can enter cache with remember; no model fallback was attempted.
+Report: .walkcache/reports/run-1795345904140-70713.json
+Latest report: .walkcache/reports/latest.json
+Source diffs: none
+
+Exit code: 3 (expected 3: Web cold exploration is explicitly unsupported)

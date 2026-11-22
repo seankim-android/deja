@@ -1,0 +1,20 @@
+Build fingerprint before: 85bc4f070a43cd3be046bd1adc5df9c22195f5c2ad15a6c1ea57944944dbb4ee
+Build fingerprint after: 4c4195b5276378f9ec597f55ea5440d10d15d164255ae1579e42719b96517635
+
+$ bun ../../apps/cli/walkcache.ts run checkout --config walkcache.config.json
+Command: run
+Goal: checkout
+Outcome: repair-rejected
+Passed: no
+Cache status: miss (stale-build)
+Model calls: 0 (stale-build diagnosis never constructs a model client)
+Duration: 1 ms
+Assertions: unknown
+Repair count: 0
+YAML: none
+Error: A stale build requires a configured selector repairer; cold exploration was not substituted
+Report: .walkcache/reports/run-1795346264228-71369.json
+Latest report: .walkcache/reports/latest.json
+Source diffs: none
+
+Exit code: 1 (expected 1: stale build, repair unavailable, no cold fallback)

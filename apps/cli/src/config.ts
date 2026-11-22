@@ -1,7 +1,11 @@
-import { createHash } from 'node:crypto'
+import { existsSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { dirname, resolve, sep } from 'node:path'
 import { loadExploreConfiguration, type ExploreConfiguration } from '../../../packages/agent-openclaw/src/index.ts'
+import {
+  androidMaestroAdapter,
+  type MaestroExecutionAdapter,
+} from '../../../packages/maestro/src/index.ts'
 import type { CheckoutRepairPolicy } from '../../../packages/repair/src/index.ts'
 
 export class CliConfigurationError extends Error {
@@ -11,15 +15,25 @@ export class CliConfigurationError extends Error {
   }
 }
 
+export type WebExploreConfiguration = Omit<ExploreConfiguration,
+  'platform' | 'openClawModel' | 'openClawBaseUrl'
+> & {
+  platform: 'web'
+  adapter: string
+  browser: 'chromium'
+  headless: boolean
+  screenSize: string
+}
+
 export type ProductionConfiguration = {
   configPath: string
-  explore: ExploreConfiguration
+  explore: ExploreConfiguration | WebExploreConfiguration
   workspaceRoot: string
   maestro: {
     executable: string
     timeoutMs: number
   }
-  openClaw: {
+  openClaw?: {
     executable: string
     mcpProxy: string
   }
@@ -50,6 +64,56 @@ function inside(root: string, candidate: string) {
   return absolute !== root && absolute.startsWith(`${root}${sep}`)
 }
 
+function loadWebExploreConfiguration(absolute: string, raw: Record<string, unknown>): WebExploreConfiguration {
+  const workspaceRoot = resolve(dirname(absolute), String(raw.workspaceRoot ?? ''))
+  const appId = typeof raw.appId === 'string' ? raw.appId.trim() : ''
+  const buildPath = typeof raw.buildPath === 'string' ? raw.buildPath : ''
+  if (!appId.startsWith('http://127.0.0.1:') && !appId.startsWith('http://localhost:')) {
+    throw new CliConfigurationError('WALK-010 Web appId must be an explicit loopback fixture URL')
+  }
+  if (!raw.workspaceRoot || !buildPath || !inside(workspaceRoot, buildPath) ||
+      !existsSync(workspaceRoot) || !existsSync(resolve(workspaceRoot, buildPath))) {
+    throw new CliConfigurationError('Web config requires existing workspaceRoot and a buildPath inside it')
+  }
+  if (raw.device !== undefined && raw.device !== 'chromium') {
+    throw new CliConfigurationError('WALK-010 supports only device: chromium')
+  }
+  if (raw.browser !== 'chromium') throw new CliConfigurationError('Web browser must be chromium')
+  if (raw.headless !== undefined && typeof raw.headless !== 'boolean') {
+    throw new CliConfigurationError('headless must be a boolean')
+  }
+  const adapter = text(raw.adapter, 'maestro-web/v1', 'adapter')
+  const screenSize = text(raw.screenSize, '1280x800', 'screenSize')
+  if (!/^[1-9][0-9]{2,4}x[1-9][0-9]{2,4}$/.test(screenSize)) {
+    throw new CliConfigurationError('screenSize must use WIDTHxHEIGHT')
+  }
+  if (!Array.isArray(raw.fixtureCredentials)) {
+    throw new CliConfigurationError('fixtureCredentials must be an explicit array')
+  }
+  const fixtureCredentials = raw.fixtureCredentials.map((entry, index) => {
+    const credential = entry as Record<string, unknown>
+    if (typeof credential.label !== 'string' || typeof credential.value !== 'string' ||
+        !credential.label.trim() || credential.value.length > 4096) {
+      throw new CliConfigurationError(`fixtureCredentials[${index}] requires a label and bounded fixture value`)
+    }
+    return { label: credential.label, value: credential.value }
+  })
+  return {
+    workspaceRoot,
+    appId,
+    platform: 'web',
+    buildPath,
+    device: 'chromium',
+    fixtureCredentials,
+    explorationTimeoutSeconds: positiveInteger(raw.explorationTimeoutSeconds, 120, 'explorationTimeoutSeconds'),
+    verificationTimeoutMs: positiveInteger(raw.verificationTimeoutMs, 120_000, 'verificationTimeoutMs'),
+    adapter,
+    browser: 'chromium',
+    headless: raw.headless === undefined ? true : raw.headless === true,
+    screenSize,
+  }
+}
+
 export async function loadProductionConfiguration(configPath: string): Promise<ProductionConfiguration> {
   const absolute = resolve(configPath)
   let raw: Record<string, unknown>
@@ -60,9 +124,11 @@ export async function loadProductionConfiguration(configPath: string): Promise<P
   } catch (error) {
     throw new CliConfigurationError(`Cannot read WalkCache config ${configPath}`, { cause: error })
   }
-  let explore: ExploreConfiguration
+  let explore: ExploreConfiguration | WebExploreConfiguration
   try {
-    explore = loadExploreConfiguration(absolute)
+    explore = raw.platform === 'web'
+      ? loadWebExploreConfiguration(absolute, raw)
+      : loadExploreConfiguration(absolute)
   } catch (error) {
     throw new CliConfigurationError('Invalid WalkCache fixture configuration', { cause: error })
   }
@@ -73,14 +139,28 @@ export async function loadProductionConfiguration(configPath: string): Promise<P
   const openClaw = typeof raw.openClaw === 'object' && raw.openClaw !== null
     ? raw.openClaw as Record<string, unknown>
     : {}
-  const mcpProxy = text(
-    openClaw.mcpProxy,
-    'scripts/maestro-mcp-proxy.ts',
-    'openClaw.mcpProxy',
-  )
-  if (!inside(root, mcpProxy)) throw new CliConfigurationError('openClaw.mcpProxy must be inside workspaceRoot')
+  let openClawConfiguration: ProductionConfiguration['openClaw']
+  if (explore.platform === 'android') {
+    const mcpProxy = text(
+      openClaw.mcpProxy,
+      'scripts/maestro-mcp-proxy.ts',
+      'openClaw.mcpProxy',
+    )
+    if (!inside(root, mcpProxy)) throw new CliConfigurationError('openClaw.mcpProxy must be inside workspaceRoot')
+    openClawConfiguration = {
+      executable: text(
+        openClaw.executable,
+        process.env.WALKCACHE_OPENCLAW ?? 'openclaw',
+        'openClaw.executable',
+      ),
+      mcpProxy,
+    }
+  }
 
   let repair: ProductionConfiguration['repair']
+  if (explore.platform === 'web' && raw.repair !== undefined) {
+    throw new CliConfigurationError('WALK-010 Web does not configure the Android-only repair plugin')
+  }
   if (raw.repair !== undefined) {
     if (!raw.repair || typeof raw.repair !== 'object' || Array.isArray(raw.repair)) {
       throw new CliConfigurationError('repair must be an object')
@@ -121,21 +201,17 @@ export async function loadProductionConfiguration(configPath: string): Promise<P
         'maestro.timeoutMs',
       ),
     },
-    openClaw: {
-      executable: text(
-        openClaw.executable,
-        process.env.WALKCACHE_OPENCLAW ?? 'openclaw',
-        'openClaw.executable',
-      ),
-      mcpProxy,
-    },
+    ...(openClawConfiguration ? { openClaw: openClawConfiguration } : {}),
     ...(repair ? { repair } : {}),
   }
 }
 
-export async function buildFingerprint(configuration: ProductionConfiguration) {
-  const contents = await readFile(resolve(configuration.workspaceRoot, configuration.explore.buildPath))
-  return createHash('sha256').update(contents).digest('hex')
+export async function buildFingerprint(
+  configuration: ProductionConfiguration,
+  adapter?: MaestroExecutionAdapter,
+) {
+  const selected = adapter ?? androidMaestroAdapter({ device: configuration.explore.device })
+  return selected.buildFingerprint(configuration.workspaceRoot, configuration.explore.buildPath)
 }
 
 export function defaultConfigPath(configDirectory = process.cwd()) {

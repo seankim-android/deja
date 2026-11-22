@@ -43,3 +43,20 @@ Exit codes are `0` success/help/list/inspect-of-pass, `1` product/unknown/repair
 Inspecting a failed report returns that report's original failure class; inspecting a passing report
 returns zero. Help does not load configuration. Invalid memory must be quarantined, not edited into
 a hit.
+
+## WALK-010 Web boundary
+
+[`spikes/002-web-walkcache`](../../spikes/002-web-walkcache/README.md) adds a distinct Maestro Web
+execution adapter for the installed 2.12.0 Beta Chromium runtime. Its configuration explicitly
+requires `platform: web`, `browser: chromium`, an adapter identity, loopback `appId`, `device:
+chromium`, browser settings, and a static build tree. The adapter owns browser command selection,
+static-tree fingerprinting, and its adapter/browser contribution to exact cache identity; core and
+Android repair contain no per-demo Web conditionals. Existing Android identity remains unchanged.
+
+Only independently verified YAML (`remember`), exact Chromium warm replay, build invalidation, and
+honest assertion failures are supported. Web cold model exploration returns
+`exploration-rejected` with 0 model calls and directs the operator to reviewed YAML + `remember`.
+Web has no repair plugin: a stale build returns `repair-rejected` and never falls through to cold
+exploration. Android MCP `launchApp/clearState`, APK hashing/install, and Android source patching
+are deliberately not reused. No cross-browser, non-loopback, generalized exploration, or measured
+speedup claim is made. Actual commands/results are linked from the Web fixture README.

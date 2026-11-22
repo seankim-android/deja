@@ -35,7 +35,7 @@ Statuses: `in_progress`, `done`, `ready` (no incomplete dependencies), `queued` 
 | --- | --- | --- | --- |
 | [WALK-008](WALK-008-production-cli-plugin-contracts.md) | done | 003–007 | Headless CLI around plugin interfaces |
 | [WALK-009](WALK-009-local-run-viewer.md) | done | 008 | Optional local dashboard for runs and artifacts |
-| [WALK-010](WALK-010-verified-web-proof.md) | ready | 005, 007, 008 | Real Chromium evidence or named blocker |
+| [WALK-010](WALK-010-verified-web-proof.md) | done | 005, 007, 008 | Verified Chromium replay; cold exploration/repair explicitly unsupported |
 | [WALK-011](WALK-011-verified-ios-proof.md) | ready | 005, 007, 008 | Real iOS simulator evidence or named blocker |
 
 ## P0 — Release

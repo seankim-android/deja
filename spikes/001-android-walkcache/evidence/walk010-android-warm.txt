@@ -1,0 +1,26 @@
+$ adb -s emulator-5554 install -r app/build/outputs/apk/debug/app-debug.apk
+Performing Streamed Install
+Success
+
+$ bun ../../apps/cli/walkcache.ts run checkout --config walkcache.config.json
+Command: run
+Goal: checkout
+Outcome: passed
+Passed: yes
+Cache status: hit
+Model calls: 0 (exact local hit: explorer and model factories were not invoked)
+Duration: 30421 ms
+Assertions: 12
+Repair count: 0
+YAML: .walkcache/flows/checkout/android-e09660f45502b720f79f95a65c78ad5f48a4e11ae1ff5f52c6cb99972b12b478.yaml
+YAML SHA-256: e09660f45502b720f79f95a65c78ad5f48a4e11ae1ff5f52c6cb99972b12b478
+Report: .walkcache/reports/run-1795345934686-70714.json
+Latest report: .walkcache/reports/latest.json
+Artifacts:
+- [yaml] .walkcache/flows/checkout/android-e09660f45502b720f79f95a65c78ad5f48a4e11ae1ff5f52c6cb99972b12b478.yaml
+- [output] .walkcache/reports/run-1795345904266-awwvck80/output.log
+- [output] .walkcache/reports/run-1795345904266-awwvck80/stdout.log
+- [output] .walkcache/reports/run-1795345904266-awwvck80/stderr.log
+Source diffs: none
+
+Exit code: 0
