@@ -526,3 +526,24 @@ export class LocalWalkStore implements WalkStore {
     return updated
   }
 }
+
+export {
+  LocalVerifiedSubflowStore,
+  VERIFIED_SUBFLOW_INDEX_PATH,
+  InvalidSubflowMemoryError,
+  type LocalVerifiedSubflowStoreOptions,
+} from './verified-subflow-store.ts'
+export {
+  VERIFIED_SUBFLOW_SCHEMA_VERSION,
+  validateSubflowContract,
+  type CompositionModelMetrics,
+  type CompositionStepMetrics,
+  type PersistVerifiedSubflowOptions,
+  type SubflowContract,
+  type SubflowIdentity,
+  type SubflowInput,
+  type SubflowOutput,
+  type VerifiedSubflow,
+  type VerifiedSubflowLookup,
+  type VerifiedSubflowStore,
+} from '../../core/src/subflow.ts'

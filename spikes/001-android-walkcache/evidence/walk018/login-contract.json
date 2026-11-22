@@ -1,0 +1,62 @@
+{
+  "schemaVersion": 1,
+  "segmentId": "login-v1",
+  "identity": {
+    "appId": "dev.walkcache.checkout",
+    "platform": "android",
+    "flowSchemaVersion": "maestro/v1",
+    "buildFingerprint": "6aec5fea876938db14007ba3dbcb91f698832fe855886abd9dea1e7b28861759"
+  },
+  "inputs": [
+    {
+      "name": "username",
+      "kind": "text",
+      "required": true
+    },
+    {
+      "name": "password",
+      "kind": "credential",
+      "required": true
+    }
+  ],
+  "outputs": [
+    {
+      "name": "authenticatedCatalog",
+      "kind": "screen",
+      "resourceId": "screen_catalog"
+    }
+  ],
+  "preconditions": [
+    {
+      "kind": "clean-app-launch"
+    }
+  ],
+  "postconditions": [
+    {
+      "kind": "screen-visible",
+      "resourceId": "screen_catalog"
+    }
+  ],
+  "stepCount": 11,
+  "assertionCount": 5,
+  "provenance": {
+    "kind": "curated-evidence",
+    "ticket": "WALK-020",
+    "runId": "walk020-android-checkout-06",
+    "newDeviceRunRecorded": false,
+    "artifacts": [
+      {
+        "path": "demo/live-evidence/android/cold-saved-checkout.yaml",
+        "sha256": "e95532ce04a4e125d3bd56e1b9d5d367b31dd67eed4441c56271ca52f3c3d0a1"
+      },
+      {
+        "path": "demo/live-evidence/android/cold-stored-memory.json",
+        "sha256": "ee2afdb4d6e4eda848d3a9d2ba6b4524000b5f032c841a486334884b252481cd"
+      },
+      {
+        "path": "demo/live-evidence/android/cold-run-report.json",
+        "sha256": "f17ac91926e16b7566829b798b5de5855f1b0fe667f39a9aef01b9edb9a18283"
+      }
+    ]
+  }
+}

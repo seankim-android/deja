@@ -1,0 +1,25 @@
+appId: dev.walkcache.checkout
+---
+- launchApp:
+    clearState: true
+- assertVisible:
+    id: screen_login
+    text: WalkCache Shop
+- assertVisible:
+    id: username_input
+- assertVisible:
+    id: password_input
+- assertVisible:
+    id: login_button
+    text: Sign in
+- tapOn:
+    id: username_input
+- inputText: qa@walkcache.dev
+- tapOn:
+    id: password_input
+- inputText: testing123
+- tapOn:
+    id: login_button
+- assertVisible:
+    id: screen_catalog
+    text: Catalog

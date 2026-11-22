@@ -98,6 +98,24 @@ The store deliberately rejects invalid existing metadata during persistence inst
 Only a complete passing cold exploration after quarantine can create new successful memory. This is a
 recovery procedure, not a claim that exploration or a warm replay passed.
 
+## Verified reusable segments (WALK-018)
+
+`LocalVerifiedSubflowStore` is separate from `WalkStore`: it holds typed login contracts and actual
+checksummed YAML under `.walkcache/segments`, never goal hits. An index entry is accepted only with
+`passed: true` and a canonical UTC validation timestamp. The composer supplies that validation only
+after an independent runner pass and candidate/contract checks. Exact app/platform/schema/build plus
+adapter/browser identity, canonical paths, and SHA-256 recomputation govern every lookup; malformed
+or duplicate metadata fails closed.
+
+Flow files are content-addressed and renamed before the closed index. A failed index replacement
+leaves the previous login index and YAML byte-for-byte reusable; a failed flow rename creates no
+index. Orphan flow/temp files are ignored. Composition failures never call segment persistence.
+See [`docs/SUBFLOW_COMPOSITION.md`](../../docs/SUBFLOW_COMPOSITION.md).
+
+```sh
+bun test packages/store-local/test/verified-subflow-store.test.ts --timeout=10000
+```
+
 ## Focused deterministic verification
 
 The original storage regressions now live in the implementation-neutral

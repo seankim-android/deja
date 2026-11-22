@@ -46,6 +46,22 @@ Run focused tests from the repository root:
 bun test packages/maestro/test/maestro-runner.test.ts --timeout=10000
 ```
 
+## Verified login composition (WALK-018)
+
+`MaestroLoginComposer` is an explicit one-segment login-plus-suffix proof, not route planning. It
+independently runs the segment and validates its YAML against exact app/build identity, typed launch
+and screen conditions, and step/assertion counts before a segment store write. `compose` reads only an
+exact checksum-verified segment, emits one relative `runFlow` reference plus new suffix steps, executes
+the complete clean-state candidate with all expanded assertions, and only then calls the ordinary
+`WalkStore` verified-persistence API. Failed execution performs no goal write.
+
+`countFlowAssertions` follows relative `runFlow` references for complete accounting and returns `null`
+on unreadable, absolute, malformed, or cyclic references. The curated WALK-018 candidate/final flow
+locations are peer directories, preventing the segment path from changing when verified bytes are
+stored. Existing flows without `runFlow` are counted exactly as before, and exact cache lookup is
+unchanged. See [`docs/SUBFLOW_COMPOSITION.md`](../../docs/SUBFLOW_COMPOSITION.md) for executable
+fixtures and preservation evidence; no emulator/simulator or real-device run is claimed.
+
 ## Advisory failure classification (WALK-006)
 
 `classifyMaestroFailure` adds a deterministic `selector`, `navigation`, `product_assertion`,

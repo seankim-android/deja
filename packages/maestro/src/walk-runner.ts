@@ -1,5 +1,5 @@
-import { readFile } from 'node:fs/promises'
-import { relative, resolve } from 'node:path'
+import { readFile, realpath } from 'node:fs/promises'
+import { dirname, isAbsolute, relative, resolve } from 'node:path'
 import type {
   ExecutionResult,
   RunnerRequest,
@@ -27,12 +27,37 @@ function portable(root: string, path: string) {
 }
 
 export async function countFlowAssertions(flowPath: string): Promise<number | null> {
-  try {
-    const contents = await readFile(flowPath, 'utf8')
-    return (contents.match(/^\s*-\s+assertVisible:/gm) ?? []).length
-  } catch {
-    return null
+  const active = new Set<string>()
+  async function visit(path: string): Promise<number | null> {
+    try {
+      const canonical = await realpath(path)
+      if (active.has(canonical)) return null
+      active.add(canonical)
+      try {
+        const contents = await readFile(canonical, 'utf8')
+        let count = (contents.match(/^\s*-\s+assertVisible:/gm) ?? []).length
+        for (const match of contents.matchAll(/^\s*-\s+runFlow:\s*(.+)$/gm)) {
+          const rawReference = match[1].trim()
+          let reference: string
+          try {
+            reference = rawReference.startsWith('"') ? JSON.parse(rawReference) : rawReference
+          } catch {
+            return null
+          }
+          if (!reference || isAbsolute(reference)) return null
+          const nested = await visit(resolve(dirname(canonical), reference))
+          if (nested === null) return null
+          count += nested
+        }
+        return count
+      } finally {
+        active.delete(canonical)
+      }
+    } catch {
+      return null
+    }
   }
+  return visit(flowPath)
 }
 
 export class MaestroWalkRunner implements WalkRunner {

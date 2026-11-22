@@ -54,6 +54,6 @@ Statuses: `in_progress`, `done`, `ready` (no incomplete dependencies), `queued` 
 | --- | --- | --- |
 | [WALK-016](WALK-016-semantic-goal-retrieval.md) | done | Exact-match-first semantic retrieval |
 | [WALK-017](WALK-017-route-graph-screen-fingerprints.md) | done | Evidence-backed diagnostic Android graph; bounded fingerprints and fail-closed matching, no cache-path changes |
-| [WALK-018](WALK-018-reusable-login-subflow.md) | deferred | Verified login subflow reused by another goal |
+| [WALK-018](WALK-018-reusable-login-subflow.md) | done | Independently verified login reused by one explicit checkout composition; clean-state/exact replay and byte preservation |
 | [WALK-019](WALK-019-store-plugin-conformance.md) | done | Second store and conformance tests |
 

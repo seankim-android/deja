@@ -218,7 +218,9 @@ const hit: LookupHit = { status: 'hit', walk: storedWalk, flowPath: '/fixture/st
 
 describe('vendor-independent orchestration', () => {
   test('core source has no platform, demo, UI, filesystem, or vendor imports', async () => {
-    for (const filename of ['contracts.ts', 'orchestration.ts', 'semantic.ts', 'index.ts']) {
+    for (const filename of [
+      'contracts.ts', 'orchestration.ts', 'semantic.ts', 'subflow.ts', 'index.ts',
+    ]) {
       const source = await readFile(resolve(import.meta.dir, `../src/${filename}`), 'utf8')
       for (const forbidden of ['node:', '../../maestro', '../../agent-openclaw', 'react', 'checkout', 'android']) {
         expect(source.toLowerCase()).not.toContain(forbidden)

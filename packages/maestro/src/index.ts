@@ -11,6 +11,19 @@ export {
 } from './walk-runner.ts'
 
 export {
+  COMPOSITION_MODEL_METRICS,
+  MAESTRO_COMPOSITE_FLOW_SCHEMA,
+  MaestroLoginComposer,
+  composeMaestroLoginFlow,
+  countMaestroAssertions,
+  countMaestroSteps,
+  readMaestroContinuation,
+  type LoginCompositionResult,
+  type MaestroLoginComposerOptions,
+  type SegmentVerificationResult,
+} from './subflow-composition.ts'
+
+export {
   androidMaestroAdapter,
   iosMaestroAdapter,
   webMaestroAdapter,

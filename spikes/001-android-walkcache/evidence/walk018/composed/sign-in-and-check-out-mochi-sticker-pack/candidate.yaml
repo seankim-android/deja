@@ -1,0 +1,26 @@
+appId: dev.walkcache.checkout
+---
+- runFlow: "../../segments/login-v1/android-c415a62dae8b1346213ac1f92c5201d2a8c17e01d98c84e6ab979f4d785f3266.yaml"
+- assertVisible: Mochi sticker pack
+- assertVisible: "$5.00 · 6 stickers"
+- assertVisible:
+    id: add_to_cart
+    text: Add to cart
+- tapOn:
+    id: add_to_cart
+- assertVisible:
+    id: screen_cart
+    text: Your cart
+- assertVisible: "1 × Mochi sticker pack"
+- assertVisible: "Total: $5.00"
+- assertVisible:
+    id: checkout_button
+    text: Checkout
+- tapOn:
+    id: checkout_button
+- assertVisible:
+    id: order_confirmation
+    text: Order confirmed
+- assertVisible:
+    id: screen_confirmation
+    text: "Order #WC-1001 · Mochi sticker pack"

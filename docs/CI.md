@@ -17,10 +17,14 @@ git rev-parse HEAD
 
 The deterministic unit/component/contract tests cover orchestration, exact/corrupt storage,
 runner behavior and platform adapters, OpenClaw exploration boundaries, bounded repair, failure
-classification, cold/warm metrics, CLI/report behavior, the local viewer, and diagnostic-only route
-graphs. The 25 route-graph tests include schema/failure fixtures and byte-exact re-derivation from
-curated WALK-020 evidence. Tests use fake process fixtures where appropriate and do not assert a real
-device result; the WALK-017 graph is derived from prior curated evidence, not a CI device run.
+classification, cold/warm metrics, CLI/report behavior, the local viewer, diagnostic-only route
+graphs, and explicit login-subflow composition/preservation. The 25 route-graph tests include
+schema/failure fixtures and byte-exact re-derivation from curated WALK-020 evidence. WALK-018 tests
+add closed contracts, segment-store failures, complete clean-state `runFlow` execution, stored exact
+replay, and runner/filesystem failure preservation. Tests use fake process fixtures where appropriate
+and do not assert a real device result; the WALK-017 graph and WALK-018 split are derived from prior
+curated evidence, not a CI device run. The independently runnable WALK-018 deriver/verifier commands
+are documented in [`SUBFLOW_COMPOSITION.md`](SUBFLOW_COMPOSITION.md).
 
 The artifact validator parses every strict tracked JSON file (compiler-owned JSONC `tsconfig` files are
 separately validated by `bun run build`), rejects generated cache/build/dependency/binary artifacts, scans text for private keys/token shapes and machine-specific home paths, and fails if the

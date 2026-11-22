@@ -1,0 +1,67 @@
+{
+  "result": "pass",
+  "mode": "check",
+  "ticket": "WALK-018",
+  "provenance": {
+    "ticket": "WALK-020",
+    "runId": "walk020-android-checkout-06",
+    "newDeviceRunRecorded": false
+  },
+  "appId": "dev.walkcache.checkout",
+  "buildFingerprint": "6aec5fea876938db14007ba3dbcb91f698832fe855886abd9dea1e7b28861759",
+  "sourceFlowSha256": "e95532ce04a4e125d3bd56e1b9d5d367b31dd67eed4441c56271ca52f3c3d0a1",
+  "loginFlowSha256": "c415a62dae8b1346213ac1f92c5201d2a8c17e01d98c84e6ab979f4d785f3266",
+  "composedFlowSha256": "59778cf6a4dd43d2cac304e2af0145fd6ffde695031e8154221832f5295908ab",
+  "reusedSteps": 11,
+  "newlyExploredSteps": 11,
+  "reusedAssertions": 5,
+  "newAssertions": 9,
+  "totalAssertions": 14,
+  "loginStepsDuplicated": false,
+  "artifacts": [
+    "spikes/001-android-walkcache/evidence/walk018/segments/login-v1/android-c415a62dae8b1346213ac1f92c5201d2a8c17e01d98c84e6ab979f4d785f3266.yaml",
+    "spikes/001-android-walkcache/evidence/walk018/continuation/checkout.yaml",
+    "spikes/001-android-walkcache/evidence/walk018/composed/sign-in-and-check-out-mochi-sticker-pack/candidate.yaml",
+    "spikes/001-android-walkcache/evidence/walk018/login-contract.json"
+  ]
+}
+{
+  "result": "pass",
+  "mode": "check",
+  "ticket": "WALK-018",
+  "newDeviceRunRecorded": false,
+  "provenance": {
+    "kind": "curated-evidence",
+    "ticket": "WALK-020",
+    "runId": "walk020-android-checkout-06",
+    "sourceFlowSha256": "e95532ce04a4e125d3bd56e1b9d5d367b31dd67eed4441c56271ca52f3c3d0a1",
+    "sourceValidationAt": "2026-11-22T20:27:33.668Z",
+    "buildFingerprint": "6aec5fea876938db14007ba3dbcb91f698832fe855886abd9dea1e7b28861759"
+  },
+  "reusedSteps": 11,
+  "newlyExploredSteps": 11,
+  "totalAssertions": 14,
+  "modelCalls": {
+    "composition": 0,
+    "newExploration": 0,
+    "segmentVerification": 0,
+    "fullJourneyVerification": 0,
+    "basis": "Curated continuation and deterministic process runner; no explorer or model client is constructed"
+  },
+  "exactCacheReplay": {
+    "cacheStatus": "hit",
+    "outcome": "passed",
+    "modelCalls": 0,
+    "explorerConstructions": 0,
+    "assertions": 14,
+    "cleanState": {
+      "clearStateLaunches": 1,
+      "steps": 22,
+      "reusedSteps": 11,
+      "assertions": 14,
+      "finalProductAssertionPassed": true,
+      "screen": "confirmation"
+    }
+  },
+  "failedCompositionPreservedByteForByte": true
+}

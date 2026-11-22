@@ -1,0 +1,23 @@
+Launch app "dev.walkcache.checkout" with clear state... COMPLETED
+Assert that id: screen_login is visible... COMPLETED
+Assert that id: username_input is visible... COMPLETED
+Assert that id: password_input is visible... COMPLETED
+Assert that id: login_button is visible... COMPLETED
+Tap on id: username_input... COMPLETED
+Input text "qa@walkcache.dev"... COMPLETED
+Tap on id: password_input... COMPLETED
+Input text "testing123"... COMPLETED
+Tap on id: login_button... COMPLETED
+Assert that id: screen_catalog is visible... COMPLETED
+Assert that "Mochi sticker pack" is visible... COMPLETED
+Assert that "$5.00 · 6 stickers" is visible... COMPLETED
+Assert that id: add_to_cart is visible... COMPLETED
+Tap on id: add_to_cart... COMPLETED
+Assert that id: screen_cart is visible... COMPLETED
+Assert that "1 × Mochi sticker pack" is visible... COMPLETED
+Assert that "Total: $5.00" is visible... COMPLETED
+Assert that id: checkout_button is visible... COMPLETED
+Tap on id: checkout_button... COMPLETED
+Assert that id: order_confirmation is visible... COMPLETED
+Assert that id: screen_confirmation is visible... COMPLETED
+FIXTURE_SUMMARY {"clearStateLaunches":1,"steps":22,"reusedSteps":11,"assertions":14,"finalProductAssertionPassed":true,"screen":"confirmation"}

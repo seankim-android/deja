@@ -150,6 +150,28 @@ The [route-graph guide](ROUTE_GRAPH.md) links the four-node Android graph derive
 curated WALK-020 cold/warm evidence. No new device run is claimed. This diagnostic memory does not
 make transitions independently executable or establish complete app coverage.
 
+## Explicit verified subflow composition (WALK-018)
+
+`subflow.ts` defines a separate closed `SubflowContract`/`VerifiedSubflowStore` contract: exact
+app/build identity, typed input descriptors (never input values), screen outputs, launch/screen
+conditions, bounded step/assertion counts, and hashed provenance. A Maestro-specific composer takes
+one independently verified clean-launch login segment and an explicit checkout suffix. It references
+the stored segment with `runFlow`; it does not copy login YAML or invoke route planning, semantic
+segment selection, an explorer, or a model.
+
+The candidate and final goal-flow directories are peers, so their relative segment reference is
+proved identical before execution. The complete expanded candidate passes `WalkRunner` from clean
+state with every reused/new assertion before `WalkStore.persistVerifiedCandidate` can run. Nested
+subflows, duplicate login commands, second launches, identity/checksum mismatches, and mismatched
+contract accounting fail closed. Segment storage is separate from goal memory and content-checks
+reusable YAML. Runner failure performs no goal write; goal metadata failure preserves its old bytes
+and never mutates verified segment bytes. Ordinary `WalkCache.run` then replays the stored composed
+flow under the unchanged exact identity and zero-model lookup behavior.
+
+See [the WALK-018 composition guide](SUBFLOW_COMPOSITION.md) for curated YAML, clean-state and failure
+logs, exact WALK-020 provenance, reproduction commands, and the deliberately narrow acceptance
+limits. No new device execution is claimed.
+
 ## Memory schema
 
 The CLI-default `LocalWalkStore` uses the `.walkcache/memory/walks.json` envelope at schema **2**.

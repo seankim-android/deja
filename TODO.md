@@ -136,7 +136,13 @@ Check an item only when its ticket is complete and its evidence is linked. All t
   [`route-graph guide`](docs/ROUTE_GRAPH.md), and 25 focused tests (131 full-suite tests / 699 assertions).
   Derived solely from existing curated WALK-020 cold/warm evidence; no new device run or route-based
   cache behavior is claimed. Unknown/changed/ambiguous states fail closed to existing orchestration.
-- [ ] [WALK-018](tickets/WALK-018-reusable-login-subflow.md) — Reuse a verified login subflow.
+- [x] [WALK-018](tickets/WALK-018-reusable-login-subflow.md) — Reuse a verified login subflow.
+  Evidence: [typed contract/composed YAML/report](docs/SUBFLOW_COMPOSITION.md),
+  [40 focused tests / 215 assertions](spikes/001-android-walkcache/evidence/walk018/walk018-focused-tests.txt),
+  [213 full tests / 1,061 assertions](spikes/001-android-walkcache/evidence/walk018/walk018-all-tests.txt),
+  and [fresh clean-state/replay/preservation reproduction](spikes/001-android-walkcache/evidence/walk018/walk018-reproduction-check.txt).
+  Split solely from accepted WALK-020 evidence; 11 reused + 11 new steps, 14 retained assertions,
+  zero new model calls, no emulator/simulator or new device run, and no general route-planning claim.
 - [x] [WALK-019](tickets/WALK-019-store-plugin-conformance.md) — Second local Bun SQLite store,
   transactional metadata replacement, actual YAML persistence, and one unchanged contract suite against
   both stores, including canonical metadata symlink/containment regressions from integration review.

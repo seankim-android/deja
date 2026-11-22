@@ -1,0 +1,54 @@
+bun test v1.4.4-canary.1 (191755ec1)
+
+packages/core/test/subflow.test.ts:
+(pass) typed reusable subflow contracts > round-trips closed typed inputs, outputs, identity, and conditions [0.59ms]
+(pass) typed reusable subflow contracts > retains optional adapter and browser as exact app identity [0.05ms]
+(pass) typed reusable subflow contracts > rejects unsupported versions and unknown fields [0.37ms]
+(pass) typed reusable subflow contracts > rejects raw input values instead of persisting them in metadata [0.04ms]
+(pass) typed reusable subflow contracts > rejects duplicate or malformed typed inputs and outputs [0.08ms]
+(pass) typed reusable subflow contracts > requires executable bounds and stable resource identifiers [0.10ms]
+(pass) typed reusable subflow contracts > requires explicit non-new-device provenance and bounded curated artifacts [0.34ms]
+(pass) typed reusable subflow contracts > exact identity never crosses app, build, schema, adapter, or browser [0.05ms]
+(pass) typed reusable subflow contracts > miss diagnoses remain exact and fail closed [0.08ms]
+
+packages/core/test/orchestration.test.ts:
+(pass) vendor-independent orchestration > core source has no platform, demo, UI, filesystem, or vendor imports [0.57ms]
+(pass) vendor-independent orchestration > a warm constructor/spy proves no explorer or repairer is constructed or invoked [0.82ms]
+(pass) vendor-independent orchestration > a normal miss invokes the cold explorer once and returns its verified metrics [0.07ms]
+(pass) vendor-independent orchestration > explicit explore also uses the injected cold lifecycle and times the whole command [0.06ms]
+(pass) vendor-independent orchestration > a stale-build miss uses exactly one bounded repair and no explorer [0.07ms]
+(pass) vendor-independent orchestration > a stale selector on an exact hit enters only the bounded repair plugin [0.05ms]
+(pass) vendor-independent orchestration > product_assertion reports and stops without constructing a repairer or explorer [0.04ms]
+(pass) vendor-independent orchestration > unknown reports and stops without constructing a repairer or explorer
+(pass) vendor-independent orchestration > remember independently verifies before persistence and rejects failures without exploration [0.23ms]
+(pass) vendor-independent orchestration > rejected exploration and repair remain failures rather than falling through to a pass [0.05ms]
+(pass) vendor-independent orchestration > an exact hit never constructs or calls an opt-in embedding provider [0.04ms]
+(pass) vendor-independent orchestration > a semantic selection replays its stored flow and validates the selected exact identity [0.72ms]
+(pass) vendor-independent orchestration > a failed semantic replay stays failed and never uses exploration or semantic repair [0.17ms]
+(pass) vendor-independent orchestration > a semantic winner changed after embedding is revalidated before any replay [0.10ms]
+(pass) vendor-independent orchestration > missing embedding service preserves the ordinary miss/explore lifecycle [0.06ms]
+(pass) vendor-independent orchestration > an adversarial goal stops before provider or explorer construction [0.09ms]
+
+packages/maestro/test/subflow-composition.test.ts:
+(pass) bounded verified login composition > pure composition contains a reference and all new assertions, never login commands or values [0.24ms]
+(pass) bounded verified login composition > rejects nested launch, nested composition, headers, and duplicated login controls [0.19ms]
+(pass) bounded verified login composition > assertion accounting follows reused runFlow references and detects cycles [1.41ms]
+(pass) bounded verified login composition > failed independent login verification never calls reusable segment persistence [0.79ms]
+(pass) bounded verified login composition > a passing run cannot save a segment when runner assertions disagree with its contract [0.74ms]
+(pass) bounded verified login composition > unavailable exact segment identity fails closed before execution or goal persistence [0.65ms]
+(pass) bounded verified login composition > goal-store replacement failure retains memory and verified login bytes after a passing run [32.52ms]
+(pass) bounded verified login composition > executable clean-state, exact-cache, and byte-preservation evidence matches curated YAML [54.69ms]
+
+packages/store-local/test/verified-subflow-store.test.ts:
+(pass) local verified reusable segment store > persists actual YAML only with passing validation and reopens an exact hit [1.40ms]
+(pass) local verified reusable segment store > rejects failed validation before creating segment memory [0.52ms]
+(pass) local verified reusable segment store > partitions lookup by exact app, build, platform, and schema identity [1.36ms]
+(pass) local verified reusable segment store > reports missing YAML and rejects checksum tampering [2.59ms]
+(pass) local verified reusable segment store > fails closed on malformed or duplicate segment metadata [1.33ms]
+(pass) local verified reusable segment store > metadata replacement failure retains the previous segment and index byte-for-byte [2.49ms]
+(pass) local verified reusable segment store > flow write failure creates no successful index entry [1.11ms]
+
+ 40 pass
+ 0 fail
+ 215 expect() calls
+Ran 40 tests across 4 files. [127.00ms]

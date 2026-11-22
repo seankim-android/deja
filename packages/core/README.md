@@ -34,6 +34,13 @@ replay/exploration fallback. Neither orchestration nor `WalkStore` calls this mo
 cannot broaden cache identity or the P0 execution path. See
 [`docs/ROUTE_GRAPH.md`](../../docs/ROUTE_GRAPH.md).
 
+`src/subflow.ts` similarly remains outside `WalkCache.run`: it defines exact-identity reusable segment
+contracts with typed input descriptors (not values), outputs, conditions, counts, and provenance.
+`VerifiedSubflowStore` is not another goal cache and never does semantic selection. The Maestro edge
+owns independent segment verification, explicit reference-based composition, and complete-journey
+verification before goal persistence. See
+[`docs/SUBFLOW_COMPOSITION.md`](../../docs/SUBFLOW_COMPOSITION.md).
+
 Concrete wiring lives at the edges: `store-local`, `store-sqlite`, `maestro`, `agent-openclaw`,
 `repair`, and the headless CLI's local JSON reporter. Their richer vendor-specific records are
 translated into the shared result contract without weakening their original safety gates. WALK-019

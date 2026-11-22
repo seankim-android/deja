@@ -1,0 +1,162 @@
+{
+  "schemaVersion": 1,
+  "ticket": "WALK-018",
+  "generatedAt": "2026-11-22T21:17:16.852Z",
+  "newDeviceRunRecorded": false,
+  "provenance": {
+    "kind": "curated-evidence",
+    "ticket": "WALK-020",
+    "runId": "walk020-android-checkout-06",
+    "sourceFlowSha256": "e95532ce04a4e125d3bd56e1b9d5d367b31dd67eed4441c56271ca52f3c3d0a1",
+    "sourceValidationAt": "2026-11-22T20:27:33.668Z",
+    "buildFingerprint": "6aec5fea876938db14007ba3dbcb91f698832fe855886abd9dea1e7b28861759"
+  },
+  "previousGoalMemorySha256": "f0055fce579bc3bb8fbd3d3cd77e4fa282b6534e7f7a561787b97f7441df6b64",
+  "loginSegment": {
+    "segmentId": "login-v1",
+    "flowPath": "spikes/001-android-walkcache/evidence/walk018/segments/login-v1/android-c415a62dae8b1346213ac1f92c5201d2a8c17e01d98c84e6ab979f4d785f3266.yaml",
+    "storedFlowPath": ".walkcache/segments/login-v1/android-c415a62dae8b1346213ac1f92c5201d2a8c17e01d98c84e6ab979f4d785f3266.yaml",
+    "flowSha256": "c415a62dae8b1346213ac1f92c5201d2a8c17e01d98c84e6ab979f4d785f3266",
+    "independentlyVerified": true,
+    "verificationEndedAt": "2026-11-22T21:17:16.820Z",
+    "cleanState": {
+      "clearStateLaunches": 1,
+      "steps": 11,
+      "reusedSteps": 0,
+      "assertions": 5,
+      "finalProductAssertionPassed": false,
+      "screen": "catalog"
+    },
+    "inputs": [
+      {
+        "name": "username",
+        "kind": "text",
+        "required": true
+      },
+      {
+        "name": "password",
+        "kind": "credential",
+        "required": true
+      }
+    ],
+    "outputs": [
+      {
+        "name": "authenticatedCatalog",
+        "kind": "screen",
+        "resourceId": "screen_catalog"
+      }
+    ],
+    "preconditions": [
+      {
+        "kind": "clean-app-launch"
+      }
+    ],
+    "postconditions": [
+      {
+        "kind": "screen-visible",
+        "resourceId": "screen_catalog"
+      }
+    ]
+  },
+  "composition": {
+    "status": "composed",
+    "goal": "Sign in and check out Mochi sticker pack",
+    "candidateSha256": "59778cf6a4dd43d2cac304e2af0145fd6ffde695031e8154221832f5295908ab",
+    "storedFlowSha256": "59778cf6a4dd43d2cac304e2af0145fd6ffde695031e8154221832f5295908ab",
+    "verificationEndedAt": "2026-11-22T21:17:16.831Z",
+    "steps": {
+      "reusedSteps": 11,
+      "newlyExploredSteps": 11,
+      "totalSteps": 22,
+      "reusedAssertions": 5,
+      "newAssertions": 9,
+      "totalAssertions": 14
+    },
+    "modelCalls": {
+      "composition": 0,
+      "newExploration": 0,
+      "segmentVerification": 0,
+      "fullJourneyVerification": 0,
+      "basis": "Curated continuation and deterministic process runner; no explorer or model client is constructed"
+    },
+    "cleanState": {
+      "clearStateLaunches": 1,
+      "steps": 22,
+      "reusedSteps": 11,
+      "assertions": 14,
+      "finalProductAssertionPassed": true,
+      "screen": "confirmation"
+    },
+    "finalProductAssertionsRetained": [
+      "order_confirmation: Order confirmed",
+      "screen_confirmation: Order #WC-1001 · Mochi sticker pack"
+    ]
+  },
+  "exactCacheReplay": {
+    "cacheStatus": "hit",
+    "outcome": "passed",
+    "modelCalls": 0,
+    "explorerConstructions": 0,
+    "assertions": 14,
+    "cleanState": {
+      "clearStateLaunches": 1,
+      "steps": 22,
+      "reusedSteps": 11,
+      "assertions": 14,
+      "finalProductAssertionPassed": true,
+      "screen": "confirmation"
+    }
+  },
+  "failedCompositionPreservation": {
+    "status": "rejected",
+    "failureCategory": "selector",
+    "before": {
+      ".walkcache/memory/walks.json": {
+        "sha256": "e5a24bb8a5ef537d70d027bfa1dd1f3be0121cfa23293010b15aa84a658fc522",
+        "bytes": 2512
+      },
+      ".walkcache/segments/index.json": {
+        "sha256": "021e387d525bfcd5768f8209c1c2046a1a683005bd663ade1e2fda6dc1b657fb",
+        "bytes": 2121
+      },
+      ".walkcache/segments/login-v1/android-c415a62dae8b1346213ac1f92c5201d2a8c17e01d98c84e6ab979f4d785f3266.yaml": {
+        "sha256": "c415a62dae8b1346213ac1f92c5201d2a8c17e01d98c84e6ab979f4d785f3266",
+        "bytes": 473
+      },
+      ".walkcache/flows/checkout/android-e95532ce04a4e125d3bd56e1b9d5d367b31dd67eed4441c56271ca52f3c3d0a1.yaml": {
+        "sha256": "e95532ce04a4e125d3bd56e1b9d5d367b31dd67eed4441c56271ca52f3c3d0a1",
+        "bytes": 1025
+      }
+    },
+    "after": {
+      ".walkcache/memory/walks.json": {
+        "sha256": "e5a24bb8a5ef537d70d027bfa1dd1f3be0121cfa23293010b15aa84a658fc522",
+        "bytes": 2512
+      },
+      ".walkcache/segments/index.json": {
+        "sha256": "021e387d525bfcd5768f8209c1c2046a1a683005bd663ade1e2fda6dc1b657fb",
+        "bytes": 2121
+      },
+      ".walkcache/segments/login-v1/android-c415a62dae8b1346213ac1f92c5201d2a8c17e01d98c84e6ab979f4d785f3266.yaml": {
+        "sha256": "c415a62dae8b1346213ac1f92c5201d2a8c17e01d98c84e6ab979f4d785f3266",
+        "bytes": 473
+      },
+      ".walkcache/flows/checkout/android-e95532ce04a4e125d3bd56e1b9d5d367b31dd67eed4441c56271ca52f3c3d0a1.yaml": {
+        "sha256": "e95532ce04a4e125d3bd56e1b9d5d367b31dd67eed4441c56271ca52f3c3d0a1",
+        "bytes": 1025
+      }
+    },
+    "byteForByteUnchanged": true,
+    "segmentIndexSha256": "021e387d525bfcd5768f8209c1c2046a1a683005bd663ade1e2fda6dc1b657fb",
+    "segmentFlowSha256": "c415a62dae8b1346213ac1f92c5201d2a8c17e01d98c84e6ab979f4d785f3266",
+    "lastKnownGoodMemorySha256": "e5a24bb8a5ef537d70d027bfa1dd1f3be0121cfa23293010b15aa84a658fc522",
+    "previousGoalStillUsable": true,
+    "finalProductAssertionsUnchanged": true
+  },
+  "logs": {
+    "loginVerification": "spikes/001-android-walkcache/evidence/walk018/walk018-login-verification.log",
+    "cleanStateComposition": "spikes/001-android-walkcache/evidence/walk018/walk018-clean-state-composition.log",
+    "exactReplay": "spikes/001-android-walkcache/evidence/walk018/walk018-exact-replay.log",
+    "failedComposition": "spikes/001-android-walkcache/evidence/walk018/walk018-failed-composition.log"
+  }
+}
