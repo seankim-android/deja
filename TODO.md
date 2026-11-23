@@ -4,11 +4,11 @@
 
 Submitted on Nov 22, 2026: [X post](https://x.com/kssc0112/status/2124667198837059953), [r/cerebras post](https://www.reddit.com/r/Cerebras/comments/1y34xuv/i_made_kimi_k31_pro_on_cerebras_test_my_app_once/), and the [Discord #share-your-demo post](https://discord.com/channels/1085960591052644463/1574227471706886236) (General Demo).
 
-Tickets WALK-001 to WALK-014 and WALK-016 to WALK-020 are complete. History and evidence: [tickets/README.md](tickets/README.md).
+Tickets WALK-001 to WALK-014 and WALK-016 to WALK-020 are complete. The backlog lives in the Linear team DEJA. Evidence stays in the repo (`spikes/*/evidence/`, `demo/live-evidence/`); the old `tickets/` files are in git history before their removal.
 
 ## Open
 
-- [ ] Make Déjà a consumable SDK: see [docs/SDK_PLAN.md](docs/SDK_PLAN.md).
+- [ ] Make Déjà a consumable SDK: see [docs/SDK_PLAN.md](docs/SDK_PLAN.md). Open work is tracked in the Linear team DEJA; Blankaday is the first consumer.
 
 ## Standing rules
 

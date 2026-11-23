@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, realpath, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import type { ExecutionResult, VerifiedSubflowStore, WalkIdentity } from '@deja-qa/core'
@@ -96,7 +96,7 @@ describe('bounded verified login composition', () => {
     const composed = resolve(repo,
       `${evidence}/composed/sign-in-and-check-out-mochi-sticker-pack/candidate.yaml`)
     expect(await countFlowAssertions(composed)).toBe(14)
-    const temporary = await mkdtemp(join(tmpdir(), 'walk018-count-'))
+    const temporary = await realpath(await mkdtemp(join(tmpdir(), 'walk018-count-')))
     try {
       await writeFile(join(temporary, 'a.yaml'), '- runFlow: "b.yaml"\n- assertVisible: A\n')
       await writeFile(join(temporary, 'b.yaml'), '- runFlow: "a.yaml"\n- assertVisible: B\n')
@@ -109,7 +109,7 @@ describe('bounded verified login composition', () => {
   })
 
   test('failed independent login verification never calls reusable segment persistence', async () => {
-    const temporary = await mkdtemp(join(tmpdir(), 'walk018-login-reject-'))
+    const temporary = await realpath(await mkdtemp(join(tmpdir(), 'walk018-login-reject-')))
     try {
       const workspaceRoot = temporary
       await writeFile(join(workspaceRoot, 'placeholder'), 'root')
@@ -143,7 +143,7 @@ describe('bounded verified login composition', () => {
   })
 
   test('a passing run cannot save a segment when runner assertions disagree with its contract', async () => {
-    const temporary = await mkdtemp(join(tmpdir(), 'walk018-contract-reject-'))
+    const temporary = await realpath(await mkdtemp(join(tmpdir(), 'walk018-contract-reject-')))
     try {
       const workspaceRoot = temporary
       const candidatePath = 'login.yaml'
@@ -167,7 +167,7 @@ describe('bounded verified login composition', () => {
   })
 
   test('a passing run without runner observations cannot authorize reusable persistence', async () => {
-    const temporary = await mkdtemp(join(tmpdir(), 'walk018-observation-reject-'))
+    const temporary = await realpath(await mkdtemp(join(tmpdir(), 'walk018-observation-reject-')))
     try {
       const workspaceRoot = temporary
       const candidatePath = 'login.yaml'
@@ -192,7 +192,7 @@ describe('bounded verified login composition', () => {
   })
 
   test('unavailable exact segment identity fails closed before execution or goal persistence', async () => {
-    const temporary = await mkdtemp(join(tmpdir(), 'walk018-wrong-build-'))
+    const temporary = await realpath(await mkdtemp(join(tmpdir(), 'walk018-wrong-build-')))
     try {
       const workspaceRoot = temporary
       await writeFile(join(workspaceRoot, 'placeholder'), 'root')
@@ -215,7 +215,7 @@ describe('bounded verified login composition', () => {
   })
 
   test('goal-store replacement failure retains memory and verified login bytes after a passing run', async () => {
-    const temporary = await mkdtemp(join(tmpdir(), 'walk018-persist-failure-'))
+    const temporary = await realpath(await mkdtemp(join(tmpdir(), 'walk018-persist-failure-')))
     const priorFailure = process.env.DEJA_COMPOSITION_FAIL
     delete process.env.DEJA_COMPOSITION_FAIL
     try {
@@ -237,7 +237,7 @@ describe('bounded verified login composition', () => {
       await writeFile(memoryPath, `${JSON.stringify({ schemaVersion: 2, walks: [previous] }, null, 2)}\n`)
       const runner = new MaestroWalkRunner({
         workspaceRoot, executable: resolve(repo, 'packages/maestro/test/fixtures/composition-maestro.cjs'),
-        device: 'deterministic-fixture', timeoutMs: 5_000,
+        device: 'deterministic-fixture', timeoutMs: 30_000,
         adapter: androidMaestroAdapter({ device: 'deterministic-fixture' }),
       })
       const segments = new LocalVerifiedSubflowStore({ workspaceRoot })

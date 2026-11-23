@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { existsSync } from 'node:fs'
-import { mkdir, mkdtemp, readFile, readdir, rename, rm, symlink, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, realpath, readFile, readdir, rename, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { basename, join, resolve } from 'node:path'
 import type { WalkIdentity, WalkStore } from '@deja-qa/core'
@@ -50,7 +50,7 @@ async function temporaryFiles(root: string): Promise<string[]> {
 }
 
 async function fixture() {
-  const temporary = await mkdtemp(join(tmpdir(), 'deja-store-contract-'))
+  const temporary = await realpath(await mkdtemp(join(tmpdir(), 'deja-store-contract-')))
   const workspaceRoot = join(temporary, 'workspace')
   await mkdir(join(workspaceRoot, '.deja/attempts'), { recursive: true })
   const candidatePath = '.deja/attempts/candidate.yaml'
@@ -348,6 +348,48 @@ export function runWalkStoreContractTests(implementation: WalkStoreContractImple
         expect(await readFile(outsideMetadata)).toEqual(beforeMetadata)
         expect(await readdir(outside)).toEqual(beforeEntries)
         expect(await readFile(join(ctx.workspaceRoot, persisted.flowPath))).toEqual(beforeFlow)
+      } finally {
+        await ctx.cleanup()
+      }
+    })
+
+    test('a candidate whose bytes differ from expectedFlowSha256 is refused before any write', async () => {
+      const ctx = await context()
+      try {
+        const { persisted } = await ctx.seed()
+        const store = ctx.makeStore()
+        const beforeMetadata = await implementation.snapshotMetadata(ctx.workspaceRoot)
+        const beforeFlows = await readdir(join(ctx.workspaceRoot, '.deja/flows'), { recursive: true })
+        await expect(store.persistVerifiedCandidate({
+          identity: contractIdentity({ buildFingerprint: 'b'.repeat(64) }),
+          candidatePath: ctx.candidatePath,
+          validation: { passed: true, at: laterValidation }, origin: 'replayed-on-new-build',
+          expectedFlowSha256: 'c'.repeat(64),
+        })).rejects.toThrow('nothing was stored')
+        expect(await implementation.snapshotMetadata(ctx.workspaceRoot)).toEqual(beforeMetadata)
+        expect(await readdir(join(ctx.workspaceRoot, '.deja/flows'), { recursive: true })).toEqual(beforeFlows)
+        expect(await temporaryFiles(ctx.workspaceRoot)).toEqual([])
+        expect((await store.lookup(contractIdentity())).status).toBe('hit')
+        expect(persisted.flowSha256).toHaveLength(64)
+      } finally {
+        await ctx.cleanup()
+      }
+    })
+
+    test('a matching expectedFlowSha256 stores the walk with origin replayed-on-new-build', async () => {
+      const ctx = await context()
+      try {
+        const { persisted } = await ctx.seed()
+        const store = ctx.makeStore()
+        const next = await store.persistVerifiedCandidate({
+          identity: contractIdentity({ buildFingerprint: 'b'.repeat(64) }),
+          candidatePath: ctx.candidatePath,
+          validation: { passed: true, at: laterValidation }, origin: 'replayed-on-new-build',
+          expectedFlowSha256: persisted.flowSha256,
+        })
+        expect(next.walk.origin).toBe('replayed-on-new-build')
+        const hit = await store.lookup(contractIdentity({ buildFingerprint: 'b'.repeat(64) }))
+        expect(hit.status === 'hit' && hit.walk.origin).toBe('replayed-on-new-build')
       } finally {
         await ctx.cleanup()
       }
