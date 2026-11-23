@@ -1,6 +1,6 @@
 // typescript 7.0.2
 // entry . (./src/index.ts)
-// exports: ASSERTION_HASH_VERSION, ActionChoice, ActionChooser, ArtifactKind, AssertionHashChangedError, CONTRACT_VERSION, CacheMissReason, CacheStatus, CandidateAction, CandidateSnapshot, CompositionModelMetrics, CompositionStepMetrics, CreateDejaOptions, DEFAULT_FLOW_SCHEMA_VERSION, DEFAULT_MINIMUM_MARGIN, DEFAULT_MINIMUM_SIMILARITY, Deja, DejaAdapter, DejaCallOptions, DejaClient, DejaClientRememberOptions, DejaClientRunOptions, DejaDependencies, DejaFactoryContext, DejaRememberOptions, DejaRunOptions, ElementObservation, ElementRole, EngineReport, EvidenceArtifact, ExactFirstLookupResult, ExactFirstWalkRetriever, ExecutionResult, ExpectedClosureMismatchError, ExpectedFlowChecksumMismatchError, ExplorationDetails, ExplorationDriver, ExplorationResult, ExploreRequest, FailedBranch, FailureCategory, FingerprintConfig, FingerprintRules, FlowAssertion, FlowChangedError, FlowReference, FlowReferenceError, Goal, GoalEmbeddingProvider, InvalidRouteGraphError, InvalidSubflowError, InvalidWalkManifestError, LaunchProfile, LookupHit, LookupMiss, MANIFEST_HASH_VERSION, MAX_OBSERVED_ELEMENTS, ManifestOwnerRules, ManifestProfile, ManifestWalk, NewBuildReplayReport, Observation, ObservationReport, OwnerRuleError, PersistVerifiedOptions, PersistVerifiedRepairOptions, PersistVerifiedSubflowOptions, PersistedWalk, ROUTE_GRAPH_FALLBACK, ROUTE_GRAPH_SCHEMA_VERSION, RawElement, RepairProvenance, RepairRequest, RepairResult, ReportReceipt, RouteAction, RouteGraph, RouteGraphProvenance, RunArtifact, RunOutcome, RunReporter, RunResult, RunnerRequest, SCREEN_FINGERPRINT_V2, SCREEN_FINGERPRINT_VERSION, ScreenFingerprintV2, ScreenMatch, ScreenMatchOptions, ScreenMatchV2, ScreenNode, ScreenObservation, Segment, SelectorRepairer, SemanticLookupReason, SemanticLookupReport, SemanticLookupStatus, SemanticRetrievalOptions, SemanticSelectedWalk, SourceDiff, StaleBuildPolicy, StepResult, StoredFlowFile, StoredScreen, StoredValidation, StoredWalk, SubflowContract, SubflowEvidenceArtifact, SubflowIdentity, SubflowInput, SubflowOutput, SubflowPostcondition, SubflowPrecondition, SubflowProvenance, SystemUiKind, SystemUiState, UnsupportedPlatformExplorer, VERIFIED_SUBFLOW_SCHEMA_VERSION, VerifiedSubflow, VerifiedSubflowHit, VerifiedSubflowLookup, VerifiedSubflowStore, VerifiedTransition, WALK_MANIFEST_VERSION, WALK_RESULT_SCHEMA_VERSION, WalkExplorer, WalkFailure, WalkIdentity, WalkManifest, WalkRunner, WalkStore, WalkValidation, checkManifestFlowPath, cosineSimilarity, createDeja, emptyWalkManifest, findChromeIds, findFlowAssertions, findFlowReferences, fingerprintScreen, fingerprintScreenV2, goalsAreContradictory, hasAdversarialGoalMarker, isDynamicId, makeScreenNode, manifestWalkKey, matchScreen, matchScreenV2, normalizeElements, normalizeGoal, normalizedSnapshot, observationReport, parseWalkManifest, sameSubflowIdentity, serializeWalkManifest, subflowMissReason, validateRouteGraph, validateSubflowContract
+// exports: ASSERTION_HASH_VERSION, ActionChoice, ActionChooser, ArtifactKind, AssertionHashChangedError, CONTRACT_VERSION, CacheMissReason, CacheStatus, CandidateAction, CandidateSnapshot, CompositionModelMetrics, CompositionStepMetrics, CreateDejaOptions, DEFAULT_FLOW_SCHEMA_VERSION, DEFAULT_MINIMUM_MARGIN, DEFAULT_MINIMUM_SIMILARITY, Deja, DejaAdapter, DejaCallOptions, DejaClient, DejaClientRememberOptions, DejaClientRunOptions, DejaDependencies, DejaFactoryContext, DejaRememberOptions, DejaRunOptions, ElementObservation, ElementRole, EngineReport, EvidenceArtifact, ExactFirstLookupResult, ExactFirstWalkRetriever, ExecutionResult, ExpectedClosureMismatchError, ExpectedFlowChecksumMismatchError, ExplorationDetails, ExplorationDriver, ExplorationResult, ExploreRequest, FailedBranch, FailureCategory, FingerprintConfig, FingerprintRules, FlowAssertion, FlowChangedError, FlowReference, FlowReferenceError, Goal, GoalEmbeddingProvider, InvalidRouteGraphError, InvalidSubflowError, InvalidWalkManifestError, LaunchProfile, LookupHit, LookupMiss, MANIFEST_HASH_VERSION, MAX_OBSERVED_ELEMENTS, ManifestOwnerRules, ManifestProfile, ManifestWalk, MigrateOptions, MigratedWalk, MigrationReport, NewBuildReplayReport, Observation, ObservationReport, OwnerRuleError, PersistVerifiedOptions, PersistVerifiedRepairOptions, PersistVerifiedSubflowOptions, PersistedWalk, ROUTE_GRAPH_FALLBACK, ROUTE_GRAPH_SCHEMA_VERSION, RawElement, RepairProvenance, RepairRequest, RepairResult, ReportReceipt, RouteAction, RouteGraph, RouteGraphProvenance, RunArtifact, RunOutcome, RunReporter, RunResult, RunnerRequest, SCREEN_FINGERPRINT_V2, SCREEN_FINGERPRINT_VERSION, ScreenFingerprintV2, ScreenMatch, ScreenMatchOptions, ScreenMatchV2, ScreenNode, ScreenObservation, Segment, SelectorRepairer, SemanticLookupReason, SemanticLookupReport, SemanticLookupStatus, SemanticRetrievalOptions, SemanticSelectedWalk, SkippedWalk, SourceDiff, StaleBuildPolicy, StepResult, StoredFlowFile, StoredScreen, StoredValidation, StoredWalk, SubflowContract, SubflowEvidenceArtifact, SubflowIdentity, SubflowInput, SubflowOutput, SubflowPostcondition, SubflowPrecondition, SubflowProvenance, SystemUiKind, SystemUiState, UnsupportedPlatformExplorer, VERIFIED_SUBFLOW_SCHEMA_VERSION, VerifiedSubflow, VerifiedSubflowHit, VerifiedSubflowLookup, VerifiedSubflowStore, VerifiedTransition, WALK_MANIFEST_VERSION, WALK_RESULT_SCHEMA_VERSION, WalkExplorer, WalkFailure, WalkIdentity, WalkManifest, WalkRunner, WalkStore, WalkValidation, checkManifestFlowPath, cosineSimilarity, createDeja, emptyWalkManifest, findChromeIds, findFlowAssertions, findFlowReferences, findFlowStrings, fingerprintScreen, fingerprintScreenV2, goalsAreContradictory, hasAdversarialGoalMarker, isDynamicId, makeScreenNode, manifestWalkKey, matchScreen, matchScreenV2, normalizeElements, normalizeGoal, normalizedSnapshot, observationReport, parseWalkManifest, sameSubflowIdentity, serializeWalkManifest, subflowMissReason, validateRouteGraph, validateSubflowContract
 export type ActionChoice = {
     action: CandidateAction | null;
     reason: string;
@@ -76,6 +76,7 @@ export declare class Deja {
     private readonly dependencies;
     constructor(dependencies: DejaDependencies);
     private get manifestMode();
+    private get exploreOutputMissing();
     private now;
     private artifactId;
     private base;
@@ -247,6 +248,7 @@ export declare function findChromeIds(screens: {
 }): string[];
 export declare function findFlowAssertions(contents: string): FlowAssertion[];
 export declare function findFlowReferences(contents: string): FlowReference[];
+export declare function findFlowStrings(contents: string): string[] | null;
 export type FingerprintConfig = {
     screenMarkerPattern?: string;
     ignore?: string[];
@@ -348,6 +350,29 @@ export declare function manifestWalkKey(walk: Pick<ManifestWalk, 'goal' | 'appId
 export declare function matchScreen(graphInput: RouteGraph, options: ScreenMatchOptions): ScreenMatch;
 export declare function matchScreenV2(stored: StoredScreen[], current: ScreenFingerprintV2, expectedNodeId?: string): ScreenMatchV2;
 export declare const MAX_OBSERVED_ELEMENTS = 400;
+export type MigratedWalk = {
+    goal: string;
+    platform: string;
+    flow: string;
+    closureSha256: string;
+    assertionsSha256: string;
+    filesWritten: string[];
+    filesUnchanged: string[];
+    historyEntries: number;
+    olderWalksDropped: number;
+};
+export type MigrateOptions = {
+    dryRun?: boolean;
+    adapter?: string;
+};
+export type MigrationReport = {
+    dryRun: boolean;
+    manifestPath: string;
+    manifestChanged: boolean;
+    migrated: MigratedWalk[];
+    skipped: SkippedWalk[];
+    backupPath: string | null;
+};
 export type NewBuildReplayReport = {
     policy: StaleBuildPolicy;
     previousBuildFingerprint: string;
@@ -413,6 +438,7 @@ export type PersistedWalk = {
     manifest?: {
         path: string;
         changed: boolean;
+        filesWritten?: string[];
     };
 };
 export type PersistVerifiedOptions = {
@@ -625,6 +651,11 @@ export type SemanticSelectedWalk = {
     flowSha256: string;
 };
 export declare function serializeWalkManifest(manifest: WalkManifest): string;
+export type SkippedWalk = {
+    goal: string;
+    reason: 'not-passing' | 'subflows-not-stored' | 'copy-missing' | 'copy-changed' | 'adapter-unknown' | 'would-overwrite' | 'manifest-differs' | 'closure-error' | 'holds-fixture-value' | 'manifest-invalid' | 'slug-collision';
+    detail: string;
+};
 export type SourceDiff = {
     path: string | null;
     affectedFiles: string[];
@@ -782,6 +813,7 @@ export interface WalkRunner {
 }
 export interface WalkStore {
     readonly manifestPath?: string;
+    readonly manifestFlowsDir?: string;
     lookup(identity: WalkIdentity): Promise<LookupHit | LookupMiss>;
     lookupPreviousSuccessful(identity: WalkIdentity): Promise<LookupHit | LookupMiss>;
     snapshotCandidate?(candidatePath: string, directory: string): Promise<CandidateSnapshot>;
@@ -789,6 +821,7 @@ export interface WalkStore {
     persistVerifiedRepair(options: PersistVerifiedRepairOptions): Promise<PersistedWalk>;
     recordValidation(identity: WalkIdentity, validation: WalkValidation): Promise<StoredWalk>;
     list(): Promise<StoredWalk[]>;
+    migrateToManifest?(options?: MigrateOptions): Promise<MigrationReport>;
 }
 export type WalkValidation = {
     passed: boolean;

@@ -171,8 +171,14 @@ export async function collectFlowClosure(root: string, main: string): Promise<Fl
   return {
     main: posix(relative(base, main)),
     files,
-    sha256: sha256(files.map(file => `${file.path}\n${file.sha256}\n`).join('')),
+    sha256: closureSha256Of(files),
   }
+}
+
+/** The closure checksum: every path (from the closure root) and file checksum, sorted by path. */
+export function closureSha256Of(files: { path: string; sha256: string }[]) {
+  const sorted = [...files].sort((left, right) => (left.path < right.path ? -1 : left.path > right.path ? 1 : 0))
+  return sha256(sorted.map(file => `${file.path}\n${file.sha256}\n`).join(''))
 }
 
 export type StoredClosurePlan = {

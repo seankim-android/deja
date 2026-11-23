@@ -21,7 +21,7 @@ function createSQLiteStore(
   workspaceRoot: string,
   failures: StoreFailureInjection = {},
   storeId?: string,
-  manifest?: { path: string; forbiddenValues?: string[] },
+  manifest?: { path: string; forbiddenValues?: string[]; flowsDir?: string },
 ) {
   return new SQLiteWalkStore({
     workspaceRoot,

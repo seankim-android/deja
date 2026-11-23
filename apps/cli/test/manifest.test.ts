@@ -130,6 +130,91 @@ describe('manifest mode on the CLI', () => {
     }
   })
 
+  test('migrate moves an old store into the tree as reviewable files, and then run replays them', async () => {
+    const { temporary, root, manifest } = await workspace({ manifest: undefined })
+    try {
+      // Before: the old way. remember copies the flow into .deja/flows.
+      expect((await execute(root, ['remember', 'today', '--flow', '.maestro/flows/today.yaml'])).exitCode).toBe(0)
+      expect((await readFile(join(root, '.deja/memory/walks.json'), 'utf8'))).toContain('"schemaVersion": 3')
+      const config = JSON.parse(await readFile(join(root, 'deja.config.json'), 'utf8'))
+      await writeFile(join(root, 'deja.config.json'), JSON.stringify({ ...config, manifest: 'deja.walks.json' }))
+
+      const blocked = await execute(root, ['run', 'today'])
+      expect(blocked.exitCode).toBe(6)
+      expect(blocked.report).toMatchObject({ outcome: 'needs-migration', passed: false, modelCalls: 0 })
+
+      const dry = await execute(root, ['migrate', '--dry-run'])
+      expect(dry.exitCode).toBe(0)
+      expect(dry.stdout).toContain('dry run, nothing written')
+      expect(dry.stdout).toContain('.maestro/flows/deja/today/flows/today.yaml')
+      await expect(readFile(join(root, 'deja.walks.json'))).rejects.toBeDefined()
+      await expect(readFile(join(root, '.maestro/flows/deja/today/flows/today.yaml'))).rejects.toBeDefined()
+
+      const migrated = await execute(root, ['migrate', '--json'])
+      expect(migrated.exitCode).toBe(0)
+      const report = JSON.parse(migrated.stdout).migration
+      expect(report).toMatchObject({ dryRun: false, manifestPath: 'deja.walks.json', skipped: [] })
+      expect(report.migrated[0]).toMatchObject({ goal: 'today', flow: '.maestro/flows/deja/today/flows/today.yaml' })
+      expect(report.backupPath).toBe('.deja/memory/walks.json.schema3.bak')
+      expect(await readFile(join(root, '.maestro/flows/deja/today/flows/today.yaml'), 'utf8')).toBe(TODAY)
+      expect(await readFile(join(root, '.maestro/flows/deja/today/subflows/type.yaml'), 'utf8')).toBe(TYPE)
+      const written = await manifest()
+      expect(JSON.parse(written).walks[0]).toMatchObject({ goal: 'today', flow: '.maestro/flows/deja/today/flows/today.yaml' })
+      expect(written).not.toContain(root)
+
+      const warm = await execute(root, ['run', 'today'])
+      expect(warm.exitCode).toBe(0)
+      expect(warm.report).toMatchObject({ cacheStatus: 'hit', passed: true, yamlPath: '.maestro/flows/deja/today/flows/today.yaml' })
+      const again = await execute(root, ['migrate'])
+      expect(again.exitCode).toBe(0)
+      expect(again.stdout).toContain('0 moved, 0 left')
+    } finally {
+      await rm(temporary, { recursive: true, force: true })
+    }
+  })
+
+  test('migrate needs a manifest, takes no goal, and flowsDir must be a safe folder', async () => {
+    const without = await workspace({ manifest: undefined })
+    try {
+      const result = await execute(without.root, ['migrate'])
+      expect(result.exitCode).toBe(2)
+      expect(result.stderr).toContain('migrate needs a "manifest"')
+      expect((await execute(without.root, ['run', 'today', '--dry-run'])).exitCode).toBe(2)
+    } finally {
+      await rm(without.temporary, { recursive: true, force: true })
+    }
+    for (const flowsDir of ['/abs', '../out', '.deja/flows', '.DEJA/flows', 'a//b']) {
+      const bad = await workspace({ flowsDir })
+      try {
+        const result = await execute(bad.root, ['migrate', '--dry-run'])
+        expect(result.exitCode).toBe(2)
+        expect(result.stderr).toContain('flowsDir')
+      } finally {
+        await rm(bad.temporary, { recursive: true, force: true })
+      }
+    }
+    const shortValue = await workspace({ fixtureCredentials: [{ label: 'Pin', value: 'ab' }] })
+    try {
+      const result = await execute(shortValue.root, ['list'])
+      expect(result.exitCode).toBe(2)
+      expect(result.stderr).toContain('shorter than 3 characters')
+    } finally {
+      await rm(shortValue.temporary, { recursive: true, force: true })
+    }
+    const orphan = await workspace({ manifest: undefined, flowsDir: '.maestro/x' })
+    try {
+      expect((await execute(orphan.root, ['list'])).stderr).toContain('flowsDir needs a manifest')
+    } finally {
+      await rm(orphan.temporary, { recursive: true, force: true })
+    }
+    const extra = await workspace()
+    try {
+      expect((await execute(extra.root, ['migrate', 'today'])).exitCode).toBe(2)
+    } finally {
+      await rm(extra.temporary, { recursive: true, force: true })
+    }
+  })
+
   test('a bad manifest, a bad config and a fixture credential in the manifest all fail closed', async () => {
     const { temporary, root } = await workspace()
     try {

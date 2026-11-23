@@ -10,6 +10,8 @@ import {
   type ExplorationDetails,
   type LookupHit,
   type LookupMiss,
+  type MigrateOptions,
+  type MigrationReport,
   type PersistedWalk,
   type PersistVerifiedOptions,
   type PersistVerifiedRepairOptions,
@@ -23,6 +25,7 @@ import {
   ConsumerFlows,
   readConsumerWalkFields,
 } from './consumer-flow.ts'
+import { runMigration } from './migration.ts'
 import {
   checkStoredSubflows,
   collectFlowClosure,
@@ -74,6 +77,11 @@ export type LocalWalkStoreOptions = {
     path: string
     /** Fixture values that must never be written into the manifest. */
     forbiddenValues?: string[]
+    /**
+     * Where a verified explore result is written as a new file of the consumer's, relative to the
+     * workspace (for example `.maestro/flows/deja`). Without it, explore output is refused.
+     */
+    flowsDir?: string
   }
   /** Injectable only to model filesystem failures deterministically; production uses fs.rename. */
   renameFile?: (temporaryPath: string, destinationPath: string) => Promise<void>
@@ -360,6 +368,8 @@ export class LocalWalkStore implements WalkStore {
   private readonly renameFile: (temporaryPath: string, destinationPath: string) => Promise<void>
   /** The manifest's workspace-relative path, when this store replays the consumer's own files. */
   readonly manifestPath: string | undefined
+  /** The folder where explore output is written, when this store can take it. */
+  readonly manifestFlowsDir: string | undefined
   private readonly consumer: ConsumerFlows | null
   private writerLock: WriterLock | null = null
 
@@ -370,9 +380,11 @@ export class LocalWalkStore implements WalkStore {
         workspaceRoot: this.workspaceRoot,
         manifestPath: options.manifest.path,
         ...(options.manifest.forbiddenValues ? { forbiddenValues: options.manifest.forbiddenValues } : {}),
+        ...(options.manifest.flowsDir !== undefined ? { flowsDir: options.manifest.flowsDir } : {}),
       })
       : null
     this.manifestPath = this.consumer?.manifestPath
+    this.manifestFlowsDir = this.consumer?.flowsDir
     this.relativeMemoryPath = storeMetadataPath(LOCAL_MEMORY_PATH, options.storeId)
     this.memoryPath = resolve(this.workspaceRoot, this.relativeMemoryPath)
     this.renameFile = options.renameFile ?? rename
@@ -570,17 +582,24 @@ export class LocalWalkStore implements WalkStore {
       // Validate all existing entries first: corrupt memory is never silently replaced.
       const memory = await this.loadMemory()
       const plan = await consumer.plan(memory.walks, identity, options)
-      await this.writeMemory({
-        schemaVersion: LOCAL_MEMORY_CONSUMER_SCHEMA_VERSION, walks: [...plan.remaining, plan.walk],
-      })
-      const changed = await plan.commit()
+      let changed: boolean
+      try {
+        await this.writeMemory({
+          schemaVersion: LOCAL_MEMORY_CONSUMER_SCHEMA_VERSION, walks: [...plan.remaining, plan.walk],
+        })
+        changed = await plan.commit()
+      } catch (error) {
+        // New files with no entry and no history would only block a retry: take them back.
+        await consumer.removeWritten(plan.filesWritten)
+        throw error
+      }
       return {
         walk: plan.walk,
         flowPath: plan.flowPath,
         flowSha256: plan.flowSha256,
         storedMetadataPath: this.relativeMemoryPath,
         atomicWrite: true,
-        manifest: { path: consumer.manifestPath, changed },
+        manifest: { path: consumer.manifestPath, changed, ...(plan.filesWritten.length > 0 ? { filesWritten: plan.filesWritten } : {}) },
       }
     })
   }
@@ -604,6 +623,22 @@ export class LocalWalkStore implements WalkStore {
 
   async list(): Promise<StoredWalk[]> {
     return [...(await this.loadMemory()).walks]
+  }
+
+  /** Manifest mode: move the schema 3 walks into the consumer's own files. See `runMigration`. */
+  async migrateToManifest(options: MigrateOptions = {}): Promise<MigrationReport> {
+    const consumer = this.consumer
+    if (!consumer) throw new Error('migrateToManifest needs a store built with a manifest')
+    if (!options.dryRun) this.acquireWriter()
+    const migrate = async () => runMigration({
+      root: await this.canonicalRoot(),
+      consumer,
+      walks: (await this.loadMemory()).walks,
+      options,
+      memoryFile: canonicalMetadataTarget(this.workspaceRoot, this.memoryPath).path,
+      writeWalks: walks => this.writeMemory({ schemaVersion: LOCAL_MEMORY_CONSUMER_SCHEMA_VERSION, walks }),
+    })
+    return options.dryRun ? migrate() : consumer.withLock(migrate)
   }
 
   async lookup(identityInput: WalkIdentity): Promise<LookupHit | LookupMiss> {
@@ -755,3 +790,6 @@ export {
   type ConsumerPlan,
 } from './consumer-flow.ts'
 export { MissingFlowFileError } from './flow-closure.ts'
+export { runMigration, type MigrationContext } from './migration.ts'
+export { checkFlowsDir, type MaterializePlan } from './consumer-flow.ts'
+export { ForbiddenValueTooShortError, MIN_FORBIDDEN_VALUE_LENGTH } from './secret-scan.ts'

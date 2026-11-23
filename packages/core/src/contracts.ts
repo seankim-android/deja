@@ -193,8 +193,11 @@ export type PersistedWalk = {
   flowSha256: string
   storedMetadataPath: string
   atomicWrite: true
-  /** Manifest mode: the manifest file Déjà wrote or checked. Déjà never commits it. */
-  manifest?: { path: string; changed: boolean }
+  /**
+   * Manifest mode: the manifest file Déjà wrote or checked, and the new flow files it wrote into the
+   * consumer's tree (explore output). Déjà never commits any of them.
+   */
+  manifest?: { path: string; changed: boolean; filesWritten?: string[] }
 }
 
 export type CandidateSnapshot = {
@@ -203,12 +206,59 @@ export type CandidateSnapshot = {
   closureSha256: string
 }
 
+export type MigrateOptions = {
+  /** Report what would be written, and write nothing. */
+  dryRun?: boolean
+  /** The adapter id to give a walk from before adapters were recorded. */
+  adapter?: string
+}
+
+export type MigratedWalk = {
+  goal: string
+  platform: string
+  /** The consumer file now named by the manifest, relative to the workspace root. */
+  flow: string
+  closureSha256: string
+  assertionsSha256: string
+  /** New files in the consumer's tree. */
+  filesWritten: string[]
+  /** Files that were already there with the same bytes. */
+  filesUnchanged: string[]
+  /** Validation entries kept from the old walk. */
+  historyEntries: number
+  /** Other old walks for this goal (older builds or flows) left only in the backup. */
+  olderWalksDropped: number
+}
+
+export type SkippedWalk = {
+  goal: string
+  reason: 'not-passing' | 'subflows-not-stored' | 'copy-missing' | 'copy-changed' | 'adapter-unknown' |
+    'would-overwrite' | 'manifest-differs' | 'closure-error' | 'holds-fixture-value' | 'manifest-invalid' | 'slug-collision'
+  detail: string
+}
+
+export type MigrationReport = {
+  dryRun: boolean
+  manifestPath: string
+  manifestChanged: boolean
+  migrated: MigratedWalk[]
+  /** Left as memory schema 3 walks. They give `needs-migration` until fixed or re-remembered. */
+  skipped: SkippedWalk[]
+  /** The schema 3 store file, kept beside the new one. Null on a dry run or when nothing migrated. */
+  backupPath: string | null
+}
+
 export interface WalkStore {
   /**
    * Set when the store replays the consumer's own files through a committed manifest. It is the
    * manifest's workspace-relative path. Stores without it replay their own copies.
    */
   readonly manifestPath?: string
+  /**
+   * Manifest mode: the folder (relative to the workspace root) where a verified explore result is
+   * written as a new file of the consumer's. Without it, explore output has nowhere to go.
+   */
+  readonly manifestFlowsDir?: string
   lookup(identity: WalkIdentity): Promise<LookupHit | LookupMiss>
   lookupPreviousSuccessful(identity: WalkIdentity): Promise<LookupHit | LookupMiss>
   /**
@@ -223,6 +273,12 @@ export interface WalkStore {
   persistVerifiedRepair(options: PersistVerifiedRepairOptions): Promise<PersistedWalk>
   recordValidation(identity: WalkIdentity, validation: WalkValidation): Promise<StoredWalk>
   list(): Promise<StoredWalk[]>
+  /**
+   * Manifest mode: turn the store's schema 3 walks into the consumer's own files plus manifest
+   * entries. Each copy under `.deja/flows` is written once into the flows folder; nothing is
+   * overwritten and nothing is committed.
+   */
+  migrateToManifest?(options?: MigrateOptions): Promise<MigrationReport>
 }
 
 /** A bounded provider call for one goal. Implementations are not constructed on an exact hit. */

@@ -1,4 +1,5 @@
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
+import { readFile } from 'node:fs/promises'
 import { spawn } from 'node:child_process'
 import { delimiter, relative, resolve, sep } from 'node:path'
 import type {
@@ -156,12 +157,16 @@ export class OpenClawWalkExplorer implements WalkExplorer {
     }, {
       clearAppState: async () => clearAndroidApp(configuration),
       verifyCandidate: async (candidatePath, attempt) => {
+        const hash = async () => createHash('sha256').update(await readFile(candidatePath)).digest('hex')
+        const before = await hash()
         const raw = await runner.runFlow(
           candidatePath,
           resolve(attempt, 'verification'),
           configuration.verificationTimeoutMs,
         )
-        return verificationDetails(root, raw, await runner.adapt(raw))
+        const flowSha256 = await hash()
+        if (flowSha256 !== before) throw new Error('The candidate changed while it was being verified; nothing was stored')
+        return { ...verificationDetails(root, raw, await runner.adapt(raw)), flowSha256 }
       },
       persistVerified: async (candidatePath, verification, metrics: ExplorationMetrics) => {
         if (!verification.passed || typeof verification.endedAt !== 'string') {
@@ -172,6 +177,8 @@ export class OpenClawWalkExplorer implements WalkExplorer {
           candidatePath,
           validation: { passed: true, at: verification.endedAt },
           origin: 'explore',
+          // The bytes that were verified are the only bytes that may be stored.
+          ...(typeof verification.flowSha256 === 'string' ? { expectedFlowSha256: verification.flowSha256 } : {}),
           exploration: metrics,
         })
         return {

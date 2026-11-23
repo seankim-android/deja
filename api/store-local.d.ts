@@ -1,7 +1,8 @@
 // typescript 7.0.2
 // entry . (./src/index.ts)
-// exports: ConsumerFlowError, ConsumerFlows, ConsumerFlowsOptions, ConsumerPlan, FlowClosureError, InvalidStoreIdError, InvalidSubflowMemoryError, InvalidWalkMemoryError, LOCAL_MEMORY_CONSUMER_SCHEMA_VERSION, LOCAL_MEMORY_PATH, LOCAL_MEMORY_SCHEMA_VERSION, LocalVerifiedSubflowStore, LocalVerifiedSubflowStoreOptions, LocalWalkStore, LocalWalkStoreOptions, LockHolder, LockTestHooks, MAESTRO_FLOW_SCHEMA_VERSION, ManifestChangedError, ManifestLockedError, MissingFlowFileError, StoreLockContentionError, StoreLockUnavailableError, StoreLockedError, VERIFIED_SUBFLOW_INDEX_PATH, WalkMemory, WriterLock, assertionsSha256, checkManifestPath, checkStoredSubflows, closureAssertions, collectFlowClosure, normalizeGoal, planStoredClosure, readConsumerWalkFields, readStoredFlowFiles, snapshotFlowClosure, storeMetadataPath
+// exports: ConsumerFlowError, ConsumerFlows, ConsumerFlowsOptions, ConsumerPlan, FlowClosureError, ForbiddenValueTooShortError, InvalidStoreIdError, InvalidSubflowMemoryError, InvalidWalkMemoryError, LOCAL_MEMORY_CONSUMER_SCHEMA_VERSION, LOCAL_MEMORY_PATH, LOCAL_MEMORY_SCHEMA_VERSION, LocalVerifiedSubflowStore, LocalVerifiedSubflowStoreOptions, LocalWalkStore, LocalWalkStoreOptions, LockHolder, LockTestHooks, MAESTRO_FLOW_SCHEMA_VERSION, MIN_FORBIDDEN_VALUE_LENGTH, ManifestChangedError, ManifestLockedError, MaterializePlan, MigrationContext, MissingFlowFileError, StoreLockContentionError, StoreLockUnavailableError, StoreLockedError, VERIFIED_SUBFLOW_INDEX_PATH, WalkMemory, WriterLock, assertionsSha256, checkFlowsDir, checkManifestPath, checkStoredSubflows, closureAssertions, collectFlowClosure, normalizeGoal, planStoredClosure, readConsumerWalkFields, readStoredFlowFiles, runMigration, snapshotFlowClosure, storeMetadataPath
 export declare function assertionsSha256(closure: FlowClosure): string;
+export declare function checkFlowsDir(path: string): string;
 export declare function checkManifestPath(path: string): string;
 export declare function checkStoredSubflows(root: string, flowPath: string, subflowFiles: StoredFlowFile[] | undefined, legacyClosure?: boolean): Promise<StoredClosureCheck>;
 export declare function closureAssertions(closure: FlowClosure): ClosureAssertion[];
@@ -11,6 +12,7 @@ export declare class ConsumerFlowError extends Error {
 }
 export declare class ConsumerFlows {
     readonly manifestPath: string;
+    readonly flowsDir: string | undefined;
     private readonly workspaceRoot;
     private readonly forbiddenValues;
     constructor(options: ConsumerFlowsOptions);
@@ -24,12 +26,20 @@ export declare class ConsumerFlows {
     assertUnchanged(walks: StoredWalk[], identity: NormalizedIdentity): Promise<LookupHit | LookupMiss>;
     withLock<T>(work: () => Promise<T>): Promise<T>;
     plan(walks: StoredWalk[], identity: NormalizedIdentity, options: PersistVerifiedOptions): Promise<ConsumerPlan>;
+    private isUnderDeja;
+    planMaterialize(sourceMain: string, goalKey: string): Promise<MaterializePlan>;
+    private holdsForbiddenValue;
+    writeMaterialized(plan: MaterializePlan): Promise<string[]>;
     checkManifest(manifest: WalkManifest): string;
+    removeWritten(paths: string[]): Promise<void>;
+    manifestText(): Promise<string | null>;
+    restoreManifestText(text: string | null): Promise<void>;
     writeManifest(manifest: WalkManifest): Promise<void>;
 }
 export type ConsumerFlowsOptions = {
     workspaceRoot: string;
     manifestPath: string;
+    flowsDir?: string;
     forbiddenValues?: string[];
 };
 export type ConsumerPlan = {
@@ -37,10 +47,14 @@ export type ConsumerPlan = {
     remaining: StoredWalk[];
     flowPath: string;
     flowSha256: string;
+    filesWritten: string[];
     commit(): Promise<boolean>;
 };
 export declare class FlowClosureError extends Error {
     constructor(message: string, options?: ErrorOptions);
+}
+export declare class ForbiddenValueTooShortError extends Error {
+    constructor();
 }
 export declare class InvalidStoreIdError extends Error {
     constructor(id: string);
@@ -79,6 +93,7 @@ export declare class LocalWalkStore implements WalkStore {
     readonly relativeMemoryPath: string;
     private readonly renameFile;
     readonly manifestPath: string | undefined;
+    readonly manifestFlowsDir: string | undefined;
     private readonly consumer;
     private writerLock;
     constructor(options: LocalWalkStoreOptions);
@@ -96,6 +111,7 @@ export declare class LocalWalkStore implements WalkStore {
     persistVerifiedCandidate(options: PersistVerifiedOptions): Promise<PersistedWalk>;
     persistVerifiedRepair(options: PersistVerifiedRepairOptions): Promise<PersistedWalk>;
     list(): Promise<StoredWalk[]>;
+    migrateToManifest(options?: MigrateOptions): Promise<MigrationReport>;
     lookup(identityInput: WalkIdentity): Promise<LookupHit | LookupMiss>;
     lookupPreviousSuccessful(identityInput: WalkIdentity): Promise<LookupHit | LookupMiss>;
     recordValidation(identityInput: WalkIdentity, validation: WalkValidation): Promise<StoredWalk>;
@@ -106,6 +122,7 @@ export type LocalWalkStoreOptions = {
     manifest?: {
         path: string;
         forbiddenValues?: string[];
+        flowsDir?: string;
     };
     renameFile?: (temporaryPath: string, destinationPath: string) => Promise<void>;
 };
@@ -129,6 +146,30 @@ export declare class ManifestLockedError extends Error {
     readonly lockPath: string;
     constructor(lockPath: string);
 }
+export type MaterializePlan = {
+    flow: string;
+    closureSha256: string;
+    assertionsSha256: string;
+    mainSha256: string;
+    sourceClosureSha256: string;
+    files: {
+        path: string;
+        bytes: Buffer;
+        sha256: string;
+        exists: boolean;
+    }[];
+    conflicts: string[];
+    secrets: string[];
+};
+export type MigrationContext = {
+    root: string;
+    consumer: ConsumerFlows;
+    walks: StoredWalk[];
+    options: MigrateOptions;
+    memoryFile: string;
+    writeWalks(walks: StoredWalk[]): Promise<void> | void;
+};
+export declare const MIN_FORBIDDEN_VALUE_LENGTH = 3;
 export declare class MissingFlowFileError extends FlowClosureError {
     constructor(path: string);
 }
@@ -139,6 +180,7 @@ export declare function readConsumerWalkFields(value: {
     closureSha256: unknown;
 }): string | null;
 export declare function readStoredFlowFiles(value: unknown): StoredFlowFile[] | null;
+export declare function runMigration(context: MigrationContext): Promise<MigrationReport>;
 export declare function snapshotFlowClosure(root: string, candidate: string, directory: string): Promise<CandidateClosureSnapshot>;
 export declare class StoreLockContentionError extends StoreLockedError {
     readonly code = "STORE_LOCK_CONTENTION";

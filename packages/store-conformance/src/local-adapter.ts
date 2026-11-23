@@ -24,7 +24,7 @@ function createLocalStore(
   workspaceRoot: string,
   failures: StoreFailureInjection = {},
   storeId?: string,
-  manifest?: { path: string; forbiddenValues?: string[] },
+  manifest?: { path: string; forbiddenValues?: string[]; flowsDir?: string },
 ) {
   const memoryPath = resolve(workspaceRoot, LOCAL_MEMORY_PATH)
   return new LocalWalkStore({
