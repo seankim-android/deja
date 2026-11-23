@@ -196,7 +196,7 @@ for label, color in items:
     d.rounded_rectangle((66, y, 1818, y + 74), 12, fill=PANEL)
     text(d, (94, y + 19), label, 29, color, True)
     y += 91
-text(d, (66, 858), "github.com/seankim-android/kimi-hackathon  ·  Apache-2.0", 32, MINT, True)
+text(d, (66, 858), "github.com/seankim-android/deja  ·  Apache-2.0", 32, MINT, True)
 slides.append(save(im, 8))
 
 # Explicit per-input trims avoid image-concat demuxer padding (the rejected first take was 65 s).

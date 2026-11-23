@@ -2,19 +2,35 @@
   "slug": "deja",
   "theme": "paper",
   "model": "Kimi K3.1 Pro",
-  "popin": { "video": "/Users/sean/Development/deja/demo/walkcache-live-demo.mp4" },
+  "popin": {
+    "video": "/Users/sean/Development/deja/demo/walkcache-live-demo.mp4"
+  },
   "claim": {
-    "number": 2000,
-    "unit": "tokens per second",
-    "footnote": "*Up to 2,000 tokens per second: Kimi K3.1 Pro on Cerebras. Stated rate, not measured in this demo."
+    "number": 0,
+    "unit": "model calls to replay a test",
+    "footnote": "*Android checkout test, Nov 22. Learning it took 13 model calls on Kimi K3.1 Pro on Cerebras."
   },
   "scenes": [
-    { "scene": "intro", "intro": {
+    {
+      "scene": "intro",
+      "intro": {
         "title": "Déjà",
         "description": "Kimi on Cerebras tests your app once. Déjà saves that test. Every later run replays it with zero model calls."
-    } },
-    { "scene": "popin", "clip_from": 1500, "ms": 41000 },
-    { "scene": "claim" },
-    { "scene": "lockup" }
-  ]
+      }
+    },
+    {
+      "scene": "popin",
+      "clip_from": 1500,
+      "ms": 41000
+    },
+    {
+      "scene": "claim"
+    },
+    {
+      "scene": "lockup"
+    }
+  ],
+  "words": {
+    "up_to": "Just"
+  }
 }

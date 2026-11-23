@@ -1,0 +1,10 @@
+[[0.4,"This is Déjà. It gives a testing agent a memory."],
+[3.6,"Testing agents call the AI model on every run, even when nothing changed."],
+[8.0,"The first time, Kimi K3.1 Pro on Cerebras tests the checkout through OpenClaw. It takes thirteen model calls."],
+[13.5,"Déjà runs the new test again. It saves it only if all fourteen checks pass."],
+[17.5,"After that, each run replays the saved test. Zero model calls."],
+[24.0,"Then a button ID changed. Déjà made one small fix, and showed the change."],
+[31.0,"If the app itself breaks, the test still fails. Déjà never hides a real bug."],
+[39.5,"Here, the fixed test passes again."],
+[45.3,"Zero model calls to replay."],
+[48.6,"Déjà. Built with Kimi on Cerebras, and OpenClaw."]]

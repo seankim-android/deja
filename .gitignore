@@ -34,3 +34,8 @@ demo/rehearsal/scene-*.png
 *.njsproj
 *.sln
 *.sw?
+
+# Film build files
+demo/film/frames/
+demo/film/vo/*.mp3
+demo/film/vo/*.wav

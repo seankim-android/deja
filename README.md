@@ -17,6 +17,8 @@ The CLI command is still <code>walkcache</code>.
 
 <p align="center"><img src="demo/deja-preview.gif" width="80%"/></p>
 
+<p align="center">Narrated demo, 51 s.</p>
+
 <p align="center">Watch the full demo: <a href="demo/deja-demo.mp4">demo/deja-demo.mp4</a></p>
 
 ## How it works
