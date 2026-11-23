@@ -1,0 +1,14 @@
+{
+  "name": "@deja-qa/semantic-local",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local lexical goal embeddings",
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@deja-qa/core": "workspace:*"
+  }
+}

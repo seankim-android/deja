@@ -1,0 +1,20 @@
+{
+  "name": "@deja-qa/store-conformance",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Shared WalkStore behavioral contract suite",
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@deja-qa/core": "workspace:*",
+    "@deja-qa/store-local": "workspace:*",
+    "@deja-qa/store-sqlite": "workspace:*"
+  },
+  "devDependencies": {
+    "@deja-qa/maestro": "workspace:*",
+    "@deja-qa/cli": "workspace:*"
+  }
+}

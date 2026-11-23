@@ -8,20 +8,20 @@ import {
   resolveFlowPath,
   runMaestro,
   type MaestroRunResult,
-} from '../../../packages/maestro/src/index.ts'
-import type { PersistenceDetails, VerificationDetails } from '../../../packages/agent-openclaw/src/index.ts'
+} from '@deja-qa/maestro'
+import type { PersistenceDetails, VerificationDetails } from '@deja-qa/explorer-openclaw'
 import {
   InvalidWalkMemoryError,
   LOCAL_MEMORY_PATH,
   LocalWalkStore,
   MAESTRO_FLOW_SCHEMA_VERSION,
   type ExplorationDetails,
-} from '../../../packages/store-local/src/index.ts'
+} from '@deja-qa/store-local'
 import {
   BoundedCheckoutRepairer,
   CHECKOUT_AFFECTED_FILES,
   runCheckoutBuildAndInstall,
-} from '../../../packages/repair/src/index.ts'
+} from '@deja-qa/repair'
 import { exploreGoal } from './explore.ts'
 
 const root = process.cwd()
@@ -223,6 +223,8 @@ async function repair(goalKey: string, configPath: string) {
     appId,
     platform: 'android',
     timeoutMs: timeBudgetMs,
+    store: walkStore,
+    memoryPath: LOCAL_MEMORY_PATH,
     policy: {
       workspaceRoot: root,
       sourceRoots: parsed.sourceRoots,

@@ -1,6 +1,7 @@
 {
   "name": "deja",
   "version": "0.1.0",
+  "private": true,
   "description": "Déjà: verified Maestro QA walk caching, zero-model warm replay, and bounded selector repair",
   "license": "Apache-2.0",
   "repository": {
@@ -26,6 +27,10 @@
     "bun": ">=1.4.0"
   },
   "type": "module",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
   "bin": {
     "deja": "apps/cli/deja.ts"
   },
@@ -42,6 +47,12 @@
     "react-dom": "^19.3.1"
   },
   "devDependencies": {
+    "@deja-qa/core": "workspace:*",
+    "@deja-qa/explorer-openclaw": "workspace:*",
+    "@deja-qa/maestro": "workspace:*",
+    "@deja-qa/metrics": "workspace:*",
+    "@deja-qa/repair": "workspace:*",
+    "@deja-qa/store-local": "workspace:*",
     "@happy-dom/global-registrator": "^21.0.4",
     "@testing-library/react": "^16.3.3",
     "@types/bun": "^1.4.5",

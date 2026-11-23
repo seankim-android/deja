@@ -1,4 +1,4 @@
-import type { ExplorationResult, WalkExplorer } from '../../../packages/core/src/index.ts'
+import type { ExplorationResult, WalkExplorer } from '@deja-qa/core'
 
 /** Reviewed-YAML-only platforms never instantiate the Android explorer or its credential chain. */
 export class UnsupportedPlatformExplorer implements WalkExplorer {

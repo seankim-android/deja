@@ -1,0 +1,23 @@
+{
+  "name": "@deja-qa/cli",
+  "version": "0.1.0",
+  "private": true,
+  "description": "The deja CLI",
+  "license": "Apache-2.0",
+  "type": "module",
+  "bin": {
+    "deja": "./deja.ts"
+  },
+  "exports": {
+    "./reporter": "./src/reporter.ts",
+    "./redaction": "./src/redaction.ts"
+  },
+  "dependencies": {
+    "@deja-qa/core": "workspace:*",
+    "@deja-qa/maestro": "workspace:*",
+    "@deja-qa/store-local": "workspace:*",
+    "@deja-qa/explorer-openclaw": "workspace:*",
+    "@deja-qa/repair": "workspace:*",
+    "@deja-qa/semantic-local": "workspace:*"
+  }
+}

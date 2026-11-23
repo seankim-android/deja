@@ -6,7 +6,7 @@ import {
   makeScreenNode,
   validateRouteGraph,
   type RouteGraph,
-} from '../packages/core/src/index.ts'
+} from '@deja-qa/core'
 
 const coldYamlPath = 'demo/live-evidence/android/cold-saved-checkout.yaml'
 const warmYamlPath = 'demo/live-evidence/android/warm-saved-checkout.yaml'

@@ -5,21 +5,21 @@ import {
 } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
-import { Deja, type RunReporter, type WalkIdentity } from '../packages/core/src/index.ts'
+import { Deja, type RunReporter, type WalkIdentity } from '@deja-qa/core'
 import {
   MaestroWalkRunner,
   type MaestroExecutionAdapter,
   MaestroLoginComposer,
   androidMaestroAdapter,
   readMaestroContinuation,
-} from '../packages/maestro/src/index.ts'
+} from '@deja-qa/maestro'
 import {
   LOCAL_MEMORY_PATH,
   LocalVerifiedSubflowStore,
   LocalWalkStore,
   VERIFIED_SUBFLOW_INDEX_PATH,
   type SubflowContract,
-} from '../packages/store-local/src/index.ts'
+} from '@deja-qa/store-local'
 
 const repo = resolve(import.meta.dir, '..')
 const evidenceRoot = 'spikes/001-android-deja/evidence/walk018'

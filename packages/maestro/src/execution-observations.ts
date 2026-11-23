@@ -1,6 +1,6 @@
 import { readFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
-import type { ExecutionResult } from '../../core/src/index.ts'
+import type { ExecutionResult } from '@deja-qa/core'
 
 export type CompositionRunnerObservation = {
   kind: 'launch'

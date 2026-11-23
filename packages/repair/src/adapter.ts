@@ -5,7 +5,7 @@ import type {
   RunArtifact,
   SelectorRepairer,
   WalkStore,
-} from '../../core/src/index.ts'
+} from '@deja-qa/core'
 import {
   BoundedCheckoutRepairer,
   runCheckoutBuildAndInstall,
@@ -15,7 +15,7 @@ import {
 import {
   countFlowAssertions,
   MaestroWalkRunner,
-} from '../../maestro/src/index.ts'
+} from '@deja-qa/maestro'
 
 export type BoundedSelectorRepairerOptions = {
   workspaceRoot: string
@@ -24,6 +24,8 @@ export type BoundedSelectorRepairerOptions = {
   apkPath: string
   device: string
   store: WalkStore
+  /** Workspace-relative path of the store's durable memory file; see BoundedCheckoutRepairOptions. */
+  memoryPath: string
   runner: MaestroWalkRunner
   fingerprint: () => Promise<string>
   androidSdkRoot?: string
@@ -53,6 +55,7 @@ export class BoundedSelectorRepairer implements SelectorRepairer {
       timeoutMs: this.options.timeoutMs,
       policy: this.options.policy,
       store: this.options.store,
+      memoryPath: this.options.memoryPath,
       fingerprint: this.options.fingerprint,
       runFlow: (flowPath, artifactDirectory, timeoutMs) =>
         this.options.runner.runFlow(flowPath, artifactDirectory, timeoutMs),

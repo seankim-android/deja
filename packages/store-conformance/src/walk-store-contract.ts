@@ -3,7 +3,7 @@ import { existsSync } from 'node:fs'
 import { mkdir, mkdtemp, readFile, readdir, rename, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { basename, join, resolve } from 'node:path'
-import type { WalkIdentity, WalkStore } from '../../core/src/index.ts'
+import type { WalkIdentity, WalkStore } from '@deja-qa/core'
 
 export const initialValidation = '2026-11-22T00:00:00.000Z'
 export const laterValidation = '2026-11-22T00:01:00.000Z'

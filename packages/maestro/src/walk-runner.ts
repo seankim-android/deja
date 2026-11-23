@@ -4,7 +4,7 @@ import type {
   ExecutionResult,
   RunnerRequest,
   WalkRunner,
-} from '../../core/src/index.ts'
+} from '@deja-qa/core'
 import {
   classifyMaestroFailure,
   runMaestro,

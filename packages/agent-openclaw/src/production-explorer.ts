@@ -7,11 +7,11 @@ import type {
   WalkExplorer,
   WalkFailure,
   WalkStore,
-} from '../../core/src/index.ts'
+} from '@deja-qa/core'
 import {
   countFlowAssertions,
-  MaestroWalkRunner,
-} from '../../maestro/src/index.ts'
+  type MaestroWalkRunner,
+} from '@deja-qa/maestro'
 import {
   runColdExploration,
   type ColdExploreReport,
@@ -25,9 +25,17 @@ export type OpenClawWalkExplorerOptions = {
   buildFingerprint: string
   openClawExecutable: string
   maestroMcpProxy: string
-  runner: MaestroWalkRunner
+  runner: MaestroVerificationRunner
   store: WalkStore
 }
+
+/**
+ * The part of a Maestro runner the explorer needs. The generic `WalkRunner` contract is not enough:
+ * cold-run evidence records Maestro's raw verification (signal, monotonic time, stdout and stderr
+ * paths), and the Maestro MCP server is given the same executable. `MaestroWalkRunner` satisfies
+ * this, and so can a wrapper or test double, without the explorer depending on the concrete class.
+ */
+export type MaestroVerificationRunner = Pick<MaestroWalkRunner, 'executable' | 'runFlow' | 'adapt'>
 
 function portable(root: string, path: string) {
   return relative(root, path).split('\\').join('/')
@@ -89,8 +97,8 @@ function mcpEnvironment(configuration: ExploreConfiguration, executable: string)
 
 function verificationDetails(
   root: string,
-  result: Awaited<ReturnType<MaestroWalkRunner['runFlow']>>,
-  execution: Awaited<ReturnType<MaestroWalkRunner['adapt']>>,
+  result: Awaited<ReturnType<MaestroVerificationRunner['runFlow']>>,
+  execution: Awaited<ReturnType<MaestroVerificationRunner['adapt']>>,
 ): VerificationDetails {
   return {
     runner: 'WALK-002 runMaestro',

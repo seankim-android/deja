@@ -5,8 +5,10 @@ Status: proposal. Nothing in this document is built yet unless it says "today".
 ## Goal
 
 Today Déjà is a Bun monorepo with one product surface: the `deja` CLI in `apps/cli`.
-The packages under `packages/` have no `package.json` files. They import each other by relative
-paths such as `../../core/src/index.ts`. Nobody outside this repo can install them.
+Today each package and app is a Bun workspace with a private `@deja-qa/*` `package.json`, and they
+import each other only by package name. `scripts/workspace-boundaries.test.ts` fails on a relative
+cross-package import or an undeclared dependency. Nothing is published yet, and the `exports` maps
+still point at `.ts` sources, so nobody outside this repo can install them.
 
 The goal is to let two kinds of users install Déjà from npm:
 
@@ -75,7 +77,7 @@ All packages publish under the `@deja-qa` scope. See Risks for the name check.
 | `@deja-qa/store-sqlite` | `packages/store-sqlite` | `SQLiteWalkStore` | core |
 | `@deja-qa/store-conformance` | `packages/store-conformance` | `WalkStoreContractImplementation` and the shared suite | core |
 | `@deja-qa/explorer-openclaw` | `packages/agent-openclaw` | `OpenClawWalkExplorer` | core, maestro |
-| `@deja-qa/repair` | `packages/repair` | `BoundedSelectorRepairer`, `CheckoutRepairPolicy` | core, maestro, store-local (to remove) |
+| `@deja-qa/repair` | `packages/repair` | `BoundedSelectorRepairer`, `CheckoutRepairPolicy` | core, maestro |
 | `@deja-qa/semantic-local` | `packages/semantic-local` | `LocalLexicalEmbeddingProvider` | core |
 | `@deja-qa/cli` (bin `deja`) | `apps/cli` | the `deja` CLI | all of the above |
 
@@ -85,11 +87,17 @@ optional local viewer), `spikes/`, `demo/`.
 Dependency direction: `core` imports nothing from the repo. Plugins import `core` (and `maestro`
 where they drive Maestro). Only the CLI imports everything. This matches the rule in
 `docs/ARCHITECTURE.md` that core imports no Maestro, OpenClaw, filesystem or platform code.
-Two edges break it today and need work before publishing:
+Two edges used to break it:
 
-- `repair` imports `store-local` in `packages/repair/src/index.ts`. It should take a `WalkStore`.
-- `OpenClawWalkExplorer` takes a concrete `MaestroWalkRunner` and a `WalkStore`, because it
-  verifies and persists the candidate itself. It should accept the `WalkRunner` interface.
+- Done: `repair` no longer imports `store-local`. It takes a required `WalkStore` plus the
+  workspace-relative `memoryPath` of that store's durable file, which it proves byte-for-byte
+  unchanged. The CLI passes `LocalWalkStore` and `LOCAL_MEMORY_PATH`. A store with no single memory
+  file (SQLite, a hosted store) needs a different preservation proof before it can back repair.
+- Done: `OpenClawWalkExplorer` takes a `MaestroVerificationRunner`
+  (`Pick<MaestroWalkRunner, 'executable' | 'runFlow' | 'adapt'>`) instead of the concrete class. It
+  does not take the generic `WalkRunner`: cold-run evidence records Maestro's raw verification
+  (signal, monotonic time, stdout and stderr paths), and the explorer hands the same executable to
+  the Maestro MCP server. Dropping those fields would weaken the evidence.
 
 ## Plugin contracts
 
@@ -169,8 +177,8 @@ Sizes: S is under a day, M is a few days, L is a week or more.
 
 | Item | Size | Done when |
 | --- | --- | --- |
-| Bun workspaces and a `package.json` per package; replace relative `../../x/src` imports | M | `bun test` and `bun run build` pass with only package imports |
-| Remove `repair` -> `store-local` edge; explorer takes `WalkRunner` | S | a test fails on a forbidden import |
+| Done: Bun workspaces and a `package.json` per package; replace relative `../../x/src` imports | M | `bun test` and `bun run build` pass with only package imports |
+| Done: remove `repair` -> `store-local` edge; explorer takes a narrow Maestro runner type | S | a test fails on a forbidden import |
 | tsup build per package, ESM and `.d.ts` | S | `npm pack` of each package installs into an empty Node 20 project and type-checks |
 | Remove `Bun.file`; sqlite driver seam | M | the store conformance suite passes on Node 20 and Bun 1.4 |
 | Publish 0.1.0 under the chosen scope with provenance | S | `npm view @deja-qa/core version` prints 0.1.0 |
@@ -205,7 +213,7 @@ Sizes: S is under a day, M is a few days, L is a week or more.
   - `@deja-qa/core` returns 404 on npm, and `deja-qa` and `dejaqa` are free as unscoped names.
   - `deja-qa.com`, `dejaqa.com`, `deja-qa.dev` and `dejaqa.dev` return 404 from registry RDAP (not
     registered). A registrar can still mark a name premium or reserved.
-  - Still to do: claim the scope with `npm org create deja-qa` while logged in, and buy the domain.
+  - The `deja-qa` npm org was created on 2026-11-22. Still to do: buy the domain.
   - Test data never uses the project domain. Fixture logins use the reserved `example.com`.
 - **Maestro version pinning.** All evidence is on Maestro 2.12.0, and Maestro Web is beta. The
   runner should read `maestro --version` and refuse or warn outside a tested range. The Action pins
@@ -225,10 +233,10 @@ Sizes: S is under a day, M is a few days, L is a week or more.
 
 ## Next 5 steps
 
-1. Claim the `@deja-qa` scope: run `npm org create deja-qa` while logged in.
-2. Add Bun workspaces and one `package.json` per package, and switch to package imports.
-3. Remove the two forbidden edges (`repair` -> `store-local`, explorer -> concrete runner) and add a
-   test that fails on forbidden imports.
+1. Done: the `deja-qa` npm org exists (created 2026-11-22).
+2. Done: Bun workspaces, one `package.json` per package, and package imports.
+3. Done: removed the two forbidden edges; `scripts/workspace-boundaries.test.ts` fails if either
+   comes back.
 4. Make the packages run on Node 20: drop `Bun.file`, add the sqlite driver seam, and run the store
    conformance suite on both runtimes in CI.
 5. Build with tsup, `npm pack` each package into an empty Node project, then publish 0.1.0.

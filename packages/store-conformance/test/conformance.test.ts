@@ -2,10 +2,10 @@ import { describe, expect, test } from 'bun:test'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
-import { JsonRunReporter } from '../../../apps/cli/src/reporter.ts'
-import { createRedactor } from '../../../apps/cli/src/redaction.ts'
-import { Deja } from '../../core/src/index.ts'
-import { MaestroWalkRunner } from '../../maestro/src/index.ts'
+import { JsonRunReporter } from '@deja-qa/cli/reporter'
+import { createRedactor } from '@deja-qa/cli/redaction'
+import { Deja } from '@deja-qa/core'
+import { MaestroWalkRunner } from '@deja-qa/maestro'
 import {
   contractIdentity,
   initialValidation,

@@ -1,5 +1,6 @@
 export {
   OpenClawWalkExplorer,
+  type MaestroVerificationRunner,
   type OpenClawWalkExplorerOptions,
 } from './production-explorer.ts'
 

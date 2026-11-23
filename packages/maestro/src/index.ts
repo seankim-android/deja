@@ -4,6 +4,9 @@ import { realpathSync, statSync } from 'node:fs'
 import { mkdir, realpath, writeFile } from 'node:fs/promises'
 import { delimiter, dirname, resolve, sep } from 'node:path'
 
+/** The Maestro flow schema that walk identities and stored flows are keyed on. */
+export const MAESTRO_FLOW_SCHEMA_VERSION = 'maestro/v1'
+
 export {
   MaestroWalkRunner,
   countFlowAssertions,

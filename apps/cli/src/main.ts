@@ -1,22 +1,23 @@
 import { resolve } from 'node:path'
-import { Deja, type RunResult } from '../../../packages/core/src/index.ts'
-import { OpenClawWalkExplorer } from '../../../packages/agent-openclaw/src/index.ts'
+import { Deja, type RunResult } from '@deja-qa/core'
+import { OpenClawWalkExplorer } from '@deja-qa/explorer-openclaw'
 import {
   InvalidWalkMemoryError,
+  LOCAL_MEMORY_PATH,
   LocalWalkStore,
   MAESTRO_FLOW_SCHEMA_VERSION,
-} from '../../../packages/store-local/src/index.ts'
+} from '@deja-qa/store-local'
 import {
   MaestroWalkRunner,
   androidMaestroAdapter,
   iosMaestroAdapter,
   webMaestroAdapter,
-} from '../../../packages/maestro/src/index.ts'
-import { BoundedSelectorRepairer } from '../../../packages/repair/src/index.ts'
+} from '@deja-qa/maestro'
+import { BoundedSelectorRepairer } from '@deja-qa/repair'
 import {
   LOCAL_LEXICAL_EMBEDDING_PROVIDER,
   LocalLexicalEmbeddingProvider,
-} from '../../../packages/semantic-local/src/index.ts'
+} from '@deja-qa/semantic-local'
 import {
   buildFingerprint,
   CliConfigurationError,
@@ -150,6 +151,7 @@ function createOrchestration(
         apkPath: resolve(configuration.workspaceRoot, configuration.explore.buildPath),
         device: configuration.explore.device,
         store,
+        memoryPath: LOCAL_MEMORY_PATH,
         runner,
         fingerprint: () => buildFingerprint(configuration, executionAdapter),
         ...(process.env.ANDROID_HOME || process.env.ANDROID_SDK_ROOT

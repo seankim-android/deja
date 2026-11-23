@@ -1,11 +1,11 @@
 import { Database } from 'bun:sqlite'
 import { readFile, rename } from 'node:fs/promises'
 import { resolve } from 'node:path'
-import type { WalkStore } from '../../core/src/index.ts'
+import type { WalkStore } from '@deja-qa/core'
 import {
   SQLITE_MEMORY_PATH,
   SQLiteWalkStore,
-} from '../../store-sqlite/src/index.ts'
+} from '@deja-qa/store-sqlite'
 import type {
   MetadataTamper,
   StoreFailureInjection,
