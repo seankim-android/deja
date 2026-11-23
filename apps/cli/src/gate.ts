@@ -1,5 +1,5 @@
-import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
-import { dirname, relative, resolve } from 'node:path'
+import { lstat, mkdir, readdir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { basename, dirname, join, relative, resolve, sep } from 'node:path'
 import {
   evaluateGate,
   gatePassed,
@@ -33,6 +33,8 @@ export type GateEvidenceGoal = GateGoalResult & {
 
 /** The evidence file (JSON). The text table beside it carries the same facts. */
 export type GateEvidence = {
+  /** Marks a file as gate evidence, so only a previous evidence file is ever replaced. */
+  kind: typeof EVIDENCE_KIND
   schemaVersion: 1
   command: 'gate'
   verdict: 'passed' | 'closed' | 'error'
@@ -50,6 +52,21 @@ export type GateEvidence = {
 }
 
 const MAX_REPORT_BYTES = 2_000_000
+const EVIDENCE_KIND = 'deja-gate-evidence'
+const TABLE_HEADER = 'Release gate: '
+/** C0, DEL, C1, and the Unicode line and paragraph separators. */
+function isControl(character: string) {
+  const code = character.charCodeAt(0)
+  return code < 0x20 || (code >= 0x7f && code <= 0x9f) || code === 0x2028 || code === 0x2029
+}
+const hasControl = (value: string) => [...value].some(isControl)
+
+/** Shown, never trusted: control characters become visible escapes, so a value cannot add a line or an escape code. */
+function plain(value: string) {
+  return [...value].map(character => isControl(character)
+    ? `\\u${character.charCodeAt(0).toString(16).padStart(4, '0')}`
+    : character).join('')
+}
 
 /**
  * A plain list (one goal per line; blank lines and lines starting with `#` are skipped), a JSON
@@ -84,6 +101,7 @@ export function parseGoals(text: string, label: string): string[] {
   const unique = new Map<string, string>()
   for (const goal of goals) {
     if (!goal.trim()) throw new CliConfigurationError(`${label} contains an empty goal`)
+    if (hasControl(goal)) throw new CliConfigurationError(`${label} contains a goal with a control character`)
     const { key, text: normalized } = normalizeGoal(goal)
     if (!unique.has(key)) unique.set(key, normalized)
   }
@@ -125,35 +143,105 @@ async function readReportFacts(workspaceRoot: string): Promise<ReportFact[]> {
 export function renderGateTable(evidence: GateEvidence, redact: Redactor) {
   const passedCount = evidence.goals.filter(goal => goal.outcome === 'passed').length
   const lines = [
-    `Release gate: ${evidence.verdict === 'passed' ? 'OPEN' : evidence.verdict === 'closed' ? 'CLOSED' : 'ERROR'}` +
+    `${TABLE_HEADER}${evidence.verdict === 'passed' ? 'OPEN' : evidence.verdict === 'closed' ? 'CLOSED' : 'ERROR'}` +
       ` (${passedCount} of ${evidence.goals.length} goals passed)`,
-    `Build: ${evidence.buildFingerprint ?? 'unknown'}${evidence.label !== null ? `  label: ${evidence.label}` : ''}`,
+    `Build: ${evidence.buildFingerprint ?? 'unknown'}${evidence.label !== null ? `  label: ${plain(evidence.label)}` : ''}`,
   ]
-  if (evidence.error) lines.push(`Error: ${evidence.error}`)
-  const width = Math.max(4, ...evidence.goals.map(goal => goal.goal.length))
+  if (evidence.error) lines.push(`Error: ${plain(evidence.error)}`)
+  const width = Math.max(4, ...evidence.goals.map(goal => plain(goal.goal).length))
   lines.push(`${'GOAL'.padEnd(width)}  ${'OUTCOME'.padEnd(12)}  ${'VALIDATED'.padEnd(24)}  FLOW SHA256`)
   for (const goal of evidence.goals) {
     lines.push(
-      `${goal.goal.padEnd(width)}  ${goal.outcome.padEnd(12)}  ${(goal.validatedAt ?? '-').padEnd(24)}  ${goal.flowSha256 ?? '-'}`,
+      `${plain(goal.goal).padEnd(width)}  ${goal.outcome.padEnd(12)}  ${(goal.validatedAt ?? '-').padEnd(24)}  ${goal.flowSha256 ?? '-'}`,
     )
-    if (goal.detail && goal.outcome !== 'passed') lines.push(`  ${goal.detail}`)
-    if (goal.reportPath) lines.push(`  report: ${goal.reportPath}`)
+    if (goal.detail && goal.outcome !== 'passed') lines.push(`  ${plain(goal.detail)}`)
+    if (goal.reportPath) lines.push(`  report: ${plain(goal.reportPath)}`)
   }
   return redact(`${lines.join('\n')}\n`)
 }
 
-async function atomicWrite(path: string, contents: string) {
+export async function atomicWrite(path: string, contents: string) {
   await mkdir(dirname(path), { recursive: true })
   const temporary = `${path}.${process.pid}.tmp`
-  await writeFile(temporary, contents)
-  await rename(temporary, path)
+  try {
+    await writeFile(temporary, contents)
+    await rename(temporary, path)
+  } catch (error) {
+    await rm(temporary, { force: true })
+    throw error
+  }
 }
 
-function evidencePaths(configuration: ProductionConfiguration, evidencePath: string | undefined) {
-  const json = evidencePath
+/** The nearest existing ancestor resolved through symlinks, plus the rest of the path. */
+async function canonicalPath(path: string): Promise<string> {
+  const rest: string[] = []
+  let current = path
+  for (;;) {
+    try {
+      return join(await realpath(current), ...rest.reverse())
+    } catch (error) {
+      const parent = dirname(current)
+      if (parent === current || (error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+      rest.push(basename(current))
+      current = parent
+    }
+  }
+}
+
+/**
+ * Where the evidence goes, and proof that writing it can only replace a previous gate evidence
+ * file. Nothing is deleted or written before this returns. A path that names the goals file, the
+ * manifest, anything under `.deja/` but `.deja/gate/`, a symlink, a directory or any file that is not
+ * gate evidence (a flow, the store's walks.json) is refused with exit 2.
+ */
+async function evidencePaths(
+  configuration: ProductionConfiguration,
+  evidencePath: string | undefined,
+  goalsFile: string,
+  manifestPath: string | undefined,
+) {
+  const requested = evidencePath
     ? resolve(process.cwd(), evidencePath)
     : resolve(configuration.workspaceRoot, '.deja/gate/evidence.json')
-  return { json, text: json.endsWith('.json') ? `${json.slice(0, -5)}.txt` : `${json}.txt` }
+  const json = requested
+  const text = json.endsWith('.json') ? `${json.slice(0, -5)}.txt` : `${json}.txt`
+  const root = await realpath(configuration.workspaceRoot)
+  const protectedFiles = new Set<string>()
+  for (const file of [goalsFile, ...(manifestPath ? [resolve(configuration.workspaceRoot, manifestPath)] : [])]) {
+    protectedFiles.add(await canonicalPath(file))
+  }
+  const gateDirectory = join(root, '.deja', 'gate') + sep
+  const deja = join(root, '.deja') + sep
+  const refuse = (target: string, reason: string): never => {
+    throw new CliConfigurationError(`--evidence ${relative(process.cwd(), target) || target} is refused: ${reason}. Nothing was changed.`)
+  }
+  for (const [target, isText] of [[json, false], [text, true]] as const) {
+    let existing = null
+    try { existing = await lstat(target) } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+    }
+    if (existing?.isSymbolicLink()) refuse(target, 'it is a symbolic link')
+    const canonical = await canonicalPath(target)
+    if (protectedFiles.has(canonical)) refuse(target, 'it is the goals file or the manifest')
+    if (`${canonical}${sep}`.startsWith(deja) && !canonical.startsWith(gateDirectory)) {
+      refuse(target, 'it is inside .deja/ but not .deja/gate/')
+    }
+    if (!existing) continue
+    if (!existing.isFile()) refuse(target, 'it is not a regular file')
+    if (existing.nlink > 1) refuse(target, 'it has more than one hard link')
+    if (existing.size > MAX_REPORT_BYTES) refuse(target, 'it is not a gate evidence file')
+    const contents = await readFile(target, 'utf8')
+    if (isText) {
+      if (!contents.startsWith(TABLE_HEADER)) refuse(target, 'it is not a gate evidence table')
+      continue
+    }
+    let parsed: Partial<GateEvidence> | null = null
+    try { parsed = JSON.parse(contents) as Partial<GateEvidence> } catch { /* refused below */ }
+    if (parsed?.kind !== EVIDENCE_KIND || parsed.command !== 'gate' || parsed.schemaVersion !== 1) {
+      refuse(target, 'it is not a gate evidence file')
+    }
+  }
+  return { json, text }
 }
 
 export type GateIo = { stdout: (text: string) => void; stderr: (text: string) => void }
@@ -174,12 +262,16 @@ export async function runGate(input: {
   io: GateIo
 }): Promise<number> {
   const { configuration, store, adapter, options, redact, io } = input
-  const paths = evidencePaths(configuration, options.evidencePath)
-  // A file left by an earlier run must never be read as this run's evidence.
+  const goalsFile = resolve(process.cwd(), options.goalsPath)
+  if (options.label !== undefined && hasControl(options.label)) {
+    throw new CliConfigurationError('--label cannot contain control characters or line breaks')
+  }
+  const paths = await evidencePaths(configuration, options.evidencePath, goalsFile, store.manifestPath)
+  // A file left by an earlier run must never be read as this run's evidence. Only an old gate
+  // evidence file gets here (evidencePaths checked).
   await rm(paths.json, { force: true })
   await rm(paths.text, { force: true })
 
-  const goalsFile = resolve(process.cwd(), options.goalsPath)
   let goalsText: string
   try { goalsText = await readFile(goalsFile, 'utf8') } catch (error) {
     throw new CliConfigurationError(`The goals file cannot be read: ${options.goalsPath}`, { cause: error })
@@ -188,7 +280,7 @@ export async function runGate(input: {
 
   const buildPath = options.buildPath ?? configuration.explore.buildPath
   const evidence: GateEvidence = {
-    schemaVersion: 1, command: 'gate', verdict: 'error', passed: false,
+    kind: EVIDENCE_KIND, schemaVersion: 1, command: 'gate', verdict: 'error', passed: false,
     checkedAt: new Date().toISOString(),
     buildFingerprint: null,
     label: options.label ?? null,
@@ -233,7 +325,10 @@ export async function runGate(input: {
         : null,
     }))
     evidence.passed = gatePassed(results)
-    evidence.verdict = evidence.passed ? 'passed' : 'closed'
+    // A goal the gate could not read or trust is undecided (exit 11), the same as a failing list().
+    const undecided = results.some(result => result.outcome === 'invalid')
+    evidence.verdict = evidence.passed ? 'passed' : undecided ? 'error' : 'closed'
+    if (undecided) evidence.error = 'at least one goal has a stored walk or flow that cannot be read or trusted'
   } catch (error) {
     // Never passes by default: an unreadable store or build is a closed gate with its own exit code.
     evidence.verdict = 'error'

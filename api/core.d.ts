@@ -164,7 +164,7 @@ export type EngineReport = {
     overrideVia?: 'config' | 'env';
     inRange: boolean;
 };
-export declare function evaluateGate(store: Pick<WalkStore, 'list' | 'lookup'>, goals: readonly string[], identity: GateIdentity, options?: GateOptions): Promise<GateGoalResult[]>;
+export declare function evaluateGate(store: Pick<WalkStore, 'list' | 'lookup' | 'manifestPath'>, goals: readonly string[], identity: GateIdentity, options?: GateOptions): Promise<GateGoalResult[]>;
 export type EvidenceArtifact = {
     path: string;
     sha256: string;
@@ -352,6 +352,7 @@ export type LookupMiss = {
         manifestClosureSha256: string;
         currentClosureSha256: string;
     };
+    closureSha256?: string;
     flowPath?: string;
 };
 export declare function makeScreenNode(nodeId: string, input: ScreenObservation[], validatedAt: string): ScreenNode;

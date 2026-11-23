@@ -8,9 +8,14 @@ import { normalizeGoal, type LookupMiss, type StoredWalk, type WalkIdentity, typ
  * - `flaky`: that failure came from a run that passed on a rerun, or failed differently (DEJA-7).
  * - `not-run`: no validation on this fingerprint, even if older builds passed.
  * - `flow-changed`: manifest mode, the flow or a file it runs no longer matches the manifest.
- * - `invalid`: the stored walk or the flow file cannot be trusted (corrupt, checksum mismatch, missing).
+ * - `invalid`: the stored walk or the flow file cannot be read or trusted (corrupt, checksum mismatch,
+ *   missing). The gate could not decide this goal, so the CLI exits 11, not 10.
  *
  * Only `passed` opens the gate.
+ *
+ * "Latest" is the store's own answer: its `lastValidation` for the one walk on this fingerprint,
+ * which is the last one written. Timestamps are recorded but never compared, so equal timestamps
+ * and clock skew cannot reorder a pass and a failure.
  */
 export type GateOutcome = 'passed' | 'failed' | 'flaky' | 'not-run' | 'flow-changed' | 'invalid'
 
@@ -71,7 +76,7 @@ function missDetail(miss: LookupMiss) {
  * read throws; the caller must treat that as a closed gate.
  */
 export async function evaluateGate(
-  store: Pick<WalkStore, 'list' | 'lookup'>,
+  store: Pick<WalkStore, 'list' | 'lookup' | 'manifestPath'>,
   goals: readonly string[],
   identity: GateIdentity,
   options: GateOptions = {},
@@ -118,9 +123,12 @@ export async function evaluateGate(
       continue
     }
     if (lookup.reason === 'failed-validation') {
-      const failed = walks
-        .filter(walk => walk.goalKey === key && sameLogicalIdentity(walk, identity) && !walk.lastValidation.passed)
-        .sort((left, right) => right.lastValidation.at.localeCompare(left.lastValidation.at))[0]
+      // The walk the store's own lookup used: the first match in list order (write order, never a
+      // timestamp compare, so clock skew and equal timestamps cannot change the answer). In manifest
+      // mode only the walk of the manifest's current closure counts, never an older flow's.
+      const failed = walks.find(walk =>
+        walk.goalKey === key && sameLogicalIdentity(walk, identity) && !walk.lastValidation.passed &&
+        (store.manifestPath === undefined || walk.closureSha256 === lookup.closureSha256))
       if (failed) {
         const flaky = options.flakyFailures?.some(item =>
           item.goalKey === key && item.buildFingerprint === identity.buildFingerprint &&

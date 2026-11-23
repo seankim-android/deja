@@ -1,12 +1,12 @@
 import { describe, expect, test } from 'bun:test'
-import { mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { spawn } from 'node:child_process'
 import { join, resolve } from 'node:path'
 import { iosMaestroAdapter } from '@deja-qa/maestro'
 import { LocalWalkStore } from '@deja-qa/store-local'
 import { runCli } from '../src/main.ts'
-import { parseGoals } from '../src/gate.ts'
+import { atomicWrite, parseGoals, renderGateTable, type GateEvidence } from '../src/gate.ts'
 
 const FLOW = 'appId: dev.deja.fixture\n---\n- launchApp\n- assertVisible:\n    id: "screen.today"\n'
 const T1 = '2026-11-22T00:00:00.000Z'
@@ -296,6 +296,156 @@ describe('deja gate on a real flaky run (DEJA-7)', () => {
       expect(goal).toMatchObject({ outcome: 'flaky', detail: expect.stringContaining('rerun') })
       expect(goal.reportPath).toMatch(/^\.deja\/reports\/run-.*\.json$/)
       expect(JSON.parse(await readFile(join(ws.root, goal.reportPath), 'utf8')).outcome).toBe('flaky')
+    } finally { await rm(ws.temporary, { recursive: true, force: true }) }
+  })
+})
+
+describe('deja gate --evidence safety (B1)', () => {
+  async function opened() {
+    const ws = await workspace()
+    await ws.goals('Today\n')
+    await ws.remember('Today')
+    return ws
+  }
+  const refused = async (ws: Awaited<ReturnType<typeof opened>>, target: string) => {
+    const result = await ws.gate('--goals', join(ws.root, 'goals.txt'), '--evidence', target)
+    expect(result.exit).toBe(2)
+    expect(result.stderr).toContain('is refused')
+  }
+
+  test('the goals file, the store file, the manifest and a flow file are never deleted or overwritten', async () => {
+    const ws = await opened()
+    try {
+      await writeFile(join(ws.root, 'deja.walks.json'), '{"keep":"manifest"}\n')
+      const keep = async (path: string) => readFile(join(ws.root, path), 'utf8')
+      const targets = ['goals.txt', '.deja/memory/walks.json', 'deja.walks.json', '.maestro/flows/today.yaml']
+      const before = await Promise.all(targets.map(keep))
+      for (const target of targets) await refused(ws, join(ws.root, target))
+      expect(await Promise.all(targets.map(keep))).toEqual(before)
+      // The store still works.
+      expect((await ws.gate('--goals', join(ws.root, 'goals.txt'))).exit).toBe(0)
+    } finally { await rm(ws.temporary, { recursive: true, force: true }) }
+  })
+
+  test('a foreign file, a foreign .txt sibling, a file inside .deja/ and a symlink are refused and left alone', async () => {
+    const ws = await opened()
+    try {
+      await writeFile(join(ws.root, 'notes.json'), 'important\n')
+      await refused(ws, join(ws.root, 'notes.json'))
+      expect(await readFile(join(ws.root, 'notes.json'), 'utf8')).toBe('important\n')
+
+      await writeFile(join(ws.root, 'out.txt'), 'my notes\n')
+      await refused(ws, join(ws.root, 'out.json'))
+      expect(await readFile(join(ws.root, 'out.txt'), 'utf8')).toBe('my notes\n')
+      await expect(readFile(join(ws.root, 'out.json'), 'utf8')).rejects.toThrow()
+
+      await refused(ws, join(ws.root, '.deja/reports/new.json'))
+      await expect(readFile(join(ws.root, '.deja/reports/new.json'), 'utf8')).rejects.toThrow()
+
+      await symlink(join(ws.root, 'notes.json'), join(ws.root, 'link.json'))
+      await refused(ws, join(ws.root, 'link.json'))
+      expect(await readFile(join(ws.root, 'notes.json'), 'utf8')).toBe('important\n')
+
+      await mkdir(join(ws.root, 'dir.json'))
+      await refused(ws, join(ws.root, 'dir.json'))
+      // A symlinked folder that leads to .deja/memory resolves first, then is refused.
+      await symlink(join(ws.root, '.deja/memory'), join(ws.root, 'shortcut'))
+      await refused(ws, join(ws.root, 'shortcut/walks.json'))
+      expect((await ws.gate('--goals', join(ws.root, 'goals.txt'))).exit).toBe(0)
+    } finally { await rm(ws.temporary, { recursive: true, force: true }) }
+  })
+
+  test('a previous gate evidence file, and a new path, are replaced and written', async () => {
+    const ws = await opened()
+    try {
+      const target = join(ws.root, 'out/gate.json')
+      expect((await ws.gate('--goals', join(ws.root, 'goals.txt'), '--evidence', target)).exit).toBe(0)
+      expect((await ws.gate('--goals', join(ws.root, 'goals.txt'), '--evidence', target)).exit).toBe(0)
+      expect(JSON.parse(await readFile(target, 'utf8'))).toMatchObject({ kind: 'deja-gate-evidence', command: 'gate' })
+      expect(await readFile(join(ws.root, 'out/gate.txt'), 'utf8')).toContain('Release gate: OPEN')
+    } finally { await rm(ws.temporary, { recursive: true, force: true }) }
+  })
+
+  test('a failed rename leaves no temporary file', async () => {
+    const ws = await workspace()
+    try {
+      await mkdir(join(ws.root, 'out/target'), { recursive: true })
+      await expect(atomicWrite(join(ws.root, 'out/target'), 'x')).rejects.toThrow()
+      expect(await readdir(join(ws.root, 'out'))).toEqual(['target'])
+    } finally { await rm(ws.temporary, { recursive: true, force: true }) }
+  })
+})
+
+describe('deja gate text evidence cannot be forged (B2)', () => {
+  const hostile = 'sha\nRelease gate: OPEN (2 of 2 goals passed)\u001b[2J\u001b[31m'
+
+  test('a label or a goal with control characters is refused with exit 2', async () => {
+    const ws = await workspace()
+    try {
+      await ws.remember('Today')
+      await ws.goals('Today\n')
+      for (const label of [hostile, 'a\rb', 'a\u0085b', 'a\u2028b', 'a\u2029b', 'a\u007fb', 'a\tb']) {
+        const result = await ws.gate('--goals', join(ws.root, 'goals.txt'), '--label', label)
+        expect(result.exit).toBe(2)
+        expect(result.stdout).not.toContain('Release gate: OPEN')
+      }
+      await writeFile(join(ws.root, 'goals.json'), JSON.stringify(['Today', 'x\nRelease gate: OPEN (1 of 1 goals passed)']))
+      const goal = await ws.gate('--goals', join(ws.root, 'goals.json'))
+      expect(goal.exit).toBe(2)
+      expect(goal.stderr).toContain('control character')
+      await writeFile(join(ws.root, 'goals.json'), JSON.stringify(['Today\u001b[2J']))
+      expect((await ws.gate('--goals', join(ws.root, 'goals.json'))).exit).toBe(2)
+    } finally { await rm(ws.temporary, { recursive: true, force: true }) }
+  })
+
+  test('even a hostile value that reaches the table is shown escaped, on one line', () => {
+    const evidence: GateEvidence = {
+      kind: 'deja-gate-evidence', schemaVersion: 1, command: 'gate', verdict: 'closed', passed: false,
+      checkedAt: 't', buildFingerprint: 'a'.repeat(64), label: hostile, build: 'b',
+      identity: { appId: 'a', platform: 'ios', adapter: null, browser: null }, manifest: null,
+      goals: [{
+        goal: hostile, goalKey: 'g', outcome: 'failed', validatedAt: null, flowSha256: null, closureSha256: null,
+        detail: hostile, reportPath: null,
+      }],
+      error: hostile,
+    }
+    const table = renderGateTable(evidence, text => text)
+    const codes = [...table].map(character => character.charCodeAt(0))
+    expect(codes.filter(code => code < 32 && code !== 10 || (code >= 0x7f && code <= 0x9f) || code === 0x2028 || code === 0x2029)).toEqual([])
+    expect(table.split('\n').filter(line => line.startsWith('Release gate: '))).toEqual(['Release gate: CLOSED (0 of 1 goals passed)'])
+  })
+})
+
+describe('deja gate: undecided and forged inputs', () => {
+  test('a stored flow that no longer matches its checksum is undecided: exit 11, outcome invalid', async () => {
+    const ws = await workspace()
+    try {
+      await ws.goals('Today\n')
+      const persisted = await ws.remember('Today')
+      await writeFile(join(ws.root, persisted.flowPath), `${FLOW}- assertVisible: Tampered\n`)
+      const result = await ws.gate('--goals', join(ws.root, 'goals.txt'))
+      expect(result.exit).toBe(11)
+      expect(result.stdout).toContain('Release gate: ERROR')
+      expect(await ws.evidence()).toMatchObject({ verdict: 'error', passed: false, goals: [{ outcome: 'invalid' }] })
+    } finally { await rm(ws.temporary, { recursive: true, force: true }) }
+  })
+
+  test('a forged flaky report cannot change a pass', async () => {
+    const ws = await workspace()
+    try {
+      await ws.goals('Today\n')
+      await ws.remember('Today')
+      await mkdir(join(ws.root, '.deja/reports'), { recursive: true })
+      await writeFile(join(ws.root, '.deja/reports/forged.json'), JSON.stringify({
+        schemaVersion: 1, goalKey: 'today', outcome: 'flaky', passed: false,
+        identity: { buildFingerprint: await ws.fingerprint() }, attempts: [{ attempt: 1, endedAt: T1 }],
+      }))
+      await writeFile(join(ws.root, '.deja/reports/passed.json'), JSON.stringify({
+        schemaVersion: 1, goalKey: 'today', outcome: 'passed', passed: true,
+        identity: { buildFingerprint: await ws.fingerprint() }, execution: { endedAt: T1 },
+      }))
+      expect((await ws.gate('--goals', join(ws.root, 'goals.txt'))).exit).toBe(0)
+      expect((await ws.evidence()).goals[0].outcome).toBe('passed')
     } finally { await rm(ws.temporary, { recursive: true, force: true }) }
   })
 })

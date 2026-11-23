@@ -439,8 +439,8 @@ deja gate --goals goals.txt --build build/Dev.app --label "$(git rev-parse HEAD)
 | --- | --- |
 | `--goals <file>` | Required. A plain list (one goal per line, `#` comments), a JSON array of goals, or the walk manifest itself (`deja.walks.json`, whose entries name the goals). A missing file or an empty list is exit 2. |
 | `--build <path>` | The build to fingerprint. Default: the config's `buildPath`. The fingerprint is a hash of the build files, so a simulator build and a store archive of one commit differ. |
-| `--label <text>` | Recorded in the evidence as given, for example a commit SHA. The gate never checks it. |
-| `--evidence <file>` | Evidence JSON path (default `.deja/gate/evidence.json`). A text table is written beside it (`.txt`). An older file is deleted first, so a stale pass is never read as this run's. |
+| `--label <text>` | Recorded in the evidence as given, for example a commit SHA. The gate never checks it. Control characters and line breaks are refused (exit 2), as they are in goals, so the text table cannot be forged. |
+| `--evidence <file>` | Evidence JSON path (default `.deja/gate/evidence.json`). A text table is written beside it (`.txt`). An older file is deleted first, so a stale pass is never read as this run's. Only a previous gate evidence file is ever replaced (`"kind": "deja-gate-evidence"`; the text file must start with `Release gate: `). Any other existing file, a symlink, the goals file, the manifest, or a path in `.deja/` outside `.deja/gate/` is refused with exit 2 and nothing is deleted. |
 | `--store <id>` | Read this store, as for other commands. |
 
 There is no option to allow a failure or skip a goal. To check fewer goals, edit the goals file.
@@ -454,7 +454,9 @@ Per goal, the latest validation on this fingerprint decides:
 | `flaky` | That failure came from a run that passed on a rerun or failed differently (`--rerun-failed`). See below. |
 | `not-run` | No validation on this fingerprint, even if older builds passed, or the goal is not in the store. |
 | `flow-changed` | Manifest mode: the flow or a file it runs no longer matches the manifest's closure sha, so an earlier pass does not speak for the file on disk. |
-| `invalid` | The stored walk or its flow file cannot be trusted (checksum mismatch, missing file). |
+| `invalid` | The stored walk or its flow file cannot be read or trusted (checksum mismatch, missing file). The gate could not decide this goal: exit 11, not 10. |
+
+"Latest" is the store's own `lastValidation` for the one walk on this fingerprint: the last one written. Timestamps are recorded but never compared, so equal timestamps and clock skew cannot reorder a pass and a failure. In manifest mode only the walk of the manifest's current closure counts.
 
 The gate exits 0 only when every goal is `passed`. A store that cannot be read, a corrupt walk and a
 build that cannot be fingerprinted never pass: exit 11 with `"verdict": "error"` in the evidence.
@@ -480,8 +482,8 @@ validation, when it is still in `.deja/reports`). It goes through the same redac
 | `4` | Invalid/corrupt local memory; quarantine it and recover through verified cold exploration |
 | `7` | Flaky (`--rerun-failed`): the replay failed, then passed or failed differently on a rerun of the same YAML. Not a pass; the first failure is recorded |
 | `6` | Manifest mode: `flow-changed`, `not-validated`, `needs-migration` or `assertions-changed`. Nothing was replayed or written. Run with `--verify`, or review the change and run `remember` |
-| `10` | `gate`: the gate is closed. At least one goal is `failed`, `flaky`, `not-run`, `flow-changed` or `invalid` |
-| `11` | `gate`: it could not decide. The store or build could not be read, or the evidence file could not be written |
+| `10` | `gate`: the gate is closed. At least one goal is `failed`, `flaky`, `not-run` or `flow-changed` |
+| `11` | `gate`: it could not decide. The store, a stored walk or flow, or the build could not be read or trusted (`invalid`), or the evidence file could not be written |
 | `5` | The store is locked by another run (`STORE_LOCKED`), two runs collided taking over a stale lock (`STORE_LOCK_CONTENTION`), or the filesystem cannot hold the lock (`STORE_LOCK_UNAVAILABLE`). Use a different `--store <id>` per device; for contention, run again |
 
 ### One store per device

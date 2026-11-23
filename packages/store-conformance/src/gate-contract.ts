@@ -141,6 +141,28 @@ export function runGateContractTests(implementation: PortableStoreImplementation
       }
     })
 
+    test('latest is write order, never a timestamp compare: equal timestamps and clock skew cannot reorder', async () => {
+      const ctx = await context()
+      try {
+        // A failure recorded later but stamped earlier than the pass is still the latest.
+        await ctx.persist('Skewed', laterValidation)
+        await ctx.fail('Skewed', initialValidation)
+        // A failure stamped the same instant as the pass, recorded after it.
+        await ctx.persist('Equal', initialValidation)
+        await ctx.fail('Equal', initialValidation)
+        // A pass recorded after a failure, stamped earlier than it.
+        await ctx.persist('Recovered', initialValidation)
+        await ctx.fail('Recovered', laterValidation)
+        await ctx.persist('Recovered', initialValidation)
+        const results = await evaluateGate(ctx.store, ['Skewed', 'Equal', 'Recovered'], gateIdentity())
+        expect(results.map(result => [result.goal, result.outcome])).toEqual([
+          ['Skewed', 'failed'], ['Equal', 'failed'], ['Recovered', 'passed'],
+        ])
+      } finally {
+        await ctx.cleanup()
+      }
+    })
+
     test('goals are matched by normalized text and listed once', async () => {
       const ctx = await context()
       try {
@@ -232,6 +254,38 @@ export function runGateStoreContractTests(implementation: WalkStoreContractImple
         expect((await implementation.snapshotMetadata(ctx.workspaceRoot)).equals(before)).toBe(true)
         // The writer still holds its lock: the gate neither took nor released it.
         expect(() => locking.acquireWriter()).not.toThrow()
+      } finally {
+        await ctx.cleanup()
+      }
+    })
+
+    test('manifest mode: a goal with only an old-store walk needs migration and closes the gate', async () => {
+      const ctx = await context()
+      try {
+        await seed(ctx.open(), 'Today')
+        const results = await evaluateGate(ctx.open(true), ['Today'], gateIdentity())
+        expect(results).toMatchObject([{ outcome: 'not-run' }])
+        expect(results[0].detail).toMatch(/needs-migration/)
+        expect(gatePassed(results)).toBe(false)
+      } finally {
+        await ctx.cleanup()
+      }
+    })
+
+    test('manifest mode: a failure is reported for the manifest\'s current closure only', async () => {
+      const ctx = await context()
+      try {
+        const identity = { adapter: 'maestro-ios/v1', platform: 'ios' }
+        await writeFile(join(ctx.workspaceRoot, '.maestro/flows/today.yaml'), FLOW)
+        const store = ctx.open(true)
+        const persisted = await store.persistVerifiedCandidate({
+          identity: contractIdentity({ goal: 'Today', ...identity }), candidatePath: '.maestro/flows/today.yaml',
+          validation: { passed: true, at: initialValidation }, origin: 'remember',
+        })
+        await store.recordValidation(contractIdentity({ goal: 'Today', ...identity }), { passed: false, at: laterValidation })
+        const results = await evaluateGate(ctx.open(true), ['Today'], gateIdentity(identity))
+        expect(results).toMatchObject([{ outcome: 'failed', validatedAt: laterValidation, flowSha256: persisted.flowSha256 }])
+        expect(results[0].closureSha256).toMatch(/^[0-9a-f]{64}$/)
       } finally {
         await ctx.cleanup()
       }
