@@ -12,6 +12,7 @@ import {
   type Tool,
 } from '@modelcontextprotocol/sdk/types.js'
 import { InvalidWalkManifestError, type RunResult } from '@deja-qa/core'
+import { isMap, isScalar, parseAllDocuments } from 'yaml'
 import {
   ConsumerFlowError,
   InvalidWalkMemoryError,
@@ -105,17 +106,23 @@ const TOOLS: Record<string, ToolSpec> = {
  * On top of the CLI's redactor: the values of key-like environment variables, and the shapes provider
  * keys take (`sk-…`, `Bearer …`), so a key echoed by a child process or an error never reaches an agent.
  */
+/** A short value of letters and separators only (`dvorak-layout`) is a word, not a key: it has no digit and is not long. */
+function looksLikeWord(value: string) {
+  return value.length < 24 && /^[A-Za-z]+(?:[-_. ][A-Za-z]+)*$/.test(value)
+}
+
 export function providerKeyRedactor(env: NodeJS.ProcessEnv): Redactor {
   const values = Object.entries(env)
-    .filter(([name, value]) => /(?:KEY|TOKEN|SECRET|PASSWORD)/i.test(name) && typeof value === 'string' && value.length >= 8)
+    .filter(([name, value]) => /(?:KEY|TOKEN|SECRET|PASSWORD)/i.test(name) && typeof value === 'string' &&
+      value.length >= 8 && !looksLikeWord(value))
     .map(([, value]) => value!)
     .sort((left, right) => right.length - left.length)
   return text => {
     let redacted = text
     for (const value of values) redacted = redacted.split(value).join('<redacted-secret>')
     return redacted
-      .replace(/\b(?:sk|pk|rk)-[A-Za-z0-9_-]{16,}/g, '<redacted-secret>')
-      .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]{8,}/gi, 'Bearer <redacted-secret>')
+      .replace(/(?<![A-Za-z0-9_-])(?:sk|pk|rk)-[A-Za-z0-9_-]{16,}/g, '<redacted-secret>')
+      .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]{20,}/gi, 'Bearer <redacted-secret>')
   }
 }
 
@@ -163,7 +170,9 @@ function underDeja(root: string, candidate: string) {
  * `.deja/`, and (after resolving every symlink) still a file inside the real workspace. Returns the
  * workspace-relative path to hand to `remember`.
  */
-export async function confineFlow(workspaceRoot: string, flow: string, appId?: string): Promise<string> {
+export async function confineFlow(
+  workspaceRoot: string, flow: string, app?: { appId: string; platform: string },
+): Promise<string> {
   if (isAbsolute(flow)) throw new FlowPathError('flow must be a path relative to the workspace')
   if (!['.yaml', '.yml'].includes(extname(flow).toLowerCase())) throw new FlowPathError('flow must be a .yaml or .yml file')
   const root = await realpath(resolve(workspaceRoot))
@@ -186,22 +195,41 @@ export async function confineFlow(workspaceRoot: string, flow: string, appId?: s
   if (!info.isFile()) throw new FlowPathError('flow must be a file')
   // realpath cannot see a hard link to a file elsewhere, so a shared inode is refused.
   if (info.nlink > 1) throw new FlowPathError('flow must not have more than one hard link')
-  if (appId !== undefined) {
-    const declared = flowAppId(await readFile(canonical, 'utf8'))
-    if (declared !== null && declared !== appId) {
-      throw new FlowPathError(`flow appId ${JSON.stringify(declared)} does not match the configured app ID ${JSON.stringify(appId)}`)
-    }
-  }
+  if (app) checkFlowApp(await readFile(canonical, 'utf8'), app)
   // The canonical path, so a symlink swapped after this check cannot change what is verified and saved.
   return relative(root, canonical)
 }
 
-/** The `appId:` of a Maestro flow's header (the part before the first `---`), or null when it has none. */
-export function flowAppId(text: string): string | null {
-  const header = text.split(/^---\s*$/m)[0] ?? ''
-  const match = /^appId:[ \t]*(.*?)[ \t]*(?:#.*)?$/m.exec(header)
-  if (!match) return null
-  return match[1]!.replace(/^(['"])(.*)\1$/, '$2')
+/**
+ * The flow's config document (the first YAML document, as Maestro reads it) must name the host's app,
+ * and this fails closed: a flow that does not parse, repeats a key, has no mapping, or has no plain
+ * string `appId` is refused. A web flow names its page with `url`, which must be on the configured origin.
+ * Per-command app IDs (`launchApp: {appId}`) are not checked; see DEJA-41.
+ */
+export function checkFlowApp(text: string, app: { appId: string; platform: string }) {
+  const refuse = (reason: string): never => { throw new FlowPathError(`flow header refused: ${reason}`) }
+  const documents = parseAllDocuments(text.replace(/^\uFEFF/, ''), { uniqueKeys: true })
+  for (const document of documents) {
+    if (document.errors.length > 0) refuse(`the file does not parse as YAML (${document.errors[0]!.message.split('\n')[0]})`)
+  }
+  const config = documents[0]?.contents
+  if (!isMap(config)) refuse('the first YAML document is not a mapping with the app ID')
+  const key = app.platform === 'web' ? 'url' : 'appId'
+  const pair = isMap(config) ? config.items.find(item => isScalar(item.key) && item.key.value === key) : undefined
+  const value = pair?.value
+  if (!isScalar(value) || typeof value.value !== 'string' || value.tag !== undefined) {
+    refuse(`${key} must be a plain string`)
+  }
+  const declared = (value as { value: string }).value
+  if (key === 'url') {
+    let origin: string | null = null
+    try { origin = new URL(declared).origin } catch { /* refused below */ }
+    if (origin !== new URL(app.appId).origin) {
+      throw new FlowPathError(`flow url ${JSON.stringify(declared)} is not on the configured page ${JSON.stringify(app.appId)}`)
+    }
+  } else if (declared !== app.appId) {
+    throw new FlowPathError(`flow appId ${JSON.stringify(declared)} does not match the configured app ID ${JSON.stringify(app.appId)}`)
+  }
 }
 
 async function confineReport(workspaceRoot: string, report: string): Promise<string> {
@@ -385,7 +413,7 @@ export function createMcpServer(options: McpServerOptions): Server {
           return await write({ repair: false, explore: false },
             ({ orchestration }) => orchestration.run(input.goal!, callOptions))
         case 'deja_remember': {
-          const flow = await confineFlow(root, input.flow!, configuration.explore.appId)
+          const flow = await confineFlow(root, input.flow!, { appId: configuration.explore.appId, platform: configuration.explore.platform })
           return await write({ repair: false, explore: false },
             ({ orchestration }) => orchestration.remember(input.goal!, flow, callOptions))
         }

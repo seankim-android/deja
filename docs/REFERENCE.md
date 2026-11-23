@@ -458,10 +458,15 @@ What the server will not do, whatever a tool call says:
 - `deja_remember` resolves `flow` with `realpath`. It refuses an absolute path, a path outside the
   workspace (a symlink that leaves it included), anything under `.deja/` (also through a symlink),
   a file whose name or symlink target is not `.yaml` or `.yml`, a file with more than one hard link, and a
-  flow whose `appId:` header differs from the configured app ID. The canonical path is what is verified and saved. In manifest mode the store then applies the same rules as
+  flow whose config document (the first YAML document, parsed with `yaml`) does not have a plain-string `appId`
+  equal to the configured app ID (a web flow: a `url` on the configured origin). It fails closed: a flow that
+  does not parse, repeats a key, or has no such header is refused. Only the header is checked: per-command
+  app IDs such as `launchApp: {appId}` are not (DEJA-41). The canonical path is what is verified and saved. In manifest mode the store then applies the same rules as
   `deja remember`.
 - Responses use the CLI's report redaction (workspace and home paths, fixture credentials, secret-like
-  keys), plus the values of key-like environment variables and `sk-…` and `Bearer …` tokens, and artifact paths are relative to the workspace.
+  keys), plus the values of key-like environment variables (8 or more characters; a short value made only of letters
+  and separators, like `dvorak-layout`, is treated as a word and left alone), `sk-…` keys and `Bearer` tokens of 20 or more
+  characters. This can still hide an ordinary word that looks like a key; hiding too much is the safe side, and artifact paths are relative to the workspace.
 - One writer per store: a second `deja_run`, `deja_remember` or `deja_explore` while one is running is
   refused at once with `error.code` `STORE_LOCKED`. `deja_list` and `deja_inspect` never take the lock.
   Run one `deja mcp --store <id>` per device.

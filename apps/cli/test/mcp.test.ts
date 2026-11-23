@@ -7,7 +7,7 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import { LocalWalkStore } from '@deja-qa/store-local'
 import { loadProductionConfiguration } from '../src/config.ts'
-import { confineFlow, createMcpServer, flowAppId, parseMcpArguments, relativizeResult } from '../src/mcp.ts'
+import { confineFlow, createMcpServer, checkFlowApp, parseMcpArguments, providerKeyRedactor, relativizeResult } from '../src/mcp.ts'
 import { runCli } from '../src/main.ts'
 
 const fakeMaestro = resolve(import.meta.dir, '../../../packages/maestro/test/fixtures/fake-maestro.cjs')
@@ -297,20 +297,55 @@ describe('deja mcp', () => {
     }
   })
 
-  test('a flow for another app is refused; a matching or absent appId header is accepted', async () => {
+  test('the flow header must name the configured app, and the check fails closed', async () => {
     const { root } = await workspace()
-    await writeFile(join(root, '.maestro/flows/settings.yaml'), 'appId: com.apple.Preferences\n---\n- launchApp\n- assertVisible: Settings\n')
-    await writeFile(join(root, '.maestro/flows/quoted.yaml'), `appId: "dev.deja.fixture" # ours\n---\n- launchApp\n- assertVisible: x\n`)
-    await writeFile(join(root, '.maestro/flows/bare.yaml'), '- launchApp\n- assertVisible: x\n')
     const client = await connect(root)
-    const refused = await call(client, 'deja_remember', { goal: 'settings', flow: '.maestro/flows/settings.yaml' })
-    expect(refused.payload.error).toMatchObject({ code: 'INVALID_PATH' })
-    expect(refused.payload.error.message).toContain('does not match the configured app ID')
+    const body = '- launchApp\n- assertVisible: x\n'
+    const refused: Record<string, string> = {
+      'other app': `appId: com.apple.Preferences\n---\n${body}`,
+      'leading document marker': `---\nappId: com.evil\n---\n${body}`,
+      'duplicate key, good first': `appId: dev.deja.fixture\nappId: com.evil\n---\n${body}`,
+      'duplicate key, good last': `appId: com.evil\nappId: dev.deja.fixture\n---\n${body}`,
+      'space before colon': `appId : com.evil\n---\n${body}`,
+      'quoted key': `"appId": com.evil\n---\n${body}`,
+      'flow mapping': `{appId: com.evil}\n---\n${body}`,
+      'BOM': `\uFEFFappId: com.evil\n---\n${body}`,
+      'tagged value': `appId: !!str com.evil\n---\n${body}`,
+      'tagged good value': `appId: !!str dev.deja.fixture\n---\n${body}`,
+      'no header': body,
+      'empty first document': `---\n---\n${body}`,
+      'header without appId': `name: x\n---\n${body}`,
+      'appId not a string': `appId: 123\n---\n${body}`,
+      'appId an alias': `base: &a dev.deja.fixture\nappId: *a\n---\n${body}`,
+      'does not parse': `appId: [unclosed\n---\n${body}`,
+    }
+    for (const [name, text] of Object.entries(refused)) {
+      await writeFile(join(root, '.maestro/flows/case.yaml'), text)
+      const result = await call(client, 'deja_remember', { goal: 'case', flow: '.maestro/flows/case.yaml' })
+      expect({ name, code: result.payload.error?.code, message: result.payload.error?.message ?? '' })
+        .toEqual({ name, code: 'INVALID_PATH', message: expect.stringMatching(/flow header refused|does not match/) })
+    }
     await expect(readFile(join(root, 'deja.walks.json'), 'utf8')).rejects.toBeDefined()
-    expect((await call(client, 'deja_remember', { goal: 'quoted', flow: '.maestro/flows/quoted.yaml' })).payload.outcome).toBe('remembered')
-    expect((await call(client, 'deja_remember', { goal: 'bare', flow: '.maestro/flows/bare.yaml' })).payload.outcome).toBe('remembered')
-    expect(flowAppId('appId: a.b\n---\n- x')).toBe('a.b')
-    expect(flowAppId('- launchApp:\n    appId: other\n')).toBeNull()
+    const accepted: Record<string, string> = {
+      plain: `appId: dev.deja.fixture\n---\n${body}`,
+      'quoted value and comment': `appId: "dev.deja.fixture" # ours\n---\n${body}`,
+      'quoted key': `"appId": dev.deja.fixture\n---\n${body}`,
+      'flow mapping': `{appId: dev.deja.fixture}\n---\n${body}`,
+      'leading document marker': `---\nappId: dev.deja.fixture\n---\n${body}`,
+      BOM: `\uFEFFappId: dev.deja.fixture\n---\n${body}`,
+    }
+    for (const [name, text] of Object.entries(accepted)) {
+      await writeFile(join(root, '.maestro/flows/case.yaml'), text)
+      const result = await call(client, 'deja_remember', { goal: 'case', flow: '.maestro/flows/case.yaml' })
+      expect({ name, outcome: result.payload.outcome ?? result.payload.error }).toEqual({ name, outcome: 'remembered' })
+    }
+  })
+
+  test('a web flow must stay on the configured page origin', () => {
+    const web = { appId: 'http://127.0.0.1:4173', platform: 'web' }
+    expect(() => checkFlowApp('url: http://127.0.0.1:4173/shop\n---\n- tapOn: x\n', web)).not.toThrow()
+    expect(() => checkFlowApp('url: https://evil.example/\n---\n- tapOn: x\n', web)).toThrow(/not on the configured page/)
+    expect(() => checkFlowApp('appId: http://127.0.0.1:4173\n---\n- tapOn: x\n', web)).toThrow(/url must be a plain string/)
   })
 
   test('inherited property names are unknown arguments, and rerunFailed is not an argument', async () => {
@@ -390,6 +425,16 @@ describe('deja mcp', () => {
     expect(failed.text).not.toContain(root)
     const listed = await call(client, 'deja_inspect', { report: '.deja/reports/none.json' })
     expect(listed.text).not.toContain(envKey)
+  })
+
+  test('redaction leaves ordinary words alone and still catches real keys', () => {
+    const redact = providerKeyRedactor({ KEYBOARD: 'dvorak-layout', API_TOKEN: 'tok3n-Zq81xv07', SESSION_SECRET: 'x'.repeat(30), SHORT_KEY: 'abc' })
+    const key = `sk-${'a1b2c3d4'.repeat(4)}`
+    const bearer = `Bearer ${'Ab1.'.repeat(8)}`
+    expect(redact('Bearer authentication scheme with dvorak-layout and flow-' + key + ' and disk-' + 'x'.repeat(20)))
+      .toBe('Bearer authentication scheme with dvorak-layout and flow-' + key + ' and disk-' + 'x'.repeat(20))
+    expect(redact(`key ${key}, header ${bearer}, env tok3n-Zq81xv07 and ${'x'.repeat(30)}`))
+      .toBe('key <redacted-secret>, header Bearer <redacted-secret>, env <redacted-secret> and <redacted-secret>')
   })
 
   test('responses are redacted like CLI reports', async () => {
