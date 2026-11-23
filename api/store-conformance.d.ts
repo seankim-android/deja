@@ -20,4 +20,6 @@ export type WalkStoreContractImplementation = {
     snapshotMetadata(workspaceRoot: string): Promise<Buffer>;
     tamperMetadata(workspaceRoot: string, kind: MetadataTamper): Promise<void>;
     setFirstFlowPath(workspaceRoot: string, flowPath: string): Promise<void>;
+    editSubflowMetadata(workspaceRoot: string, kind: 'strip' | 'empty'): Promise<void>;
+    downgradeToSchema2(workspaceRoot: string): Promise<void>;
 };

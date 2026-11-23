@@ -6,7 +6,7 @@ export declare class InvalidWalkMemoryError extends Error {
 }
 export declare const MAESTRO_FLOW_SCHEMA_VERSION = "maestro/v1";
 export declare const SQLITE_MEMORY_PATH = ".deja/memory/walks.sqlite";
-export declare const SQLITE_MEMORY_SCHEMA_VERSION = 2;
+export declare const SQLITE_MEMORY_SCHEMA_VERSION = 3;
 export declare class SQLiteWalkStore implements WalkStore {
     readonly workspaceRoot: string;
     readonly memoryPath: string;
@@ -27,6 +27,7 @@ export declare class SQLiteWalkStore implements WalkStore {
     private storedFlowPath;
     private atomicWriteFlow;
     private persistVerified;
+    snapshotCandidate(candidatePath: string, directory: string): Promise<CandidateSnapshot>;
     persistVerifiedCandidate(options: PersistVerifiedOptions): Promise<PersistedWalk>;
     persistVerifiedRepair(options: PersistVerifiedRepairOptions): Promise<PersistedWalk>;
     list(): Promise<StoredWalk[]>;
