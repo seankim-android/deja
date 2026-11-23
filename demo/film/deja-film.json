@@ -15,7 +15,7 @@
       "scene": "intro",
       "intro": {
         "title": "Déjà",
-        "description": "Kimi on Cerebras tests your app once. Déjà saves that test. Every later run replays it with zero model calls."
+        "description": "Kimi on Cerebras tests your app once. Déjà saves that test. Later runs replay it with zero model calls. Formerly WalkCache."
       }
     },
     {
