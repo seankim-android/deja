@@ -32,6 +32,9 @@ Options:
   --junit <file>   Write Maestro's own JUnit report to <file> (config field: "junit"). If Maestro
                    never ran or did not pass, a minimal report with one failed testcase is written,
                    so a missing file is never a pass. Listed as a junit artifact in the result.
+  --store <id>     Use a separate store for this run, for example one per device or simulator.
+                   Run one deja per device in parallel, each with its own id. A second writer on
+                   one store is refused (exit 5). Flows are shared; history is not.
   --summary        Print one line: deja-summary v=1 outcome cache fingerprint model_calls
                    failure goal (goal last, percent-encoded). Last stdout line, or stderr with --json.
   -h, --help       Show help without loading configuration or constructing plugins.
@@ -49,6 +52,7 @@ Exit codes:
   2  Usage, configuration, report-inspection, or direct I/O error.
   3  Cold exploration did not produce a verified reusable walk.
   4  Invalid/corrupt local memory; quarantine it and use cold exploration to recover.
+  5  Store locked: another run is writing the same store. Use a different --store <id>.
 
 YAML verification and replay always invoke standalone Maestro flows. No YAML depends on
 Déjà or an LLM after it has been written.

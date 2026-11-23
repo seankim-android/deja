@@ -287,12 +287,33 @@ Temporary files left before flow rename are never loaded. SQLite validation writ
 transaction mechanism; filesystem validation and report writes use temporary file plus rename.
 
 Filesystem rename and SQLite commit provide local replacement integrity, not one cross-resource
-transaction, distributed transactions, or multi-writer coordination. SQLite serializes immediate
+transaction, distributed transactions, or multi-writer merging. SQLite serializes immediate
 writers and has a 1-second busy timeout, but its high-level read/modify/write lifecycle has no
-optimistic revision check or update merge: persistence/validation writers must be single-writer per
-workspace. Deterministic rename failures and a real trigger-aborted SQLite transaction are tested;
-power loss, drive failures, every crash point, and concurrent-writer conflicts are not certified.
+optimistic revision check or update merge, so each store has exactly one writer (DEJA-4, below).
+Deterministic rename failures and a real trigger-aborted SQLite transaction are tested;
+power loss, drive failures and every crash point are not certified.
 See `packages/store-sqlite/README.md` for setup and durability boundaries.
+
+### One writer per store, one store per device (DEJA-4)
+
+Both stores take a writer lock on their first write (persist, repair, validation) and keep it until
+`close()` or process exit. The lock is a file beside the metadata (`walks.json.lock`,
+`walks.sqlite.lock`) holding the holder's pid, `ps` start time and host, created whole by a hard
+link. A second writer gets `StoreLockedError` (`code: 'STORE_LOCKED'`), and the CLI exits 5 before it
+runs anything. Reads (`lookup`, `list`, `deja list`) never take the lock. A lock is stale only when
+it is on this host and its pid is gone or now has a different start time; then the next writer
+takes over under a short `.break` file. Another host, an unreadable file, or a failed `ps` all mean
+held (fail closed). A killed process leaves its file behind until the next writer replaces it.
+The lock does not cover a network filesystem shared between hosts.
+
+To run several devices at once, give each its own store with `storeId` (`--store <id>` on the CLI;
+a simulator UDID works). History goes to `.deja/memory/stores/<id>/walks.{json,sqlite}` with its
+own lock. Flow files stay in the shared `.deja/flows`: they are content-addressed and written
+atomically, so two stores writing the same bytes agree. Without an id the store is the original
+single store, unchanged. Ids are 1 to 128 of `[A-Za-z0-9._-]`, starting with a letter or digit.
+Reports in `.deja/reports` are named per process, but `latest.json` is last-writer-wins, so a
+parallel host should read each run's own report path. Each device learns on its own: a flow
+remembered under one id is not a hit under another.
 
 Reports are written under `.deja/reports/<command>-<time>-<pid>.json`, then `latest.json` is
 atomically replaced. Runner artifacts retain separate `stdout.log`, `stderr.log`, and combined

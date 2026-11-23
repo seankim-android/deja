@@ -90,10 +90,12 @@ meaning of atomic successful replacement, not distributed atomicity.
 SQLite serializes `BEGIN IMMEDIATE` writers and `busy_timeout` is 1,000 ms. Separate readers may use
 their own connections. However, each high-level operation reads a metadata snapshot before entering
 its later write transaction, and replacement writes the resulting snapshot as a unit. There is no
-cross-operation optimistic version check, application lock, multi-writer merge, or distributed
-coordination. Run only **one persistence/validation writer at a time per workspace**; concurrent
-candidates can overwrite another writer's logical update, and repair still requires its previous
-base to match at the initial check. A busy database can fail rather than wait indefinitely.
+cross-operation optimistic version check, multi-writer merge, or distributed coordination. A
+writer lock (`walks.sqlite.lock`, taken on the first write, released by `close()` or exit) refuses a
+second writer with `StoreLockedError`, so there is **one persistence/validation writer per store**.
+For parallel devices pass `storeId` per device (`.deja/memory/stores/<id>/walks.sqlite`). See
+`docs/ARCHITECTURE.md`, "One writer per store". Repair still requires its previous base to match at
+the initial check. A busy database can fail rather than wait indefinitely.
 
 The store is for one local workspace and local filesystem semantics. It is not a network database,
 cross-machine lock, remote cache, backup system, or semantic retrieval implementation. Existing

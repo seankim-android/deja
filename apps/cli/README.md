@@ -40,10 +40,18 @@ YAML may contain deterministic fixture inputs but is never printed by the CLI su
 
 Exit codes are `0` success/help/list/inspect-of-pass, `1` product/unknown/runner/executable-launch/
 repair/candidate failure, `2` usage/config/report/direct-I/O error, `3` rejected or failed cold
-exploration, and `4` invalid memory.
+exploration, `4` invalid memory, and `5` the store is locked by another run.
 Inspecting a failed report returns that report's original failure class; inspecting a passing report
 returns zero. Help does not load configuration. Invalid memory must be quarantined, not edited into
 a hit.
+
+## One store per device
+
+A store has one writer. To split flows over devices, start one `deja` per device with its own
+store: `deja run checkout --store "$UDID"`. Each id keeps its own history under
+`.deja/memory/stores/<id>/`; flows are shared. Two runs on the same store are refused with exit 5
+before they run anything, and `deja list` works while a run holds the lock. See
+[ARCHITECTURE.md](../../docs/ARCHITECTURE.md#one-writer-per-store-one-store-per-device-deja-4).
 
 ## JUnit and summary output
 

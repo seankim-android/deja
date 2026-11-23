@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { mkdir, mkdtemp, realpath, readFile, rm, writeFile } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
+import { hostname, tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
 const cli = resolve(import.meta.dir, '../deja.ts')
@@ -185,6 +185,41 @@ describe('production headless CLI', () => {
       expect(inspected.exitCode).toBe(1)
       expect(inspected.stdout).toContain('Outcome: product-regression')
       expect(inspected.stdout).not.toContain('testing123')
+    } finally {
+      await cleanup(context.temporary)
+    }
+  })
+
+  test('--store keeps each device in its own store; a second writer on one store exits 5 and list still works', async () => {
+    const context = await workspace()
+    try {
+      const [a, b] = await Promise.all(['udid-A', 'udid-B'].map(id => execute(context.root, [
+        'remember', 'checkout', '--flow', 'flows/candidate.yaml', '--store', id,
+      ])))
+      expect(a.exitCode).toBe(0)
+      expect(b.exitCode).toBe(0)
+      for (const id of ['udid-A', 'udid-B']) {
+        const memory = JSON.parse(await readFile(join(context.root, `.deja/memory/stores/${id}/walks.json`), 'utf8'))
+        expect(memory.walks).toHaveLength(1)
+      }
+      expect(existsSync(join(context.root, '.deja/memory/walks.json'))).toBe(false)
+      const listed = await execute(context.root, ['list', '--store', 'udid-A'])
+      expect(listed.exitCode).toBe(0)
+      expect(listed.stdout).toContain('checkout')
+
+      // A live holder (this test process) on the same store: refused before any work, exit 5.
+      const lockPath = join(context.root, '.deja/memory/stores/udid-A/walks.json.lock')
+      await writeFile(lockPath, `${JSON.stringify({
+        version: 1, pid: process.pid, startedAt: null, host: hostname(),
+        token: 'held-by-test', acquiredAt: '2026-11-22T00:00:00.000Z',
+      })}\n`)
+      const refused = await execute(context.root, ['run', 'checkout', '--store', 'udid-A'])
+      expect(refused.exitCode).toBe(5)
+      expect(refused.stderr).toContain('Store is locked')
+      const stillListed = await execute(context.root, ['list', '--store', 'udid-A'])
+      expect(stillListed.exitCode).toBe(0)
+      const bad = await execute(context.root, ['list', '--store', '../x'])
+      expect(bad.exitCode).toBe(2)
     } finally {
       await cleanup(context.temporary)
     }
