@@ -1,6 +1,6 @@
 // typescript 7.0.2
 // entry . (./src/index.ts)
-// exports: ASSERTION_HASH_VERSION, ActionChoice, ActionChooser, ArtifactKind, AssertionHashChangedError, CONTRACT_VERSION, CacheMissReason, CacheStatus, CandidateAction, CandidateSnapshot, CompositionModelMetrics, CompositionStepMetrics, CreateDejaOptions, DEFAULT_FLOW_SCHEMA_VERSION, DEFAULT_MINIMUM_MARGIN, DEFAULT_MINIMUM_SIMILARITY, Deja, DejaAdapter, DejaCallOptions, DejaClient, DejaClientRememberOptions, DejaClientRunOptions, DejaDependencies, DejaFactoryContext, DejaRememberOptions, DejaRunOptions, ElementObservation, ElementRole, EngineReport, EvidenceArtifact, ExactFirstLookupResult, ExactFirstWalkRetriever, ExecutionResult, ExpectedClosureMismatchError, ExpectedFlowChecksumMismatchError, ExplorationDetails, ExplorationDriver, ExplorationResult, ExploreRequest, FailedBranch, FailureCategory, FingerprintConfig, FingerprintRules, FlowAssertion, FlowChangedError, FlowReference, FlowReferenceError, GateFlakyFailure, GateGoalResult, GateIdentity, GateOptions, GateOutcome, Goal, GoalEmbeddingProvider, InvalidRouteGraphError, InvalidSubflowError, InvalidWalkManifestError, LaunchProfile, LookupHit, LookupMiss, MANIFEST_HASH_VERSION, MAX_OBSERVED_ELEMENTS, ManifestOwnerRules, ManifestProfile, ManifestWalk, MigrateOptions, MigratedWalk, MigrationReport, NewBuildReplayReport, Observation, ObservationReport, OwnerRuleError, PersistVerifiedOptions, PersistVerifiedRepairOptions, PersistVerifiedSubflowOptions, PersistedWalk, ROUTE_GRAPH_FALLBACK, ROUTE_GRAPH_SCHEMA_VERSION, RawElement, RepairProvenance, RepairRequest, RepairResult, ReportReceipt, RouteAction, RouteGraph, RouteGraphProvenance, RunArtifact, RunOutcome, RunReporter, RunResult, RunnerRequest, SCREEN_FINGERPRINT_V2, SCREEN_FINGERPRINT_VERSION, ScreenFingerprintV2, ScreenMatch, ScreenMatchOptions, ScreenMatchV2, ScreenNode, ScreenObservation, Segment, SelectorRepairer, SemanticLookupReason, SemanticLookupReport, SemanticLookupStatus, SemanticRetrievalOptions, SemanticSelectedWalk, SkippedWalk, SourceDiff, StaleBuildPolicy, StepResult, StoredFlowFile, StoredScreen, StoredValidation, StoredWalk, SubflowContract, SubflowEvidenceArtifact, SubflowIdentity, SubflowInput, SubflowOutput, SubflowPostcondition, SubflowPrecondition, SubflowProvenance, SystemUiKind, SystemUiState, UnsupportedPlatformExplorer, VERIFIED_SUBFLOW_SCHEMA_VERSION, VerifiedSubflow, VerifiedSubflowHit, VerifiedSubflowLookup, VerifiedSubflowStore, VerifiedTransition, WALK_MANIFEST_VERSION, WALK_RESULT_SCHEMA_VERSION, WalkExplorer, WalkFailure, WalkIdentity, WalkManifest, WalkRunner, WalkStore, WalkValidation, checkManifestFlowPath, cosineSimilarity, createDeja, emptyWalkManifest, evaluateGate, findChromeIds, findFlowAssertions, findFlowReferences, findFlowStrings, fingerprintScreen, fingerprintScreenV2, gatePassed, goalsAreContradictory, hasAdversarialGoalMarker, isDynamicId, makeScreenNode, manifestWalkKey, matchScreen, matchScreenV2, normalizeElements, normalizeGoal, normalizedSnapshot, observationReport, parseWalkManifest, sameSubflowIdentity, serializeWalkManifest, subflowMissReason, validateRouteGraph, validateSubflowContract
+// exports: ASSERTION_HASH_VERSION, ActionChoice, ActionChooser, ArtifactKind, AssertionHashChangedError, CONTRACT_VERSION, CacheMissReason, CacheStatus, CandidateAction, CandidateSnapshot, CompositionModelMetrics, CompositionStepMetrics, CrashSignal, CreateDejaOptions, DEFAULT_FLOW_SCHEMA_VERSION, DEFAULT_MINIMUM_MARGIN, DEFAULT_MINIMUM_SIMILARITY, Deja, DejaAdapter, DejaCallOptions, DejaClient, DejaClientRememberOptions, DejaClientRunOptions, DejaDependencies, DejaFactoryContext, DejaRememberOptions, DejaRunOptions, ElementObservation, ElementRole, EngineReport, EvidenceArtifact, ExactFirstLookupResult, ExactFirstWalkRetriever, ExecutionResult, ExpectedClosureMismatchError, ExpectedFlowChecksumMismatchError, ExplorationDetails, ExplorationDriver, ExplorationResult, ExploreRequest, FailedBranch, FailureCategory, FingerprintConfig, FingerprintRules, FlowAssertion, FlowChangedError, FlowReference, FlowReferenceError, GateFlakyFailure, GateGoalResult, GateIdentity, GateOptions, GateOutcome, Goal, GoalEmbeddingProvider, InvalidRouteGraphError, InvalidSubflowError, InvalidWalkManifestError, LaunchProfile, LookupHit, LookupMiss, MANIFEST_HASH_VERSION, MAX_OBSERVED_ELEMENTS, ManifestOwnerRules, ManifestProfile, ManifestWalk, MigrateOptions, MigratedWalk, MigrationReport, NewBuildReplayReport, Observation, ObservationReport, OwnerRuleError, PersistVerifiedOptions, PersistVerifiedRepairOptions, PersistVerifiedSubflowOptions, PersistedWalk, ROUTE_GRAPH_FALLBACK, ROUTE_GRAPH_SCHEMA_VERSION, RawElement, RepairProvenance, RepairRequest, RepairResult, ReportReceipt, RouteAction, RouteGraph, RouteGraphProvenance, RunArtifact, RunAttempt, RunOutcome, RunReporter, RunResult, RunnerRequest, SCREEN_FINGERPRINT_V2, SCREEN_FINGERPRINT_VERSION, ScreenFingerprintV2, ScreenMatch, ScreenMatchOptions, ScreenMatchV2, ScreenNode, ScreenObservation, Segment, SelectorRepairer, SemanticLookupReason, SemanticLookupReport, SemanticLookupStatus, SemanticRetrievalOptions, SemanticSelectedWalk, SkippedWalk, SourceDiff, StaleBuildPolicy, StepResult, StoredFlowFile, StoredScreen, StoredValidation, StoredWalk, SubflowContract, SubflowEvidenceArtifact, SubflowIdentity, SubflowInput, SubflowOutput, SubflowPostcondition, SubflowPrecondition, SubflowProvenance, SystemUiKind, SystemUiState, UnsupportedPlatformExplorer, VERIFIED_SUBFLOW_SCHEMA_VERSION, VerifiedSubflow, VerifiedSubflowHit, VerifiedSubflowLookup, VerifiedSubflowStore, VerifiedTransition, WALK_MANIFEST_VERSION, WALK_RESULT_SCHEMA_VERSION, WalkExplorer, WalkFailure, WalkIdentity, WalkManifest, WalkRunner, WalkStore, WalkValidation, checkManifestFlowPath, cosineSimilarity, createDeja, emptyWalkManifest, evaluateGate, findChromeIds, findFlowAssertions, findFlowReferences, findFlowStrings, fingerprintScreen, fingerprintScreenV2, gatePassed, goalsAreContradictory, hasAdversarialGoalMarker, isDynamicId, makeScreenNode, manifestWalkKey, matchScreen, matchScreenV2, normalizeElements, normalizeGoal, normalizedSnapshot, observationReport, parseWalkManifest, sameSubflowIdentity, serializeWalkManifest, subflowMissReason, validateRouteGraph, validateSubflowContract
 export type ActionChoice = {
     action: CandidateAction | null;
     reason: string;
@@ -49,6 +49,11 @@ export type CompositionStepMetrics = {
 };
 export declare const CONTRACT_VERSION = 1;
 export declare function cosineSimilarity(left: readonly number[], right: readonly number[]): number;
+export type CrashSignal = {
+    source: 'maestro-output' | 'crash-report';
+    reportFile?: string;
+    process?: string;
+};
 export declare function createDeja(options: CreateDejaOptions): DejaClient;
 export type CreateDejaOptions = {
     workspaceRoot: string;
@@ -87,6 +92,10 @@ export declare class Deja {
     remember(identity: WalkIdentity, candidatePath: string, options?: DejaRememberOptions): Promise<RunResult>;
     private manifestExplorationRefused;
     private recordOrFlowChanged;
+    private flowChangedDetails;
+    private changedBetweenAttempts;
+    private rerunOnce;
+    private flakyDetails;
     private manifestMiss;
     private verifyFlow;
     private explorationDetails;
@@ -137,6 +146,7 @@ export type DejaRememberOptions = {
 };
 export type DejaRunOptions = {
     verify?: boolean;
+    rerunFailed?: boolean;
 };
 export type ElementObservation = {
     id: string | null;
@@ -239,7 +249,7 @@ export type FailedBranch = {
     category: 'selector' | 'navigation' | 'product_assertion' | 'runner' | 'timeout' | 'unknown';
     failedAt: string;
 };
-export type FailureCategory = 'selector' | 'navigation' | 'product_assertion' | 'runner' | 'timeout' | 'unknown';
+export type FailureCategory = 'selector' | 'navigation' | 'product_assertion' | 'runner' | 'timeout' | 'unknown' | 'app_crash';
 export declare function findChromeIds(screens: {
     anchors: string[];
     markers?: string[];
@@ -558,13 +568,22 @@ export type RunArtifact = {
     path: string;
     sha256?: string;
 };
+export type RunAttempt = {
+    attempt: 1 | 2;
+    passed: boolean;
+    startedAt: string;
+    endedAt: string;
+    durationMs: number;
+    failure: WalkFailure | null;
+    artifacts: RunArtifact[];
+};
 export type RunnerRequest = {
     flowPath: string;
     artifactDirectory: string;
     timeoutMs?: number;
     env?: Record<string, string>;
 };
-export type RunOutcome = 'passed' | 'remembered' | 'cold-recorded' | 'repaired' | 'rejected' | 'exploration-rejected' | 'product-regression' | 'repair-rejected' | 'failed' | 'flow-changed' | 'not-validated' | 'needs-migration' | 'assertions-changed';
+export type RunOutcome = 'passed' | 'remembered' | 'cold-recorded' | 'repaired' | 'rejected' | 'exploration-rejected' | 'product-regression' | 'repair-rejected' | 'failed' | 'flow-changed' | 'not-validated' | 'needs-migration' | 'assertions-changed' | 'flaky';
 export interface RunReporter {
     report(result: RunResult): Promise<ReportReceipt>;
 }
@@ -596,6 +615,7 @@ export type RunResult = {
     repair?: RepairResult;
     replayedOnNewBuild?: NewBuildReplayReport;
     engine?: EngineReport;
+    attempts?: RunAttempt[];
 };
 export declare function sameSubflowIdentity(left: SubflowIdentity, right: SubflowIdentity): boolean;
 export declare const SCREEN_FINGERPRINT_V2 = 2;
@@ -814,6 +834,7 @@ export type WalkFailure = {
     repairEligible: boolean;
     failingStep: string | null;
     rawArtifactPath: string | null;
+    crash?: CrashSignal;
 };
 export type WalkIdentity = {
     goal: string;

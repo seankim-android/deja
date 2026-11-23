@@ -1,7 +1,8 @@
 import { describe, expect, test } from 'bun:test'
 import { mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { spawn } from 'node:child_process'
+import { join, resolve } from 'node:path'
 import { iosMaestroAdapter } from '@deja-qa/maestro'
 import { LocalWalkStore } from '@deja-qa/store-local'
 import { runCli } from '../src/main.ts'
@@ -262,6 +263,39 @@ describe('deja gate', () => {
         { stdout: () => {}, stderr: text => stderr.push(text) })
       expect(exit).toBe(2)
       expect(stderr.join('')).toContain('valid only with gate')
+    } finally { await rm(ws.temporary, { recursive: true, force: true }) }
+  })
+})
+
+const cli = resolve(import.meta.dir, '../deja.ts')
+const fakeMaestro = resolve(import.meta.dir, '../../../packages/maestro/test/fixtures/fake-maestro.cjs')
+
+function execute(root: string, args: string[], env: Record<string, string> = {}) {
+  return new Promise<{ exitCode: number | null }>(done => {
+    const child = spawn(process.execPath, [cli, ...args, '--config', 'deja.config.json'], {
+      cwd: root, env: { ...process.env, DEJA_FAKE_MAESTRO_MODE: '', ...env }, stdio: 'ignore',
+    })
+    child.once('close', code => done({ exitCode: code }))
+  })
+}
+
+describe('deja gate on a real flaky run (DEJA-7)', () => {
+  test('a run that failed, then passed on a rerun reads flaky', async () => {
+    const ws = await workspace({ maestro: { executable: fakeMaestro, timeoutMs: 30_000 } })
+    try {
+      await ws.goals('Today\n')
+      expect((await execute(ws.root, ['remember', 'today', '--flow', '.maestro/flows/today.yaml'])).exitCode).toBe(0)
+      expect((await ws.gate('--goals', join(ws.root, 'goals.txt'))).exit).toBe(0)
+      const flaky = await execute(ws.root, ['run', 'today', '--rerun-failed'], {
+        DEJA_FAKE_MAESTRO_SCRIPT: 'crash,pass', DEJA_FAKE_MAESTRO_COUNTER: join(ws.temporary, 'counter'),
+      })
+      expect(flaky.exitCode).toBe(7)
+      const closed = await ws.gate('--goals', join(ws.root, 'goals.txt'))
+      expect(closed.exit).toBe(10)
+      const [goal] = (await ws.evidence()).goals
+      expect(goal).toMatchObject({ outcome: 'flaky', detail: expect.stringContaining('rerun') })
+      expect(goal.reportPath).toMatch(/^\.deja\/reports\/run-.*\.json$/)
+      expect(JSON.parse(await readFile(join(ws.root, goal.reportPath), 'utf8')).outcome).toBe('flaky')
     } finally { await rm(ws.temporary, { recursive: true, force: true }) }
   })
 })

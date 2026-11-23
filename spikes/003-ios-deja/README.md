@@ -89,6 +89,33 @@ bun ../../apps/cli/deja.ts run checkout --config deja.config.json
 xcrun simctl spawn <walkcache_ios-UDID> defaults delete NSGlobalDomain DEJA_FIXTURE_ORDER
 ```
 
+## First-launch crash mode (DEJA-7)
+
+For the rerun evidence only, the fixture can crash on its first launch and start normally after.
+It is off unless the simulator-global default `DEJA_FIXTURE_CRASH_MARKER` names a file path outside
+the app container (the flow's `clearState: true` wipes the container). The first launch finds no
+file, creates it and crashes; later launches start normally. Set it only on `walkcache_ios`, run,
+then always delete both the default and the marker:
+
+```sh
+xcrun simctl spawn <walkcache_ios-UDID> \
+  defaults write NSGlobalDomain DEJA_FIXTURE_CRASH_MARKER -string /tmp/deja-fixture-crash-marker
+rm -f /tmp/deja-fixture-crash-marker
+bun ../../apps/cli/deja.ts run checkout --rerun-failed --summary --config deja.config.json
+# Expected: outcome flaky (exit 7), attempt 1 app_crash, attempt 2 passed.
+# A real assertion failure (the DEJA_FIXTURE_ORDER override above) still reports one steady
+# product_assertion failure with --rerun-failed.
+xcrun simctl spawn <walkcache_ios-UDID> defaults delete NSGlobalDomain DEJA_FIXTURE_CRASH_MARKER
+rm -f /tmp/deja-fixture-crash-marker
+```
+
+When you run this, record which step fails after the crash. If it is an `assertVisible`, the run
+may be labeled `product_assertion` instead of `app_crash`, because Déjà does not wait for the crash
+report after a failed assertion. That is a known limit; note the result in the ticket.
+
+Status: the mode is built and the Déjà side is covered by tests with fakes. It has **not** been run
+on a simulator yet (the dedicated simulator was in use), so there is no recorded evidence.
+
 The build invalidation transcript uses a generated `PkgInfo` probe and proves its bytes were restored.
 Raw `.deja`, `build`, simulator state, and attempt logs stay ignored. Committed evidence contains
 only the reviewed YAML, redacted structured reports, and concise command/result transcripts.

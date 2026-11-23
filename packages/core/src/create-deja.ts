@@ -181,6 +181,7 @@ export function createDeja(options: CreateDejaOptions): DejaClient {
       const value = await identity(goal)
       return orchestrator(value, callOptions).run(value, {
         ...(callOptions?.verify ? { verify: true } : {}),
+        ...(callOptions?.rerunFailed ? { rerunFailed: true } : {}),
       })
     },
     explore: async (goal, callOptions) => {

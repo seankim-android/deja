@@ -56,6 +56,8 @@ export type CliDependencies = {
   engineInstall?: InstallEngineOptions
   doctorProbe?: DoctorProbe
   env?: NodeJS.ProcessEnv
+  /** Where iOS crash reports are written; defaults to ~/Library/Logs/DiagnosticReports. */
+  crashReportDirectory?: string
   /** Overrides compiled-binary detection, so a test can exercise the explore refusal. */
   compiledBinary?: boolean
 }
@@ -105,6 +107,7 @@ type ParsedArguments = {
   help: boolean
   version: boolean
   verify: boolean
+  rerunFailed: boolean
   acceptAssertionChange: boolean
   dryRun: boolean
 }
@@ -124,6 +127,7 @@ function parseArguments(argv: string[]): ParsedArguments {
   let help = false
   let version = false
   let verify = false
+  let rerunFailed = false
   let acceptAssertionChange = false
   let dryRun = false
   for (let index = 0; index < argv.length; index += 1) {
@@ -132,6 +136,7 @@ function parseArguments(argv: string[]): ParsedArguments {
     else if (argument === '--summary') summary = true
     else if (argument === '--version' || argument === '-v') version = true
     else if (argument === '--verify') verify = true
+    else if (argument === '--rerun-failed') rerunFailed = true
     else if (argument === '--accept-assertion-change') acceptAssertionChange = true
     else if (argument === '--dry-run') dryRun = true
     else if (argument === '-h' || argument === '--help' || argument === 'help') help = true
@@ -170,6 +175,7 @@ function parseArguments(argv: string[]): ParsedArguments {
     help,
     version,
     verify,
+    rerunFailed,
     acceptAssertionChange,
     dryRun,
   }
@@ -185,6 +191,7 @@ function resultExitCode(result: RunResult) {
   if (result.passed) return 0
   if (result.outcome === 'exploration-rejected') return 3
   if (['flow-changed', 'not-validated', 'needs-migration', 'assertions-changed'].includes(result.outcome)) return 6
+  if (result.outcome === 'flaky') return 7
   return 1
 }
 
@@ -224,6 +231,7 @@ function createOrchestration(
   junitPath: string | undefined,
   storeId: string | undefined,
   executable: string,
+  crashReportDirectory: string | undefined,
   compiledBinary: boolean,
 ) {
   const store = createStore(configuration, storeId)
@@ -234,6 +242,9 @@ function createOrchestration(
     device: executionAdapter.device,
     adapter: executionAdapter,
     timeoutMs: configuration.maestro.timeoutMs,
+    appId: configuration.explore.appId,
+    ...(crashReportDirectory ? { crashReportDirectory } : {}),
+    crashReportGraceMs: configuration.crashReportGraceMs,
     ...(junitPath ? { junitPath } : {}),
     ...(process.env.ANDROID_HOME || process.env.ANDROID_SDK_ROOT
       ? { androidSdkRoot: process.env.ANDROID_HOME ?? process.env.ANDROID_SDK_ROOT }
@@ -370,6 +381,9 @@ export async function runCli(argv: string[], io: CliIo = {
         throw new CliConfigurationError('gate accepts only --goals, --build, --label, --evidence, --store, --config and --json')
       }
     }
+    if (parsed.rerunFailed && parsed.command !== 'run') {
+      throw new CliConfigurationError('--rerun-failed is valid only with run')
+    }
     if (parsed.dryRun && parsed.command !== 'migrate') {
       throw new CliConfigurationError('--dry-run is valid only with migrate')
     }
@@ -439,7 +453,7 @@ export async function runCli(argv: string[], io: CliIo = {
     const reporter = engine ? new EngineRunReporter(baseReporter, engine) : baseReporter
     const { store, orchestration, adapterId } = createOrchestration(
       configuration, reporter, runsMaestro ? junitPath : undefined, parsed.store,
-      selected?.resolved.executable ?? '',
+      selected?.resolved.executable ?? '', dependencies.crashReportDirectory,
       dependencies.compiledBinary ?? isCompiledBinary(),
     )
     openedStore = store
@@ -476,7 +490,10 @@ export async function runCli(argv: string[], io: CliIo = {
         ? await orchestration.remember(goalText, parsed.flow!, {
           ...(parsed.acceptAssertionChange ? { acceptAssertionChange: true } : {}),
         })
-        : await orchestration.run(goalText, { ...(parsed.verify ? { verify: true } : {}) })
+        : await orchestration.run(goalText, {
+          ...(parsed.verify ? { verify: true } : {}),
+          ...(parsed.rerunFailed ? { rerunFailed: true } : {}),
+        })
     const result: RunResult = engine ? { ...ran, engine } : ran
     io.stdout(parsed.json
       ? `${JSON.stringify(redactJson({ ...result, report: jsonReporter.receipt }, redact), null, 2)}\n`
