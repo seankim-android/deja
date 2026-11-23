@@ -381,7 +381,7 @@ describe('deja mcp', () => {
     process.env.DEJA_FAKE_MAESTRO_COUNTER = join(temporary, 'counter-report')
     process.env.DEJA_FAKE_CRASH_REPORT = join(reports, 'DejaFixture-2026-11-23-010203.ips')
     process.env.DEJA_FAKE_CRASH_REPORT_BODY =
-      '{"app_name":"DejaFixture"}\n{"procName":"DejaFixture","bundleInfo":{"CFBundleIdentifier":"dev.deja.fixture"},"private":"patient"}'
+      '{"app_name":"DejaFixture"}\n{"procName":"DejaFixture","procPath":"\\/Users\\/x\\/Library\\/Developer\\/CoreSimulator\\/Devices\\/dfc4d233-498b-4b33-b713-e59b239fa86a\\/data\\/App","bundleInfo":{"CFBundleIdentifier":"dev.deja.fixture"},"private":"patient"}'
     try {
       const report = await call(client, 'deja_run', { goal: 'today' })
       expect(report.payload.failure).toMatchObject({ category: 'app_crash', crash: { source: 'crash-report', process: 'DejaFixture' } })

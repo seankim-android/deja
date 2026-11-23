@@ -27,7 +27,7 @@ export type MaestroWalkRunnerOptions = {
   junitPath?: string
   /**
    * The app under test. With an iOS adapter it turns on the crash-report signal: a new `.ips` for
-   * this app ID written during a failed run labels it `app_crash`. Absent means no report is read.
+   * this app ID and this simulator (`device`, a UDID) written during a failed run labels it `app_crash`. Absent means no report is read.
    */
   appId?: string
   /** Seam: where crash reports are written. Defaults to ~/Library/Logs/DiagnosticReports. */
@@ -128,7 +128,15 @@ export class MaestroWalkRunner implements WalkRunner {
       appId: this.options.appId,
       sinceMs: Date.parse(result.startedAt),
       untilMs: Date.parse(result.endedAt) + grace,
+      deviceUdid: this.options.device,
+      onIgnored: (file: string, reason: string) => {
+        if (!ignored.has(file)) {
+          ignored.add(file)
+          process.stderr.write(`deja: crash report ignored: ${reason} (${file})\n`)
+        }
+      },
     }
+    const ignored = new Set<string>()
     // Poll until the report lands or the grace window closes. A report written later than that
     // belongs to no attempt we can name, so it is not used.
     const deadline = Date.now() + grace

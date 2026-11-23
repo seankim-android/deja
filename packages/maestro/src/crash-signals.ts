@@ -50,7 +50,21 @@ export type FindCrashReportOptions = {
   /** Inclusive run window, as epoch milliseconds. Only a report written inside it counts. */
   sinceMs: number
   untilMs: number
+  /**
+   * The run's simulator UDID. A report counts only if its `procPath` is inside
+   * `CoreSimulator/Devices/<this UDID>/`, compared case-insensitively. Every simulator on the Mac
+   * writes to one folder, so without it a crash in another session would be blamed on this run.
+   * Absent or not a UUID means the simulator is unknown, and no report is accepted.
+   */
+  deviceUdid?: string
+  /** Called once per report that names the app but is not accepted, with the reason. */
+  onIgnored?: (reportFile: string, reason: string) => void
 }
+
+const UDID = /^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$/
+/** The report body is JSON, so the slashes in `procPath` are usually written as `\/`. */
+const SIMULATOR_PROC_PATH =
+  /"procPath"\s*:\s*"[^"]*?CoreSimulator\\?\/Devices\\?\/([0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12})\\?\//
 
 // Maestro's IPSParser reads these keys. The header and the first part of the body are enough.
 const HEADER_BYTES = 32 * 1024
@@ -75,11 +89,12 @@ async function readHead(path: string) {
 }
 
 /**
- * The newest `.ips` crash report for this app ID written during the run window, or null. A crash
+ * The newest `.ips` crash report for this app ID and simulator written during the run window, or null. A crash
  * report can hold personal data, so only a bounded head is read to match the app ID, and only the
  * file name and the process name leave this function.
  */
 export async function findCrashReport(options: FindCrashReportOptions): Promise<MaestroCrashSignal | null> {
+  const deviceUdid = options.deviceUdid && UDID.test(options.deviceUdid) ? options.deviceUdid.toLowerCase() : null
   let names: string[]
   try {
     names = (await readdir(options.directory)).filter(name => name.endsWith('.ips'))
@@ -110,6 +125,15 @@ export async function findCrashReport(options: FindCrashReportOptions): Promise<
       continue
     }
     if (!appId.test(head)) continue
+    if (!deviceUdid) {
+      options.onIgnored?.(name, 'run simulator unknown')
+      continue
+    }
+    const reportUdid = SIMULATOR_PROC_PATH.exec(head)?.[1]?.toLowerCase()
+    if (reportUdid !== deviceUdid) {
+      options.onIgnored?.(name, reportUdid ? 'other simulator' : 'no simulator in report')
+      continue
+    }
     const process = /"(?:procName|app_name)"\s*:\s*"([^"]*)"/.exec(head)?.[1]
     return {
       source: 'crash-report',
