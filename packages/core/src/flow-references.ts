@@ -1,4 +1,4 @@
-import { parseAllDocuments } from 'yaml'
+import { parseYamlDocuments } from './yaml-documents.ts'
 
 export type FlowReference = {
   /** `flow` is another Maestro YAML file; `script` is a JavaScript file run by `runScript`. */
@@ -15,20 +15,11 @@ export class FlowReferenceError extends Error {
 }
 
 function parseDocuments(contents: string): unknown[] {
-  let documents
-  try {
-    documents = parseAllDocuments(contents)
-  } catch (error) {
-    throw new FlowReferenceError('Flow is not valid YAML', { cause: error })
+  const parsed = parseYamlDocuments(contents)
+  if ('error' in parsed) {
+    throw new FlowReferenceError(parsed.error.message, { cause: parsed.error.cause })
   }
-  return documents.map(document => {
-    if (document.errors.length > 0) {
-      throw new FlowReferenceError(`Flow is not valid YAML: ${document.errors[0].message}`, {
-        cause: document.errors[0],
-      })
-    }
-    return document.toJS()
-  })
+  return parsed.documents
 }
 
 function referencePath(kind: string, value: unknown): string {
