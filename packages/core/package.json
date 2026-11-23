@@ -38,5 +38,8 @@
   },
   "scripts": {
     "prepublishOnly": "bun ../../scripts/publish-guard.ts"
+  },
+  "dependencies": {
+    "yaml": "^2.9.1"
   }
 }

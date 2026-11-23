@@ -52,7 +52,7 @@ Core imports no Maestro, OpenClaw, React, filesystem, demo, or platform implemen
 | --- | --- | --- |
 | `WalkStore` | Exact lookup, prior-success diagnostic lookup, verified persistence/replacement, validation history, listing | CLI default `LocalWalkStore` in `packages/store-local`; second conforming `SQLiteWalkStore` in `packages/store-sqlite` |
 | `WalkRunner` | Execute a flow; return timing, assertions, artifacts, exit state, and conservative failure classification | `MaestroWalkRunner` plus Android/Web/iOS execution adapters in `packages/maestro` |
-| `WalkExplorer` | Cold exploration and independently verified candidate persistence | `OpenClawWalkExplorer` for Android; explicit `UnsupportedPlatformExplorer` for Web/iOS |
+| `WalkExplorer` | Cold exploration and independently verified candidate persistence | `OpenClawWalkExplorer` for Android; explicit `UnsupportedPlatformExplorer` (in core) for Web/iOS |
 | `SelectorRepairer` | At most one bounded diagnosis/source-patch/verification result | `BoundedSelectorRepairer` for the configured Android Checkout policy only |
 | `RunReporter` | Serialize a completed result without changing orchestration | Atomic local `JsonRunReporter` in `apps/cli` |
 | `GoalEmbeddingProvider` | Lazily embed one goal only after exact `not-found`; report calls separately | Opt-in deterministic `LocalLexicalEmbeddingProvider` in `packages/semantic-local`; no service or vector DB |
@@ -89,6 +89,30 @@ flows, stale builds, identity mismatches, unreferenced/temporary flows, and a fa
 never become hits. Malformed JSON, unsupported schemas, invalid/duplicate identities, checksum
 mismatches, or path escapes raise `InvalidWalkMemoryError`; entries are not silently discarded to
 manufacture a hit.
+
+A flow that runs other files (`runFlow`, `runScript`, in any document or nested block) is stored with
+all of them (DEJA-2). `remember` asks the store for a snapshot of the candidate and everything it
+runs, verifies that copy, and persists exactly those bytes; persistence refuses if the closure no
+longer matches the snapshot's checksum (`expectedClosureSha256`). References are read with the `yaml`
+package. A flow that is not valid YAML, an absolute path, a variable, a NUL byte, a cycle, a hidden
+file or folder (`.env`, `.secrets/`, `.git/`, checked on the path and after symlinks; only the dotted folders the main flow itself sits under, like `.maestro`, are allowed), a key file (`*.pem`, `*.key`, `*.env`, ...), two spellings that differ only in case, and any
+reference outside the workspace (by path or through a symlink) reject the flow, and nothing is
+written. Other scripts are copied verbatim, so keep secrets out of them. The closure goes to
+`.deja/flows/<goal>/<platform>-<closure sha>/` with its relative layout, and each extra file is
+recorded in `subflowFiles` (`path`, `sha256`). A changed subflow is a different closure folder.
+Lookup checks every stored file: a changed one is refused like a changed main flow, a missing one
+is `missing-flow`, and the references are read again from the stored flows, so metadata that lost
+a file cannot hide it (a hard error, not a miss, for schema 3 data that changed on disk).
+The stale-build replay runs a snapshot of the stored closure and persists it with
+`expectedFlowSha256` and `expectedClosureSha256`; `ExpectedClosureMismatchError` is handled like
+`ExpectedFlowChecksumMismatchError` (a failed result, nothing written). A flow that runs nothing keeps the one-file layout and records `[]`.
+Nested references resolve lexically (`dir-symlink/../x` collapses `..` before the OS would), and the
+files are hashed just before Maestro reads them, the same window the main flow has.
+
+Memory schema 3 requires `subflowFiles` on every walk (SQLite: `walks.has_files` and the
+`walk_files` table). Schemas 1 and 2 still load, with no file list and no subflow check; the next
+write rewrites them as schema 3 with an empty list and `legacyClosure`, so a legacy flow that runs
+files is a `legacy-closure-unknown` miss (and re-explores) until it is remembered again. An older binary refuses a schema 3 store.
 
 `lookupPreviousSuccessful` is diagnostic-only. It can locate the earlier successful build/flow for
 bounded repair but is not a warm hit and does not authorize persistence by itself.

@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
-import { mkdtemp, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { lstat, mkdtemp, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawnSync } from 'node:child_process'
@@ -92,15 +93,20 @@ try {
     dependencies: overrides,
     overrides,
   }, null, 2))
-  // The only registry fetch is @modelcontextprotocol/sdk and its tree. Pin the SDK to the version
+  // The only registry fetches are @modelcontextprotocol/sdk and yaml (with their trees). Pin both to the versions
   // the repo is locked to, prefer the cache and retry, so a registry blip or a new release does not
   // fail an unrelated PR. skipLibCheck stays false so a broken import inside our own packed
   // `.d.ts` cannot silently become `any`. If a third-party type ever breaks it, add a pass that
   // fails only on errors under node_modules/@deja-qa/.
-  const sdkVersion = (JSON.parse(await readFile(join(repo, 'node_modules/@modelcontextprotocol/sdk/package.json'), 'utf8')) as { version: string }).version
   const consumer = JSON.parse(await readFile(join(project, 'package.json'), 'utf8'))
-  consumer.dependencies['@modelcontextprotocol/sdk'] = sdkVersion
-  consumer.overrides['@modelcontextprotocol/sdk'] = sdkVersion
+  const registryDependencies = ['@modelcontextprotocol/sdk', 'yaml']
+  for (const name of registryDependencies) {
+    // Resolve from core: Bun may not hoist workspace dependencies to the root.
+    const manifestPath = createRequire(join(repo, 'packages/core/package.json')).resolve(`${name}/package.json`)
+    const { version } = JSON.parse(await readFile(manifestPath, 'utf8')) as { version: string }
+    consumer.dependencies[name] = version
+    consumer.overrides[name] = version
+  }
   await writeFile(join(project, 'package.json'), JSON.stringify(consumer, null, 2))
   const install = () => run('npm', ['install', '--no-audit', '--no-fund', '--ignore-scripts', '--prefer-offline', '--fetch-retries=5'], project)
   let installed = install()
@@ -110,6 +116,18 @@ try {
     installed = install()
   }
   if (!installed.ok) throw new Error(`npm install failed:\n${installed.output}`)
+
+  // `yaml` is a real dependency of the packed core: a registry install, not a workspace link or an override to a tarball.
+  const corePacked = JSON.parse(must('tar', ['-xzOf', packages.find(({ manifest }) => manifest.name === '@deja-qa/core')!.tarball, 'package/package.json'], work)) as Manifest
+  if (!corePacked.dependencies?.yaml) failures.push('packed @deja-qa/core does not declare yaml')
+  const yamlFolder = join(project, 'node_modules/yaml')
+  const yamlStat = await lstat(yamlFolder).catch(() => null)
+  const coreStat = await lstat(join(project, 'node_modules/@deja-qa/core')).catch(() => null)
+  if (!yamlStat || yamlStat.isSymbolicLink()) failures.push('yaml is missing or a link, not a registry install')
+  if (!coreStat || coreStat.isSymbolicLink()) failures.push('core is missing or a link, not a packed install')
+  const resolved = createRequire(join(project, 'node_modules/@deja-qa/core/package.json')).resolve('yaml/package.json')
+  const yamlVersion = (JSON.parse(await readFile(resolved, 'utf8')) as { version: string }).version
+  console.log(`yaml: ${yamlStat && !yamlStat.isSymbolicLink() ? `registry install ${yamlVersion}, resolved from the packed core` : 'FAILED'}`)
 
   const specifiers = packages.flatMap(({ specifiers }) => specifiers)
   const importList = specifiers.map((specifier, index) => `import * as m${index} from '${specifier}'`).join('\n')
