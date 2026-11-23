@@ -78,7 +78,7 @@ def scan_text() -> int:
         "common API token": re.compile(r"(?:sk-[A-Za-z0-9_-]{12,}|AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{20,})"),
         "authorization material": re.compile(r"(?:Authorization\s*:|Bearer\s+[A-Za-z0-9._-]{12,})", re.I),
     }
-    paths = [DEMO / "LIVE_SCRIPT.md", REPO / "tickets" / "WALK-020-live-device-demo.md"]
+    paths = [DEMO / "LIVE_SCRIPT.md"]
     paths.extend(path for path in EVIDENCE.rglob("*") if path.is_file() and
                  path.suffix in {".json", ".md", ".txt", ".yaml", ".yml", ".diff", ".log"})
     scanned = 0

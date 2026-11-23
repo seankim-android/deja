@@ -14,9 +14,9 @@ Shared Maestro YAML does not establish cross-platform support. See the
 [Android evidence](../spikes/001-android-deja/README.md),
 [Chromium fixture and command boundary](../spikes/002-web-deja/README.md),
 [native iOS fixture and command boundary](../spikes/003-ios-deja/README.md), and
-[WALK-010](../tickets/WALK-010-verified-web-proof.md)/[WALK-011](../tickets/WALK-011-verified-ios-proof.md)
-for the evidence behind this matrix. The post-WALK-011 Android compatibility attempt was blocked
-before boot by insufficient emulator disk space; its exact limit is linked from WALK-011.
+the WALK-010/WALK-011 evidence files in those folders for the evidence behind this matrix. The
+post-WALK-011 Android compatibility attempt was blocked before boot by insufficient emulator disk
+space ([its record](../spikes/003-ios-deja/evidence/walk011-android-compatibility.txt)).
 
 **No measured wall-clock speedup is claimed for the current CLI.** Warm replay eliminates model
 calls; it does not make Maestro itself instant. Historical WALK-005 spike samples measured complete
@@ -202,14 +202,14 @@ The package scripts also include `preview` for the built viewer.
 - [`spikes/001-android-deja/`](../spikes/001-android-deja/README.md) — preserved Android fixture/evidence.
 - [`spikes/002-web-deja/`](../spikes/002-web-deja/README.md) — bounded Chromium fixture/evidence.
 - [`spikes/003-ios-deja/`](../spikes/003-ios-deja/README.md) — bounded native iOS simulator fixture/evidence.
-- [`TODO.md`](../TODO.md) and [`tickets/README.md`](../tickets/README.md) — repo-local backlog, status, and dependencies.
+- [`TODO.md`](../TODO.md) — standing rules. The backlog, status and dependencies are in the Linear team DEJA.
 - [`docs/PROJECT_PLAN.md`](PROJECT_PLAN.md) — historical hackathon scope and plan; current verified behavior is defined by ticket evidence, not aspirations.
 
-Déjà uses repo-local `WALK-` tickets, not Linear objects. A ticket becomes `done` only when
-all acceptance criteria link reproducible commands and secret-free evidence; its ticket checklist,
-evidence links, and `TODO.md` state change together. Record exact commands and measured values, use
-`unknown` when instrumentation is unavailable, and preserve prior evidence. Completing a repository
-ticket does not authorize social posts, external submission, or other publication.
+The backlog lives in the Linear team DEJA (open work moved there from the old repo-local `WALK-`
+tickets, which stay in git history). An issue is done only when all acceptance criteria link
+reproducible commands and secret-free evidence in this repo. Record exact commands and measured
+values, use `unknown` when instrumentation is unavailable, and preserve prior evidence. Closing an
+issue does not authorize social posts, external submission, or other publication.
 
 Licensed under [Apache-2.0](../LICENSE).
 
