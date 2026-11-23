@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from 'node:fs/promises'
+import { lstat, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { spawn } from 'node:child_process'
 import { join, resolve } from 'node:path'
@@ -412,8 +412,9 @@ describe('deja gate --evidence safety (B1)', () => {
       await writeFile(path, 'checked\n')
       const info = await lstat(path)
       const checked = { canonical: await realpath(path), identity: { dev: info.dev, ino: info.ino } }
-      await rm(path)
-      await writeFile(path, 'a different file\n')
+      // Created while the first still exists, so the inode cannot be reused.
+      await writeFile(`${path}.new`, 'a different file\n')
+      await rename(`${path}.new`, path)
       await expect(removeChecked(path, checked)).rejects.toThrow(/changed while the gate was running/)
       expect(await readFile(path, 'utf8')).toBe('a different file\n')
       // A file that appeared where none was checked is refused too, a symlink swapped in is not followed.
