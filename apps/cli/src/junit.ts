@@ -92,7 +92,7 @@ const STRUCTURAL_ATTRIBUTES = new Set(['status', 'failures', 'errors', 'tests', 
  */
 export function redactJunit(xml: string, redact: Redactor) {
   return xml.replace(
-    /<!\[CDATA\[([\s\S]*?)\]\]>|<!--([\s\S]*?)-->|<[^>]*>|[^<]+/g,
+    /<!\[CDATA\[([\s\S]*?)\]\]>|<!--([\s\S]*?)-->|<(?:[^>"']|"[^"]*"|'[^']*')*>|[^<]+/g,
     (segment, cdata: string | undefined, comment: string | undefined) => {
       if (cdata !== undefined) return `<![CDATA[${redact(cdata)}]]>`
       if (comment !== undefined) return `<!--${redact(comment)}-->`

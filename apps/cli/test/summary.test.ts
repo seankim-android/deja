@@ -61,4 +61,15 @@ describe('redactJunit', () => {
     expect(out).toContain('&lt;redacted&gt; &amp; &lt;redacted&gt;')
     expect(out).toContain('<![CDATA[ <redacted> ]]>')
   })
+
+  test('a ">" inside an attribute value does not end the tag early', () => {
+    const redact = (text: string) => text.split('s3cret').join('<redacted>')
+    const xml = `<testcase name="a > s3cret" message='b>s3cret' status="ERROR"><failure>x</failure></testcase>`
+    const out = redactJunit(xml, redact)
+    expect(out).not.toContain('s3cret')
+    expect(out).toContain('status="ERROR"')
+    expect(out).toBe(
+      `<testcase name="a &gt; &lt;redacted&gt;" message="b&gt;&lt;redacted&gt;" status="ERROR"><failure>x</failure></testcase>`,
+    )
+  })
 })
