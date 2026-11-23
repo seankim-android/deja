@@ -67,10 +67,16 @@ export type StoredWalk = WalkIdentity & {
    * flow that runs files cannot replay and lookup returns the `legacy-closure-unknown` miss.
    */
   legacyClosure?: true
+  /**
+   * Set when the walk replays the consumer's own files through a committed manifest (memory
+   * schema 4). It is the sha256 of the main flow plus every file it runs, as the manifest records
+   * it, and `flowPath` is then a workspace path of the consumer's file, never a copy.
+   */
+  closureSha256?: string
   lastValidation: WalkValidation
   validationHistory: StoredValidation[]
   /** `replayed-on-new-build` (WALK-021): an earlier build's verified YAML, replayed once on this build. */
-  origin?: 'remember' | 'explore' | 'repair' | 'replayed-on-new-build'
+  origin?: 'remember' | 'explore' | 'repair' | 'replayed-on-new-build' | 'verify'
   exploration?: ExplorationDetails
   repairHistory?: RepairProvenance[]
 }
@@ -83,19 +89,39 @@ export type LookupHit = {
 
 export type CacheMissReason = 'not-found' | 'wrong-app' | 'wrong-platform' |
   'wrong-flow-schema' | 'wrong-adapter' | 'wrong-browser' | 'stale-build' |
-  'missing-flow' | 'failed-validation' | 'legacy-closure-unknown'
+  'missing-flow' | 'failed-validation' | 'legacy-closure-unknown' |
+  /** Manifest mode: the consumer's flow or a file it runs no longer matches the manifest's closure sha. */
+  'flow-changed' |
+  /** Manifest mode: the manifest lists the flow, but no build has validated it in this store. */
+  'not-validated' |
+  /** Manifest mode: the goal has only a memory schema 3 walk and no manifest entry. */
+  'needs-migration'
 
 export type LookupMiss = {
   status: 'miss'
   reason: CacheMissReason
+  /** Set with `flow-changed`: the sha the manifest records and the sha of the files on disk now. */
+  flowChange?: { manifestClosureSha256: string; currentClosureSha256: string }
+  /**
+   * Manifest mode, when the consumer's file exists (`flow-changed`, `not-validated`,
+   * `failed-validation`, `stale-build`): its path, so a caller can re-run it as a check (`verify`).
+   * It is never a cache hit.
+   */
+  flowPath?: string
 }
 
 export type PersistVerifiedOptions = {
   identity: WalkIdentity
   candidatePath: string
   validation: WalkValidation
-  origin: 'remember' | 'explore' | 'replayed-on-new-build'
+  origin: 'remember' | 'explore' | 'replayed-on-new-build' | 'verify'
   exploration?: ExplorationDetails
+  /**
+   * Manifest mode only. What to do when the flow's assertion hash differs from the manifest's:
+   * `refuse` (the default) throws `AssertionHashChangedError` before writing anything, `accept`
+   * writes the new hash. Only a reviewed `remember` may pass `accept`; `verify` never does.
+   */
+  assertionChange?: 'refuse' | 'accept'
   /**
    * Checksum of the closure a store's `snapshotCandidate` returned. When set, persistence refuses
    * if the candidate and every file it runs no longer hash to it.
@@ -124,6 +150,35 @@ export class ExpectedClosureMismatchError extends Error {
   }
 }
 
+/** Thrown in manifest mode when the flow's files no longer match the manifest's closure sha. */
+export class FlowChangedError extends Error {
+  constructor(manifestClosureSha256: string, currentClosureSha256: string) {
+    super(`The flow or a file it runs changed (manifest ${manifestClosureSha256}, now ${currentClosureSha256}); re-verify it`)
+    this.name = 'FlowChangedError'
+  }
+}
+
+/** Thrown before any write when the flow's product assertions differ from the manifest's. */
+export class AssertionHashChangedError extends Error {
+  readonly manifestAssertionsSha256: string
+  readonly currentAssertionsSha256: string
+
+  constructor(manifestAssertionsSha256: string, currentAssertionsSha256: string) {
+    super(`The flow's assertions changed (manifest ${manifestAssertionsSha256}, now ${currentAssertionsSha256}); only a reviewed remember can accept that`)
+    this.manifestAssertionsSha256 = manifestAssertionsSha256
+    this.currentAssertionsSha256 = currentAssertionsSha256
+    this.name = 'AssertionHashChangedError'
+  }
+}
+
+/** Thrown before any write when a manifest owner rule is not met (for example a required assertion id). */
+export class OwnerRuleError extends Error {
+  constructor(message: string) {
+    super(`Owner rule not met: ${message}`)
+    this.name = 'OwnerRuleError'
+  }
+}
+
 export type PersistVerifiedRepairOptions = Omit<PersistVerifiedOptions, 'origin' | 'exploration'> & {
   previous: {
     buildFingerprint: string
@@ -138,6 +193,8 @@ export type PersistedWalk = {
   flowSha256: string
   storedMetadataPath: string
   atomicWrite: true
+  /** Manifest mode: the manifest file Déjà wrote or checked. Déjà never commits it. */
+  manifest?: { path: string; changed: boolean }
 }
 
 export type CandidateSnapshot = {
@@ -147,12 +204,19 @@ export type CandidateSnapshot = {
 }
 
 export interface WalkStore {
+  /**
+   * Set when the store replays the consumer's own files through a committed manifest. It is the
+   * manifest's workspace-relative path. Stores without it replay their own copies.
+   */
+  readonly manifestPath?: string
   lookup(identity: WalkIdentity): Promise<LookupHit | LookupMiss>
   lookupPreviousSuccessful(identity: WalkIdentity): Promise<LookupHit | LookupMiss>
   /**
    * Copy a candidate and every file it runs into `directory`, so the bytes that get verified are
    * the bytes that get stored. Returns the copy's main flow and its closure checksum, to pass back
-   * as `expectedClosureSha256`. Stores without it are verified in place.
+   * as `expectedClosureSha256`. Stores without it are verified in place. In manifest mode nothing
+   * is copied: it returns the consumer's own path and the closure checksum, the flow runs in place,
+   * and the store re-hashes before it writes. An edit that is undone before the save is not seen.
    */
   snapshotCandidate?(candidatePath: string, directory: string): Promise<CandidateSnapshot>
   persistVerifiedCandidate(options: PersistVerifiedOptions): Promise<PersistedWalk>
@@ -219,7 +283,7 @@ export type WalkFailure = {
 }
 
 export type ArtifactKind = 'yaml' | 'output' | 'attempt' | 'repair-report' |
-  'diff' | 'memory' | 'model-metrics' | 'junit'
+  'diff' | 'memory' | 'model-metrics' | 'junit' | 'manifest'
 
 export type RunArtifact = {
   kind: ArtifactKind
@@ -309,7 +373,15 @@ export interface SelectorRepairer {
 
 export type CacheStatus = 'hit' | 'miss' | 'not-checked'
 export type RunOutcome = 'passed' | 'remembered' | 'cold-recorded' | 'repaired' |
-  'rejected' | 'exploration-rejected' | 'product-regression' | 'repair-rejected' | 'failed'
+  'rejected' | 'exploration-rejected' | 'product-regression' | 'repair-rejected' | 'failed' |
+  /** Manifest mode: the consumer's flow no longer matches the manifest; nothing was replayed. */
+  'flow-changed' |
+  /** Manifest mode: the manifest lists the flow but no build has validated it; run with verify. */
+  'not-validated' |
+  /** Manifest mode: the goal has only a schema 3 walk; run `deja migrate`. */
+  'needs-migration' |
+  /** Manifest mode: verify passed but the assertion hash differs; only a reviewed remember accepts it. */
+  'assertions-changed'
 
 /**
  * Opt-in WALK-021 policy for a stale-build miss with no repairer: replay the latest verified walk's

@@ -10,6 +10,7 @@ import {
   contractIdentity,
   initialValidation,
   localStoreContract,
+  runConsumerFlowContractTests,
   runWalkStoreContractTests,
   sqliteStoreContract,
   runWriterLockContractTests,
@@ -18,6 +19,8 @@ import {
 
 runWalkStoreContractTests(localStoreContract)
 runWalkStoreContractTests(sqliteStoreContract)
+runConsumerFlowContractTests(localStoreContract)
+runConsumerFlowContractTests(sqliteStoreContract)
 runWriterLockContractTests(localStoreContract)
 runWriterLockContractTests(sqliteStoreContract)
 

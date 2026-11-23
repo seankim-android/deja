@@ -44,6 +44,7 @@ function storedFor(identity: WalkIdentity): StoredWalk {
 const previousFingerprint = 'c'.repeat(64)
 
 class FakeStore implements WalkStore {
+  manifestPath: string | undefined
   hit = false
   /** A walk verified on another build exists, so an exact lookup says `stale-build`. */
   staleWithPrevious = false
@@ -130,6 +131,20 @@ describe('createDeja', () => {
       adapter: 'fixture-adapter',
     })
     expect(await deja.identity('checkout')).toEqual(result.identity)
+  })
+
+  test('with a manifest the identity always names its adapter, even when the adapter omits it', async () => {
+    const quiet: DejaAdapter = {
+      id: 'maestro-android', platform: 'android',
+      buildFingerprint: async () => fingerprint,
+      cacheIdentity: ({ buildFingerprint }) => ({ buildFingerprint }),
+    }
+    const store = new FakeStore()
+    store.manifestPath = 'deja.walks.json'
+    const withManifest = createDeja(options(store, { adapter: quiet, manifestPath: 'deja.walks.json' }))
+    expect((await withManifest.identity('checkout')).adapter).toBe('maestro-android')
+    const plain = createDeja(options(new FakeStore(), { adapter: quiet }))
+    expect((await plain.identity('checkout')).adapter).toBeUndefined()
   })
 
   test('a cache hit constructs no explorer, repairer or embedding client', async () => {

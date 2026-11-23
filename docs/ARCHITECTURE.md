@@ -270,6 +270,36 @@ YAML/checksum, advisory failure, artifacts, source diffs, and errors. `durationM
 reported lifecycle/execution path; cold exploration also exposes exploration and verification
 submetrics. These numbers are not automatically a comparable cold/warm benchmark.
 
+## Consumer-owned flows (DEJA-36)
+
+Memory schema 4 (JSON `schemaVersion: 4`, SQLite `user_version = 4`) exists only for stores built
+with a manifest. A walk with `closureSha256` replays the consumer's own file: its `flowPath` is a
+workspace path outside `.deja/`, and it has no `subflowFiles` and no copy. A file with any such walk
+is written as schema 4; a file with none stays schema 3. Schema 1 to 3 walks are still read, and one
+file may hold both. A store opened with a manifest never reads `.deja/flows`.
+
+```text
+repo/
+  deja.walks.json              committed: goal, flow path, closure sha, assertion hash
+  .maestro/flows/today.yaml    committed: the consumer's flow, run in place
+  .deja/                       ignored: history, reports, attempts, locks (no flow copies)
+```
+
+Lookup in manifest mode, in order: a manifest entry for the goal (else `needs-migration` for a
+schema 3 walk, or `not-found`), app, platform, adapter and browser (`wrong-*`), the consumer's files
+exist (`missing-flow`), their closure sha equals the manifest's (`flow-changed`, with both shas), and
+a history record for this build at that sha (`stale-build`, or `not-validated` when no build has
+one). The orchestrator ends every one of these misses except `stale-build` before the explorer, and
+a stale build reaches only the replay policy or `--verify`.
+
+`snapshotCandidate` copies nothing in manifest mode. It returns the consumer's path and the sha of
+its closure; the runner runs that path, and the store re-hashes the closure before it writes
+(`expectedClosureSha256`) or records a validation (`FlowChangedError`). That is the check against
+a change between verify and save. A save writes memory first and the manifest last, under
+`.deja/manifest.lock`, so a failed manifest write leaves history no entry matches (`not-validated`).
+Repair persistence and cold exploration are refused in manifest mode until their output goes to
+reviewable files in the consumer's tree.
+
 ## Atomic writes and artifact boundaries
 
 Verified flow files are content-addressed:

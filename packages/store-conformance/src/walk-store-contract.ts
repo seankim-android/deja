@@ -34,7 +34,13 @@ export type WalkStoreContractImplementation = {
   /** Which store the writer-process fixture should build. */
   kind: 'local' | 'sqlite'
   metadataPath(workspaceRoot: string, storeId?: string): string
-  createStore(workspaceRoot: string, failures?: StoreFailureInjection, storeId?: string): WalkStore
+  /** `manifest` builds the store in manifest mode: it replays the consumer's own files. */
+  createStore(
+    workspaceRoot: string,
+    failures?: StoreFailureInjection,
+    storeId?: string,
+    manifest?: { path: string; forbiddenValues?: string[] },
+  ): WalkStore
   closeStore(store: WalkStore): void | Promise<void>
   snapshotMetadata(workspaceRoot: string): Promise<Buffer>
   tamperMetadata(workspaceRoot: string, kind: MetadataTamper): Promise<void>

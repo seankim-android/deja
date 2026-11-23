@@ -15,3 +15,4 @@ export {
   type ExplorationDriverContractImplementation,
 } from './driver-contract.ts'
 export { runWriterLockContractTests } from './writer-lock-contract.ts'
+export { runConsumerFlowContractTests } from './consumer-flow-contract.ts'
