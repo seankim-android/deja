@@ -38,6 +38,29 @@ flowchart LR
   E -- product bug --> G[Fail]
 ```
 
+## Bring your own model
+
+Kimi K3.1 Pro on Cerebras is the default, but the model is a setting. Cold exploration runs through OpenClaw, so you can point Déjà at any model that has an OpenAI-compatible chat API with tool calls. Set two fields in `deja.config.json`:
+
+```json
+{
+  "openClawModel": "cerebras/moonshotai-kimi-k3.1-pro-trial",
+  "openClawBaseUrl": "https://api.cerebras.ai/v1"
+}
+```
+
+`openClawModel` is `provider/model`, and `openClawBaseUrl` must be an `https://` URL. OpenClaw reads the provider key from its own settings, so Déjà never stores it. Replay never needs a model, so changing the model only changes how a test is first learned. We have only measured Kimi K3.1 Pro on Cerebras. Other models should work but are not tested yet.
+
+## Use cases
+
+- **Nightly regression runs.** Learn the main flows once. Then run them every night in CI with 0 model calls and no model bill.
+- **Smoke tests on every pull request.** Replay sign-in and checkout on each PR. The model is only called again when a flow is new.
+- **Small UI changes.** When a button ID changes, Déjà makes one scoped fix and shows the diff, so a rename does not break the suite.
+- **Guarding real bugs.** A wrong price or a missing order still fails the test. Déjà never repairs a product bug into a pass.
+- **Agent frameworks.** An agent can learn a UI walk once and reuse it as a plain Maestro file, which any team can read and run without Déjà.
+
+Today, learning and repair work on Android only. Chromium and iOS can replay a saved test. See [Limits](#limits).
+
 ## Results
 
 All numbers come from the saved run reports in `demo/live-evidence/`.
