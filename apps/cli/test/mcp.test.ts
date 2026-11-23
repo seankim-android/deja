@@ -7,7 +7,7 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import { LocalWalkStore } from '@deja-qa/store-local'
 import { loadProductionConfiguration } from '../src/config.ts'
-import { confineFlow, createMcpServer, checkFlowApp, parseMcpArguments, providerKeyRedactor, relativizeResult } from '../src/mcp.ts'
+import { confineFlow, createMcpServer, checkFlowApp, isKeyLikeName, parseMcpArguments, providerKeyRedactor, relativizeResult } from '../src/mcp.ts'
 import { runCli } from '../src/main.ts'
 
 const fakeMaestro = resolve(import.meta.dir, '../../../packages/maestro/test/fixtures/fake-maestro.cjs')
@@ -431,29 +431,46 @@ describe('deja mcp', () => {
     const redact = providerKeyRedactor({ KEYBOARD: 'dvorak-layout', API_TOKEN: 'tok3n-Zq81xv07', SESSION_SECRET: 'x'.repeat(30), SHORT_KEY: 'abc' })
     const key = `sk-${'a1b2c3d4'.repeat(4)}`
     const bearer = `Bearer ${'Ab1.'.repeat(8)}`
-    expect(redact('Bearer authentication scheme with dvorak-layout and flow-' + key + ' and disk-' + 'x'.repeat(20)))
-      .toBe('Bearer authentication scheme with dvorak-layout and flow-' + key + ' and disk-' + 'x'.repeat(20))
+    expect(redact('Bearer authentication scheme with dvorak-layout and flow-' + key + ' and disk-' + 'x'.repeat(20) + ' task_' + 'x'.repeat(20) + ' risk_' + 'y'.repeat(20)))
+      .toBe('Bearer authentication scheme with dvorak-layout and flow-' + key + ' and disk-' + 'x'.repeat(20) + ' task_' + 'x'.repeat(20) + ' risk_' + 'y'.repeat(20))
     expect(redact(`key ${key}, header ${bearer}, env tok3n-Zq81xv07 and ${'x'.repeat(30)}`))
       .toBe('key <redacted-secret>, header Bearer <redacted-secret>, env <redacted-secret> and <redacted-secret>')
   })
 
-  test('letters-only secrets are redacted in secret-like variables, and spaces never make a value a word', () => {
+  test('key-like names are matched by whole part, so a key-like variable always redacts', () => {
+    for (const name of ['API_KEY', 'SSH_KEY', 'MY_TOKEN', 'APIKEY', 'apiKey', 'githubToken', 'DB_PASS', 'DB_PWD', 'AUTH', 'SSH_AUTH_SOCK', 'SESSION',
+      'COOKIE', 'PASSWD', 'AWS_CREDENTIALS', 'GPG_PRIVATE', 'client.secret', 'x-api-key', 'XDG_SESSION_TYPE']) {
+      expect({ name, keyLike: isKeyLikeName(name) }).toEqual({ name, keyLike: true })
+    }
+    for (const name of ['KEYBOARD', 'MONKEY', 'KEYS_DIR', 'SESSIONNAME', 'PATH', 'HOME', 'PWD', 'OLDPWD', 'PASSTHROUGH', 'AUTHOR']) {
+      expect({ name, keyLike: isKeyLikeName(name) }).toEqual({ name, keyLike: false })
+    }
     const env = {
-      MY_TOKEN: 'abcDEFghiJKLmnoPQRst', DB_PASSWORD: 'correct horse battery', API_SECRET: 'lowercaseonlysecret',
-      SSH_PRIVATE: 'plain-words-here', KEYBOARD: 'dvorak-layout', SEARCH_KEY: 'two words here',
+      API_TOKEN: 'abcdefghijklmnopqrstuv', API_KEY: 'correct-horse-battery', SSH_KEY: 'abcdefghij', MY_TOKEN: 'abcDEFghiJKLmnoPQRst',
+      DB_PASSWORD: 'correct horse battery', AUTH: 'hunter2hunter2', SESSION: 'sessionvalue', COOKIE: 'cookie=abcdefgh', DB_PASS: 'letmeinletmein',
+      DB_PWD: 'passw0rdpassw0rd', PWD: '/work/project', OLDPWD: '/work/previous', KEYBOARD: 'dvorak-layout', API_KEY_SHORT_KEY: 'short',
     }
     const redact = providerKeyRedactor(env)
-    expect(redact('abcDEFghiJKLmnoPQRst')).toBe('<redacted-secret>')
-    expect(redact('pw correct horse battery!')).toBe('pw <redacted-secret>!')
-    expect(redact('lowercaseonlysecret and plain-words-here')).toBe('<redacted-secret> and <redacted-secret>')
-    expect(redact('dvorak-layout')).toBe('dvorak-layout')
-    // A space is not a word separator any more, in any variable.
-    expect(redact('two words here')).toBe('<redacted-secret>')
+    for (const [name, value] of Object.entries(env)) {
+      const expected = ['PWD', 'OLDPWD', 'KEYBOARD'].includes(name) || value.length < 8 ? value : '<redacted-secret>'
+      expect({ name, text: redact(`value ${value}!`) }).toEqual({ name, text: `value ${expected}!` })
+    }
+  })
+
+  test('underscore provider keys are redacted by shape, ordinary words are not', () => {
+    const redact = providerKeyRedactor({})
+    const live = `sk_live_${'a1b2c3d4'.repeat(3)}`
+    const lower = `sk_test_${'abcdefgh'.repeat(3)}`
+    expect(redact(`${live} ${lower} (pk_live_${'q'.repeat(20)})`)).toBe('<redacted-secret> <redacted-secret> (<redacted-secret>)')
+    expect(redact(`task_${'x'.repeat(20)} ask_${'x'.repeat(20)}`)).toBe(`task_${'x'.repeat(20)} ask_${'x'.repeat(20)}`)
   })
 
   test('a bad configured URL is a flow path error, not a crash', () => {
     const header = 'url: http://127.0.0.1:4173/\n---\n- tapOn: x\n'
     expect(() => checkFlowApp(header, { appId: 'not a url', platform: 'web' })).toThrow(/not on the configured page/)
+    // And a bad declared url, with a good configured page.
+    expect(() => checkFlowApp('url: not a url\n---\n- tapOn: x\n', { appId: 'http://127.0.0.1:4173', platform: 'web' }))
+      .toThrow(/not on the configured page/)
   })
 
   test('responses are redacted like CLI reports', async () => {

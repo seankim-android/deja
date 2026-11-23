@@ -106,27 +106,32 @@ const TOOLS: Record<string, ToolSpec> = {
  * On top of the CLI's redactor: the values of key-like environment variables, and the shapes provider
  * keys take (`sk-…`, `Bearer …`), so a key echoed by a child process or an error never reaches an agent.
  */
+const KEY_LIKE_PARTS = new Set([
+  'KEY', 'APIKEY', 'TOKEN', 'SECRET', 'PASSWORD', 'PASSWD', 'PASS', 'PWD', 'PRIVATE', 'CREDENTIAL', 'CREDENTIALS',
+  'AUTH', 'SESSION', 'COOKIE',
+])
+
 /**
- * A short, all lower-case value of letters and separators (`dvorak-layout`) is a word, not a key. Never
- * in a variable named like a password, secret or credential, and never with a space in it: those are
- * secrets even when they read like words.
+ * Whether an environment variable name reads as a secret: any whole part, split on `_`, `-`, `.` and camelCase
+ * boundaries, is a key-like word. `KEYBOARD` is one part and does not match; `SSH_KEY` and `apiKey` do. The
+ * shell's own `PWD` and `OLDPWD` are the current directory, not a password.
  */
-function looksLikeWord(name: string, value: string) {
-  if (/(?:PASSWORD|PASSWD|SECRET|PRIVATE|CREDENTIAL)/i.test(name)) return false
-  return value.length < 24 && /^[a-z]+(?:[-_.][a-z]+)*$/.test(value)
+export function isKeyLikeName(name: string) {
+  if (name === 'PWD' || name === 'OLDPWD') return false
+  return name.replace(/([a-z0-9])([A-Z])/g, '$1_$2').split(/[_.-]+/)
+    .some(part => KEY_LIKE_PARTS.has(part.toUpperCase()))
 }
 
 export function providerKeyRedactor(env: NodeJS.ProcessEnv): Redactor {
   const values = Object.entries(env)
-    .filter(([name, value]) => /(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|PRIVATE|CREDENTIAL)/i.test(name) && typeof value === 'string' &&
-      value.length >= 8 && !looksLikeWord(name, value))
+    .filter(([name, value]) => isKeyLikeName(name) && typeof value === 'string' && value.length >= 8)
     .map(([, value]) => value!)
     .sort((left, right) => right.length - left.length)
   return text => {
     let redacted = text
     for (const value of values) redacted = redacted.split(value).join('<redacted-secret>')
     return redacted
-      .replace(/(?<![A-Za-z0-9_-])(?:sk|pk|rk)-[A-Za-z0-9_-]{16,}/g, '<redacted-secret>')
+      .replace(/(?<![A-Za-z0-9_-])(?:sk|pk|rk)[-_][A-Za-z0-9_-]{16,}/g, '<redacted-secret>')
       .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]{20,}/gi, 'Bearer <redacted-secret>')
   }
 }
