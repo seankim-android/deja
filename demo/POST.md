@@ -17,6 +17,17 @@ Other first lines (swap in for line 1):
 - B: "Paying a model to tap the same Sign In button every night felt wrong. So I made the agent remember."
 - C: "Kimi on Cerebras tests my app once. After that, the test runs with no model at all."
 
+### If you don't have X Premium (280-character limit), post this instead and put the template above in the first reply
+
+```
+My AI testing agent learned our checkout in 13 model calls. Now it replays it with 0.
+
+Déjà: Kimi K3.1 Pro on Cerebras tests an app once through OpenClaw. Later runs reuse the test, no model needed.
+
+github.com/seankim-android/deja
+#KimiOnCerebras @Cerebras @Kimi_Moonshot
+```
+
 ### First reply (post it right after, under your own post)
 
 ```
