@@ -1,12 +1,40 @@
 {
   "name": "@deja-qa/store-sqlite",
   "version": "0.1.0",
-  "private": true,
   "description": "SQLite WalkStore (Bun SQLite today)",
   "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/seankim-android/deja.git",
+    "directory": "packages/store-sqlite"
+  },
+  "homepage": "https://github.com/seankim-android/deja#readme",
+  "bugs": {
+    "url": "https://github.com/seankim-android/deja/issues"
+  },
   "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "exports": {
-    ".": "./src/index.ts"
+    ".": {
+      "bun": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "src",
+    "!dist/.tsbuildinfo",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20",
+    "bun": ">=1.4.0"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "dependencies": {
     "@deja-qa/core": "workspace:*"
