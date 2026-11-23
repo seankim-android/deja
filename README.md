@@ -144,6 +144,10 @@ We do not claim a speedup. See [docs/REFERENCE.md](docs/REFERENCE.md) for the fu
 
 The full plan is in [docs/SDK_PLAN.md](docs/SDK_PLAN.md).
 
+## Contributing
+
+Outside contributions will require accepting the [CLA](CLA.md) (draft; see [CONTRIBUTING.md](CONTRIBUTING.md)).
+
 ## License
 
 [Apache-2.0](LICENSE)
