@@ -9,7 +9,7 @@ import type {
   WalkRunner,
   WalkStore,
 } from './contracts.ts'
-import { Deja } from './orchestration.ts'
+import { Deja, type DejaRememberOptions, type DejaRunOptions } from './orchestration.ts'
 
 /** Bumped on a breaking change to a plugin contract. Plugins declare a peer range on core. */
 export const CONTRACT_VERSION = 1
@@ -52,6 +52,13 @@ export type CreateDejaOptions = {
   }
   adapter: DejaAdapter
   store: WalkStore
+  /**
+   * The committed walk manifest, relative to `workspaceRoot` (for example `deja.walks.json`). Set
+   * it, and build the store with the same path, to replay the consumer's own flow files. A store
+   * that does not support a manifest is refused, so a hidden copy is never replayed by accident.
+   * With a manifest: cold exploration and repair are not available yet, and `run` takes `verify`.
+   */
+  manifestPath?: string
   runner: WalkRunner
   /** Lazy: called only on a cold miss or an explicit `explore`. A cache hit never calls it. */
   explorer: (context: DejaFactoryContext) => WalkExplorer
@@ -80,13 +87,18 @@ export type DejaCallOptions = {
   timeoutMs?: number
 }
 
+/** Per-call options of `run`. */
+export type DejaClientRunOptions = DejaCallOptions & DejaRunOptions
+/** Per-call options of `remember`. */
+export type DejaClientRememberOptions = DejaCallOptions & DejaRememberOptions
+
 export type DejaClient = {
   /** The identity `run`, `explore` and `remember` use for this goal. */
   identity(goal: string): Promise<WalkIdentity>
-  run(goal: string, callOptions?: DejaCallOptions): Promise<RunResult>
+  run(goal: string, callOptions?: DejaClientRunOptions): Promise<RunResult>
   explore(goal: string, callOptions?: DejaCallOptions): Promise<RunResult>
   /** `candidatePath` is a file path the runner and store can read (a Maestro YAML on disk today). */
-  remember(goal: string, candidatePath: string, callOptions?: DejaCallOptions): Promise<RunResult>
+  remember(goal: string, candidatePath: string, callOptions?: DejaClientRememberOptions): Promise<RunResult>
 }
 
 const noopReporter: RunReporter = {
@@ -94,6 +106,17 @@ const noopReporter: RunReporter = {
 }
 
 export function createDeja(options: CreateDejaOptions): DejaClient {
+  if (options.store.manifestPath !== undefined && options.repairer) {
+    // Repair works on a stored copy; with a manifest the flow is the consumer's own file (DEJA-6).
+    throw new TypeError('Repair is not supported with a manifest yet; omit the repairer')
+  }
+  if (options.manifestPath !== undefined && options.store.manifestPath !== options.manifestPath) {
+    throw new TypeError(
+      `manifestPath ${JSON.stringify(options.manifestPath)} needs a store built for the same manifest ` +
+      `(store.manifestPath is ${JSON.stringify(options.store.manifestPath ?? null)}); ` +
+      'refusing to replay a stored copy instead of the consumer\'s file',
+    )
+  }
   const identity = async (goal: string): Promise<WalkIdentity> => {
     const buildFingerprint = await options.adapter.buildFingerprint(
       options.workspaceRoot, options.app.buildPath,
@@ -151,7 +174,9 @@ export function createDeja(options: CreateDejaOptions): DejaClient {
     run: async (goal, callOptions) => {
       callOptions?.signal?.throwIfAborted()
       const value = await identity(goal)
-      return orchestrator(value, callOptions).run(value)
+      return orchestrator(value, callOptions).run(value, {
+        ...(callOptions?.verify ? { verify: true } : {}),
+      })
     },
     explore: async (goal, callOptions) => {
       callOptions?.signal?.throwIfAborted()
@@ -161,7 +186,9 @@ export function createDeja(options: CreateDejaOptions): DejaClient {
     remember: async (goal, candidatePath, callOptions) => {
       callOptions?.signal?.throwIfAborted()
       const value = await identity(goal)
-      return orchestrator(value, callOptions).remember(value, candidatePath)
+      return orchestrator(value, callOptions).remember(value, candidatePath, {
+        ...(callOptions?.acceptAssertionChange ? { acceptAssertionChange: true } : {}),
+      })
     },
   }
 }

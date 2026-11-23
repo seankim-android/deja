@@ -9,8 +9,8 @@ export const HELP = `Déjà — explore once, replay without a model, repair onl
 
 Usage:
   deja explore <goal> [--config <file>] [--json] [--junit <file>] [--summary]
-  deja run <goal> [--config <file>] [--json] [--junit <file>] [--summary]
-  deja remember <goal> --flow <candidate.yaml> [--config <file>] [--json] [--junit <file>] [--summary]
+  deja run <goal> [--verify] [--config <file>] [--json] [--junit <file>] [--summary]
+  deja remember <goal> --flow <candidate.yaml> [--accept-assertion-change] [--config <file>] [--json] [--junit <file>] [--summary]
   deja list [--config <file>] [--json]
   deja inspect <report> [--config <file>] [--json] [--summary]
   deja help
@@ -32,6 +32,12 @@ Options:
   --junit <file>   Write Maestro's own JUnit report to <file> (config field: "junit"). If Maestro
                    never ran or did not pass, a minimal report with one failed testcase is written,
                    so a missing file is never a pass. Listed as a junit artifact in the result.
+  --verify         With a manifest: if the flow changed, or no build has validated it, re-run your
+                   current file in place. A pass with unchanged assertions updates the manifest's sha.
+                   Changed assertions fail (exit 6) and write nothing.
+  --accept-assertion-change
+                   With a manifest, remember only: let this reviewed run change the manifest's
+                   assertion hash. Review the flow's assertions in the diff first.
   --store <id>     Use a separate store for this run, for example one per device or simulator.
                    Run one deja per device in parallel, each with its own id. A second writer on
                    one store is refused (exit 5). Flows are shared; history is not.
@@ -45,6 +51,12 @@ Semantic retrieval:
   adapter/browser/checksum/latest-pass gates, similarity and margin thresholds, then replay YAML.
   Missing providers fall back to the ordinary miss lifecycle. This is a narrow local lexical proof.
 
+Manifest (config "manifest": "deja.walks.json", relative to workspaceRoot):
+  The manifest is committed with your flows. It names each goal's flow file, a sha256 of the flow
+  and every file it runs, and a hash of its assertions. Replay runs your file in place; .deja/
+  keeps history only. A changed flow gives "flow-changed" and nothing is replayed. Déjà writes
+  the manifest and never commits it. Cold exploration and repair are not available with it yet.
+
 Exit codes:
   0  Successful run/explore/remember, list, inspect, or help.
   1  Product/unknown/runner failure (including executable launch), rejected candidate,
@@ -53,6 +65,8 @@ Exit codes:
   3  Cold exploration did not produce a verified reusable walk.
   4  Invalid/corrupt local memory; quarantine it and use cold exploration to recover.
   5  Store locked: another run is writing the same store. Use a different --store <id>.
+  6  Manifest: flow-changed, not-validated, needs-migration or assertions-changed. Nothing was
+     replayed or written. Run with --verify, or review the change and run remember.
 
 YAML verification and replay always invoke standalone Maestro flows. No YAML depends on
 Déjà or an LLM after it has been written.

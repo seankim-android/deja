@@ -7,6 +7,7 @@ import {
   type MaestroExecutionAdapter,
 } from '@deja-qa/maestro'
 import type { CheckoutRepairPolicy } from '@deja-qa/repair'
+import { checkManifestPath } from '@deja-qa/store-local'
 
 export class CliConfigurationError extends Error {
   constructor(message: string, options?: ErrorOptions) {
@@ -55,6 +56,11 @@ export type ProductionConfiguration = {
     policy: CheckoutRepairPolicy
     timeBudgetMs: number
   }
+  /**
+   * The committed walk manifest, relative to `workspaceRoot` (config `manifest`). Set, the CLI runs
+   * the consumer's own flow files and the manifest names them; unset, it uses the stores' own copies.
+   */
+  manifest?: string
   /** WALK-021, iOS only: on a stale build, replay the last verified walk instead of rejecting. */
   staleBuild?: 'replay-last-verified'
 }
@@ -252,6 +258,18 @@ export async function loadProductionConfiguration(configPath: string): Promise<P
     }
   }
 
+  let manifest: string | undefined
+  if (raw.manifest !== undefined) {
+    try {
+      manifest = checkManifestPath(text(raw.manifest, '', 'manifest'))
+    } catch (error) {
+      throw new CliConfigurationError(`manifest must be a relative .json path inside workspaceRoot: ${(error as Error).message}`, { cause: error })
+    }
+    if (raw.repair !== undefined) {
+      throw new CliConfigurationError('repair is not supported with a manifest yet (DEJA-6)')
+    }
+  }
+
   let staleBuild: ProductionConfiguration['staleBuild']
   if (raw.staleBuild !== undefined) {
     if (explore.platform !== 'ios') {
@@ -305,6 +323,7 @@ export async function loadProductionConfiguration(configPath: string): Promise<P
     ...(semantic ? { semantic } : {}),
     ...(repair ? { repair } : {}),
     ...(staleBuild ? { staleBuild } : {}),
+    ...(manifest ? { manifest } : {}),
   }
 }
 
