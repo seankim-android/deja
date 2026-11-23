@@ -4,7 +4,7 @@ import { parseAllDocuments } from 'yaml'
 export function parseYamlDocuments(contents: string): { documents: unknown[] } | { error: Error } {
   let documents
   try {
-    documents = parseAllDocuments(contents)
+    documents = parseAllDocuments(contents, { merge: true })
   } catch (error) {
     return { error: new Error('Flow is not valid YAML', { cause: error }) }
   }

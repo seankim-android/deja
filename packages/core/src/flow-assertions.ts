@@ -48,6 +48,11 @@ function parameters(value: unknown): Record<string, unknown> {
   return rest
 }
 
+/** Anything but an absent or literal `false` counts as optional (`yes`, `on`, a string): fail closed. */
+function isOptional(value: unknown) {
+  return isMapping(value) && value.optional !== undefined && value.optional !== false
+}
+
 const CALLS = new Set(['runFlow', 'repeat', 'retry', 'runScript'])
 const ALWAYS_RUNS = new Set(['onFlowStart', 'onFlowComplete'])
 
@@ -62,6 +67,10 @@ const ALWAYS_RUNS = new Set(['onFlowStart', 'onFlowComplete'])
  *   `times`, `while`, `maxRetries`, `env`), so a condition, `times: 0` or another env value changes
  *   it.
  * - Each `runFlow`, `retry` and `runScript` is a line of its own, and names the file it reaches.
+ * - A bare word item such as `- assertNoDefectsWithAi` counts like the mapping form.
+ * - `extendedWaitUntil` counts with its whole mapping (`visible`, `notVisible`, `timeout`): it fails
+ *   the flow when its condition is not met. It is hashed, but it is not an assertion for
+ *   `minAssertions`.
  * - `evalScript` counts with its source, and `env` mappings count where they sit, because
  *   `assertTrue` and `${VAR}` selectors read what scripts and env set.
  * - Order counts: the lines keep the order the flow runs them in.
@@ -72,7 +81,17 @@ export function findFlowAssertions(contents: string): FlowAssertion[] {
   const found: FlowAssertion[] = []
   const visit = (node: unknown, ancestors: string[], direct: boolean) => {
     if (Array.isArray(node)) {
-      for (const item of node) visit(item, ancestors, false)
+      for (const item of node) {
+        if (typeof item === 'string' && item.startsWith('assert')) {
+          // A command written as a bare word, like `- assertNoDefectsWithAi`.
+          found.push({
+            entry: `${ancestors.join('>')}|${item}|null`, command: item, id: null,
+            always: ancestors.every(element => ALWAYS_RUNS.has(element)),
+          })
+        } else {
+          visit(item, ancestors, false)
+        }
+      }
       return
     }
     if (!isMapping(node)) return
@@ -80,10 +99,23 @@ export function findFlowAssertions(contents: string): FlowAssertion[] {
     for (const [key, value] of Object.entries(node)) {
       const where = ancestors.join('>')
       if (key.startsWith('assert')) {
-        const optional = isMapping(value) && value.optional === true
+        const optional = isOptional(value)
         const id = isMapping(value) && typeof value.id === 'string' ? value.id : null
         found.push({
           entry: `${where}|${key}|${canonicalJson(value)}`, command: key, id, always: always && !optional,
+        })
+        continue
+      }
+      if (key === '<<') {
+        // An unresolved merge key could bring in anything, `optional` included.
+        found.push({ entry: `${where}|<<|${canonicalJson(value)}`, command: '<<', id: null, always: false })
+        continue
+      }
+      if (key === 'extendedWaitUntil') {
+        // It fails the flow when its condition is not met, so it guards behavior like an assertion.
+        found.push({
+          entry: `${where}|extendedWaitUntil|${canonicalJson(value)}`, command: 'extendedWaitUntil', id: null,
+          always: always && !isOptional(value),
         })
         continue
       }
@@ -99,7 +131,7 @@ export function findFlowAssertions(contents: string): FlowAssertion[] {
       if (CALLS.has(key)) {
         const params = canonicalJson(parameters(value))
         const file = typeof value === 'string' ? value : isMapping(value) ? value.file : undefined
-        const conditional = isMapping(value) && value.when !== undefined
+        const conditional = isMapping(value) && (value.when !== undefined || isOptional(value))
         found.push({
           entry: `${where}|${key}|params=${params}`,
           command: key,

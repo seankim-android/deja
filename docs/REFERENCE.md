@@ -139,8 +139,12 @@ refused (exit 2). The CLI also refuses to write it if it would hold a `fixtureCr
   selectors read what they set; and the sha256 of every `runScript` file. Adding `optional:
   true`, wrapping an assertion in a condition, `times: 0`, a loosened env value, another script
   result, or swapping two assertions all change it. Not in it: actions (`tapOn` and the like), so
-  an assertion moved before the action it checks is not seen; `label`; and `extendedWaitUntil`,
-  which is a wait, not a product assertion. Golden vectors are in
+  an assertion moved before the action it checks is not seen; and `label`. A bare word item such
+  as `- assertNoDefectsWithAi` counts like the mapping form. `extendedWaitUntil` is hashed with its
+  whole mapping (`visible`, `notVisible`, `timeout`) because it fails the run when its condition is
+  not met, but it does not count toward `minAssertions`. For `ownerRules`, an assertion counts as
+  always running only when nothing around it is conditional or `optional` (any value but an absent
+  or literal `false`, so `yes` and a `<<` merge count). Golden vectors are in
   `packages/core/test/flow-assertions.test.ts` and `packages/store-local/test/consumer-flow.test.ts`.
 - **Stateless CI.** A checkout with an empty `.deja/` has no validation history, so each run says
   `not-validated` until `--verify` runs. `--verify` also accepts a changed flow, so a CI job that

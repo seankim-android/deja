@@ -114,6 +114,35 @@ describe('flow assertions (hash form version 1)', () => {
     expect(findFlowAssertions('appId: a\nonFlowStart:\n  - assertVisible: "x"\n').map(item => item.always)).toEqual([true])
   })
 
+  test('a bare word assertion is an entry, and extendedWaitUntil is hashed with its whole mapping', () => {
+    const yaml = '- assertNoDefectsWithAi\n- tapOn: x\n- extendedWaitUntil:\n    visible: "Done"\n    timeout: 5000\n'
+    const items = findFlowAssertions(yaml)
+    expect(items.map(item => item.entry)).toEqual([
+      '|assertNoDefectsWithAi|null',
+      '|extendedWaitUntil|{"timeout":5000,"visible":"Done"}',
+    ])
+    expect(items.map(item => item.command)).toEqual(['assertNoDefectsWithAi', 'extendedWaitUntil'])
+    expect(entries('- extendedWaitUntil:\n    notVisible: "Done"\n    timeout: 5000\n'))
+      .not.toEqual(entries('- extendedWaitUntil:\n    visible: "Done"\n    timeout: 5000\n'))
+    expect(entries('- extendedWaitUntil:\n    visible: "Done"\n    timeout: 1\n'))
+      .not.toEqual(entries('- extendedWaitUntil:\n    visible: "Done"\n    timeout: 5000\n'))
+  })
+
+  test('optional counts however YAML spells it, including through a merge key', () => {
+    const always = (yaml: string) => findFlowAssertions(yaml).map(item => [item.command, item.always])
+    expect(always('- assertVisible:\n    id: a\n    optional: true\n')).toEqual([['assertVisible', false]])
+    expect(always('- assertVisible:\n    id: a\n    optional: yes\n')).toEqual([['assertVisible', false]])
+    expect(always('- assertVisible:\n    id: a\n    optional: false\n')).toEqual([['assertVisible', true]])
+    expect(always('- defaults: &base\n    optional: true\n- assertVisible:\n    <<: *base\n    id: a\n'))
+      .toEqual([['assertVisible', false]])
+    expect(always('- assertVisible:\n    <<: {optional: true}\n    id: a\n')).toEqual([['assertVisible', false]])
+    expect(always('- runFlow:\n    file: a.yaml\n    optional: true\n')).toEqual([['runFlow', false]])
+    expect(always('- runFlow:\n    file: a.yaml\n    optional: yes\n')).toEqual([['runFlow', false]])
+    expect(always('- runFlow:\n    <<: {optional: true}\n    file: a.yaml\n')).toEqual([['runFlow', false]])
+    expect(always('- runFlow:\n    optional: true\n    commands:\n      - assertVisible: a\n'))
+      .toEqual([['runFlow', false], ['assertVisible', false]])
+  })
+
   test('finds assertions in every document and in onFlowStart', () => {
     const yaml = 'appId: a\nonFlowStart:\n  - assertVisible: "start"\n---\n- assertVisible: "main"\n'
     expect(entries(yaml)).toEqual(['onFlowStart|assertVisible|"start"', '|assertVisible|"main"'])
