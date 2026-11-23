@@ -19,7 +19,8 @@ Commands:
   explore   Force verified cold exploration and store only a passing candidate.
   run       Check exact local memory first. Hits never construct an explorer/model client.
             Opt-in semantic fallback applies only to not-found misses and replays verified YAML.
-            Other misses explore cold; stale-build memory enters only bounded selector repair.
+            Other misses explore cold; stale-build memory enters only bounded selector repair,
+            or, with iOS {"staleBuild":"replay-last-verified"}, replays the last verified YAML.
   remember  Independently verify an existing YAML candidate before storing it.
   list      List local walks without constructing an explorer or runner invocation.
   inspect   Summarize a saved run result, artifact paths, failures, and source diffs.
@@ -72,6 +73,11 @@ export function renderResult(
     `YAML: ${result.yamlPath ?? 'none'}`,
   ]
   if (result.yamlSha256) lines.push(`YAML SHA-256: ${result.yamlSha256}`)
+  if (result.replayedOnNewBuild) {
+    const replay = result.replayedOnNewBuild
+    lines.push(`Replayed on a new build: this build was not verified; the YAML was last verified on build ${replay.previousBuildFingerprint}`)
+    lines.push(`Stored for this build: ${replay.recordedForNewBuild ? 'yes' : 'no'}`)
+  }
   if (result.semantic) {
     lines.push(`Semantic lookup: ${result.semantic.status}${result.semantic.reason ? ` (${result.semantic.reason})` : ''}`)
     lines.push(`Semantic embedding calls: ${result.semantic.embeddingCalls}`)

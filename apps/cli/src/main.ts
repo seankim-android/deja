@@ -141,6 +141,7 @@ function createOrchestration(
         minimumMargin: configuration.semantic!.minimumMargin,
       },
     } : {}),
+    ...(configuration.staleBuild ? { staleBuild: configuration.staleBuild } : {}),
     createExplorer: () => {
       if (configuration.explore.platform !== 'android') {
         return new UnsupportedPlatformExplorer(configuration.explore.platform)

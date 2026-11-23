@@ -104,6 +104,10 @@ Maestro with `--platform ios --device <UDID>`. It never shares Android install/s
 Only independently reviewed YAML via `remember`, exact zero-model warm replay, native-build
 invalidation, and meaningful product-regression handling are supported. Cold iOS exploration returns
 `exploration-rejected` with 0 model calls; stale builds return `repair-rejected` without a cold
-fallback. The verified target is the dedicated iPhone 17 / iOS 27.0 `walkcache_ios` simulator with
+fallback, unless the config opts in with `"staleBuild": "replay-last-verified"` (WALK-021): then the
+last verified YAML replays once on the new build, a pass is stored for it, and a fail stores nothing.
+A pass replaces the old build's entry and restarts its history (DEJA-12 tracks keeping it).
+
+The verified target is the dedicated iPhone 17 / iOS 27.0 `walkcache_ios` simulator with
 Xcode 27.2 and Maestro 2.12.0. The requested Android compatibility replay was blocked before boot
 by emulator disk capacity, as recorded in the WALK-011 evidence; portable tests do not replace it.

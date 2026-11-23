@@ -4,6 +4,7 @@ import { resolve } from 'node:path'
 import {
   Deja,
   normalizeGoal,
+  ExpectedFlowChecksumMismatchError,
   type ExecutionResult,
   type ExplorationResult,
   type FailureCategory,
@@ -26,7 +27,7 @@ import {
 const identity: WalkIdentity = {
   goal: 'Checkout',
   appId: 'fixture.app',
-  platform: 'fixture-platform',
+  platform: 'ios',
   flowSchemaVersion: 'flow/v1',
   buildFingerprint: 'a'.repeat(64),
 }
@@ -45,17 +46,23 @@ class FakeStore implements WalkStore {
   validations: WalkValidation[] = []
   validationIdentities: WalkIdentity[] = []
   persistCalls = 0
+  persistOptions: PersistVerifiedOptions[] = []
+  previousLookups = 0
+  previousResult: () => Promise<LookupHit | LookupMiss> =
+    async () => ({ status: 'miss', reason: 'not-found' })
 
   async lookup(_identity?: WalkIdentity) {
     return this.lookupResult
   }
 
-  async lookupPreviousSuccessful(): Promise<LookupMiss> {
-    return { status: 'miss', reason: 'not-found' }
+  async lookupPreviousSuccessful(_identity?: WalkIdentity): Promise<LookupHit | LookupMiss> {
+    this.previousLookups += 1
+    return this.previousResult()
   }
 
-  async persistVerifiedCandidate(_options: PersistVerifiedOptions): Promise<PersistedWalk> {
+  async persistVerifiedCandidate(options: PersistVerifiedOptions): Promise<PersistedWalk> {
     this.persistCalls += 1
+    this.persistOptions.push(options)
     return {
       walk: storedWalk,
       flowPath: storedWalk.flowPath,
@@ -159,6 +166,7 @@ function fixture(
   runnerResults = [execution(true)],
   now?: () => Date,
   semantic?: SemanticRetrievalOptions,
+  options: { repairer?: boolean, staleBuild?: 'replay-last-verified' } = {},
 ) {
   const store = new FakeStore()
   store.lookupResult = lookup
@@ -176,6 +184,7 @@ function fixture(
     reporter,
     ...(now ? { now } : {}),
     ...(semantic ? { semantic } : {}),
+    ...(options.staleBuild ? { staleBuild: options.staleBuild } : {}),
     artifactId: prefix => `${prefix}-test`,
     runner: {
       run: async () => {
@@ -195,15 +204,17 @@ function fixture(
         },
       }
     },
-    createRepairer: () => {
-      repairConstructions += 1
-      return {
-        repair: async () => {
-          repairCalls += 1
-          return repairResult
-        },
-      }
-    },
+    ...(options.repairer === false ? {} : {
+      createRepairer: () => {
+        repairConstructions += 1
+        return {
+          repair: async () => {
+            repairCalls += 1
+            return repairResult
+          },
+        }
+      },
+    }),
   })
   return {
     store, reporter, cache,
@@ -488,5 +499,186 @@ describe('vendor-independent orchestration', () => {
       repairConstructions: 0, repairCalls: 0,
     })
     expect(providerConstructions).toBe(0)
+  })
+
+  describe('WALK-021 stale-build replay of the last verified walk', () => {
+    const newBuild: WalkIdentity = { ...identity, buildFingerprint: 'b'.repeat(64) }
+    const stale: LookupMiss = { status: 'miss', reason: 'stale-build' }
+    const previousHit: LookupHit = { status: 'hit', walk: storedWalk, flowPath: '/fixture/stored.yaml' }
+    const replayOptions = { repairer: false, staleBuild: 'replay-last-verified' } as const
+    const untouched = {
+      explorerConstructions: 0, explorerCalls: 0, repairConstructions: 0, repairCalls: 0,
+    }
+
+    test('off by default: a stale build without a repairer is still rejected', async () => {
+      const context = fixture(stale, undefined, undefined, undefined, { repairer: false })
+      context.store.previousResult = async () => previousHit
+      const result = await context.cache.run(newBuild)
+      expect(result).toMatchObject({ outcome: 'repair-rejected', passed: false, modelCalls: 0 })
+      expect(result.replayedOnNewBuild).toBeUndefined()
+      expect(context.store.previousLookups).toBe(0)
+      expect(context.counts()).toEqual({ runnerCalls: 0, ...untouched })
+    })
+
+    test('a pass stores the same verified YAML for the new build and reports the prior build', async () => {
+      const context = fixture(stale, [execution(true)], undefined, undefined, replayOptions)
+      context.store.previousResult = async () => previousHit
+      const result = await context.cache.run(newBuild)
+      expect(result).toMatchObject({
+        cacheStatus: 'miss', cacheMissReason: 'stale-build', outcome: 'passed', passed: true,
+        modelCalls: 0, repairCount: 0, assertions: 9, failure: null, diffs: [], errors: [],
+        yamlPath: storedWalk.flowPath, yamlSha256: storedWalk.flowSha256,
+        identity: { buildFingerprint: newBuild.buildFingerprint },
+        replayedOnNewBuild: {
+          policy: 'replay-last-verified',
+          previousBuildFingerprint: identity.buildFingerprint,
+          previousFlowSha256: storedWalk.flowSha256,
+          previousValidatedAt: timestamp,
+          recordedForNewBuild: true,
+        },
+      })
+      expect(context.counts()).toEqual({ runnerCalls: 1, ...untouched })
+      expect(context.modelConstructions()).toBe(0)
+      expect(context.store.persistOptions).toEqual([{
+        identity: newBuild, candidatePath: '/fixture/stored.yaml',
+        validation: { passed: true, at: timestamp }, origin: 'replayed-on-new-build',
+        expectedFlowSha256: storedWalk.flowSha256,
+      }])
+      // recordValidation needs an exact hit; the new build has none, so the pass is stored instead.
+      expect(context.store.validations).toHaveLength(0)
+      expect(context.store.previousLookups).toBe(2)
+    })
+
+    for (const category of ['product_assertion', 'selector', 'unknown'] as const) {
+      test(`a ${category} failure reports the real failure and stores, repairs, explores nothing`, async () => {
+        const context = fixture(stale, [execution(false, category)], undefined, undefined, replayOptions)
+        context.store.previousResult = async () => previousHit
+        const result = await context.cache.run(newBuild)
+        expect(result).toMatchObject({
+          cacheMissReason: 'stale-build', passed: false, modelCalls: 0, repairCount: 0, diffs: [],
+          outcome: category === 'product_assertion' ? 'product-regression' : 'failed',
+          failure: { category, failingStep: `fixture ${category} step` },
+          replayedOnNewBuild: {
+            previousBuildFingerprint: identity.buildFingerprint, recordedForNewBuild: false,
+          },
+        })
+        expect(result.execution?.passed).toBe(false)
+        expect(context.counts()).toEqual({ runnerCalls: 1, ...untouched })
+        expect(context.modelConstructions()).toBe(0)
+        expect(context.store.persistCalls).toBe(0)
+        expect(context.store.validations).toHaveLength(0)
+      })
+    }
+
+    test('createExplorer is never called on pass or fail (a supplied repairer would take precedence)', async () => {
+      for (const passed of [true, false]) {
+        let explorerFactoryCalls = 0
+        const store = new FakeStore()
+        store.lookupResult = stale
+        store.previousResult = async () => previousHit
+        const cache = new Deja({
+          store,
+          reporter: new FakeReporter(),
+          staleBuild: 'replay-last-verified',
+          runner: { run: async () => execution(passed, 'product_assertion') },
+          createExplorer: () => {
+            explorerFactoryCalls += 1
+            throw new Error('createExplorer must not be called')
+          },
+        })
+        const result = await cache.run(newBuild)
+        expect(result.passed).toBe(passed)
+        expect(result.modelCalls).toBe(0)
+        expect(explorerFactoryCalls).toBe(0)
+      }
+    })
+
+    test('a configured repairer keeps precedence over the replay policy', async () => {
+      const context = fixture(stale, undefined, undefined, undefined, { staleBuild: 'replay-last-verified' })
+      context.store.previousResult = async () => previousHit
+      const result = await context.cache.run(newBuild)
+      expect(result.outcome).toBe('repaired')
+      expect(result.replayedOnNewBuild).toBeUndefined()
+      expect(context.store.previousLookups).toBe(0)
+      expect(context.counts().runnerCalls).toBe(0)
+    })
+
+    test('no previous verified walk keeps the ordinary stale-build rejection', async () => {
+      const context = fixture(stale, undefined, undefined, undefined, replayOptions)
+      const result = await context.cache.run(newBuild)
+      expect(result).toMatchObject({ outcome: 'repair-rejected', passed: false, modelCalls: 0 })
+      expect(result.replayedOnNewBuild).toBeUndefined()
+      expect(context.store.previousLookups).toBe(1)
+      expect(context.counts()).toEqual({ runnerCalls: 0, ...untouched })
+      expect(context.store.persistCalls).toBe(0)
+    })
+
+    test('a previous walk from another adapter or browser is not replayed', async () => {
+      for (const walk of [
+        { ...storedWalk, adapter: 'other-adapter' },
+        { ...storedWalk, browser: 'other-browser' },
+      ]) {
+        const context = fixture(stale, undefined, undefined, undefined, replayOptions)
+        context.store.previousResult = async () => ({ status: 'hit', walk, flowPath: '/fixture/stored.yaml' })
+        const result = await context.cache.run(newBuild)
+        expect(result.outcome).toBe('repair-rejected')
+        expect(context.counts().runnerCalls).toBe(0)
+      }
+    })
+
+    test('tampered stored YAML fails the checksum before any replay or factory', async () => {
+      const context = fixture(stale, undefined, undefined, undefined, replayOptions)
+      context.store.previousResult = async () => {
+        throw new Error('stored flow checksum does not match .deja/flows/checkout/fixture.yaml')
+      }
+      await expect(context.cache.run(newBuild)).rejects.toThrow('stored flow checksum does not match')
+      expect(context.counts()).toEqual({ runnerCalls: 0, ...untouched })
+      expect(context.store.persistCalls).toBe(0)
+      expect(context.reporter.results).toHaveLength(0)
+    })
+
+    test('YAML that changes during a passing replay is never stored for the new build', async () => {
+      const context = fixture(stale, [execution(true)], undefined, undefined, replayOptions)
+      const changed: LookupHit = {
+        ...previousHit, walk: { ...storedWalk, flowSha256: 'e'.repeat(64) },
+      }
+      context.store.previousResult = async () =>
+        context.store.previousLookups === 1 ? previousHit : changed
+      const result = await context.cache.run(newBuild)
+      expect(result).toMatchObject({
+        outcome: 'failed', passed: false, modelCalls: 0,
+        replayedOnNewBuild: { recordedForNewBuild: false },
+      })
+      expect(context.store.persistCalls).toBe(0)
+    })
+
+    test('bytes that change between the checksum check and the write are refused before any write', async () => {
+      const context = fixture(stale, [execution(true)], undefined, undefined, replayOptions)
+      context.store.previousResult = async () => previousHit
+      let expected: string | undefined
+      let origin: string | undefined
+      context.store.persistVerifiedCandidate = async options => {
+        expected = options.expectedFlowSha256
+        origin = options.origin
+        throw new ExpectedFlowChecksumMismatchError(options.expectedFlowSha256 ?? '', 'd'.repeat(64))
+      }
+      const result = await context.cache.run(newBuild)
+      expect(expected).toBe(storedWalk.flowSha256)
+      expect(origin).toBe('replayed-on-new-build')
+      expect(result).toMatchObject({
+        outcome: 'failed', passed: false, modelCalls: 0,
+        replayedOnNewBuild: { recordedForNewBuild: false },
+      })
+      expect(context.store.validations).toEqual([])
+      expect(context.counts()).toEqual({ runnerCalls: 1, ...untouched })
+    })
+
+    test('the policy is refused on a non-iOS identity', async () => {
+      const context = fixture(stale, undefined, undefined, undefined, replayOptions)
+      const result = await context.cache.run({ ...newBuild, platform: 'android' })
+      expect(result.outcome).toBe('repair-rejected')
+      expect(context.store.previousLookups).toBe(0)
+      expect(context.counts().runnerCalls).toBe(0)
+    })
   })
 })

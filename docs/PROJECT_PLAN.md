@@ -114,7 +114,7 @@ a failed latest validation is never reused as a successful hit.
 
 Times are stopping points, not aspirations. If a milestone misses its exit gate, cut its polish
 and protect the next demonstration-critical milestone. The actionable checklist is in `TODO.md`;
-repo-local ticket scope, dependencies, acceptance criteria, and evidence live in `tickets/`.
+ticket scope, dependencies and acceptance criteria live in the Linear team DEJA; evidence lives in the repo.
 
 ### M0 — Plan and Android environment gate — completed
 
