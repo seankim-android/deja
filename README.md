@@ -151,3 +151,5 @@ Outside contributions will require accepting the [CLA](CLA.md) (draft; see [CONT
 ## License
 
 [Apache-2.0](LICENSE)
+
+The Déjà name is covered by the [trademark policy](TRADEMARKS.md) (draft).
