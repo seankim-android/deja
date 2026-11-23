@@ -464,12 +464,18 @@ What the server will not do, whatever a tool call says:
   app IDs such as `launchApp: {appId}` are not (DEJA-41). The canonical path is what is verified and saved. In manifest mode the store then applies the same rules as
   `deja remember`.
 - Responses use the CLI's report redaction (workspace and home paths, fixture credentials, secret-like
-  keys), plus the values (8 or more characters) of key-like environment variables, `sk-`, `sk_` (and `pk`, `rk`) keys and `Bearer` tokens
-  of 20 or more characters. A variable is key-like when any whole part of its name (split on `_`, `-`, `.` and camelCase)
-  is KEY, APIKEY, TOKEN, SECRET, PASSWORD, PASSWD, PASS, PWD, PRIVATE, CREDENTIAL(S), AUTH, SESSION or COOKIE, so `SSH_KEY` and
-  `DB_PASS` count and `KEYBOARD` does not. The shell's own `PWD` and `OLDPWD` (a directory) are left out. A key-like variable
-  always redacts its value, so an ordinary word in one (a `KEY` set to `dvorak-layout`) is hidden too; hiding too much is the
-  safe side. Artifact paths are relative to the workspace.
+  keys), plus the values of key-like environment variables and the shapes of common secrets. An environment variable is key-like when
+  its name (split on `_`, `-`, `.` and camelCase, with trailing digits dropped) contains PASSWORD, PASSWD, SECRET, TOKEN,
+  APIKEY, CREDENTIAL, PRIVATEKEY or ACCESSKEY anywhere (`PGPASSWORD`, `APITOKEN`, `TOKEN2`), or has a whole part KEY, PASS, PWD,
+  AUTH, SESSION, COOKIE, PAT, JWT or PRIVATE, or a part that is API, SECRET, ACCESS, PRIVATE, DB, SSH, AUTH, SIGNING, ENCRYPTION
+  or MASTER followed by KEY or PASS (`DBPASS`, `SSHKEY`). `KEYBOARD`, `MONKEY`, `KEYS_DIR`, `AUTHOR`, `SESSIONNAME`, `PASSAGE` and
+  `COMPASS` do not match, and the shell's own `PWD` and `OLDPWD` are left out. A key-like variable always redacts its value:
+  from 4 characters for password-type names (`PASSWORD`, `PASSWD`, `PASS`, `PWD`), from 8 for the others. So an ordinary word in one
+  (a `KEY` set to `dvorak-layout`) is hidden too; hiding too much is the safe side. A secret in a variable whose name has none of these words is
+  caught only if its value has one of the shapes below. Value shapes
+  redacted anywhere: `sk-`, `sk_`, `pk-`, `pk_`, `rk-`, `rk_` keys, `ghp_`, `gho_`, `ghs_`, `ghu_` and `github_pat_` tokens, `AKIA` and
+  `ASIA` AWS key IDs, `xoxa-`, `xoxb-`, `xoxp-` and `xoxr-` Slack tokens, `Bearer` tokens of 20 or more characters, and the password
+  in any `scheme://user:password@host` URL (only the password part). Artifact paths are relative to the workspace.
 - One writer per store: a second `deja_run`, `deja_remember` or `deja_explore` while one is running is
   refused at once with `error.code` `STORE_LOCKED`. `deja_list` and `deja_inspect` never take the lock.
   Run one `deja mcp --store <id>` per device.

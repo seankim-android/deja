@@ -102,36 +102,71 @@ const TOOLS: Record<string, ToolSpec> = {
     { goal: GOAL }, { title: 'Explore a goal (spends model calls)', readOnlyHint: false, destructiveHint: false, idempotentHint: false }),
 }
 
-/**
- * On top of the CLI's redactor: the values of key-like environment variables, and the shapes provider
- * keys take (`sk-…`, `Bearer …`), so a key echoed by a child process or an error never reaches an agent.
- */
-const KEY_LIKE_PARTS = new Set([
-  'KEY', 'APIKEY', 'TOKEN', 'SECRET', 'PASSWORD', 'PASSWD', 'PASS', 'PWD', 'PRIVATE', 'CREDENTIAL', 'CREDENTIALS',
-  'AUTH', 'SESSION', 'COOKIE',
-])
+/** Distinctive words that almost never occur in an ordinary name: matched anywhere in the name (`PGPASSWORD`, `APITOKEN`). */
+const SECRET_WORDS = ['PASSWORD', 'PASSWD', 'SECRET', 'TOKEN', 'APIKEY', 'CREDENTIAL', 'PRIVATEKEY', 'ACCESSKEY']
+/** Short or ambiguous words: matched only as a whole part of the name (`SSH_KEY`, not `KEYBOARD`). */
+const SECRET_PARTS = new Set(['KEY', 'PASS', 'PWD', 'AUTH', 'SESSION', 'COOKIE', 'PAT', 'JWT', 'PRIVATE'])
+/** `DBPASS`, `SSHKEY`: a part that ends in KEY or PASS after one of these is still a secret; `COMPASS`, `MONKEY` are not. */
+const SECRET_PREFIXES = new Set(['API', 'SECRET', 'ACCESS', 'PRIVATE', 'DB', 'SSH', 'AUTH', 'SIGNING', 'ENCRYPTION', 'MASTER'])
+
+/** The shortest value worth hiding: 4 for password-type names (`hunter2`), 8 for every other key-like name. */
+const PASSWORD_FLOOR = 4
+const KEY_FLOOR = 8
 
 /**
- * Whether an environment variable name reads as a secret: any whole part, split on `_`, `-`, `.` and camelCase
- * boundaries, is a key-like word. `KEYBOARD` is one part and does not match; `SSH_KEY` and `apiKey` do. The
- * shell's own `PWD` and `OLDPWD` are the current directory, not a password.
+ * How an environment variable name reads: `null` for a name that is not secret-like, else the shortest value to
+ * hide. The name is split on `_`, `-`, `.` and camelCase; trailing digits are dropped (`TOKEN2`). `KEYBOARD`,
+ * `MONKEY`, `KEYS_DIR`, `AUTHOR`, `SESSIONNAME`, `PASSAGE` and `COMPASS` do not match. The shell's own `PWD` and
+ * `OLDPWD` are the current directory, not a password.
  */
-export function isKeyLikeName(name: string) {
-  if (name === 'PWD' || name === 'OLDPWD') return false
-  return name.replace(/([a-z0-9])([A-Z])/g, '$1_$2').split(/[_.-]+/)
-    .some(part => KEY_LIKE_PARTS.has(part.toUpperCase()))
+export function secretFloor(name: string): number | null {
+  if (name === 'PWD' || name === 'OLDPWD') return null
+  const parts = name.replace(/([a-z0-9])([A-Z])/g, '$1_$2').split(/[_.-]+/)
+    .map(part => part.toUpperCase().replace(/[0-9]+$/, '')).filter(part => part.length > 0)
+  const joined = parts.join('')
+  let found: number | null = null
+  const note = (floor: number) => { found = found === null ? floor : Math.min(found, floor) }
+  for (const word of SECRET_WORDS) {
+    if (joined.includes(word)) note(word === 'PASSWORD' || word === 'PASSWD' ? PASSWORD_FLOOR : KEY_FLOOR)
+  }
+  for (const part of parts) {
+    if (SECRET_PARTS.has(part)) note(part === 'PASS' || part === 'PWD' ? PASSWORD_FLOOR : KEY_FLOOR)
+    for (const suffix of ['KEY', 'PASS']) {
+      if (part.length > suffix.length && part.endsWith(suffix) && SECRET_PREFIXES.has(part.slice(0, -suffix.length))) {
+        note(suffix === 'PASS' ? PASSWORD_FLOOR : KEY_FLOOR)
+      }
+    }
+  }
+  return found
 }
 
+export function isKeyLikeName(name: string) {
+  return secretFloor(name) !== null
+}
+
+/**
+ * On top of the CLI's redactor: the values of key-like environment variables, and the shapes provider
+ * keys take (`sk-…`, `ghp_…`, `AKIA…`, `Bearer …`, URL passwords), so a key echoed by a child process or an error never reaches an agent.
+ */
 export function providerKeyRedactor(env: NodeJS.ProcessEnv): Redactor {
   const values = Object.entries(env)
-    .filter(([name, value]) => isKeyLikeName(name) && typeof value === 'string' && value.length >= 8)
+    .filter(([name, value]) => {
+      const floor = secretFloor(name)
+      return floor !== null && typeof value === 'string' && value.length >= floor
+    })
     .map(([, value]) => value!)
     .sort((left, right) => right.length - left.length)
   return text => {
     let redacted = text
     for (const value of values) redacted = redacted.split(value).join('<redacted-secret>')
     return redacted
+      // scheme://user:password@host (DATABASE_URL, REDIS_URL): only the password goes.
+      .replace(/([A-Za-z][A-Za-z0-9+.-]*:\/\/[^\s:/?#@]+:)[^\s@/]+(@)/g, '$1<redacted-secret>$2')
       .replace(/(?<![A-Za-z0-9_-])(?:sk|pk|rk)[-_][A-Za-z0-9_-]{16,}/g, '<redacted-secret>')
+      .replace(/(?<![A-Za-z0-9_-])gh[pous]_[A-Za-z0-9]{20,}/g, '<redacted-secret>')
+      .replace(/(?<![A-Za-z0-9_-])github_pat_[A-Za-z0-9_]{20,}/g, '<redacted-secret>')
+      .replace(/(?<![A-Z0-9])(?:AKIA|ASIA)[A-Z0-9]{16}(?![A-Z0-9])/g, '<redacted-secret>')
+      .replace(/(?<![A-Za-z0-9_-])xox[abpr]-[A-Za-z0-9-]{10,}/g, '<redacted-secret>')
       .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]{20,}/gi, 'Bearer <redacted-secret>')
   }
 }

@@ -437,24 +437,59 @@ describe('deja mcp', () => {
       .toBe('key <redacted-secret>, header Bearer <redacted-secret>, env <redacted-secret> and <redacted-secret>')
   })
 
-  test('key-like names are matched by whole part, so a key-like variable always redacts', () => {
+  test('key-like names: distinctive words anywhere, short words by whole part, and no ordinary words', () => {
     for (const name of ['API_KEY', 'SSH_KEY', 'MY_TOKEN', 'APIKEY', 'apiKey', 'githubToken', 'DB_PASS', 'DB_PWD', 'AUTH', 'SSH_AUTH_SOCK', 'SESSION',
-      'COOKIE', 'PASSWD', 'AWS_CREDENTIALS', 'GPG_PRIVATE', 'client.secret', 'x-api-key', 'XDG_SESSION_TYPE']) {
+      'COOKIE', 'PASSWD', 'AWS_CREDENTIALS', 'GPG_PRIVATE', 'client.secret', 'x-api-key', 'XDG_SESSION_TYPE',
+      // No separator, or a digit after the word.
+      'PGPASSWORD', 'APITOKEN', 'ACCESSTOKEN', 'OPENAIAPIKEY', 'ANTHROPICAPIKEY', 'SECRETKEY', 'AWSSECRETKEY', 'DBPASS', 'SSHKEY',
+      'TOKEN2', 'NPM_TOKEN2', 'KEY2', 'GITHUB_PAT', 'JWT', 'AWS_ACCESSKEY', 'MYPRIVATEKEY']) {
       expect({ name, keyLike: isKeyLikeName(name) }).toEqual({ name, keyLike: true })
     }
-    for (const name of ['KEYBOARD', 'MONKEY', 'KEYS_DIR', 'SESSIONNAME', 'PATH', 'HOME', 'PWD', 'OLDPWD', 'PASSTHROUGH', 'AUTHOR']) {
+    for (const name of ['KEYBOARD', 'MONKEY', 'KEYS_DIR', 'SESSIONNAME', 'PATH', 'HOME', 'PWD', 'OLDPWD', 'PASSTHROUGH', 'AUTHOR', 'PASSAGE',
+      'COMPASS', 'PATCH', 'PATTERN', 'SSH_AGENT_PID', 'USER', 'SHELL']) {
       expect({ name, keyLike: isKeyLikeName(name) }).toEqual({ name, keyLike: false })
     }
-    const env = {
+    const env: Record<string, string> = {
       API_TOKEN: 'abcdefghijklmnopqrstuv', API_KEY: 'correct-horse-battery', SSH_KEY: 'abcdefghij', MY_TOKEN: 'abcDEFghiJKLmnoPQRst',
       DB_PASSWORD: 'correct horse battery', AUTH: 'hunter2hunter2', SESSION: 'sessionvalue', COOKIE: 'cookie=abcdefgh', DB_PASS: 'letmeinletmein',
-      DB_PWD: 'passw0rdpassw0rd', PWD: '/work/project', OLDPWD: '/work/previous', KEYBOARD: 'dvorak-layout', API_KEY_SHORT_KEY: 'short',
+      DB_PWD: 'passw0rdpassw0rd', PGPASSWORD: 'pgsecretvalue', APITOKEN: 'apitokenvalue', OPENAIAPIKEY: 'openaikeyvalue', SECRETKEY: 'secretkeyvalue',
+      DBPASS: 'dbpassvalue', TOKEN2: 'tokentwovalue', KEY2: 'keytwovalue', GITHUB_PAT: 'patvaluepat', PWD: '/work/project', OLDPWD: '/work/previous',
+      KEYBOARD: 'dvorak-layout', COMPASS: 'north-east-heading', API_KEY_SHORT_KEY: 'short',
     }
     const redact = providerKeyRedactor(env)
     for (const [name, value] of Object.entries(env)) {
-      const expected = ['PWD', 'OLDPWD', 'KEYBOARD'].includes(name) || value.length < 8 ? value : '<redacted-secret>'
+      const expected = ['PWD', 'OLDPWD', 'KEYBOARD', 'COMPASS'].includes(name) || value.length < 8 ? value : '<redacted-secret>'
       expect({ name, text: redact(`value ${value}!`) }).toEqual({ name, text: `value ${expected}!` })
     }
+  })
+
+  test('password-type names hide values from 4 characters, other names from 8', () => {
+    const redact = providerKeyRedactor({ DB_PASSWORD: 'hunter2', PGPASSWORD: 'qwer', DB_PASS: 'xyz', MY_PWD: 'pw12', API_TOKEN: 'abcdefg', API_KEY: 'abcdefgh' })
+    expect(redact('hunter2 qwer xyz pw12 abcdefg abcdefgh')).toBe('<redacted-secret> <redacted-secret> xyz <redacted-secret> abcdefg <redacted-secret>')
+  })
+
+  test('provider value shapes are redacted without a key-like name', () => {
+    const redact = providerKeyRedactor({})
+    // Built at runtime, so no literal credential sits in the repository.
+    const samples = [
+      `ghp_${'a1B2c3D4e5'.repeat(4)}`, `gho_${'a1B2c3D4e5'.repeat(4)}`, `ghs_${'a1B2c3D4e5'.repeat(4)}`, `ghu_${'a1B2c3D4e5'.repeat(4)}`,
+      `github_pat_${'A1b2C3d4E5'.repeat(6)}_${'z9'.repeat(10)}`,
+      `AKIA${'Q7W8E9R2T3Y4U5I6'}`, `ASIA${'Q7W8E9R2T3Y4U5I6'}`,
+      `xoxb-${'1234567890'}-${'abcdefghij'}`, `xoxp-${'1234567890'}-${'abcdefghij'}`, `xoxa-${'1234567890'}-x`, `xoxr-${'1234567890'}-x`,
+    ]
+    for (const sample of samples) {
+      expect({ sample, out: redact(`before ${sample} after`) }).toEqual({ sample, out: 'before <redacted-secret> after' })
+    }
+    const ordinary = ['ghost_story_title_of_the_week', 'ghp_short', 'AKIAshort', 'MAKIA' + 'Q7W8E9R2T3Y4U5I6', 'AKIA' + 'Q7W8E9R2T3Y4U5I6X', 'xoxz-1234567890-abcdefghij']
+    for (const text of ordinary) expect(redact(text)).toBe(text)
+  })
+
+  test('only the password of a URL is redacted', () => {
+    const redact = providerKeyRedactor({})
+    expect(redact('postgres://app:s3cr3t-pass@db.internal:5432/app')).toBe('postgres://app:<redacted-secret>@db.internal:5432/app')
+    expect(redact('REDIS_URL=redis://:x@cache:6379 and rediss://default:abc123@cache:6380/0'))
+      .toBe('REDIS_URL=redis://:x@cache:6379 and rediss://default:<redacted-secret>@cache:6380/0')
+    expect(redact('https://example.com/path?x=a:b@c and http://user@host/ and https://host:8080/')).toBe('https://example.com/path?x=a:b@c and http://user@host/ and https://host:8080/')
   })
 
   test('underscore provider keys are redacted by shape, ordinary words are not', () => {
