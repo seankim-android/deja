@@ -1,19 +1,12 @@
-// index.d.ts
-import { type LookupHit, type LookupMiss, type PersistedWalk, type PersistVerifiedOptions, type PersistVerifiedRepairOptions, type StoredWalk, type WalkIdentity, type WalkStore, type WalkValidation } from '@deja-qa/core';
-export { type ExplorationDetails, type LookupHit, type LookupMiss, type PersistedWalk, type PersistVerifiedOptions, type PersistVerifiedRepairOptions, type RepairProvenance, type StoredWalk, type WalkIdentity, type WalkValidation, } from '@deja-qa/core';
-export declare const SQLITE_MEMORY_SCHEMA_VERSION = 2;
-export declare const MAESTRO_FLOW_SCHEMA_VERSION = "maestro/v1";
-export declare const SQLITE_MEMORY_PATH = ".deja/memory/walks.sqlite";
-export type SQLiteWalkStoreOptions = {
-    workspaceRoot: string;
-    /** Test-only deterministic filesystem failure injection; production uses fs.rename. */
-    renameFile?: (temporaryPath: string, destinationPath: string) => Promise<void>;
-    /** Test-only transaction failure injection; production uses one IMMEDIATE SQLite transaction. */
-    replaceMetadata?: (walks: StoredWalk[]) => void;
-};
+// typescript 7.0.2
+// entry . (./src/index.ts)
+// exports: InvalidWalkMemoryError, MAESTRO_FLOW_SCHEMA_VERSION, SQLITE_MEMORY_PATH, SQLITE_MEMORY_SCHEMA_VERSION, SQLiteWalkStore, SQLiteWalkStoreOptions
 export declare class InvalidWalkMemoryError extends Error {
     constructor(message: string, options?: ErrorOptions);
 }
+export declare const MAESTRO_FLOW_SCHEMA_VERSION = "maestro/v1";
+export declare const SQLITE_MEMORY_PATH = ".deja/memory/walks.sqlite";
+export declare const SQLITE_MEMORY_SCHEMA_VERSION = 2;
 export declare class SQLiteWalkStore implements WalkStore {
     readonly workspaceRoot: string;
     readonly memoryPath: string;
@@ -41,3 +34,8 @@ export declare class SQLiteWalkStore implements WalkStore {
     lookupPreviousSuccessful(identityInput: WalkIdentity): Promise<LookupHit | LookupMiss>;
     recordValidation(identityInput: WalkIdentity, validation: WalkValidation): Promise<StoredWalk>;
 }
+export type SQLiteWalkStoreOptions = {
+    workspaceRoot: string;
+    renameFile?: (temporaryPath: string, destinationPath: string) => Promise<void>;
+    replaceMetadata?: (walks: StoredWalk[]) => void;
+};

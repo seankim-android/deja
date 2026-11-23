@@ -1,50 +1,6 @@
-// index.d.ts
-export { OpenClawWalkExplorer, type MaestroVerificationRunner, type OpenClawWalkExplorerOptions, } from './production-explorer.ts';
-export type FixtureCredential = {
-    label: string;
-    value: string;
-};
-export type ExploreConfiguration = {
-    workspaceRoot: string;
-    appId: string;
-    platform: 'android';
-    buildPath: string;
-    device: string;
-    fixtureCredentials: FixtureCredential[];
-    openClawModel: string;
-    openClawBaseUrl: string;
-    explorationTimeoutSeconds: number;
-    verificationTimeoutMs: number;
-};
-export type OpenClawEnvelope = {
-    ok?: boolean;
-    status?: string;
-    final?: string;
-    assistantTurns?: number;
-    model?: string | null;
-    provider?: string | null;
-    sessionId?: string;
-    error?: {
-        message?: string;
-        kind?: string;
-    };
-};
-export type VerificationDetails = {
-    passed: boolean;
-    [key: string]: unknown;
-};
-export type PersistenceDetails = {
-    flowPath: string;
-    flowSha256: string;
-    [key: string]: unknown;
-};
-export type ExplorationMetrics = {
-    explorationDurationMs: number | null;
-    verificationDurationMs: number | null;
-    mcpCalls: number | null;
-    modelCalls: number | null;
-    modelCallBasis: string;
-};
+// typescript 7.0.2
+// entry . (./src/index.ts)
+// exports: ColdExploreHooks, ColdExploreOptions, ColdExploreReport, ExplorationMetrics, ExploreConfiguration, FixtureCredential, MaestroVerificationRunner, OpenClawEnvelope, OpenClawWalkExplorer, OpenClawWalkExplorerOptions, PersistenceDetails, VerificationDetails, explorerPrompt, extractCandidateYaml, loadExploreConfiguration, openClawConfig, runColdExploration, validateCandidate
 export type ColdExploreHooks = {
     clearAppState: (phase: 'exploration' | 'verification') => Promise<void>;
     verifyCandidate: (candidatePath: string, attemptDirectory: string) => Promise<VerificationDetails>;
@@ -102,10 +58,33 @@ export type ColdExploreReport = {
     persistence: PersistenceDetails | null;
     errors: string[];
 };
-export declare function loadExploreConfiguration(configPath: string): ExploreConfiguration;
+export type ExplorationMetrics = {
+    explorationDurationMs: number | null;
+    verificationDurationMs: number | null;
+    mcpCalls: number | null;
+    modelCalls: number | null;
+    modelCallBasis: string;
+};
+export type ExploreConfiguration = {
+    workspaceRoot: string;
+    appId: string;
+    platform: 'android';
+    buildPath: string;
+    device: string;
+    fixtureCredentials: FixtureCredential[];
+    openClawModel: string;
+    openClawBaseUrl: string;
+    explorationTimeoutSeconds: number;
+    verificationTimeoutMs: number;
+};
 export declare function explorerPrompt(goal: string, configuration: ExploreConfiguration): string;
 export declare function extractCandidateYaml(finalText: string): string;
-export declare function validateCandidate(candidate: string, appId: string): void;
+export type FixtureCredential = {
+    label: string;
+    value: string;
+};
+export declare function loadExploreConfiguration(configPath: string): ExploreConfiguration;
+export type MaestroVerificationRunner = Pick<MaestroWalkRunner, 'executable' | 'runFlow' | 'adapt'>;
 export declare function openClawConfig(options: ColdExploreOptions): {
     models: {
         providers: {
@@ -161,12 +140,24 @@ export declare function openClawConfig(options: ColdExploreOptions): {
         };
     };
 };
-export declare function runColdExploration(options: ColdExploreOptions, hooks: ColdExploreHooks): Promise<ColdExploreReport>;
-
-// production-explorer.d.ts
-import type { ExplorationResult, ExploreRequest, WalkExplorer, WalkStore } from '@deja-qa/core';
-import { type MaestroWalkRunner } from '@deja-qa/maestro';
-import { type ExploreConfiguration } from './index.ts';
+export type OpenClawEnvelope = {
+    ok?: boolean;
+    status?: string;
+    final?: string;
+    assistantTurns?: number;
+    model?: string | null;
+    provider?: string | null;
+    sessionId?: string;
+    error?: {
+        message?: string;
+        kind?: string;
+    };
+};
+export declare class OpenClawWalkExplorer implements WalkExplorer {
+    private readonly options;
+    constructor(options: OpenClawWalkExplorerOptions);
+    explore(request: ExploreRequest): Promise<ExplorationResult>;
+}
 export type OpenClawWalkExplorerOptions = {
     configuration: ExploreConfiguration;
     buildFingerprint: string;
@@ -175,15 +166,14 @@ export type OpenClawWalkExplorerOptions = {
     runner: MaestroVerificationRunner;
     store: WalkStore;
 };
-/**
- * The part of a Maestro runner the explorer needs. The generic `WalkRunner` contract is not enough:
- * cold-run evidence records Maestro's raw verification (signal, monotonic time, stdout and stderr
- * paths), and the Maestro MCP server is given the same executable. `MaestroWalkRunner` satisfies
- * this, and so can a wrapper or test double, without the explorer depending on the concrete class.
- */
-export type MaestroVerificationRunner = Pick<MaestroWalkRunner, 'executable' | 'runFlow' | 'adapt'>;
-export declare class OpenClawWalkExplorer implements WalkExplorer {
-    private readonly options;
-    constructor(options: OpenClawWalkExplorerOptions);
-    explore(request: ExploreRequest): Promise<ExplorationResult>;
-}
+export type PersistenceDetails = {
+    flowPath: string;
+    flowSha256: string;
+    [key: string]: unknown;
+};
+export declare function runColdExploration(options: ColdExploreOptions, hooks: ColdExploreHooks): Promise<ColdExploreReport>;
+export declare function validateCandidate(candidate: string, appId: string): void;
+export type VerificationDetails = {
+    passed: boolean;
+    [key: string]: unknown;
+};

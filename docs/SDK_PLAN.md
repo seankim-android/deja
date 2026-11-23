@@ -160,8 +160,10 @@ are not negotiable in the engine, not the policy: product assertion failures are
   contract. A breaking change to any of them is a major version, with a reader for the old schema.
 - `core` exports a `CONTRACT_VERSION` (1 today; bumped on a breaking change to a plugin contract).
   Plugins declare the range they support in `peerDependencies` on `@deja-qa/core`.
-- Today: `api/<package>.d.ts` is a checked-in snapshot of each published package's declarations,
-  made by `tsc --emitDeclarationOnly` (`bun scripts/api-snapshot.ts`). `bun test` and the Portable
+- Today: `api/<package>.d.ts` is a checked-in snapshot of what each published package exports from its
+  `exports` entry points (plus the declarations they reference), made from `tsc --emitDeclarationOnly`
+  output (`bun scripts/api-snapshot.ts`). Internal changes do not change it. It records the
+  TypeScript version; regenerate it in the same PR as a TypeScript or `@types/node` bump. `bun test` and the Portable
   checks workflow fail on drift; accept a reviewed change with `bun scripts/api-snapshot.ts --update`.
 
 ## Distribution
