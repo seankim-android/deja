@@ -109,6 +109,14 @@ Options, config fields and exit codes are in [docs/REFERENCE.md](docs/REFERENCE.
 
 We do not claim a speedup. See [docs/REFERENCE.md](docs/REFERENCE.md) for the full support matrix.
 
+## Roadmap
+
+- Publish the packages to npm so other projects can install Déjà as a library.
+- Add a GitHub Action for CI replay and an MCP server so agents can call `run`.
+- Later: cold exploration on iOS and Web, more repair policies, and a hosted cache.
+
+The full plan is in [docs/SDK_PLAN.md](docs/SDK_PLAN.md).
+
 ## License
 
 [Apache-2.0](LICENSE)
