@@ -19,7 +19,6 @@
     }
   ],
   "maestro": {
-    "executable": "maestro",
     "timeoutMs": 120000
   },
   "openClaw": {

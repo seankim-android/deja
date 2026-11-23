@@ -10,7 +10,9 @@ function stayAlive(markerPath) {
   setInterval(() => {}, 1_000)
 }
 
-if (modeArgument === 'grandchild' || modeArgument === 'bystander') {
+if (modeArgument === '--version') {
+  console.log(process.env.DEJA_FAKE_MAESTRO_VERSION || '2.12.0')
+} else if (modeArgument === 'grandchild' || modeArgument === 'bystander') {
   stayAlive(process.argv[3])
 } else {
   const flowPath = process.argv[process.argv.length - 1]
