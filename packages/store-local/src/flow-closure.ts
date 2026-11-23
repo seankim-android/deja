@@ -13,9 +13,12 @@ export class FlowClosureError extends ClosureRefusedError {
 
 /** A file the flow runs is gone. In manifest mode the consumer deleted or moved it. */
 export class MissingFlowFileError extends FlowClosureError {
+  /** The missing file, workspace-relative with `/` separators. */
+  readonly path: string
   constructor(path: string) {
     super(`referenced file does not exist: ${path}`)
     this.name = 'MissingFlowFileError'
+    this.path = path
   }
 }
 

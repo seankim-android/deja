@@ -25,6 +25,7 @@ import { JsonRunReporter, readRunReport } from './reporter.ts'
 import { renderDoctor, runDoctor, type DoctorProbe } from './doctor.ts'
 import { installEngineCommand, selectEngine } from './engine.ts'
 import { runGate } from './gate.ts'
+import { runManifestCheck } from './manifest-check.ts'
 import { createExecutionAdapter, createOrchestration, createStore, EngineRunReporter } from './orchestration.ts'
 import { isCompiledBinary, versionLine } from './version.ts'
 
@@ -77,6 +78,9 @@ type ParsedArguments = {
   rerunFailed: boolean
   acceptAssertionChange: boolean
   dryRun: boolean
+  untracked: boolean
+  /** The `--config` value as typed, when it was given. */
+  configGiven?: string
 }
 
 function parseArguments(argv: string[]): ParsedArguments {
@@ -97,15 +101,21 @@ function parseArguments(argv: string[]): ParsedArguments {
   let rerunFailed = false
   let acceptAssertionChange = false
   let dryRun = false
+  let untracked = false
+  let afterDashes = false
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index]
-    if (argument === '--json') json = true
+    // After `--` every word is a positional, so a goal that starts with `-` can be given.
+    if (afterDashes) positionals.push(argument)
+    else if (argument === '--') afterDashes = true
+    else if (argument === '--json') json = true
     else if (argument === '--summary') summary = true
     else if (argument === '--version' || argument === '-v') version = true
     else if (argument === '--verify') verify = true
     else if (argument === '--rerun-failed') rerunFailed = true
     else if (argument === '--accept-assertion-change') acceptAssertionChange = true
     else if (argument === '--dry-run') dryRun = true
+    else if (argument === '--untracked') untracked = true
     else if (argument === '-h' || argument === '--help' || argument === 'help') help = true
     else if (['--config', '--flow', '--junit', '--store', '--goals', '--build', '--label', '--evidence'].includes(argument)) {
       const value = argv[index + 1]
@@ -130,6 +140,7 @@ function parseArguments(argv: string[]): ParsedArguments {
     command,
     positionals,
     configPath: configPath ?? defaultConfigPath(),
+    ...(configPath ? { configGiven: configPath } : {}),
     ...(flow ? { flow } : {}),
     ...(junit ? { junit } : {}),
     ...(store ? { store } : {}),
@@ -145,6 +156,7 @@ function parseArguments(argv: string[]): ParsedArguments {
     rerunFailed,
     acceptAssertionChange,
     dryRun,
+    untracked,
   }
 }
 
@@ -189,7 +201,7 @@ export async function runCli(argv: string[], io: CliIo = {
       io.stdout(HELP)
       return parsed.command === '' && !parsed.help ? 2 : 0
     }
-    if (!['explore', 'run', 'remember', 'list', 'inspect', 'migrate', 'gate', 'engine', 'doctor', 'mcp'].includes(parsed.command)) {
+    if (!['explore', 'run', 'remember', 'list', 'inspect', 'migrate', 'gate', 'engine', 'doctor', 'mcp', 'manifest'].includes(parsed.command)) {
       throw new CliConfigurationError(`Unknown command: ${parsed.command}`)
     }
     if (parsed.command === 'mcp') {
@@ -233,6 +245,19 @@ export async function runCli(argv: string[], io: CliIo = {
       })
       io.stdout(parsed.json ? `${JSON.stringify(report, null, 2)}\n` : renderDoctor(report))
       return report.ok ? 0 : 1
+    }
+    if (parsed.untracked && parsed.command !== 'manifest') {
+      throw new CliConfigurationError('--untracked is valid only with manifest check')
+    }
+    if (parsed.command === 'manifest') {
+      if (parsed.positionals.length !== 1 || parsed.positionals[0] !== 'check') {
+        throw new CliConfigurationError('manifest requires the subcommand: check')
+      }
+      if (parsed.junit || parsed.flow || parsed.summary || parsed.verify || parsed.rerunFailed ||
+          parsed.acceptAssertionChange || parsed.dryRun || parsed.store ||
+          parsed.goals || parsed.build || parsed.label || parsed.evidence) {
+        throw new CliConfigurationError('manifest check accepts only --config, --json and --untracked')
+      }
     }
     if (parsed.command !== 'remember' && parsed.flow) {
       throw new CliConfigurationError('--flow is valid only with remember')
@@ -290,6 +315,14 @@ export async function runCli(argv: string[], io: CliIo = {
         : renderResult(report, null, redact))
       summarize(report, report.goalKey)
       return resultExitCode(report)
+    }
+
+    if (parsed.command === 'manifest') {
+      // Read-only and static: no store, no lock, no engine, no device, no manifest write.
+      return await runManifestCheck({
+        configuration, redact, json: parsed.json, untracked: parsed.untracked, io,
+        ...(parsed.configGiven ? { configGiven: parsed.configGiven } : {}),
+      })
     }
 
     if (parsed.command === 'gate') {

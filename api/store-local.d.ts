@@ -1,6 +1,6 @@
 // typescript 7.0.2
 // entry . (./src/index.ts)
-// exports: ConsumerFlowError, ConsumerFlows, ConsumerFlowsOptions, ConsumerPlan, FlowClosureError, ForbiddenValueTooShortError, InvalidStoreIdError, InvalidSubflowMemoryError, InvalidWalkMemoryError, LOCAL_MEMORY_CONSUMER_SCHEMA_VERSION, LOCAL_MEMORY_PATH, LOCAL_MEMORY_SCHEMA_VERSION, LocalVerifiedSubflowStore, LocalVerifiedSubflowStoreOptions, LocalWalkStore, LocalWalkStoreOptions, LockHolder, LockTestHooks, MAESTRO_FLOW_SCHEMA_VERSION, MIN_FORBIDDEN_VALUE_LENGTH, ManifestChangedError, ManifestLockedError, MaterializePlan, MigrationContext, MissingFlowFileError, StoreLockContentionError, StoreLockUnavailableError, StoreLockedError, VERIFIED_SUBFLOW_INDEX_PATH, WalkMemory, WriterLock, assertionsSha256, checkFlowsDir, checkManifestPath, checkStoredSubflows, closureAssertions, collectFlowClosure, normalizeGoal, planStoredClosure, readConsumerWalkFields, readStoredFlowFiles, runMigration, snapshotFlowClosure, storeMetadataPath
+// exports: ConsumerFlowError, ConsumerFlows, ConsumerFlowsOptions, ConsumerPlan, FlowClosureError, ForbiddenValueTooShortError, InvalidStoreIdError, InvalidSubflowMemoryError, InvalidWalkMemoryError, LOCAL_MEMORY_CONSUMER_SCHEMA_VERSION, LOCAL_MEMORY_PATH, LOCAL_MEMORY_SCHEMA_VERSION, LocalVerifiedSubflowStore, LocalVerifiedSubflowStoreOptions, LocalWalkStore, LocalWalkStoreOptions, LockHolder, LockTestHooks, MAESTRO_FLOW_SCHEMA_VERSION, MIN_FORBIDDEN_VALUE_LENGTH, ManifestChangedError, ManifestCheck, ManifestCheckEntry, ManifestCheckIdentity, ManifestLockedError, MaterializePlan, MigrationContext, MissingFlowFileError, StoreLockContentionError, StoreLockUnavailableError, StoreLockedError, VERIFIED_SUBFLOW_INDEX_PATH, WalkMemory, WriterLock, assertionsSha256, checkFlowsDir, checkManifestPath, checkStoredSubflows, closureAssertions, collectFlowClosure, normalizeGoal, planStoredClosure, readConsumerWalkFields, readStoredFlowFiles, runMigration, snapshotFlowClosure, storeMetadataPath
 export declare function assertionsSha256(closure: FlowClosure): string;
 export declare function checkFlowsDir(path: string): string;
 export declare function checkManifestPath(path: string): string;
@@ -20,6 +20,11 @@ export declare class ConsumerFlows {
     private manifestFile;
     load(): Promise<WalkManifest>;
     private inspect;
+    check(options?: {
+        untracked?: boolean;
+        identity?: ManifestCheckIdentity;
+    }): Promise<ManifestCheck>;
+    private untrackedFlows;
     snapshot(candidatePath: string): Promise<CandidateSnapshot>;
     private consumerCandidate;
     lookup(walks: StoredWalk[], identity: NormalizedIdentity, previousSuccessful?: boolean): Promise<LookupHit | LookupMiss>;
@@ -142,6 +147,34 @@ export declare const MAESTRO_FLOW_SCHEMA_VERSION = "maestro/v1";
 export declare class ManifestChangedError extends Error {
     constructor();
 }
+export type ManifestCheck = {
+    manifest: string;
+    entries: ManifestCheckEntry[];
+    untracked?: string[];
+};
+export type ManifestCheckEntry = {
+    goal: string;
+    flow: string;
+    status: 'ok' | 'flow-changed' | 'assertions-changed' | 'missing-file' | 'closure-error' | 'identity-mismatch';
+    manifestClosureSha256: string;
+    manifestAssertionsSha256: string;
+    currentClosureSha256?: string;
+    currentAssertionsSha256?: string;
+    assertionsAlsoChanged?: true;
+    file?: string;
+    reason?: string;
+    identity?: {
+        field: 'appId' | 'platform' | 'adapter' | 'browser';
+        manifest: string | null;
+        config: string | null;
+    };
+};
+export type ManifestCheckIdentity = {
+    appId: string;
+    platform: string;
+    adapter: string;
+    browser: string | null;
+};
 export declare class ManifestLockedError extends Error {
     readonly lockPath: string;
     constructor(lockPath: string);
@@ -171,6 +204,7 @@ export type MigrationContext = {
 };
 export declare const MIN_FORBIDDEN_VALUE_LENGTH = 3;
 export declare class MissingFlowFileError extends FlowClosureError {
+    readonly path: string;
     constructor(path: string);
 }
 export declare function normalizeGoal(goal: string): string;

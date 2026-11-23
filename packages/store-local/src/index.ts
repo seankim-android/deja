@@ -788,6 +788,9 @@ export {
   readConsumerWalkFields,
   type ConsumerFlowsOptions,
   type ConsumerPlan,
+  type ManifestCheck,
+  type ManifestCheckEntry,
+  type ManifestCheckIdentity,
 } from './consumer-flow.ts'
 export { MissingFlowFileError } from './flow-closure.ts'
 export { runMigration, type MigrationContext } from './migration.ts'
