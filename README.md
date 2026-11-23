@@ -54,6 +54,7 @@ Déjà is not on npm yet, so you run the CLI from a clone. These steps add Déj�
 ```sh
 git clone https://github.com/seankim-android/deja.git ~/deja
 cd ~/deja && bun install
+# Run this line once. Use ~/.bashrc if your shell is bash.
 echo 'alias deja="bun ~/deja/apps/cli/deja.ts"' >> ~/.zshrc
 source ~/.zshrc
 
@@ -116,7 +117,7 @@ deja remember checkout --flow .maestro/flows/deja/checkout.yaml
 deja run checkout
 ```
 
-On a new build, `deja run checkout --verify` checks the test again. To let a coding agent replay your saved tests after each edit, run `deja mcp` ([MCP server](docs/REFERENCE.md#mcp-server)). Android and Chromium configs are in [docs/REFERENCE.md](docs/REFERENCE.md#configuration). So is `explore`, where an AI model writes tests for you (Android only).
+On a new build, `deja run checkout --verify` checks the test again. To let a coding agent replay your saved tests after each edit, run `deja mcp` ([MCP server](docs/REFERENCE.md#mcp-server)). Android and Chromium configs are in [docs/REFERENCE.md](docs/REFERENCE.md#configuration). The reference also covers `explore`, where an AI model writes the test. It works on Android only.
 
 <details>
 <summary>Run the iOS demo app</summary>
@@ -133,7 +134,7 @@ xcodebuild -project DejaFixture.xcodeproj -scheme DejaFixture -configuration Deb
 xcrun simctl install "$UDID" build/Build/Products/Debug-iphonesimulator/DejaFixture.app
 ```
 
-In `deja.config.json` in that folder, replace the `device` value with `$UDID`. It was tested with Xcode 27.2 on iOS 27.0 and 27.2. Then:
+In `deja.config.json` in that folder, replace the `device` value with `$UDID`. Its supported setup is Xcode 27.2 with iOS 27.0. Then:
 
 ```sh
 deja remember checkout --flow flows/checkout.yaml
