@@ -63,6 +63,10 @@ The usage example above still names `sqliteStore`, `maestroRunner` and `androidA
 the target shapes. Today you pass `new LocalWalkStore(...)`, `new MaestroWalkRunner(...)` and
 `androidMaestroAdapter(...)`.
 
+Today `createDeja` also takes `manifestPath` (DEJA-36), checked against `store.manifestPath`, and
+`run(goal, { verify })` and `remember(goal, path, { acceptAssertionChange })`. With a manifest the
+consumer's own flow files are the walks: see [Consumer-owned flows](REFERENCE.md#consumer-owned-flows-and-the-walk-manifest).
+
 `Deja` itself stays exported for callers who want full control.
 
 ### Seams that exist today

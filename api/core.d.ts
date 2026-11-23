@@ -1,13 +1,20 @@
 // typescript 7.0.2
 // entry . (./src/index.ts)
-// exports: ArtifactKind, CONTRACT_VERSION, CacheMissReason, CacheStatus, CandidateSnapshot, CompositionModelMetrics, CompositionStepMetrics, CreateDejaOptions, DEFAULT_FLOW_SCHEMA_VERSION, DEFAULT_MINIMUM_MARGIN, DEFAULT_MINIMUM_SIMILARITY, Deja, DejaAdapter, DejaCallOptions, DejaClient, DejaDependencies, DejaFactoryContext, EvidenceArtifact, ExactFirstLookupResult, ExactFirstWalkRetriever, ExecutionResult, ExpectedClosureMismatchError, ExpectedFlowChecksumMismatchError, ExplorationDetails, ExplorationResult, ExploreRequest, FailedBranch, FailureCategory, FlowReference, FlowReferenceError, Goal, GoalEmbeddingProvider, InvalidRouteGraphError, InvalidSubflowError, LookupHit, LookupMiss, NewBuildReplayReport, PersistVerifiedOptions, PersistVerifiedRepairOptions, PersistVerifiedSubflowOptions, PersistedWalk, ROUTE_GRAPH_FALLBACK, ROUTE_GRAPH_SCHEMA_VERSION, RepairProvenance, RepairRequest, RepairResult, ReportReceipt, RouteAction, RouteGraph, RouteGraphProvenance, RunArtifact, RunOutcome, RunReporter, RunResult, RunnerRequest, SCREEN_FINGERPRINT_VERSION, ScreenMatch, ScreenMatchOptions, ScreenNode, ScreenObservation, SelectorRepairer, SemanticLookupReason, SemanticLookupReport, SemanticLookupStatus, SemanticRetrievalOptions, SemanticSelectedWalk, SourceDiff, StaleBuildPolicy, StoredFlowFile, StoredValidation, StoredWalk, SubflowContract, SubflowEvidenceArtifact, SubflowIdentity, SubflowInput, SubflowOutput, SubflowPostcondition, SubflowPrecondition, SubflowProvenance, UnsupportedPlatformExplorer, VERIFIED_SUBFLOW_SCHEMA_VERSION, VerifiedSubflow, VerifiedSubflowHit, VerifiedSubflowLookup, VerifiedSubflowStore, VerifiedTransition, WALK_RESULT_SCHEMA_VERSION, WalkExplorer, WalkFailure, WalkIdentity, WalkRunner, WalkStore, WalkValidation, cosineSimilarity, createDeja, findFlowReferences, fingerprintScreen, goalsAreContradictory, hasAdversarialGoalMarker, makeScreenNode, matchScreen, normalizeGoal, sameSubflowIdentity, subflowMissReason, validateRouteGraph, validateSubflowContract
-export type ArtifactKind = 'yaml' | 'output' | 'attempt' | 'repair-report' | 'diff' | 'memory' | 'model-metrics' | 'junit';
-export type CacheMissReason = 'not-found' | 'wrong-app' | 'wrong-platform' | 'wrong-flow-schema' | 'wrong-adapter' | 'wrong-browser' | 'stale-build' | 'missing-flow' | 'failed-validation' | 'legacy-closure-unknown';
+// exports: ASSERTION_HASH_VERSION, ArtifactKind, AssertionHashChangedError, CONTRACT_VERSION, CacheMissReason, CacheStatus, CandidateSnapshot, CompositionModelMetrics, CompositionStepMetrics, CreateDejaOptions, DEFAULT_FLOW_SCHEMA_VERSION, DEFAULT_MINIMUM_MARGIN, DEFAULT_MINIMUM_SIMILARITY, Deja, DejaAdapter, DejaCallOptions, DejaClient, DejaClientRememberOptions, DejaClientRunOptions, DejaDependencies, DejaFactoryContext, DejaRememberOptions, DejaRunOptions, EvidenceArtifact, ExactFirstLookupResult, ExactFirstWalkRetriever, ExecutionResult, ExpectedClosureMismatchError, ExpectedFlowChecksumMismatchError, ExplorationDetails, ExplorationResult, ExploreRequest, FailedBranch, FailureCategory, FlowAssertion, FlowChangedError, FlowReference, FlowReferenceError, Goal, GoalEmbeddingProvider, InvalidRouteGraphError, InvalidSubflowError, InvalidWalkManifestError, LookupHit, LookupMiss, MANIFEST_HASH_VERSION, ManifestOwnerRules, ManifestProfile, ManifestWalk, NewBuildReplayReport, OwnerRuleError, PersistVerifiedOptions, PersistVerifiedRepairOptions, PersistVerifiedSubflowOptions, PersistedWalk, ROUTE_GRAPH_FALLBACK, ROUTE_GRAPH_SCHEMA_VERSION, RepairProvenance, RepairRequest, RepairResult, ReportReceipt, RouteAction, RouteGraph, RouteGraphProvenance, RunArtifact, RunOutcome, RunReporter, RunResult, RunnerRequest, SCREEN_FINGERPRINT_VERSION, ScreenMatch, ScreenMatchOptions, ScreenNode, ScreenObservation, SelectorRepairer, SemanticLookupReason, SemanticLookupReport, SemanticLookupStatus, SemanticRetrievalOptions, SemanticSelectedWalk, SourceDiff, StaleBuildPolicy, StoredFlowFile, StoredValidation, StoredWalk, SubflowContract, SubflowEvidenceArtifact, SubflowIdentity, SubflowInput, SubflowOutput, SubflowPostcondition, SubflowPrecondition, SubflowProvenance, UnsupportedPlatformExplorer, VERIFIED_SUBFLOW_SCHEMA_VERSION, VerifiedSubflow, VerifiedSubflowHit, VerifiedSubflowLookup, VerifiedSubflowStore, VerifiedTransition, WALK_MANIFEST_VERSION, WALK_RESULT_SCHEMA_VERSION, WalkExplorer, WalkFailure, WalkIdentity, WalkManifest, WalkRunner, WalkStore, WalkValidation, checkManifestFlowPath, cosineSimilarity, createDeja, emptyWalkManifest, findFlowAssertions, findFlowReferences, fingerprintScreen, goalsAreContradictory, hasAdversarialGoalMarker, makeScreenNode, manifestWalkKey, matchScreen, normalizeGoal, parseWalkManifest, sameSubflowIdentity, serializeWalkManifest, subflowMissReason, validateRouteGraph, validateSubflowContract
+export type ArtifactKind = 'yaml' | 'output' | 'attempt' | 'repair-report' | 'diff' | 'memory' | 'model-metrics' | 'junit' | 'manifest';
+export declare const ASSERTION_HASH_VERSION = 1;
+export declare class AssertionHashChangedError extends Error {
+    readonly manifestAssertionsSha256: string;
+    readonly currentAssertionsSha256: string;
+    constructor(manifestAssertionsSha256: string, currentAssertionsSha256: string);
+}
+export type CacheMissReason = 'not-found' | 'wrong-app' | 'wrong-platform' | 'wrong-flow-schema' | 'wrong-adapter' | 'wrong-browser' | 'stale-build' | 'missing-flow' | 'failed-validation' | 'legacy-closure-unknown' | 'flow-changed' | 'not-validated' | 'needs-migration';
 export type CacheStatus = 'hit' | 'miss' | 'not-checked';
 export type CandidateSnapshot = {
     candidatePath: string;
     closureSha256: string;
 };
+export declare function checkManifestFlowPath(value: unknown, where?: string): string;
 export type CompositionModelMetrics = {
     composition: 0;
     newExploration: 0;
@@ -34,6 +41,7 @@ export type CreateDejaOptions = {
     };
     adapter: DejaAdapter;
     store: WalkStore;
+    manifestPath?: string;
     runner: WalkRunner;
     explorer: (context: DejaFactoryContext) => WalkExplorer;
     repairer?: (context: DejaFactoryContext) => SelectorRepairer;
@@ -50,14 +58,19 @@ export declare const DEFAULT_MINIMUM_SIMILARITY = 0.9;
 export declare class Deja {
     private readonly dependencies;
     constructor(dependencies: DejaDependencies);
+    private get manifestMode();
     private now;
     private artifactId;
     private base;
     private finish;
-    run(identity: WalkIdentity): Promise<RunResult>;
+    run(identity: WalkIdentity, options?: DejaRunOptions): Promise<RunResult>;
     private replayLastVerified;
     explore(identity: WalkIdentity): Promise<RunResult>;
-    remember(identity: WalkIdentity, candidatePath: string): Promise<RunResult>;
+    remember(identity: WalkIdentity, candidatePath: string, options?: DejaRememberOptions): Promise<RunResult>;
+    private manifestExplorationRefused;
+    private recordOrFlowChanged;
+    private manifestMiss;
+    private verifyFlow;
     private explorationDetails;
     private repairDetails;
 }
@@ -79,10 +92,12 @@ export type DejaCallOptions = {
 };
 export type DejaClient = {
     identity(goal: string): Promise<WalkIdentity>;
-    run(goal: string, callOptions?: DejaCallOptions): Promise<RunResult>;
+    run(goal: string, callOptions?: DejaClientRunOptions): Promise<RunResult>;
     explore(goal: string, callOptions?: DejaCallOptions): Promise<RunResult>;
-    remember(goal: string, candidatePath: string, callOptions?: DejaCallOptions): Promise<RunResult>;
+    remember(goal: string, candidatePath: string, callOptions?: DejaClientRememberOptions): Promise<RunResult>;
 };
+export type DejaClientRememberOptions = DejaCallOptions & DejaRememberOptions;
+export type DejaClientRunOptions = DejaCallOptions & DejaRunOptions;
 export type DejaDependencies = {
     store: WalkStore;
     runner: WalkRunner;
@@ -99,6 +114,13 @@ export type DejaFactoryContext = {
     signal?: AbortSignal;
     timeoutMs?: number;
 };
+export type DejaRememberOptions = {
+    acceptAssertionChange?: boolean;
+};
+export type DejaRunOptions = {
+    verify?: boolean;
+};
+export declare function emptyWalkManifest(): WalkManifest;
 export type EvidenceArtifact = {
     path: string;
     sha256: string;
@@ -175,8 +197,17 @@ export type FailedBranch = {
     failedAt: string;
 };
 export type FailureCategory = 'selector' | 'navigation' | 'product_assertion' | 'runner' | 'timeout' | 'unknown';
+export declare function findFlowAssertions(contents: string): FlowAssertion[];
 export declare function findFlowReferences(contents: string): FlowReference[];
 export declare function fingerprintScreen(input: ScreenObservation[]): string;
+export type FlowAssertion = {
+    entry: string;
+    command: string;
+    id: string | null;
+};
+export declare class FlowChangedError extends Error {
+    constructor(manifestClosureSha256: string, currentClosureSha256: string);
+}
 export type FlowReference = {
     kind: 'flow' | 'script';
     path: string;
@@ -201,6 +232,9 @@ export declare class InvalidRouteGraphError extends Error {
 export declare class InvalidSubflowError extends Error {
     constructor(message: string);
 }
+export declare class InvalidWalkManifestError extends Error {
+    constructor(message: string, options?: ErrorOptions);
+}
 export type LookupHit = {
     status: 'hit';
     walk: StoredWalk;
@@ -209,8 +243,36 @@ export type LookupHit = {
 export type LookupMiss = {
     status: 'miss';
     reason: CacheMissReason;
+    flowChange?: {
+        manifestClosureSha256: string;
+        currentClosureSha256: string;
+    };
+    flowPath?: string;
 };
 export declare function makeScreenNode(nodeId: string, input: ScreenObservation[], validatedAt: string): ScreenNode;
+export declare const MANIFEST_HASH_VERSION = 1;
+export type ManifestOwnerRules = {
+    minAssertions?: number;
+    requiredAssertionIds?: string[];
+};
+export type ManifestProfile = {
+    name?: string;
+    launchArguments?: Record<string, string | number | boolean>;
+    clearState?: boolean;
+};
+export type ManifestWalk = {
+    goal: string;
+    appId: string;
+    platform: string;
+    adapter: string;
+    browser?: string;
+    flow: string;
+    closureSha256: string;
+    assertionsSha256: string;
+    ownerRules?: ManifestOwnerRules;
+    profile?: ManifestProfile;
+};
+export declare function manifestWalkKey(walk: Pick<ManifestWalk, 'goal' | 'appId' | 'platform' | 'adapter' | 'browser'>): string;
 export declare function matchScreen(graphInput: RouteGraph, options: ScreenMatchOptions): ScreenMatch;
 export type NewBuildReplayReport = {
     policy: StaleBuildPolicy;
@@ -220,19 +282,28 @@ export type NewBuildReplayReport = {
     recordedForNewBuild: boolean;
 };
 export declare function normalizeGoal(goal: string): Goal;
+export declare class OwnerRuleError extends Error {
+    constructor(message: string);
+}
+export declare function parseWalkManifest(contents: string): WalkManifest;
 export type PersistedWalk = {
     walk: StoredWalk;
     flowPath: string;
     flowSha256: string;
     storedMetadataPath: string;
     atomicWrite: true;
+    manifest?: {
+        path: string;
+        changed: boolean;
+    };
 };
 export type PersistVerifiedOptions = {
     identity: WalkIdentity;
     candidatePath: string;
     validation: WalkValidation;
-    origin: 'remember' | 'explore' | 'replayed-on-new-build';
+    origin: 'remember' | 'explore' | 'replayed-on-new-build' | 'verify';
     exploration?: ExplorationDetails;
+    assertionChange?: 'refuse' | 'accept';
     expectedClosureSha256?: string;
     expectedFlowSha256?: string;
 };
@@ -316,7 +387,7 @@ export type RunnerRequest = {
     artifactDirectory: string;
     timeoutMs?: number;
 };
-export type RunOutcome = 'passed' | 'remembered' | 'cold-recorded' | 'repaired' | 'rejected' | 'exploration-rejected' | 'product-regression' | 'repair-rejected' | 'failed';
+export type RunOutcome = 'passed' | 'remembered' | 'cold-recorded' | 'repaired' | 'rejected' | 'exploration-rejected' | 'product-regression' | 'repair-rejected' | 'failed' | 'flow-changed' | 'not-validated' | 'needs-migration' | 'assertions-changed';
 export interface RunReporter {
     report(result: RunResult): Promise<ReportReceipt>;
 }
@@ -402,6 +473,7 @@ export type SemanticSelectedWalk = {
     flowPath: string;
     flowSha256: string;
 };
+export declare function serializeWalkManifest(manifest: WalkManifest): string;
 export type SourceDiff = {
     path: string | null;
     affectedFiles: string[];
@@ -422,9 +494,10 @@ export type StoredWalk = WalkIdentity & {
     flowSha256: string;
     subflowFiles?: StoredFlowFile[];
     legacyClosure?: true;
+    closureSha256?: string;
     lastValidation: WalkValidation;
     validationHistory: StoredValidation[];
-    origin?: 'remember' | 'explore' | 'repair' | 'replayed-on-new-build';
+    origin?: 'remember' | 'explore' | 'repair' | 'replayed-on-new-build' | 'verify';
     exploration?: ExplorationDetails;
     repairHistory?: RepairProvenance[];
 };
@@ -510,6 +583,7 @@ export type VerifiedTransition = {
     toNodeId: string;
     validatedAt: string;
 };
+export declare const WALK_MANIFEST_VERSION = 1;
 export declare const WALK_RESULT_SCHEMA_VERSION = 1;
 export interface WalkExplorer {
     explore(request: ExploreRequest): Promise<ExplorationResult>;
@@ -530,10 +604,16 @@ export type WalkIdentity = {
     adapter?: string;
     browser?: string;
 };
+export type WalkManifest = {
+    manifestVersion: typeof WALK_MANIFEST_VERSION;
+    hashVersion: typeof MANIFEST_HASH_VERSION;
+    walks: ManifestWalk[];
+};
 export interface WalkRunner {
     run(request: RunnerRequest): Promise<ExecutionResult>;
 }
 export interface WalkStore {
+    readonly manifestPath?: string;
     lookup(identity: WalkIdentity): Promise<LookupHit | LookupMiss>;
     lookupPreviousSuccessful(identity: WalkIdentity): Promise<LookupHit | LookupMiss>;
     snapshotCandidate?(candidatePath: string, directory: string): Promise<CandidateSnapshot>;
