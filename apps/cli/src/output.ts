@@ -17,6 +17,7 @@ Usage:
   deja gate --goals <file> [--build <path>] [--label <text>] [--evidence <file>] [--store <id>] [--config <file>] [--json]
   deja inspect <report> [--config <file>] [--json] [--summary]
   deja engine install [--json]
+  deja manifest check [--config <file>] [--json] [--untracked]
   deja doctor [--config <file>] [--json]
   deja mcp [--config <file>] [--store <id>]
   deja help
@@ -36,6 +37,12 @@ Commands:
             flaky, not-run (no validation on this fingerprint, even if older builds passed),
             flow-changed (manifest: the flow no longer matches) or invalid (exit 11). Exit 0 only when every
             goal passed. It never runs Maestro, explores, repairs, calls a model or writes the store.
+  manifest check
+            With a manifest: static lint. Hashes every entry's flow, the files it runs and its assertions
+            the way run does, and compares them with the manifest. Prints ok, flow-changed,
+            assertions-changed, missing-file or closure-error per entry, with the hashes and the
+            command that fixes it. Exit 0 when all match. It needs no device, Maestro or model, opens
+            no store and writes nothing. It never runs a fix.
   list      List local walks without constructing an explorer or runner invocation.
   inspect   Summarize a saved run result, artifact paths, failures, and source diffs.
   engine install
@@ -66,6 +73,8 @@ Options:
                    table is written beside it. Only an old gate evidence file is replaced: any other
                    existing file, a symlink, the goals file, the manifest or a path in .deja/ outside
                    .deja/gate/ is refused (exit 2) before anything is deleted.
+  --untracked      manifest check only: also list .yaml/.yml files no entry uses, under the flows folder and
+                   beside each entry's flow. Reported only; it never changes the exit code.
   --dry-run        migrate only: show what would be written, and write nothing.
   --verify         With a manifest: if the flow changed, or no build has validated it, re-run your
                    current file in place. A pass with unchanged assertions updates the manifest's sha.
@@ -119,6 +128,8 @@ Exit codes:
   5  Store locked: another run is writing the same store. Use a different --store <id>.
   6  Manifest: flow-changed, not-validated, needs-migration or assertions-changed. Nothing was
      replayed or written. Run with --verify, or review the change and run remember.
+  8  manifest check: at least one entry is flow-changed, assertions-changed, missing-file or
+     closure-error. A manifest that is malformed, of an unknown version or missing exits 2.
   7  Flaky (--rerun-failed): the replay failed, then passed or failed differently on a rerun of
      the same YAML. Not a pass. The first failure is recorded in history. The host decides.
   10 gate: closed. At least one goal is failed, flaky, not-run or flow-changed.

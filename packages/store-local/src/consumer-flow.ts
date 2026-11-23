@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { link, lstat, mkdir, readFile, realpath, rename, rmdir, stat, unlink, writeFile } from 'node:fs/promises'
+import type { Dirent } from 'node:fs'
+import { link, lstat, mkdir, readdir, readFile, realpath, rename, rmdir, stat, unlink, writeFile } from 'node:fs/promises'
 import { dirname, isAbsolute, posix as posixPath, relative, resolve, sep } from 'node:path'
 import {
   AssertionHashChangedError,
@@ -11,6 +12,7 @@ import {
   ExpectedFlowChecksumMismatchError,
   findFlowAssertions,
   FlowChangedError,
+  FlowReferenceError,
   InvalidWalkManifestError,
   manifestWalkKey,
   normalizeGoal,
@@ -178,6 +180,29 @@ export type ConsumerFlowsOptions = {
   forbiddenValues?: string[]
 }
 
+export type ManifestCheckEntry = {
+  goal: string
+  flow: string
+  /** `closure-error`: the flow's files cannot be read safely (`reason`). `missing-file`: `file` is gone. */
+  status: 'ok' | 'flow-changed' | 'assertions-changed' | 'missing-file' | 'closure-error'
+  manifestClosureSha256: string
+  manifestAssertionsSha256: string
+  currentClosureSha256?: string
+  currentAssertionsSha256?: string
+  /** `flow-changed` only: the assertion hash differs too, so `run --verify` will need a reviewed `remember`. */
+  assertionsAlsoChanged?: true
+  /** `missing-file`: the workspace-relative path of the missing file (the flow or a file it runs). */
+  file?: string
+  reason?: string
+}
+
+export type ManifestCheck = {
+  manifest: string
+  entries: ManifestCheckEntry[]
+  /** Only with `untracked: true`: workspace-relative YAML paths no entry uses. */
+  untracked?: string[]
+}
+
 export type ConsumerPlan = {
   walk: StoredWalk
   /** The walks to keep next to the new one. */
@@ -278,17 +303,110 @@ export class ConsumerFlows {
     let canonical: string
     try {
       canonical = await realpath(absolute)
-      if (!inside(root, canonical) || !(await stat(canonical)).isFile()) return { status: 'missing' as const }
+      if (!inside(root, canonical) || !(await stat(canonical)).isFile()) return { status: 'missing' as const, file: entry.flow }
     } catch (error) {
-      if (errorCode(error) === 'ENOENT') return { status: 'missing' as const }
+      if (errorCode(error) === 'ENOENT') return { status: 'missing' as const, file: entry.flow }
       throw error
     }
     try {
       return { status: 'ok' as const, closure: await collectFlowClosure(root, canonical), canonical }
     } catch (error) {
-      if (error instanceof MissingFlowFileError) return { status: 'missing' as const }
+      if (error instanceof MissingFlowFileError) return { status: 'missing' as const, file: error.path }
       throw error
     }
+  }
+
+  /**
+   * Compare every manifest entry with the files on disk, without a store, a lock or a write. It
+   * hashes with `collectFlowClosure` and `assertionsSha256`, the same code `run` uses.
+   * A missing manifest file is refused here, because an empty manifest would pass every check.
+   */
+  async check(options: { untracked?: boolean } = {}): Promise<ManifestCheck> {
+    const { root, target } = await this.manifestFile()
+    try {
+      await stat(target)
+    } catch (error) {
+      if (errorCode(error) === 'ENOENT') throw new InvalidWalkManifestError(`the manifest file does not exist: ${this.manifestPath}`)
+    }
+    const manifest = await this.load()
+    const used = new Set<string>()
+    const entries: ManifestCheckEntry[] = []
+    for (const walk of manifest.walks) {
+      used.add(walk.flow)
+      const base = {
+        goal: walk.goal, flow: walk.flow,
+        manifestClosureSha256: walk.closureSha256, manifestAssertionsSha256: walk.assertionsSha256,
+      }
+      let consumer: Awaited<ReturnType<ConsumerFlows['inspect']>>
+      try {
+        consumer = await this.inspect(walk)
+      } catch (error) {
+        if (error instanceof ClosureRefusedError || error instanceof FlowReferenceError) {
+          entries.push({ ...base, status: 'closure-error', reason: error.message })
+          continue
+        }
+        throw error
+      }
+      if (consumer.status === 'missing') {
+        entries.push({ ...base, status: 'missing-file', file: consumer.file })
+        continue
+      }
+      for (const file of consumer.closure.files) used.add(file.source)
+      let assertionsHash: string
+      try {
+        assertionsHash = assertionsSha256(consumer.closure)
+      } catch (error) {
+        if (error instanceof ClosureRefusedError || error instanceof FlowReferenceError) {
+          entries.push({ ...base, status: 'closure-error', reason: error.message, currentClosureSha256: consumer.closure.sha256 })
+          continue
+        }
+        throw error
+      }
+      const current = { currentClosureSha256: consumer.closure.sha256, currentAssertionsSha256: assertionsHash }
+      const closureChanged = consumer.closure.sha256 !== walk.closureSha256
+      const assertionsChanged = assertionsHash !== walk.assertionsSha256
+      entries.push({
+        ...base, ...current,
+        status: closureChanged ? 'flow-changed' : assertionsChanged ? 'assertions-changed' : 'ok',
+        ...(closureChanged && assertionsChanged ? { assertionsAlsoChanged: true } : {}),
+      })
+    }
+    return {
+      manifest: this.manifestPath, entries,
+      ...(options.untracked ? { untracked: await this.untrackedFlows(root, manifest, used) } : {}),
+    }
+  }
+
+  /**
+   * YAML files no entry's closure uses. Looked for under the flows folder (all levels) and beside
+   * each entry's main flow (that folder only). `.deja/` and `node_modules` are never entered.
+   */
+  private async untrackedFlows(root: string, manifest: WalkManifest, used: Set<string>) {
+    const folders = new Map<string, boolean>()
+    if (this.flowsDir !== undefined) folders.set(this.flowsDir, true)
+    for (const walk of manifest.walks) {
+      const folder = posixPath.dirname(walk.flow)
+      if (!folders.has(folder)) folders.set(folder, false)
+    }
+    const found = new Set<string>()
+    const scan = async (folder: string, recursive: boolean) => {
+      let names: Dirent[]
+      try {
+        names = await readdir(resolve(root, folder), { withFileTypes: true })
+      } catch {
+        return
+      }
+      for (const name of names) {
+        const path = folder === '.' ? name.name : `${folder}/${name.name}`
+        if (name.isDirectory()) {
+          if (recursive && name.name !== '.deja' && name.name !== 'node_modules') await scan(path, true)
+        } else if (/\.ya?ml$/i.test(name.name) && !used.has(path)) {
+          found.add(path)
+        }
+      }
+    }
+    for (const [folder, recursive] of folders) await scan(folder, recursive)
+    return [...found].sort()
   }
 
   /** Hash the consumer's closure now. Copies nothing: the flow is run in place, then re-hashed on save. */

@@ -41,6 +41,7 @@ bun run deja -- --help
 | `run <goal> [--rerun-failed]` | Compute exact identity and check memory first. A hit replays YAML; a normal miss explores; eligible Android stale-build memory enters one bounded repair; iOS with `staleBuild: "replay-last-verified"` replays the last verified YAML instead. A failed hit is recorded and is not reusable. |
 | `remember <goal> --flow <candidate.yaml>` | Independently execute reviewed YAML and persist only after a complete pass. A bad product assertion remains a failure. |
 | `migrate [--dry-run]` | With a manifest: move the old store's walks (memory schema 3) into your own files plus manifest entries. See [Consumer-owned flows](#consumer-owned-flows-and-the-walk-manifest). |
+| `manifest check [--untracked]` | With a manifest: static check that your flow files still match the manifest. No device, Maestro, store or write. See [Manifest check](#manifest-check-a-lint-for-your-pull-requests). |
 | `gate --goals <file>` | Read-only release gate: did every listed goal pass on this exact build? See [Release gate](#release-gate). |
 | `list` | List valid local walks; does not invoke a runner, explorer, or model. |
 | `inspect <report>` | Print a saved, redacted report. Inspecting a failed result returns its original failure class. |
@@ -264,6 +265,52 @@ refused (exit 2). The CLI also refuses to write it if it would hold a `fixtureCr
 - Library: build the store with `manifest: { path }` and pass the same `manifestPath` to
   `createDeja`; a store without a manifest is refused. `run(goal, { verify })` and
   `remember(goal, path, { acceptAssertionChange })`.
+
+### Manifest check: a lint for your pull requests
+
+DEJA-43. `deja manifest check [--config <file>] [--json] [--untracked]` tells you before merge
+that a flow edit and `deja.walks.json` disagree. It hashes each entry's flow, every `runFlow`,
+`runScript`, `addMedia` and `retry` file it reaches, and its assertions, with the same code `run`
+uses (`collectFlowClosure` and `assertionsSha256`), then compares them with the manifest. It needs
+no device, Maestro or model, opens no store, takes no lock and writes nothing, not even `.deja/`.
+It never runs a fix. Eight flows take tens of milliseconds.
+
+| Status | Meaning | Fix it prints |
+| --- | --- | --- |
+| `ok` | Closure and assertion hashes match | none |
+| `flow-changed` | The flow or a file it runs differs from `closureSha256` | `deja run <goal> --verify` |
+| `assertions-changed` | Files match, but the assertions differ from `assertionsSha256` | `deja remember <goal> --flow <path> --accept-assertion-change` |
+| `missing-file` | The flow, or a file it runs, is gone (`file` names it) | none: restore the file or change the manifest |
+| `closure-error` | The files cannot be used safely (a variable path, a cycle, a size cap, a secret-looking file) (`reason`) | none: fix the flow |
+
+When the closure and the assertions both differ, the status is `flow-changed` (the same order `run`
+uses), `assertionsAlsoChanged` is `true`, and the text adds the `remember` command to use if
+`--verify` then reports `assertions-changed`. Goals and paths with spaces are shell-quoted in the
+fix command.
+
+Exit `0` when every entry is `ok`. Exit `8` when any entry is not. Exit `2` for a manifest that is
+malformed, of an unknown `manifestVersion` or `hashVersion`, or missing (an absent file is refused
+rather than read as an empty manifest, which would pass every check), and for usage errors.
+
+`--json` prints `{ "manifest", "ok", "entries": [{ goal, flow, status, manifestClosureSha256,
+manifestAssertionsSha256, currentClosureSha256?, currentAssertionsSha256?, assertionsAlsoChanged?,
+file?, reason?, fix? }], "untracked"? }`. Paths are workspace-relative and redacted like other output.
+
+`--untracked` also lists `.yaml`/`.yml` files that no entry's closure uses, under `flowsDir` (all
+levels) and in the folder of each entry's main flow (that folder only). It only reports: the exit
+code is not changed. An entry that has a `missing-file` or `closure-error` has no known closure, so
+its subflows may show up as untracked until that is fixed.
+
+Run it as a lint in the host repository, the way you run any contract check:
+
+```sh
+#!/usr/bin/env bash
+# scripts/check-walks.sh: fail a pull request that edits a .maestro/ flow without its manifest update.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+deja manifest check --config deja.config.json --untracked
+# exit 8: run the printed `deja run <goal> --verify` (or `deja remember ...`), commit deja.walks.json.
+```
 
 ### Opt-in exact-first semantic proof (WALK-016)
 
@@ -643,6 +690,7 @@ directory, so give an absolute `--config` path unless the client starts in the p
 | `4` | Invalid/corrupt local memory; quarantine it and recover through verified cold exploration |
 | `7` | Flaky (`--rerun-failed`): the replay failed, then passed or failed differently on a rerun of the same YAML. Not a pass; the first failure is recorded |
 | `6` | Manifest mode: `flow-changed`, `not-validated`, `needs-migration` or `assertions-changed`. Nothing was replayed or written. Run with `--verify`, or review the change and run `remember` |
+| `8` | `manifest check`: at least one entry is `flow-changed`, `assertions-changed`, `missing-file` or `closure-error`. A manifest that is malformed, of an unknown version or missing exits `2` |
 | `10` | `gate`: the gate is closed. At least one goal is `failed`, `flaky`, `not-run` or `flow-changed` |
 | `11` | `gate`: it could not decide. The store, a stored walk or flow, or the build could not be read or trusted (`invalid`), or the evidence file could not be written |
 | `5` | The store is locked by another run (`STORE_LOCKED`), two runs collided taking over a stale lock (`STORE_LOCK_CONTENTION`), or the filesystem cannot hold the lock (`STORE_LOCK_UNAVAILABLE`). Use a different `--store <id>` per device; for contention, run again |
