@@ -7,6 +7,9 @@ import type {
 } from '@deja-qa/core'
 import {
   classifyMaestroFailure,
+  defaultCrashReportDirectory,
+  detectCrashInOutput,
+  findCrashReport,
   runMaestro,
   type MaestroExecutionAdapter,
   type MaestroRunResult,
@@ -22,6 +25,13 @@ export type MaestroWalkRunnerOptions = {
   javaHome?: string
   /** Absolute path; every Maestro run overwrites it, so the last run's report is kept. */
   junitPath?: string
+  /**
+   * The app under test. With an iOS adapter it turns on the crash-report signal: a new `.ips` for
+   * this app ID written during a failed run labels it `app_crash`. Absent means no report is read.
+   */
+  appId?: string
+  /** Seam: where crash reports are written. Defaults to ~/Library/Logs/DiagnosticReports. */
+  crashReportDirectory?: string
 }
 
 function portable(root: string, path: string) {
@@ -93,16 +103,30 @@ export class MaestroWalkRunner implements WalkRunner {
     })
   }
 
+  /** A crash report written during this run for the app ID. Only a failed iOS run looks. */
+  private async crashReportSignal(result: MaestroRunResult) {
+    if (result.passed || this.options.adapter?.platform !== 'ios' || !this.options.appId) return null
+    if (detectCrashInOutput(result.output)) return null
+    return findCrashReport({
+      directory: this.options.crashReportDirectory ?? defaultCrashReportDirectory(),
+      appId: this.options.appId,
+      sinceMs: Date.parse(result.startedAt),
+      untilMs: Date.parse(result.endedAt),
+    })
+  }
+
   async adapt(result: MaestroRunResult): Promise<ExecutionResult> {
     const outputPath = result.artifacts
       ? portable(this.options.workspaceRoot, result.artifacts.outputPath)
       : null
+    const crashSignal = await this.crashReportSignal(result)
     const classified = classifyMaestroFailure({
       passed: result.passed,
       timedOut: result.timedOut,
       output: result.output,
       errors: result.errors,
       rawArtifactPath: outputPath,
+      crashSignal,
     })
     return {
       passed: result.passed,

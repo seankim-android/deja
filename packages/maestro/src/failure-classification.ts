@@ -1,4 +1,5 @@
 import type { MaestroRunnerError } from './index.ts'
+import { detectCrashInOutput, type MaestroCrashSignal } from './crash-signals.ts'
 
 export type MaestroFailureCategory =
   | 'selector'
@@ -7,6 +8,7 @@ export type MaestroFailureCategory =
   | 'runner'
   | 'timeout'
   | 'unknown'
+  | 'app_crash'
 
 export type MaestroFailureClassification = {
   category: MaestroFailureCategory
@@ -14,6 +16,8 @@ export type MaestroFailureClassification = {
   rawArtifactPath: string | null
   advisory: true
   repairEligible: boolean
+  /** Set only with `app_crash`: the explicit signal that justified the label. */
+  crash?: MaestroCrashSignal
 }
 
 export type MaestroFailureInput = {
@@ -22,6 +26,8 @@ export type MaestroFailureInput = {
   output: string
   errors: Pick<MaestroRunnerError, 'kind'>[]
   rawArtifactPath?: string | null
+  /** An explicit crash signal found outside the output, such as a new crash report for the app ID. */
+  crashSignal?: MaestroCrashSignal | null
 }
 
 function failedStep(output: string): string | null {
@@ -64,6 +70,11 @@ export function classifyMaestroFailure(
   if (input.errors.some(error => error.kind !== 'execution')) {
     return classification('runner', step, rawArtifactPath)
   }
+
+  // An explicit crash signal beats the element and launch shapes below: the app died, so a missing
+  // element or a failed launch afterwards is a symptom, and a crash is never sent to repair.
+  const crash = input.crashSignal ?? detectCrashInOutput(input.output)
+  if (crash) return { ...classification('app_crash', step, rawArtifactPath), crash }
 
   const hasSelectorDiagnostic = /^Element not found:/m.test(input.output)
   const hasNavigationDiagnostic = /^(?:Unable to launch app|App launch failed):/m.test(input.output)

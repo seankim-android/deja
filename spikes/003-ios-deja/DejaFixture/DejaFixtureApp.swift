@@ -2,10 +2,28 @@ import SwiftUI
 
 @main
 struct DejaFixtureApp: App {
+    init() {
+        FirstLaunchCrash.crashIfRequested()
+    }
+
     var body: some Scene {
         WindowGroup {
             CheckoutView()
         }
+    }
+}
+
+/// DEJA-7 evidence mode, off unless the simulator-global default `DEJA_FIXTURE_CRASH_MARKER` names a
+/// file path. The first launch finds no file, creates it and crashes; every later launch finds it
+/// and starts normally. The marker lives outside the app container on purpose: the flow's
+/// `clearState: true` wipes the container, which would make every launch crash.
+private enum FirstLaunchCrash {
+    static func crashIfRequested() {
+        guard let marker = UserDefaults.standard.string(forKey: "DEJA_FIXTURE_CRASH_MARKER"),
+              !marker.isEmpty else { return }
+        if FileManager.default.fileExists(atPath: marker) { return }
+        FileManager.default.createFile(atPath: marker, contents: Data())
+        fatalError("DejaFixture simulated crash on first launch")
     }
 }
 

@@ -7,10 +7,14 @@ import {
   OwnerRuleError,
   WALK_RESULT_SCHEMA_VERSION,
   type CacheStatus,
+  type ExecutionResult,
   type ExplorationResult,
+  type LookupHit,
   type LookupMiss,
   type PersistedWalk,
   type RepairResult,
+  type RunAttempt,
+  type RunnerRequest,
   type RunResult,
   type RunReporter,
   type SelectorRepairer,
@@ -62,6 +66,12 @@ export type DejaRunOptions = {
    * manifest's sha. A changed assertion hash fails and writes nothing.
    */
   verify?: boolean
+  /**
+   * Opt-in (DEJA-7): when a replay fails, replay the same bytes once more under the same timeout and
+   * report both attempts. A rerun never turns a failure into a pass, never explores or repairs, and
+   * makes no model call. A failure that changes label or step, or passes, is reported as `flaky`.
+   */
+  rerunFailed?: boolean
 }
 
 /** Options for one `remember`. */
@@ -158,7 +168,7 @@ export class Deja {
       if (retrieval.miss.reason === 'stale-build') {
         if (!this.dependencies.createRepairer &&
             this.dependencies.staleBuild === 'replay-last-verified') {
-          const replayed = await this.replayLastVerified(identity, missStart)
+          const replayed = await this.replayLastVerified(identity, missStart, options.rerunFailed === true)
           if (replayed) return replayed
         }
         if (!this.dependencies.createRepairer) {
@@ -213,10 +223,11 @@ export class Deja {
         },
       }
     }
-    const execution = await this.dependencies.runner.run({
+    const hitRequest = {
       flowPath: lookup.flowPath,
       artifactDirectory: `.deja/reports/${this.artifactId('run')}`,
-    })
+    }
+    const execution = await this.dependencies.runner.run(hitRequest)
     const hitStart = {
       ...start, cacheStatus: 'hit' as const, execution, semantic: semanticReport,
     }
@@ -237,6 +248,23 @@ export class Deja {
       })
     }
 
+    // Opt-in rerun: the same stored bytes once more. It never repairs, explores or counts as a pass.
+    let rerun: Rerun | null = null
+    if (options.rerunFailed) {
+      const again = await this.rerunOnce(hitRequest, () => this.dependencies.store.lookup(selectedIdentity))
+      if (again === 'changed') return this.finish(hitStart, this.changedBetweenAttempts(execution))
+      rerun = rerunVerdict(execution, again)
+      if (rerun.verdict === 'flaky') {
+        const changed = await this.recordOrFlowChanged(selectedIdentity, {
+          passed: false, at: execution.endedAt,
+        }, hitStart, execution)
+        if (changed) return changed
+        return this.finish(hitStart, this.flakyDetails(execution, again, rerun, {
+          modelCallBasis, yamlPath: lookup.walk.flowPath, yamlSha256: lookup.walk.flowSha256,
+        }))
+      }
+    }
+
     if (retrieval.matchType === 'exact' &&
         execution.failure?.category === 'selector' && execution.failure.repairEligible &&
         this.dependencies.createRepairer) {
@@ -249,6 +277,7 @@ export class Deja {
         yamlSha256: repair.flowSha256 ?? lookup.walk.flowSha256,
         assertions: repair.assertions ?? execution.assertions,
         execution,
+        ...(rerun ? { attempts: rerun.attempts } : {}),
       })
     }
 
@@ -263,10 +292,16 @@ export class Deja {
       modelCallBasis,
       assertions: execution.assertions, repairCount: 0,
       yamlPath: lookup.walk.flowPath, yamlSha256: lookup.walk.flowSha256,
-      failure: execution.failure, artifacts: execution.artifacts, diffs: [],
-      errors: productRegression
-        ? ['Meaningful product assertion failed; repair was not attempted']
-        : ['Replay failed with a non-repairable or unknown failure; repair was not attempted'],
+      failure: execution.failure,
+      artifacts: rerun ? [...execution.artifacts, ...rerun.second.artifacts] : execution.artifacts,
+      diffs: [],
+      errors: [
+        productRegression
+          ? 'Meaningful product assertion failed; repair was not attempted'
+          : 'Replay failed with a non-repairable or unknown failure; repair was not attempted',
+        ...(rerun ? [STEADY_MESSAGE] : []),
+      ],
+      ...(rerun ? { attempts: rerun.attempts } : {}),
     })
   }
 
@@ -277,6 +312,7 @@ export class Deja {
   private async replayLastVerified(
     identity: WalkIdentity,
     missStart: RunStart,
+    rerunFailed = false,
   ): Promise<RunResult | null> {
     if (identity.platform !== 'ios') return null
     const { store } = this.dependencies
@@ -305,17 +341,38 @@ export class Deja {
     if (!execution.passed) {
       // The new build has no walk to mark failed, and the previous build's walk stays verified.
       // Nothing is persisted, repaired, or explored.
+      let rerun: Rerun | null = null
+      if (rerunFailed) {
+        const again = await this.rerunOnce({
+          flowPath: snapshot?.candidatePath ?? previous.flowPath,
+          artifactDirectory: reportDirectory,
+        }, () => store.lookupPreviousSuccessful(identity))
+        if (again === 'changed') return this.finish(replayStart, this.changedBetweenAttempts(execution))
+        rerun = rerunVerdict(execution, again)
+        if (rerun.verdict === 'flaky') {
+          return this.finish(replayStart, {
+            ...this.flakyDetails(execution, again, rerun, {
+              modelCallBasis, yamlPath: walk.flowPath, yamlSha256: walk.flowSha256,
+            }),
+            replayedOnNewBuild: { ...replay, recordedForNewBuild: false },
+          })
+        }
+      }
       const productRegression = execution.failure?.category === 'product_assertion'
       return this.finish(replayStart, {
         outcome: productRegression ? 'product-regression' : 'failed', passed: false,
         modelCalls: 0, modelCallBasis,
         assertions: execution.assertions, repairCount: 0,
         yamlPath: walk.flowPath, yamlSha256: walk.flowSha256,
-        failure: execution.failure, artifacts: execution.artifacts, diffs: [],
+        failure: execution.failure,
+        artifacts: rerun ? [...execution.artifacts, ...rerun.second.artifacts] : execution.artifacts,
+        diffs: [],
         errors: [
           `The last verified walk (build ${walk.buildFingerprint}) failed on this unverified build; it was not stored, repaired, or explored`,
+          ...(rerun ? [STEADY_MESSAGE] : []),
         ],
         replayedOnNewBuild: { ...replay, recordedForNewBuild: false },
+        ...(rerun ? { attempts: rerun.attempts } : {}),
       })
     }
 
@@ -480,13 +537,64 @@ export class Deja {
       return null
     } catch (error) {
       if (!(error instanceof FlowChangedError)) throw error
-      return this.finish(start, {
-        outcome: 'flow-changed', passed: false, modelCalls: 0,
-        modelCallBasis: 'the flow changed during the run; nothing was recorded',
-        assertions: execution.assertions, repairCount: 0, yamlPath: null, yamlSha256: null,
-        failure: null, artifacts: execution.artifacts, diffs: [],
-        errors: [`${error.message}. The run is not recorded as a pass or a failure.`],
-      })
+      return this.finish(start, this.flowChangedDetails(
+        execution, `${error.message}. The run is not recorded as a pass or a failure.`,
+      ))
+    }
+  }
+
+  private flowChangedDetails(execution: ExecutionResult, message: string): RunDetails {
+    return {
+      outcome: 'flow-changed', passed: false, modelCalls: 0,
+      modelCallBasis: 'the flow changed during the run; nothing was recorded',
+      assertions: execution.assertions, repairCount: 0, yamlPath: null, yamlSha256: null,
+      failure: null, artifacts: execution.artifacts, diffs: [], errors: [message],
+    }
+  }
+
+  private changedBetweenAttempts(execution: ExecutionResult): RunDetails {
+    return this.flowChangedDetails(execution,
+      'The flow or a file it runs changed between the two attempts, so it was not rerun and nothing was recorded.')
+  }
+
+  /**
+   * Replay the same bytes once more, under the same timeout. The files are re-checked before and
+   * after: if they changed (manifest mode: the closure no longer matches), nothing is rerun or
+   * reported as flaky. No explorer, repairer or model client is touched.
+   */
+  private async rerunOnce(
+    request: RunnerRequest,
+    recheck: () => Promise<LookupHit | LookupMiss>,
+  ): Promise<ExecutionResult | 'changed'> {
+    const changed = async () => {
+      const current = await recheck()
+      return current.status === 'miss' &&
+        (current.reason === 'flow-changed' || current.reason === 'missing-flow')
+    }
+    if (await changed()) return 'changed'
+    const second = await this.dependencies.runner.run({
+      ...request, artifactDirectory: `${request.artifactDirectory}/rerun`,
+    })
+    return await changed() ? 'changed' : second
+  }
+
+  /** The second attempt passed, or the two failures differ: not a pass, not a steady failure. */
+  private flakyDetails(
+    first: ExecutionResult,
+    second: ExecutionResult,
+    rerun: Rerun,
+    base: { modelCallBasis: string; yamlPath: string | null; yamlSha256: string | null },
+  ): RunDetails {
+    return {
+      outcome: 'flaky', passed: false, modelCalls: 0, modelCallBasis: base.modelCallBasis,
+      assertions: first.assertions, repairCount: 0,
+      yamlPath: base.yamlPath, yamlSha256: base.yamlSha256,
+      // The first failure is the recorded one; the second attempt is in `attempts`.
+      failure: first.failure, artifacts: [...first.artifacts, ...second.artifacts], diffs: [],
+      errors: [second.passed
+        ? 'The replay failed, then passed on a rerun of the same YAML. This is flaky, not a pass; the first failure is recorded.'
+        : 'The replay failed twice with a different label or step on the same YAML. This is flaky, not a pass; the first failure is recorded.'],
+      attempts: rerun.attempts,
     }
   }
 
@@ -505,7 +613,9 @@ export class Deja {
     })
     const verifiable = miss.flowPath !== undefined &&
       ['flow-changed', 'not-validated', 'failed-validation', 'stale-build'].includes(miss.reason)
-    if (options.verify && verifiable) return this.verifyFlow(identity, missStart, miss.flowPath!)
+    if (options.verify && verifiable) {
+      return this.verifyFlow(identity, missStart, miss.flowPath!, options.rerunFailed === true)
+    }
     switch (miss.reason) {
       case 'flow-changed':
         return refuse('flow-changed',
@@ -540,6 +650,7 @@ export class Deja {
     identity: WalkIdentity,
     missStart: RunStart,
     flowPath: string,
+    rerunFailed = false,
   ): Promise<RunResult> {
     const { store, runner } = this.dependencies
     const attempt = `.deja/attempts/${this.artifactId('run')}`
@@ -551,13 +662,31 @@ export class Deja {
     const verifyStart = { ...missStart, execution }
     const modelCallBasis = 'verify replays the consumer\'s current file in place; explorer, repairer and model factories were not invoked'
     if (!execution.passed) {
+      let rerun: Rerun | null = null
+      if (rerunFailed) {
+        const again = await this.rerunOnce({
+          flowPath: snapshot?.candidatePath ?? flowPath, artifactDirectory: attempt,
+        }, () => store.lookup(identity))
+        if (again === 'changed') return this.finish(verifyStart, this.changedBetweenAttempts(execution))
+        rerun = rerunVerdict(execution, again)
+        if (rerun.verdict === 'flaky') {
+          return this.finish(verifyStart, this.flakyDetails(execution, again, rerun, {
+            modelCallBasis, yamlPath: null, yamlSha256: null,
+          }))
+        }
+      }
       const productRegression = execution.failure?.category === 'product_assertion'
       return this.finish(verifyStart, {
         outcome: productRegression ? 'product-regression' : 'failed', passed: false,
         modelCalls: 0, modelCallBasis, assertions: execution.assertions, repairCount: 0,
         yamlPath: null, yamlSha256: null, failure: execution.failure,
-        artifacts: execution.artifacts, diffs: [],
-        errors: ['The flow did not pass on this build; the manifest and history are unchanged'],
+        artifacts: rerun ? [...execution.artifacts, ...rerun.second.artifacts] : execution.artifacts,
+        diffs: [],
+        errors: [
+          'The flow did not pass on this build; the manifest and history are unchanged',
+          ...(rerun ? [STEADY_MESSAGE] : []),
+        ],
+        ...(rerun ? { attempts: rerun.attempts } : {}),
       })
     }
     let persisted: PersistedWalk
@@ -631,6 +760,29 @@ export class Deja {
       errors: repair.errors,
       repair,
     }
+  }
+}
+
+const STEADY_MESSAGE =
+  'The rerun failed with the same label and step, so this is a steady failure, not a flaky one.'
+
+type Rerun = { verdict: 'steady' | 'flaky'; attempts: RunAttempt[]; second: ExecutionResult }
+
+function attemptOf(attempt: 1 | 2, execution: ExecutionResult): RunAttempt {
+  return {
+    attempt, passed: execution.passed, startedAt: execution.startedAt, endedAt: execution.endedAt,
+    durationMs: execution.durationMs, failure: execution.failure, artifacts: execution.artifacts,
+  }
+}
+
+/** Both attempts failed with the same label and step: steady. A pass, or any difference: flaky. */
+function rerunVerdict(first: ExecutionResult, second: ExecutionResult): Rerun {
+  const steady = !second.passed &&
+    (first.failure?.category ?? null) === (second.failure?.category ?? null) &&
+    (first.failure?.failingStep ?? null) === (second.failure?.failingStep ?? null)
+  return {
+    verdict: steady ? 'steady' : 'flaky', second,
+    attempts: [attemptOf(1, first), attemptOf(2, second)],
   }
 }
 

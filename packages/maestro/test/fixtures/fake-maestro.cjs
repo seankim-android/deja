@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 const { spawn } = require('node:child_process')
-const { writeFileSync } = require('node:fs')
+const { readFileSync, writeFileSync } = require('node:fs')
 const { basename, dirname, join } = require('node:path')
 
 const modeArgument = process.argv[2]
@@ -23,10 +23,20 @@ if (modeArgument === '--version') {
     javaHome: process.env.JAVA_HOME,
     path: process.env.PATH,
   }))
+  // DEJA_FAKE_MAESTRO_SCRIPT="crash,pass" picks a mode per call, counted in DEJA_FAKE_MAESTRO_COUNTER.
+  let scripted = process.env.DEJA_FAKE_MAESTRO_MODE
+  if (process.env.DEJA_FAKE_MAESTRO_SCRIPT) {
+    const counter = process.env.DEJA_FAKE_MAESTRO_COUNTER
+    let calls = 0
+    try { calls = Number(readFileSync(counter, 'utf8')) } catch {}
+    writeFileSync(counter, String(calls + 1))
+    const modes = process.env.DEJA_FAKE_MAESTRO_SCRIPT.split(',')
+    scripted = modes[Math.min(calls, modes.length - 1)]
+  }
   console.log('fake stdout')
   console.error('fake stderr')
 
-  if (process.env.DEJA_FAKE_MAESTRO_MODE === 'selector') {
+  if (scripted === 'selector') {
     console.log('Running on fixture')
     console.log('Launch app "dev.deja.checkout" with clear state... COMPLETED')
     console.log('Assert that id: screen_cart is visible... COMPLETED')
@@ -36,10 +46,32 @@ if (modeArgument === '--version') {
     process.exitCode = 1
   }
 
-  if (process.env.DEJA_FAKE_MAESTRO_MODE === 'product') {
+  if (scripted === 'product') {
     console.log('Launch app "dev.deja.checkout" with clear state... COMPLETED')
     console.log('Assert that "Order #WC-1001" is visible... FAILED')
     console.log('Assertion is false: "Order #WC-1001" is visible')
+    process.exitCode = 1
+  }
+
+  if (scripted === 'crash') {
+    console.log('Launch app "dev.deja.ios.checkout" with clear state... COMPLETED')
+    console.log('App crashed (SIGSEGV)')
+    console.log('Tap on id: checkout_button... FAILED')
+    console.log('')
+    console.log('Element not found: Id matching regex: checkout_button')
+    process.exitCode = 1
+  }
+
+  // A crash that leaves no line in Maestro's output (an iOS crash report is the only evidence).
+  if (scripted === 'quiet-crash') {
+    // DEJA_FAKE_CRASH_REPORT is the .ips path to write during this run, as the system would.
+    if (process.env.DEJA_FAKE_CRASH_REPORT) {
+      writeFileSync(process.env.DEJA_FAKE_CRASH_REPORT, process.env.DEJA_FAKE_CRASH_REPORT_BODY ?? '')
+    }
+    console.log('Launch app "dev.deja.ios.checkout" with clear state... COMPLETED')
+    console.log('Tap on id: checkout_button... FAILED')
+    console.log('')
+    console.log('Element not found: Id matching regex: checkout_button')
     process.exitCode = 1
   }
 

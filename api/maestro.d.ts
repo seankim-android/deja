@@ -1,6 +1,6 @@
 // typescript 7.0.2
 // entry . (./src/index.ts)
-// exports: AdapterCacheIdentity, AdapterIdentityInput, AndroidAdapterOptions, COMPOSITION_MODEL_METRICS, CompositionRunnerObservation, CompositionRunnerTrace, EngineRangeStatus, EngineSource, FetchLike, InstallEngineOptions, InstallEngineResult, IosAdapterOptions, IosExplorationDriverOptions, LoginCompositionResult, MAESTRO_COMPOSITE_FLOW_SCHEMA, MAESTRO_ENGINE_PIN, MAESTRO_FLOW_SCHEMA_VERSION, MAESTRO_TESTED_RANGE, MaestroArtifactPaths, MaestroCommandOptions, MaestroEngineError, MaestroEnginePin, MaestroExecutionAdapter, MaestroFailureCategory, MaestroFailureClassification, MaestroFailureInput, MaestroFlowContainment, MaestroFlowResult, MaestroHierarchyResult, MaestroLoginComposer, MaestroLoginComposerOptions, MaestroPlatform, MaestroRunResult, MaestroRunnerError, MaestroRunnerErrorKind, MaestroTransport, MaestroWalkRunner, MaestroWalkRunnerOptions, McpMaestroTransport, McpMaestroTransportOptions, ProcessMaestroTransport, ProcessMaestroTransportOptions, ResolveEngineOptions, ResolvedEngine, RunMaestroOptions, SegmentVerificationResult, WebAdapterOptions, ZipExtractor, androidMaestroAdapter, assertSafeEntries, checkMaestroRange, classifyMaestroFailure, composeMaestroLoginFlow, countFlowAssertions, countMaestroAssertions, countMaestroSteps, dejaHome, engineDirectory, escapeRegex, idSelector, installMaestroEngine, iosExplorationDriver, iosFingerprintRules, iosMaestroAdapter, normalizeEngineVersion, parseMaestroHierarchy, parseMaestroVersion, pinnedExecutablePath, probeMaestroVersion, readCompositionRunnerTrace, readMaestroContinuation, resolveFlowPath, resolveMaestroEngine, runMaestro, systemUnzip, tapSegment, validateMaestroFlowReference, verifyInstalledEngine, waitVisibleSegment, webMaestroAdapter
+// exports: AdapterCacheIdentity, AdapterIdentityInput, AndroidAdapterOptions, COMPOSITION_MODEL_METRICS, CompositionRunnerObservation, CompositionRunnerTrace, EngineRangeStatus, EngineSource, FetchLike, FindCrashReportOptions, InstallEngineOptions, InstallEngineResult, IosAdapterOptions, IosExplorationDriverOptions, LoginCompositionResult, MAESTRO_COMPOSITE_FLOW_SCHEMA, MAESTRO_ENGINE_PIN, MAESTRO_FLOW_SCHEMA_VERSION, MAESTRO_TESTED_RANGE, MaestroArtifactPaths, MaestroCommandOptions, MaestroCrashSignal, MaestroEngineError, MaestroEnginePin, MaestroExecutionAdapter, MaestroFailureCategory, MaestroFailureClassification, MaestroFailureInput, MaestroFlowContainment, MaestroFlowResult, MaestroHierarchyResult, MaestroLoginComposer, MaestroLoginComposerOptions, MaestroPlatform, MaestroRunResult, MaestroRunnerError, MaestroRunnerErrorKind, MaestroTransport, MaestroWalkRunner, MaestroWalkRunnerOptions, McpMaestroTransport, McpMaestroTransportOptions, ProcessMaestroTransport, ProcessMaestroTransportOptions, ResolveEngineOptions, ResolvedEngine, RunMaestroOptions, SegmentVerificationResult, WebAdapterOptions, ZipExtractor, androidMaestroAdapter, assertSafeEntries, checkMaestroRange, classifyMaestroFailure, composeMaestroLoginFlow, countFlowAssertions, countMaestroAssertions, countMaestroSteps, defaultCrashReportDirectory, dejaHome, detectCrashInOutput, engineDirectory, escapeRegex, findCrashReport, idSelector, installMaestroEngine, iosExplorationDriver, iosFingerprintRules, iosMaestroAdapter, normalizeEngineVersion, parseMaestroHierarchy, parseMaestroVersion, pinnedExecutablePath, probeMaestroVersion, readCompositionRunnerTrace, readMaestroContinuation, resolveFlowPath, resolveMaestroEngine, runMaestro, systemUnzip, tapSegment, validateMaestroFlowReference, verifyInstalledEngine, waitVisibleSegment, webMaestroAdapter
 export type AdapterCacheIdentity = AdapterIdentityInput & {
     adapter?: string;
     browser?: string;
@@ -39,12 +39,21 @@ export type CompositionRunnerTrace = {
 export declare function countFlowAssertions(flowPath: string): Promise<number | null>;
 export declare function countMaestroAssertions(contents: string): number;
 export declare function countMaestroSteps(contents: string): number;
+export declare function defaultCrashReportDirectory(home?: string): string;
 export declare function dejaHome(env?: NodeJS.ProcessEnv): string;
+export declare function detectCrashInOutput(output: string): MaestroCrashSignal | null;
 export declare function engineDirectory(home: string, version: string): string;
 export type EngineRangeStatus = 'in-range' | 'out-of-range' | 'unknown';
 export type EngineSource = 'pinned' | 'override';
 export declare function escapeRegex(text: string): string;
 export type FetchLike = (url: string) => Promise<Response>;
+export declare function findCrashReport(options: FindCrashReportOptions): Promise<MaestroCrashSignal | null>;
+export type FindCrashReportOptions = {
+    directory: string;
+    appId: string;
+    sinceMs: number;
+    untilMs: number;
+};
 export declare function idSelector(id: string): string;
 export type InstallEngineOptions = {
     home?: string;
@@ -107,6 +116,11 @@ export type MaestroArtifactPaths = {
 export type MaestroCommandOptions = {
     junitPath?: string;
 };
+export type MaestroCrashSignal = {
+    source: 'maestro-output' | 'crash-report';
+    reportFile?: string;
+    process?: string;
+};
 export declare class MaestroEngineError extends Error {
     constructor(message: string, options?: ErrorOptions);
 }
@@ -124,13 +138,14 @@ export interface MaestroExecutionAdapter {
     buildFingerprint(workspaceRoot: string, buildPath: string): Promise<string>;
     commandArguments(flowPath: string, options?: MaestroCommandOptions): string[];
 }
-export type MaestroFailureCategory = 'selector' | 'navigation' | 'product_assertion' | 'runner' | 'timeout' | 'unknown';
+export type MaestroFailureCategory = 'selector' | 'navigation' | 'product_assertion' | 'runner' | 'timeout' | 'unknown' | 'app_crash';
 export type MaestroFailureClassification = {
     category: MaestroFailureCategory;
     failingStep: string | null;
     rawArtifactPath: string | null;
     advisory: true;
     repairEligible: boolean;
+    crash?: MaestroCrashSignal;
 };
 export type MaestroFailureInput = {
     passed: boolean;
@@ -138,6 +153,7 @@ export type MaestroFailureInput = {
     output: string;
     errors: Pick<MaestroRunnerError, 'kind'>[];
     rawArtifactPath?: string | null;
+    crashSignal?: MaestroCrashSignal | null;
 };
 export type MaestroFlowContainment = {
     workspaceRoot: string;
@@ -205,6 +221,7 @@ export declare class MaestroWalkRunner implements WalkRunner {
     private readonly options;
     constructor(options: MaestroWalkRunnerOptions);
     runFlow(flowPath: string, artifactDirectory: string, timeoutMs?: number, env?: Record<string, string>): Promise<MaestroRunResult>;
+    private crashReportSignal;
     adapt(result: MaestroRunResult): Promise<ExecutionResult>;
     run(request: RunnerRequest): Promise<ExecutionResult>;
 }
@@ -217,6 +234,8 @@ export type MaestroWalkRunnerOptions = {
     androidSdkRoot?: string;
     javaHome?: string;
     junitPath?: string;
+    appId?: string;
+    crashReportDirectory?: string;
 };
 export declare class McpMaestroTransport implements MaestroTransport {
     readonly kind: 'mcp';
