@@ -15,4 +15,5 @@ Tickets WALK-001 to WALK-014 and WALK-016 to WALK-020 are complete. The backlog 
 - Never save an unverified candidate or weaken a product assertion.
 - Never auto-commit a repair or hide a real product regression behind a selector or source patch.
 - Keep `.deja/`, build, temporary, credential, and personal data out of Git.
+- Only the DEJA-16 publish process may publish a package. Never run `npm publish` or `bun publish` by hand. Each published package has a `prepublishOnly` guard (`scripts/publish-guard.ts`) that refuses unless `DEJA_PUBLISH_PROCESS=DEJA-16` is set, the git tree is clean and `dist/` was just built. Publish with `bun publish`, not `npm publish`, so `workspace:*` ranges are rewritten.
 - Make no speedup claim without new raw evidence from equivalent full lifecycles.

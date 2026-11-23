@@ -17,8 +17,8 @@
   "types": "./dist/index.d.ts",
   "exports": {
     ".": {
-      "bun": "./src/index.ts",
       "types": "./dist/index.d.ts",
+      "bun": "./src/index.ts",
       "default": "./dist/index.js"
     }
   },
@@ -35,6 +35,9 @@
   },
   "publishConfig": {
     "access": "public"
+  },
+  "scripts": {
+    "prepublishOnly": "bun ../../scripts/publish-guard.ts"
   },
   "dependencies": {
     "@deja-qa/core": "workspace:*"

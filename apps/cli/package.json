@@ -18,13 +18,13 @@
   },
   "exports": {
     "./reporter": {
-      "bun": "./src/reporter.ts",
       "types": "./dist/src/reporter.d.ts",
+      "bun": "./src/reporter.ts",
       "default": "./dist/src/reporter.js"
     },
     "./redaction": {
-      "bun": "./src/redaction.ts",
       "types": "./dist/src/redaction.d.ts",
+      "bun": "./src/redaction.ts",
       "default": "./dist/src/redaction.js"
     }
   },
@@ -41,6 +41,9 @@
   },
   "publishConfig": {
     "access": "public"
+  },
+  "scripts": {
+    "prepublishOnly": "bun ../../scripts/publish-guard.ts"
   },
   "dependencies": {
     "@deja-qa/core": "workspace:*",

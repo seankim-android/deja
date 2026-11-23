@@ -1,4 +1,5 @@
 {
+  "extends": "../../tsconfig.workspace.json",
   "compilerOptions": {
     "tsBuildInfoFile": "../../node_modules/.tmp/tsconfig.store-sqlite.tsbuildinfo",
     "target": "es2023",
@@ -18,10 +19,7 @@
     "noUnusedLocals": true,
     "noUnusedParameters": true,
     "erasableSyntaxOnly": true,
-    "noFallthroughCasesInSwitch": true,
-    "customConditions": [
-      "bun"
-    ]
+    "noFallthroughCasesInSwitch": true
   },
   "include": [
     "src",

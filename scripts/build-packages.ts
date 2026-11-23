@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { readdir, readFile, writeFile } from 'node:fs/promises'
+import { readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { spawnSync } from 'node:child_process'
 
@@ -33,6 +33,8 @@ async function declarationFiles(directory: string): Promise<string[]> {
 }
 
 export async function buildPackages() {
+  // `tsc -b` never deletes the output of a removed source file, so start from empty folders.
+  for (const directory of publishedDirectories) await rm(join(repo, directory, 'dist'), { recursive: true, force: true })
   const result = spawnSync('bunx', ['tsc', '-b', 'tsconfig.build.json'], { cwd: repo, stdio: 'inherit' })
   if (result.status !== 0) throw new Error('tsc -b tsconfig.build.json failed')
   const relativeTsSpecifier = /(\bfrom\s+|\bimport\s*\(\s*|\bimport\s+)(['"])(\.{1,2}\/[^'"]*)\.ts\2/g
