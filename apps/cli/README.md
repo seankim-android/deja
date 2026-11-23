@@ -49,7 +49,7 @@ a hit.
 
 `--junit <file>` (or config `junit`) has Maestro write its own JUnit report there. When Maestro never
 ran or did not pass, a minimal failed report is written instead, so a host never reads a missing file
-as a pass. `--summary` prints one `deja-summary v=1 …` line. Both are opt-in; exit codes do not
+as a pass. `--summary` prints one `deja-summary v=1 …` line (`goal=` last, percent-encoded). Hosts must treat a missing file as a failure. Both are opt-in; exit codes do not
 change. Details: [docs/REFERENCE.md](../../docs/REFERENCE.md#junit-and-summary-output-for-ci-hosts).
 
 ## WALK-016 opt-in semantic lookup

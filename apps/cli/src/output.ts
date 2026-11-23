@@ -31,8 +31,8 @@ Options:
   --junit <file>   Write Maestro's own JUnit report to <file> (config field: "junit"). If Maestro
                    never ran or did not pass, a minimal report with one failed testcase is written,
                    so a missing file is never a pass. Listed as a junit artifact in the result.
-  --summary        Print one line: deja-summary v=1 goal outcome cache fingerprint model_calls
-                   failure. Last stdout line, or stderr with --json.
+  --summary        Print one line: deja-summary v=1 outcome cache fingerprint model_calls
+                   failure goal (goal last, percent-encoded). Last stdout line, or stderr with --json.
   -h, --help       Show help without loading configuration or constructing plugins.
 
 Semantic retrieval:
@@ -134,19 +134,36 @@ export function renderWalks(walks: StoredWalk[], redact: Redactor) {
   return `${lines.join('\n')}\n`
 }
 
+/** Percent-encodes UTF-8 bytes outside [A-Za-z0-9._~-], so no space, `=`, quote or separator survives. */
+export function encodeSummaryGoal(goal: string) {
+  return [...new TextEncoder().encode(goal)].map(byte => {
+    const character = String.fromCharCode(byte)
+    return /[A-Za-z0-9._~-]/.test(character)
+      ? character
+      : `%${byte.toString(16).toUpperCase().padStart(2, '0')}`
+  }).join('')
+}
+
 /**
- * One stable, parseable line per run, for CI host reports:
+ * One stable, parseable line per run, for CI host reports. Grammar (single physical line):
  *
- *   deja-summary v=1 goal="<json string>" outcome=<word> cache=<hit|miss|not-checked|unknown>
- *     fingerprint=<12 hex|unknown> model_calls=<n|unknown> failure=<category|unclassified|none|error>
+ *   line        = "deja-summary v=1 outcome=" outcome " cache=" cache " fingerprint=" fingerprint
+ *                 " model_calls=" calls " failure=" failure " goal=" goal
+ *   outcome     = 1*( "a-z" / "-" )                    ; a run outcome, or "error"
+ *   cache       = "hit" / "miss" / "not-checked" / "unknown"
+ *   fingerprint = 12 lower-case hex / "unknown"
+ *   calls       = 1*DIGIT / "unknown"
+ *   failure     = 1*( "a-z" / "_" )                    ; category, "unclassified", "none" or "error"
+ *   goal        = *( [A-Za-z0-9._~-] / "%" 2HEXDIG )   ; percent-encoded UTF-8, always last
  *
- * (one physical line; wrapped above). The goal is a JSON string, every other value is a bare word.
+ * Every field before `goal` has a fixed charset, and `goal` cannot contain a space, `=`, quote or
+ * any raw control or separator character, so a goal cannot add or change a field or a line.
  * `result` is null when no run result exists (usage, config, or memory errors).
  */
 export function renderSummary(result: RunResult | null, goalText: string, redact: Redactor) {
-  const goal = JSON.stringify(redact(result?.goalKey ?? goalText))
+  const goal = encodeSummaryGoal(redact(result?.goalKey ?? goalText))
   if (!result) {
-    return `deja-summary v=1 goal=${goal} outcome=error cache=unknown fingerprint=unknown model_calls=unknown failure=error`
+    return `deja-summary v=1 outcome=error cache=unknown fingerprint=unknown model_calls=unknown failure=error goal=${goal}`
   }
   const fingerprint = /^[0-9a-f]{12,}$/.test(result.identity.buildFingerprint)
     ? result.identity.buildFingerprint.slice(0, 12)
@@ -154,11 +171,11 @@ export function renderSummary(result: RunResult | null, goalText: string, redact
   const failure = result.failure?.category ?? (result.passed ? 'none' : 'unclassified')
   return [
     'deja-summary v=1',
-    `goal=${goal}`,
     `outcome=${result.outcome}`,
     `cache=${result.cacheStatus}`,
     `fingerprint=${fingerprint}`,
     `model_calls=${result.modelCalls ?? 'unknown'}`,
     `failure=${failure}`,
+    `goal=${goal}`,
   ].join(' ')
 }

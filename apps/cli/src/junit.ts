@@ -6,7 +6,7 @@ import type { Redactor } from './redaction.ts'
 /**
  * Opt-in JUnit output for CI hosts.
  *
- * When Maestro ran, its own report is passed through untouched. Maestro never ran, or the run
+ * When Maestro ran, its own report is passed through, with Déjà's redaction applied. Maestro never ran, or the run
  * did not pass and Maestro's report shows no failure: a minimal report is written instead, with
  * one failed `<testcase>` (`status="ERROR"`, the status Maestro uses), so a missing or stale file
  * is never read as a pass. Synthesized files carry `<property name="source" value="deja-synthesized"/>`.
@@ -34,7 +34,7 @@ export function synthesizedJunit(input: {
   const testcase = input.passed
     ? `<testcase id="${goal}" name="${goal}" classname="${goal}" time="${seconds}" status="SUCCESS"/>`
     : `<testcase id="${goal}" name="${goal}" classname="${goal}" time="${seconds}" status="ERROR">
-      <failure>${escapeXml(input.reason)}</failure>
+      <failure message="${escapeXml(input.reason.replace(/\s+/g, ' ').slice(0, 300))}">${escapeXml(input.reason)}</failure>
     </testcase>`
   return `<?xml version="1.0" encoding="UTF-8"?>
 <testsuites>
@@ -56,8 +56,56 @@ export function reportsFailure(xml: string) {
 async function atomicWrite(path: string, contents: string) {
   await mkdir(dirname(path), { recursive: true })
   const temporary = `${path}.${process.pid}.tmp`
-  await writeFile(temporary, contents)
-  await rename(temporary, path)
+  try {
+    await writeFile(temporary, contents)
+    await rename(temporary, path)
+  } finally {
+    await rm(temporary, { force: true })
+  }
+}
+
+function decodeXml(text: string) {
+  return text
+    .replace(/&#x([0-9a-fA-F]+);/g, (_, hex: string) => codePoint(Number.parseInt(hex, 16)))
+    .replace(/&#([0-9]+);/g, (_, decimal: string) => codePoint(Number.parseInt(decimal, 10)))
+    .replace(/&(lt|gt|quot|apos);/g, (_, name: string) => (
+      { lt: '<', gt: '>', quot: '"', apos: "'" } as Record<string, string>)[name])
+    .replace(/&amp;/g, '&')
+}
+
+function codePoint(value: number) {
+  try {
+    return String.fromCodePoint(value)
+  } catch {
+    return ''
+  }
+}
+
+// Counts and status stay as Maestro wrote them, so a short fixture value cannot change them.
+const STRUCTURAL_ATTRIBUTES = new Set(['status', 'failures', 'errors', 'tests', 'skipped', 'time'])
+
+/**
+ * Runs the redactor over the text a person can read in a JUnit file: attribute values and text
+ * nodes (decoded first, so `&amp;` and numeric-entity forms of a value cannot slip through, then
+ * escaped again), CDATA and comments. Element and attribute names stay, so the XML stays well
+ * formed and the status and count attributes keep their values.
+ */
+export function redactJunit(xml: string, redact: Redactor) {
+  return xml.replace(
+    /<!\[CDATA\[([\s\S]*?)\]\]>|<!--([\s\S]*?)-->|<[^>]*>|[^<]+/g,
+    (segment, cdata: string | undefined, comment: string | undefined) => {
+      if (cdata !== undefined) return `<![CDATA[${redact(cdata)}]]>`
+      if (comment !== undefined) return `<!--${redact(comment)}-->`
+      if (!segment.startsWith('<')) return escapeXml(redact(decodeXml(segment)))
+      return segment.replace(
+        /(\s([\w:.-]+)\s*=\s*)(?:"([^"]*)"|'([^']*)')/g,
+        (whole, prefix: string, name: string, double: string | undefined, single: string | undefined) => {
+          if (STRUCTURAL_ATTRIBUTES.has(name)) return whole
+          return `${prefix}"${escapeXml(redact(decodeXml(double ?? single ?? '')))}"`
+        },
+      )
+    },
+  )
 }
 
 /** Remove any earlier file so a stale report can never stand in for this run; create its folder. */
@@ -108,7 +156,10 @@ export class JunitReporter implements RunReporter {
       // Maestro never ran, or did not get as far as writing a report.
     }
     const keep = maestroReport !== null && (result.passed || reportsFailure(maestroReport))
-    if (!keep) {
+    if (keep) {
+      const redacted = redactJunit(maestroReport!, this.redact)
+      if (redacted !== maestroReport) await atomicWrite(this.path, redacted)
+    } else {
       await atomicWrite(this.path, synthesizedJunit({
         goal: result.goalKey,
         passed: result.passed,

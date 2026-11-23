@@ -47,10 +47,12 @@ if (modeArgument === 'grandchild' || modeArgument === 'bystander') {
   const output = process.argv.find(argument => argument.startsWith('--output='))
   if (output && process.argv.includes('--format=JUNIT')) {
     const failed = Boolean(process.exitCode)
+    // Already XML text, inserted verbatim, so tests can use entity forms.
+    const extra = process.env.DEJA_FAKE_JUNIT_TEXT ?? ''
     writeFileSync(output.slice('--output='.length), `<?xml version='1.0' encoding='UTF-8'?>
 <testsuites>
     <testsuite name="Test Suite" device="fake" tests="1" failures="${failed ? 1 : 0}" time="0.1">
-        <testcase id="${mode}" name="${mode}" classname="${mode}" time="0.1" status="${failed ? 'ERROR' : 'SUCCESS'}">${failed ? '<failure>fake maestro failure</failure>' : ''}</testcase>
+        <testcase id="${mode}" name="${mode} ${extra}" classname="${mode}" time="0.1" status="${failed ? 'ERROR' : 'SUCCESS'}">${failed ? `<failure message="fake maestro failure ${extra}">fake maestro failure ${extra}</failure>` : ''}</testcase>
     </testsuite>
 </testsuites>
 `)

@@ -118,48 +118,82 @@ tests before relying on a goal outside those examples.
 Both are opt-in. Without them, nothing changes. Exit codes are unchanged.
 
 **`--junit <file>`** (or config `junit`) passes `--format=JUNIT --output=<file>` to every Maestro
-run of the command. The file is Maestro's own report, not rewritten by Déjà. If one command runs
+run of the command. The file is Maestro's own report, with Déjà's redaction applied. If one command runs
 Maestro more than once (cold exploration plus verification, or a failed replay then a repair), each
 run overwrites the file, so it holds the last run's report. The path is added to the `RunResult`
 `artifacts` as `{ "kind": "junit" }`, workspace-relative when inside the workspace.
 
-A host must never read a missing or old file as a pass, so Déjà does this:
+A host must never read a missing or old file as a pass. **Hosts must treat a missing file as a
+failure.** Déjà keeps that rule easy:
 
 1. It deletes any file at that path before the command starts and creates its folder.
 2. After the run, if Maestro wrote a report and either the result passed or the report shows a
-   failure, Maestro's file stays as it is.
+   failure, Maestro's file is kept, with Déjà's redaction applied (below).
 3. Otherwise Déjà writes a minimal report. This happens when Maestro never ran (cache miss
-   refused, stale build with no repairer, rejected goal, checksum or memory refusal, usage or
-   config error after the command was parsed), when Maestro could not launch or was killed before
-   writing, and when the result failed but Maestro's report shows a pass (for example a candidate
-   that passed verification but was rejected). The file has one `<testcase>` named for the goal
-   with `status="ERROR"` and a `<failure>` holding the outcome, failure category and errors
-   (redacted). A passing result with no Maestro report gets a `status="SUCCESS"` case.
-   Every such file has `<property name="source" value="deja-synthesized"/>`.
+   refused, stale build with no repairer, rejected goal, invalid memory, usage or config error
+   after the command was parsed), when Maestro could not launch or was killed before writing, and
+   when the result failed but Maestro's report shows a pass (for example a candidate that passed
+   verification but was rejected). The file has one `<testcase>` named for the goal with
+   `status="ERROR"` and a `<failure message="...">` holding the outcome, failure category and
+   errors (redacted). A passing result with no Maestro report gets a `status="SUCCESS"` case. Every
+   such file has `<property name="source" value="deja-synthesized"/>`; it is Déjà's result, not
+   Maestro evidence.
+
+Limits that leave no fresh file (a missing or old file still means failure):
+
+- A path from the config field is known only after the config loads. If the config is missing or
+  invalid, nothing is deleted or written and an older file stays. Pass `--junit` on the command line
+  when the host needs the file replaced on every failure.
+- If Déjà or Maestro is killed (SIGKILL, power loss), the old file is already deleted and no new
+  one is written.
+
+**Redaction.** Before the run returns, Déjà redacts the text a person can read in Maestro's file:
+attribute values, text nodes, CDATA and comments, with entities decoded first (`&amp;`, `&lt;`,
+`&quot;`, `&apos;`, numeric forms), so an escaped fixture value cannot slip through. Redacted text is
+escaped again, so the XML stays well formed. Element and attribute names and the `status`,
+`failures`, `errors`, `tests`, `skipped` and `time` attributes are never changed. Redaction knows
+the workspace and home paths and configured fixture values only: do not publish the file as a
+public CI artifact if flows contain other personal data.
 
 The `status` values match Maestro's, so a host that treats any `<testcase>` with a status other
-than `SUCCESS` as failing (as Blankaday's `maestro-main.sh` does) works with both. Maestro's own
-file is passed through unchanged; it is not run through Déjà's redaction.
+than `SUCCESS` as failing (as Blankaday's `maestro-main.sh` does) works with both.
 
 **`--summary`** prints one line per run, last on stdout (with `--json` it goes to stderr, so stdout
 stays one JSON document):
 
 ```text
-deja-summary v=1 goal="checkout" outcome=passed cache=hit fingerprint=3f9a1c20b7de model_calls=0 failure=none
+deja-summary v=1 outcome=passed cache=hit fingerprint=3f9a1c20b7de model_calls=0 failure=none goal=checkout
 ```
 
-| Field | Values |
-| --- | --- |
-| `goal` | Normalized goal as a JSON string (the only quoted field) |
-| `outcome` | A `RunOutcome`, for example `passed`, `remembered`, `cold-recorded`, `repaired`, `product-regression`, `repair-rejected`, `failed`; `error` when no result exists |
-| `cache` | `hit`, `miss`, `not-checked`, or `unknown` (with `error`) |
-| `fingerprint` | First 12 hex characters of the build fingerprint, or `unknown` |
-| `model_calls` | Integer, or `unknown` |
-| `failure` | Failure category (`selector`, `navigation`, `product_assertion`, `runner`, `timeout`, `unknown`), `unclassified` for a failure with no category, `none` for a pass, `error` with `outcome=error` |
+Grammar (one physical line, fields in this order, single spaces between them):
 
-Fields keep this order and `v=1` changes only if one is renamed or removed. The goal and all
-values are redacted like other output. When a command fails with exit 2 or 4 after it was parsed,
-the line still prints, with `outcome=error`.
+```text
+line        = "deja-summary v=1 outcome=" outcome " cache=" cache " fingerprint=" fingerprint
+              " model_calls=" calls " failure=" failure " goal=" goal
+outcome     = 1*( %x61-7A / "-" )              ; a run outcome, or "error" when no result exists
+cache       = "hit" / "miss" / "not-checked" / "unknown"
+fingerprint = 12LOWHEX / "unknown"             ; first 12 hex characters of the build fingerprint
+calls       = 1*DIGIT / "unknown"
+failure     = 1*( %x61-7A / "_" )              ; selector, navigation, product_assertion, runner,
+                                               ; timeout, unknown, unclassified, none, or error
+goal        = *( ALPHA / DIGIT / "." / "_" / "~" / "-" / "%" 2HEXDIG )
+```
+
+`goal` is always last. It is the redacted, normalized goal as UTF-8, with every byte outside
+`[A-Za-z0-9._~-]` percent-encoded. A goal therefore cannot contain a space, `=`, a quote, a newline,
+U+0085, U+2028 or any other control or separator character, and cannot add or change a field or a
+line. All other fields have the fixed charsets above. Parse the whole line with the grammar; the
+text after `goal=` is the goal. Example:
+
+```python
+import re, urllib.parse
+m = re.fullmatch(r"deja-summary v=1 outcome=([a-z-]+) cache=([a-z-]+) fingerprint=([0-9a-f]{12}|unknown) "
+                 r"model_calls=(\d+|unknown) failure=([a-z_]+) goal=([A-Za-z0-9._~%-]*)", line)
+outcome, goal = m[1], urllib.parse.unquote(m[6])
+```
+
+`v=1` changes only if a field is renamed, removed, reordered or its charset changes. When a command
+fails with exit 2 or 4 after it was parsed, the line still prints, with `outcome=error`.
 
 ### Exit codes
 
