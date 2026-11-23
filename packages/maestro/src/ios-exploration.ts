@@ -11,6 +11,7 @@ import type {
   SystemUiState,
 } from '@deja-qa/core'
 import { normalizeElements, normalizedSnapshot } from '@deja-qa/core'
+import { tapSegment } from './selectors.ts'
 
 /** Result of one hierarchy read. `raw` is whatever the transport got back, parsed from JSON. */
 export type MaestroHierarchyResult = { raw: unknown; durationMs: number }
@@ -196,7 +197,34 @@ function quote(value: string): string {
   return JSON.stringify(value)
 }
 
+function validateProfile(profile: LaunchProfile) {
+  if (typeof profile.appId !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(profile.appId)) {
+    throw new TypeError('LaunchProfile.appId must be a bundle ID')
+  }
+  if (typeof profile.clearState !== 'boolean') throw new TypeError('LaunchProfile.clearState must be a boolean')
+  for (const [key, value] of Object.entries(profile.arguments)) {
+    if (typeof value !== 'boolean' && typeof value !== 'string') {
+      throw new TypeError(`LaunchProfile.arguments.${key} must be a string or boolean`)
+    }
+  }
+  for (const [key, value] of Object.entries(profile.permissions ?? {})) {
+    if (value !== 'allow' && value !== 'deny' && value !== 'unset') {
+      throw new TypeError(`LaunchProfile.permissions.${key} must be allow, deny or unset`)
+    }
+  }
+}
+
+/** Commands a live-app segment must never hold: they relaunch, reset or rebind the app. */
+const FORBIDDEN_SEGMENT = /^\s*(?:-\s*)?(launchApp|openLink|clearState|clearKeychain|stopApp|killApp|appId)\b/m
+
+function checkSegment(segment: Segment) {
+  if (FORBIDDEN_SEGMENT.test(segment.yaml) || /\bclearState\s*:/.test(segment.yaml)) {
+    throw new TypeError(`Segment "${segment.label}" must not set appId or use launchApp, openLink, clearState or stopApp`)
+  }
+}
+
 function launchFlow(profile: LaunchProfile): string {
+  validateProfile(profile)
   const lines = [`appId: ${quote(profile.appId)}`, '---', '- launchApp:']
   lines.push(`    clearState: ${profile.clearState}`)
   const args = Object.entries(profile.arguments)
@@ -249,6 +277,7 @@ export function iosExplorationDriver(options: IosExplorationDriverOptions): Expl
     },
 
     async reset(profile, statePaths) {
+      validateProfile(profile)
       appId = profile.appId
       const started = performance.now()
       const launched = await runSegment(launchFlow(profile))
@@ -284,8 +313,8 @@ export function iosExplorationDriver(options: IosExplorationDriverOptions): Expl
 
     async act(segment: Segment, env) {
       if (!appId) throw new Error('act() needs reset() first, so the app ID is known')
-      const yaml = segment.yaml.startsWith('appId:') ? segment.yaml : `appId: ${quote(appId)}\n---\n${segment.yaml}`
-      return runSegment(yaml, env)
+      checkSegment(segment)
+      return runSegment(`appId: ${quote(appId)}\n---\n${segment.yaml}`, env)
     },
 
     backActions(observation) {
@@ -294,7 +323,7 @@ export function iosExplorationDriver(options: IosExplorationDriverOptions): Expl
       if (ids.includes('nav.back')) {
         actions.push({
           kind: 'back', targetId: 'nav.back', via: 'nav-bar',
-          segment: { label: 'back:nav-bar', yaml: '- tapOn:\n    id: "BackButton"\n' },
+          segment: { ...tapSegment('BackButton'), label: 'back:nav-bar' },
         })
         actions.push({
           kind: 'back', targetId: null, via: 'edge-swipe',

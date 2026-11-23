@@ -7,7 +7,7 @@ import { loadavg } from 'node:os'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { spawnSync } from 'node:child_process'
-import { parseMaestroHierarchy, ProcessMaestroTransport } from '@deja-qa/maestro'
+import { idSelector, parseMaestroHierarchy, ProcessMaestroTransport } from '@deja-qa/maestro'
 
 const executable = process.env.DEJA_MAESTRO
 const device = process.env.DEJA_SIM_UDID
@@ -61,7 +61,7 @@ const dismissals: Record<string, string> = {
 const keyboard: Record<string, unknown> = {}
 for (const [name, body] of Object.entries(dismissals)) {
   await transport.runFlow(launch())
-  await transport.runFlow(`${header}- tapOn:\n    id: "today.answer"\n- extendedWaitUntil:\n    visible:\n      id: "space"\n    timeout: 10000\n`)
+  await transport.runFlow(`${header}- tapOn:\n    id: ${idSelector('today.answer')}\n- extendedWaitUntil:\n    visible:\n      id: "space"\n    timeout: 10000\n`)
   const shown = await has('space')
   const result = await flow(body)
   keyboard[name] = { keyboardShownBefore: shown, step: result, keyboardGoneAfter: !(await has('space')) }
@@ -71,16 +71,16 @@ log('6_keyboard_dismissal', keyboard)
 // 4. Alerts. The in-app alert (empty export) is measured; a SpringBoard permission sheet is not.
 await transport.runFlow(launch())
 for (const id of ['today.you', 'you.settings', 'settings.category.privacyAndData']) {
-  await transport.runFlow(`${header}- tapOn:\n    id: ${JSON.stringify(id)}\n`)
+  await transport.runFlow(`${header}- tapOn:\n    id: ${idSelector(id)}\n`)
 }
-await transport.runFlow(`${header}- scrollUntilVisible:\n    element:\n      id: "settings.export"\n`)
-await transport.runFlow(`${header}- tapOn:\n    id: "settings.export"\n`)
+await transport.runFlow(`${header}- scrollUntilVisible:\n    element:\n      id: ${idSelector('settings.export')}\n`)
+await transport.runFlow(`${header}- tapOn:\n    id: ${idSelector('settings.export')}\n`)
 const alertElements = parseMaestroHierarchy((await transport.hierarchy()).raw)
 log('4_in_app_alert', {
   emptyOKInHierarchy: alertElements.some(e => e.rawId === 'export.emptyOK'),
   systemPermissionSheet: 'not measured: Blankaday in uiTesting mode shows none, and no dedicated trigger was built',
 })
-await transport.runFlow(`${header}- tapOn:\n    id: "export.emptyOK"\n`)
+await transport.runFlow(`${header}- tapOn:\n    id: ${idSelector('export.emptyOK')}\n`)
 
 // 5. Crash. Send SIGSEGV to the app process inside this simulator only.
 await transport.runFlow(launch())
@@ -99,7 +99,7 @@ if (pid && /^\d+$/.test(pid)) {
     signalSent: 'SIGSEGV to the Blankaday Dev process in the dedicated simulator',
     hierarchyAfter: afterHierarchy,
     assertAfter: await flow('- assertVisible:\n    id: "screen.today"\n'),
-    tapAfter: await flow('- tapOn:\n    id: "tab.feed"\n'),
+    tapAfter: await flow(`- tapOn:\n    id: ${idSelector('tab.feed')}\n`),
   })
 } else log('5_crash', 'not measured: could not find the app process')
 await transport.close()

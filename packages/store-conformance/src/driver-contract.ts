@@ -12,6 +12,8 @@ export type ContractScene = {
   ids: string[]
   /** Visible labels with no ID. They must never change a fingerprint. */
   labels?: string[]
+  /** IDs of a hidden page that leaks into the hierarchy before the screen's own elements. */
+  ghost?: string[]
   /** Show the platform's software keyboard on top. */
   keyboard?: boolean
   /** Add this many extra anonymous elements with IDs, to cross the 400 bound. */
@@ -22,6 +24,8 @@ export type ExplorationDriverContractImplementation = {
   name: string
   /** `appId` for `reset`. */
   appId: string
+  /** Normalized IDs that make the driver offer at least one back action. Empty when none can. */
+  backIds: string[]
   fingerprint: FingerprintConfig
   /**
    * A driver whose `observe()` returns `scene`. `relaunches()` counts launches since creation;
@@ -53,14 +57,38 @@ export function runExplorationDriverContractTests(implementation: ExplorationDri
       expect(typeof driver.rules.normalizeId).toBe('function')
     })
 
-    test('observe never relaunches and the same screen gives the same fingerprint', async () => {
+    test('observe and act never relaunch; reset launches once; the same screen gives the same fingerprint', async () => {
       const { driver, relaunches } = implementation.create(base)
+      const profile = { appId: implementation.appId, arguments: {}, clearState: true }
+      expect((await driver.reset(profile, [])).passed).toBe(true)
+      expect(relaunches()).toBe(1)
       const first = await driver.observe()
+      for (let i = 0; i < 3; i++) {
+        expect((await driver.act({ label: 'tap', yaml: '- tapOn:\n    id: "x"\n' })).passed).toBe(true)
+        await driver.observe()
+      }
       const second = await driver.observe()
-      expect(relaunches()).toBe(0)
+      expect(relaunches()).toBe(1)
       expect(first.snapshot.sha256).toBe(second.snapshot.sha256)
       expect(fingerprintScreenV2(first.elements, implementation.fingerprint).fingerprint)
         .toBe(fingerprintScreenV2(second.elements, implementation.fingerprint).fingerprint)
+    })
+
+    test('act refuses a segment that relaunches or rebinds the app', async () => {
+      const { driver } = implementation.create(base)
+      await driver.reset({ appId: implementation.appId, arguments: {}, clearState: true }, [])
+      for (const yaml of ['- launchApp\n', '- launchApp:\n    clearState: true\n', 'appId: other.app\n---\n- tapOn: x\n', '- openLink: x://y\n']) {
+        await expect(driver.act({ label: 'bad', yaml })).rejects.toThrow()
+      }
+    })
+
+    test('a hidden page that leaks in makes the screen a gap, unless markerScope last-marker is set', async () => {
+      const clean = await fingerprintOf(base)
+      const ghosted = await fingerprintOf({ ...base, ghost: ['screen.journal', 'journal.you'] })
+      expect(ghosted.fingerprint).toMatchObject({ stable: false, unstableReason: 'marker-conflict' })
+      const scoped = fingerprintScreenV2(ghosted.observation.elements, { ...implementation.fingerprint, markerScope: 'last-marker' })
+      expect(scoped.stable).toBe(true)
+      expect(scoped.fingerprint).toBe(clean.fingerprint.fingerprint)
     })
 
     test('the keyboard is an overlay: same fingerprint, keyboardVisible, system UI reported', async () => {
@@ -103,10 +131,12 @@ export function runExplorationDriverContractTests(implementation: ExplorationDri
       expect(result.crashed).toBe(false)
     })
 
-    test('back actions are launch-free segments', async () => {
-      const { driver } = implementation.create({ ...base, ids: [...base.ids, 'BackButton', 'x.sheet'] })
+    test('back actions are launch-free segments, and exist where the platform has a back control', async () => {
+      const { driver } = implementation.create({ ...base, ids: [...base.ids, ...implementation.backIds, 'x.sheet'] })
       const observation = await driver.observe()
-      for (const action of driver.backActions(observation)) {
+      const actions = driver.backActions(observation)
+      if (implementation.backIds.length > 0) expect(actions.length).toBeGreaterThan(0)
+      for (const action of actions) {
         expect(action.segment.yaml).not.toContain('launchApp')
         expect(action.segment.yaml.length).toBeGreaterThan(0)
       }

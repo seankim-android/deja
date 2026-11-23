@@ -8,6 +8,9 @@ import {
   ProcessMaestroTransport,
   iosExplorationDriver,
   iosFingerprintRules,
+  escapeRegex,
+  idSelector,
+  tapSegment,
   parseMaestroHierarchy,
   type MaestroFlowResult,
   type MaestroTransport,
@@ -65,6 +68,18 @@ describe('iOS fingerprint rules', () => {
     expect(iosFingerprintRules.normalizeId('Fill in today’s blank')).toBeNull()
     expect(iosFingerprintRules.normalizeId('  ')).toBeNull()
     expect(iosFingerprintRules.normalizeId('BackButton')).toBe('nav.back')
+  })
+})
+
+describe('selectors', () => {
+  test('idSelector escapes regex metacharacters, so IDs that differ at a dot do not collide', () => {
+    expect(escapeRegex('a.b*c(d)[e]|f\\g')).toBe('a\\.b\\*c\\(d\\)\\[e\\]\\|f\\\\g')
+    const selector = JSON.parse(idSelector('today.save')) as string
+    const fullMatch = new RegExp(`^(?:${selector})$`)
+    expect(fullMatch.test('today.save')).toBe(true)
+    expect(fullMatch.test('today_save')).toBe(false)
+    expect(fullMatch.test('todayXsave')).toBe(false)
+    expect(tapSegment('settings.export').yaml).toBe('- tapOn:\n    id: "settings\\\\.export"\n')
   })
 })
 
@@ -141,6 +156,24 @@ describe('iosExplorationDriver', () => {
     expect(flows[1]).toBe('appId: "com.blankaday.dev"\n---\n- tapOn:\n    id: "tab.feed"\n')
     await driver.act({ label: 'again', yaml: '- tapOn: y\n' })
     expect(flows.filter(flow => flow.includes('launchApp'))).toHaveLength(1)
+  })
+
+  test('act refuses segments that relaunch or rebind the app, and reset validates the profile', async () => {
+    const flows: string[] = []
+    const driver = iosExplorationDriver({ transport: transportFor(() => today, flows) })
+    await driver.reset({ appId: 'com.blankaday.dev', clearState: false, arguments: {} }, [])
+    const before = flows.length
+    for (const yaml of [
+      '- launchApp\n', '- launchApp:\n    clearState: true\n', 'appId: other.app\n---\n- tapOn: x\n',
+      '- openLink: x://y\n', '- tapOn: x\n- clearState\n', '- stopApp\n',
+    ]) await expect(driver.act({ label: 'bad', yaml })).rejects.toThrow(TypeError)
+    expect(flows.length).toBe(before)
+    for (const profile of [
+      { appId: 'a.b', clearState: 'true\n  evil: 1', arguments: {} },
+      { appId: 'a b\n- launchApp', clearState: true, arguments: {} },
+      { appId: 'a.b', clearState: true, arguments: { k: 3 } },
+      { appId: 'a.b', clearState: true, arguments: {}, permissions: { notifications: 'sure' } },
+    ]) await expect(driver.reset(profile as never, [])).rejects.toThrow(TypeError)
   })
 
   test('a failing step is a result, not a throw', async () => {
@@ -254,5 +287,80 @@ for await (const chunk of process.stdin) {
     } finally {
       await rm(directory, { recursive: true, force: true })
     }
+  })
+})
+
+describe('McpMaestroTransport failure handling', () => {
+  test('a nonexistent executable rejects at once, not after the timeout, and does not crash the host', async () => {
+    const transport = new McpMaestroTransport({ executable: '/nonexistent/maestro', device: 'x', timeoutMs: 20_000 })
+    const started = performance.now()
+    await expect(transport.hierarchy()).rejects.toThrow()
+    expect(performance.now() - started).toBeLessThan(5_000)
+    // A second call starts again and fails the same way, still fast.
+    const again = performance.now()
+    await expect(transport.runFlow('appId: a\n---\n- tapOn: x\n')).rejects.toThrow()
+    expect(performance.now() - again).toBeLessThan(5_000)
+    await transport.close()
+  })
+
+  test('a child that dies mid-run rejects the pending call at once, and the next call starts a new one', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'deja-mcp-die-'))
+    try {
+      const counter = join(directory, 'spawns')
+      const executable = await fakeExecutable(directory, `
+import { appendFileSync } from 'node:fs'
+appendFileSync(${JSON.stringify(counter)}, 'x')
+const spawns = (await Bun.file(${JSON.stringify(counter)}).text()).length
+const reply = (id, result) => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id, result }) + '\\n')
+let buffer = ''
+for await (const chunk of process.stdin) {
+  buffer += new TextDecoder().decode(chunk)
+  for (let end = buffer.indexOf('\\n'); end >= 0; end = buffer.indexOf('\\n')) {
+    const message = JSON.parse(buffer.slice(0, end)); buffer = buffer.slice(end + 1)
+    if (message.method === 'initialize') reply(message.id, { protocolVersion: '2024-11-05' })
+    if (message.method === 'tools/call') {
+      if (spawns === 1) process.exit(3)
+      reply(message.id, { content: [{ type: 'text', text: 'Flow COMPLETED' }] })
+    }
+  }
+}
+`)
+      const transport = new McpMaestroTransport({ executable, device: 'u', timeoutMs: 20_000 })
+      const started = performance.now()
+      await expect(transport.runFlow('appId: a\n---\n- tapOn: x\n')).rejects.toThrow('exited')
+      expect(performance.now() - started).toBeLessThan(5_000)
+      expect((await transport.runFlow('appId: a\n---\n- tapOn: x\n')).passed).toBe(true)
+      expect((await readFile(counter, 'utf8')).length).toBe(2)
+      await transport.close()
+    } finally {
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
+
+  test('an initialize timeout kills the child and the next call starts a new one', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'deja-mcp-hang-'))
+    try {
+      const pidFile = join(directory, 'pid')
+      const executable = await fakeExecutable(directory, `
+await Bun.write(${JSON.stringify(pidFile)}, String(process.pid))
+await Bun.sleep(60000)
+`)
+      const transport = new McpMaestroTransport({ executable, device: 'u', timeoutMs: 400 })
+      await expect(transport.hierarchy()).rejects.toThrow('timed out')
+      const pid = Number(await readFile(pidFile, 'utf8'))
+      await Bun.sleep(300)
+      expect(() => process.kill(pid, 0)).toThrow()
+      await expect(transport.hierarchy()).rejects.toThrow('timed out')
+      await transport.close()
+    } finally {
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
+
+  test('flow variable names are validated', async () => {
+    const transport = new McpMaestroTransport({ executable: '/nonexistent/maestro', device: 'x', timeoutMs: 1000 })
+    await expect(transport.runFlow('appId: a\n---\n- tapOn: x\n', { 'BAD NAME': '1' })).rejects.toThrow('Invalid flow variable')
+    const process_ = new ProcessMaestroTransport({ executable: '/nonexistent/maestro', device: 'x' })
+    await expect(process_.runFlow('appId: a\n---\n- tapOn: x\n', { '1BAD': '1' })).rejects.toThrow('Invalid flow variable')
   })
 })

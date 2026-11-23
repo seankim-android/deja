@@ -133,7 +133,8 @@ export interface ActionChooser {
 
 /** Agent-facing observation result: never guesses (section 7.8). */
 export type ObservationReport = {
-  status: 'ok' | 'ambiguous'
+  /** The match status itself: only `matched` and `matched-scrolled` mean a known screen. */
+  status: 'matched' | 'matched-scrolled' | 'ambiguous' | 'changed' | 'unknown' | 'gap'
   ambiguous: boolean
   candidates: { nodeId: string; marker: string | null }[]
   truncated: boolean
@@ -232,19 +233,17 @@ export function fingerprintScreenV2(
   const marker = config.screenMarkerPattern ? new RegExp(config.screenMarkerPattern) : null
   const chrome = new Set(config.chromeIds ?? [])
   const ignore = config.ignore ?? []
-  const kept = new Set<string>()
-  let scoped = elements
+  // Every filter runs first, so markers are found among the IDs that count. A marker that is
+  // dynamic, ignored or chrome is not a marker.
+  const counts = (element: ElementObservation): element is ElementObservation & { id: string } =>
+    element.id !== null && !element.overlay &&
+    !ignored(element.id, ignore) && !isDynamicId(element.id) && !chrome.has(element.id)
+  let scoped = elements.filter(counts)
   if (marker && config.markerScope === 'last-marker') {
-    const at = elements.flatMap((element, index) =>
-      element.id !== null && !element.overlay && marker.test(element.id) ? [index] : [])
-    const distinct = new Set(at.map(index => elements[index].id))
-    if (distinct.size > 1) scoped = elements.slice(at[at.length - 1])
+    const at = scoped.flatMap((element, index) => marker.test(element.id) ? [index] : [])
+    if (new Set(at.map(index => scoped[index].id)).size > 1) scoped = scoped.slice(at[at.length - 1])
   }
-  for (const element of scoped) {
-    if (element.id === null || element.overlay) continue
-    if (ignored(element.id, ignore) || isDynamicId(element.id) || chrome.has(element.id)) continue
-    kept.add(element.id)
-  }
+  const kept = new Set<string>(scoped.map(element => element.id))
   const markers = marker ? [...kept].filter(id => marker.test(id)).sort() : []
   const markerSet = new Set(markers)
   const anchors = [...kept].filter(id => !markerSet.has(id)).sort()
@@ -375,7 +374,7 @@ export function observationReport(
   truncated: boolean,
 ): ObservationReport {
   return {
-    status: match.ambiguous ? 'ambiguous' : 'ok',
+    status: match.status,
     ambiguous: match.ambiguous,
     candidates: match.ambiguous
       ? match.candidateNodeIds.map(nodeId => ({

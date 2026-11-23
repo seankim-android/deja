@@ -319,7 +319,7 @@ export type Observation = {
 };
 export declare function observationReport(match: ScreenMatchV2, stored: StoredScreen[], truncated: boolean): ObservationReport;
 export type ObservationReport = {
-    status: 'ok' | 'ambiguous';
+    status: 'matched' | 'matched-scrolled' | 'ambiguous' | 'changed' | 'unknown' | 'gap';
     ambiguous: boolean;
     candidates: {
         nodeId: string;

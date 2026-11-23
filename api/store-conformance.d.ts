@@ -5,12 +5,14 @@ export declare function contractIdentity(overrides?: Partial<WalkIdentity>): Wal
 export type ContractScene = {
     ids: string[];
     labels?: string[];
+    ghost?: string[];
     keyboard?: boolean;
     extra?: number;
 };
 export type ExplorationDriverContractImplementation = {
     name: string;
     appId: string;
+    backIds: string[];
     fingerprint: FingerprintConfig;
     create(scene: ContractScene): {
         driver: ExplorationDriver;

@@ -21,6 +21,7 @@ const FAILED: MaestroFlowResult = { passed: false, exitCode: 1, output: 'Element
 
 function sceneIds(scene: ContractScene, keyboardKeys: string[]) {
   return [
+    ...(scene.ghost ?? []),
     ...scene.ids,
     ...Array.from({ length: scene.extra ?? 0 }, (_, index) => `extra.item.${index}x`),
     ...(scene.keyboard ? keyboardKeys : []),
@@ -38,6 +39,7 @@ const fakeRules: FingerprintRules = {
 const fake: ExplorationDriverContractImplementation = {
   name: 'fake driver',
   appId: 'dev.deja.fake',
+  backIds: [],
   fingerprint: { screenMarkerPattern: '^screen\\.' },
   create(scene) {
     let launches = 0
@@ -66,7 +68,8 @@ const fake: ExplorationDriverContractImplementation = {
           snapshot: { path: '', sha256: snapshot.sha256 }, capturedAt: '2026-11-22T00:00:00.000Z', durationMs: 1,
         }
       },
-      async act() {
+      async act(segment) {
+        if (/launchApp|openLink|^appId:|\nappId:/.test(segment.yaml)) throw new TypeError('segment relaunches the app')
         if (failNext) {
           failNext = false
           return {
@@ -102,6 +105,7 @@ function hierarchyJson(ids: string[], labels: string[]) {
 const ios: ExplorationDriverContractImplementation = {
   name: 'iosExplorationDriver',
   appId: 'dev.deja.ios',
+  backIds: ['BackButton'],
   fingerprint: { screenMarkerPattern: '^screen\\.' },
   create(scene) {
     let launches = 0

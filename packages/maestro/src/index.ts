@@ -44,6 +44,8 @@ export {
   type MaestroTransport,
 } from './ios-exploration.ts'
 
+export { escapeRegex, idSelector, tapSegment, waitVisibleSegment } from './selectors.ts'
+
 export {
   McpMaestroTransport,
   ProcessMaestroTransport,

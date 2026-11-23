@@ -1,6 +1,6 @@
 // typescript 7.0.2
 // entry . (./src/index.ts)
-// exports: AdapterCacheIdentity, AdapterIdentityInput, AndroidAdapterOptions, COMPOSITION_MODEL_METRICS, CompositionRunnerObservation, CompositionRunnerTrace, IosAdapterOptions, IosExplorationDriverOptions, LoginCompositionResult, MAESTRO_COMPOSITE_FLOW_SCHEMA, MAESTRO_FLOW_SCHEMA_VERSION, MaestroArtifactPaths, MaestroCommandOptions, MaestroExecutionAdapter, MaestroFailureCategory, MaestroFailureClassification, MaestroFailureInput, MaestroFlowContainment, MaestroFlowResult, MaestroHierarchyResult, MaestroLoginComposer, MaestroLoginComposerOptions, MaestroPlatform, MaestroRunResult, MaestroRunnerError, MaestroRunnerErrorKind, MaestroTransport, MaestroWalkRunner, MaestroWalkRunnerOptions, McpMaestroTransport, McpMaestroTransportOptions, ProcessMaestroTransport, ProcessMaestroTransportOptions, RunMaestroOptions, SegmentVerificationResult, WebAdapterOptions, androidMaestroAdapter, classifyMaestroFailure, composeMaestroLoginFlow, countFlowAssertions, countMaestroAssertions, countMaestroSteps, iosExplorationDriver, iosFingerprintRules, iosMaestroAdapter, parseMaestroHierarchy, readCompositionRunnerTrace, readMaestroContinuation, resolveFlowPath, runMaestro, validateMaestroFlowReference, webMaestroAdapter
+// exports: AdapterCacheIdentity, AdapterIdentityInput, AndroidAdapterOptions, COMPOSITION_MODEL_METRICS, CompositionRunnerObservation, CompositionRunnerTrace, IosAdapterOptions, IosExplorationDriverOptions, LoginCompositionResult, MAESTRO_COMPOSITE_FLOW_SCHEMA, MAESTRO_FLOW_SCHEMA_VERSION, MaestroArtifactPaths, MaestroCommandOptions, MaestroExecutionAdapter, MaestroFailureCategory, MaestroFailureClassification, MaestroFailureInput, MaestroFlowContainment, MaestroFlowResult, MaestroHierarchyResult, MaestroLoginComposer, MaestroLoginComposerOptions, MaestroPlatform, MaestroRunResult, MaestroRunnerError, MaestroRunnerErrorKind, MaestroTransport, MaestroWalkRunner, MaestroWalkRunnerOptions, McpMaestroTransport, McpMaestroTransportOptions, ProcessMaestroTransport, ProcessMaestroTransportOptions, RunMaestroOptions, SegmentVerificationResult, WebAdapterOptions, androidMaestroAdapter, classifyMaestroFailure, composeMaestroLoginFlow, countFlowAssertions, countMaestroAssertions, countMaestroSteps, escapeRegex, idSelector, iosExplorationDriver, iosFingerprintRules, iosMaestroAdapter, parseMaestroHierarchy, readCompositionRunnerTrace, readMaestroContinuation, resolveFlowPath, runMaestro, tapSegment, validateMaestroFlowReference, waitVisibleSegment, webMaestroAdapter
 export type AdapterCacheIdentity = AdapterIdentityInput & {
     adapter?: string;
     browser?: string;
@@ -34,6 +34,8 @@ export type CompositionRunnerTrace = {
 export declare function countFlowAssertions(flowPath: string): Promise<number | null>;
 export declare function countMaestroAssertions(contents: string): number;
 export declare function countMaestroSteps(contents: string): number;
+export declare function escapeRegex(text: string): string;
+export declare function idSelector(id: string): string;
 export type IosAdapterOptions = {
     device: string;
     adapterId?: string;
@@ -186,6 +188,7 @@ export declare class McpMaestroTransport implements MaestroTransport {
     startupMs: number;
     private readonly options;
     constructor(options: McpMaestroTransportOptions);
+    private fail;
     private send;
     private request;
     private start;
@@ -240,7 +243,9 @@ export type SegmentVerificationResult = {
     execution: ExecutionResult;
     errors: string[];
 };
+export declare function tapSegment(id: string): Segment;
 export declare function validateMaestroFlowReference(reference: string, containment?: MaestroFlowContainment): string;
+export declare function waitVisibleSegment(id: string, timeoutMs?: number): Segment;
 export type WebAdapterOptions = {
     device?: string;
     headless?: boolean;

@@ -16,7 +16,7 @@ import {
   findChromeIds, fingerprintScreenV2, type FingerprintConfig, type Observation, type Segment,
 } from '@deja-qa/core'
 import {
-  iosExplorationDriver, McpMaestroTransport, ProcessMaestroTransport, type MaestroTransport,
+  idSelector, iosExplorationDriver, McpMaestroTransport, ProcessMaestroTransport, tapSegment, waitVisibleSegment, type MaestroTransport,
 } from '@deja-qa/maestro'
 
 const kind = process.argv[2]
@@ -49,12 +49,6 @@ const screens: {
   stable: boolean; stableScoped: boolean; fingerprintScoped: string; unstableReason: string | null; markersInDocumentOrder: string[]; keyboardVisible: boolean; systemUi: string | null; truncated: boolean
   elementCount: number; observation: Observation
 }[] = []
-
-const tap = (id: string): Segment => ({ label: `tap:${id}`, yaml: `- tapOn:\n    id: ${JSON.stringify(id)}\n` })
-const wait = (id: string, timeout = 10000): Segment => ({
-  label: `wait:${id}`,
-  yaml: `- extendedWaitUntil:\n    visible:\n      id: ${JSON.stringify(id)}\n    timeout: ${timeout}\n`,
-})
 
 async function act(step: string, segment: Segment) {
   const result = await driver.act(segment)
@@ -106,18 +100,18 @@ try {
   if (!benchOnly) {
   // Part 1: smoke.yaml's route, observing each screen twice.
   await resetStep('reset:smoke', {})
-  await act('wait:today', wait('screen.today'))
+  await act('wait:today', waitVisibleSegment('screen.today'))
   await observe('today#1'); await observe('today#2')
-  await act('tap:tab.feed', tap('tab.feed')); await act('wait:feed', wait('screen.feed'))
+  await act('tap:tab.feed', tapSegment('tab.feed')); await act('wait:feed', waitVisibleSegment('screen.feed'))
   await observe('feed#1'); await observe('feed#2')
-  await act('tap:tab.journal', tap('tab.journal')); await act('wait:journal', wait('screen.journal'))
+  await act('tap:tab.journal', tapSegment('tab.journal')); await act('wait:journal', waitVisibleSegment('screen.journal'))
   await observe('journal#1'); await observe('journal#2')
-  await act('tap:tab.today', tap('tab.today')); await act('wait:today-back', wait('screen.today'))
+  await act('tap:tab.today', tapSegment('tab.today')); await act('wait:today-back', waitVisibleSegment('screen.today'))
   await observe('today-back#1'); await observe('today-back#2')
 
   // Part 2: keyboard on today.answer. The keyboard must not change the fingerprint.
-  await act('tap:today.answer', tap('today.answer'))
-  await act('wait:space', wait('space', 8000))
+  await act('tap:today.answer', tapSegment('today.answer'))
+  await act('wait:space', waitVisibleSegment('space', 8000))
   await observe('today-keyboard#1'); await observe('today-keyboard#2')
   await act('key:enter', { label: 'key:enter', yaml: '- pressKey: Enter\n' })
   await observe('today-after-keyboard')
@@ -125,15 +119,15 @@ try {
   // Part 3: share sheet (export.yaml's route) on the sample journal.
   await resetStep('reset:history', { '-screenshotState': 'history' })
   for (const id of ['today.you', 'you.settings', 'settings.category.privacyAndData']) {
-    await act(`tap:${id}`, tap(id))
+    await act(`tap:${id}`, tapSegment(id))
   }
   await act('scroll:settings.export', {
-    label: 'scroll', yaml: '- scrollUntilVisible:\n    element:\n      id: "settings.export"\n',
+    label: 'scroll', yaml: `- scrollUntilVisible:\n    element:\n      id: ${idSelector('settings.export')}\n`,
   })
   await observe('settings-before-share')
-  await act('tap:settings.export', tap('settings.export'))
-  await act('tap:export.csv', tap('export.csv'))
-  await act('wait:ActivityListView', wait('ActivityListView', 15000))
+  await act('tap:settings.export', tapSegment('settings.export'))
+  await act('tap:export.csv', tapSegment('export.csv'))
+  await act('wait:ActivityListView', waitVisibleSegment('ActivityListView', 15000))
   await observe('share-sheet#1')
   await act('swipe:close-sheet', { label: 'swipe', yaml: '- swipe:\n    start: 50%, 40%\n    end: 50%, 95%\n' })
   await observe('settings-after-share')
@@ -141,10 +135,10 @@ try {
   }
   // Part 4: cost microbenchmark. Repeated observe and repeated tab taps on the live app.
   await resetStep('reset:bench', {})
-  await act('bench:wait', wait('screen.today'))
+  await act('bench:wait', waitVisibleSegment('screen.today'))
   for (let i = 0; i < repeats; i++) await observe(`bench-observe#${i + 1}`)
   for (let i = 0; i < repeats; i++) {
-    await act(`bench-tap#${i + 1}`, tap(i % 2 === 0 ? 'tab.feed' : 'tab.today'))
+    await act(`bench-tap#${i + 1}`, tapSegment(i % 2 === 0 ? 'tab.feed' : 'tab.today'))
   }
 } finally {
   await transport.close()

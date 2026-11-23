@@ -76,6 +76,7 @@ export class ProcessMaestroTransport implements MaestroTransport {
     try {
       const flow = join(directory, 'step.yaml')
       await writeFile(flow, yaml)
+      checkEnv(env)
       const variables = Object.entries(env).flatMap(([key, value]) => ['-e', `${key}=${value}`])
       const result = await run(
         this.options.executable,
@@ -106,9 +107,19 @@ export type McpMaestroTransportOptions = {
 
 type Pending = { resolve: (value: any) => void; reject: (error: Error) => void }
 
+const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/
+
+function checkEnv(env: Record<string, string>) {
+  for (const key of Object.keys(env)) {
+    if (!ENV_NAME.test(key)) throw new TypeError(`Invalid flow variable name: ${key}`)
+  }
+}
+
 /**
  * One long-running `maestro mcp` process spoken to over stdio JSON-RPC. The caller owns it:
- * `close()` stops the process, and nothing else may be killed.
+ * `close()` stops the process, and nothing else may be killed. A spawn failure, a broken pipe or an
+ * exit rejects every pending request at once and resets the session, so the next call starts a
+ * new process.
  */
 export class McpMaestroTransport implements MaestroTransport {
   readonly kind = 'mcp' as const
@@ -125,57 +136,82 @@ export class McpMaestroTransport implements MaestroTransport {
     this.options = options
   }
 
+  /** Drop this child's session: reject everything pending, reset state, stop the process. */
+  private fail(child: ReturnType<typeof spawn>, error: Error) {
+    if (this.child === child) {
+      this.child = null
+      this.ready = null
+      this.buffer = ''
+    }
+    const waiting = [...this.pending.values()]
+    this.pending.clear()
+    for (const entry of waiting) entry.reject(error)
+    if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
+  }
+
   private send(message: object) {
-    this.child!.stdin!.write(`${JSON.stringify(message)}\n`)
+    const child = this.child
+    if (!child?.stdin || child.stdin.destroyed) throw new Error('maestro mcp is not running')
+    child.stdin.write(`${JSON.stringify(message)}\n`)
   }
 
   private request(method: string, params: object): Promise<any> {
     const id = ++this.nextId
+    const child = this.child
     return new Promise((resolve, reject) => {
+      if (!child) return reject(new Error('maestro mcp is not running'))
       const timer = setTimeout(() => {
-        this.pending.delete(id)
-        reject(new Error(`MCP ${method} timed out`))
+        // A request that timed out may still be running inside Maestro, so the session is dropped.
+        this.fail(child, new Error(`MCP ${method} timed out`))
       }, this.options.timeoutMs ?? 120_000)
       this.pending.set(id, {
         resolve: value => { clearTimeout(timer); resolve(value) },
         reject: error => { clearTimeout(timer); reject(error) },
       })
-      this.send({ jsonrpc: '2.0', id, method, params })
+      try {
+        this.send({ jsonrpc: '2.0', id, method, params })
+      } catch (error) {
+        this.fail(child, error instanceof Error ? error : new Error(String(error)))
+      }
     })
   }
 
   private start(): Promise<void> {
-    this.ready ??= (async () => {
-      const started = performance.now()
-      const child = spawn(this.options.executable, ['mcp'], { env: maestroEnv(), stdio: ['pipe', 'pipe', 'ignore'] })
-      this.child = child
-      child.stdout!.setEncoding('utf8').on('data', (chunk: string) => {
-        this.buffer += chunk
-        for (let end = this.buffer.indexOf('\n'); end >= 0; end = this.buffer.indexOf('\n')) {
-          const line = this.buffer.slice(0, end)
-          this.buffer = this.buffer.slice(end + 1)
-          try {
-            const message = JSON.parse(line)
-            if (typeof message.id === 'number') {
-              const waiting = this.pending.get(message.id)
-              this.pending.delete(message.id)
-              if (message.error) waiting?.reject(new Error(String(message.error.message ?? 'MCP error')))
-              else waiting?.resolve(message.result)
-            }
-          } catch { /* not a JSON-RPC line */ }
-        }
-      })
-      child.once('close', () => {
-        for (const waiting of this.pending.values()) waiting.reject(new Error('maestro mcp exited'))
-        this.pending.clear()
-      })
+    if (this.ready) return this.ready
+    const started = performance.now()
+    const child = spawn(this.options.executable, ['mcp'], { env: maestroEnv(), stdio: ['pipe', 'pipe', 'ignore'] })
+    this.child = child
+    this.buffer = ''
+    child.once('error', error => this.fail(child, error))
+    child.stdin!.on('error', error => this.fail(child, error))
+    child.once('close', () => this.fail(child, new Error('maestro mcp exited')))
+    child.stdout!.setEncoding('utf8').on('data', (chunk: string) => {
+      this.buffer += chunk
+      for (let end = this.buffer.indexOf('\n'); end >= 0; end = this.buffer.indexOf('\n')) {
+        const line = this.buffer.slice(0, end)
+        this.buffer = this.buffer.slice(end + 1)
+        try {
+          const message = JSON.parse(line)
+          if (typeof message.id === 'number') {
+            const waiting = this.pending.get(message.id)
+            this.pending.delete(message.id)
+            if (message.error) waiting?.reject(new Error(String(message.error.message ?? 'MCP error')))
+            else waiting?.resolve(message.result)
+          }
+        } catch { /* not a JSON-RPC line */ }
+      }
+    })
+    const ready = (async () => {
       await this.request('initialize', {
         protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'deja', version: '0' },
       })
       this.send({ jsonrpc: '2.0', method: 'notifications/initialized' })
       this.startupMs = Math.round(performance.now() - started)
     })()
-    return this.ready
+    this.ready = ready
+    // A failed start must not stay cached: the next call spawns again.
+    ready.catch(() => { if (this.ready === ready) this.ready = null })
+    return ready
   }
 
   private async call(name: string, args: object): Promise<any> {
@@ -192,6 +228,7 @@ export class McpMaestroTransport implements MaestroTransport {
   }
 
   async runFlow(yaml: string, env?: Record<string, string>): Promise<MaestroFlowResult> {
+    if (env) checkEnv(env)
     const started = performance.now()
     const result = await this.call('run', { yaml, ...(env ? { env } : {}) })
     const text = (result.content as { text: string }[]).map(part => part.text).join('\n')
@@ -209,11 +246,9 @@ export class McpMaestroTransport implements MaestroTransport {
     const child = this.child
     this.child = null
     this.ready = null
-    if (!child || child.exitCode !== null) return
-    child.kill('SIGTERM')
-    await new Promise<void>(resolve => {
-      const timer = setTimeout(() => { child.kill('SIGKILL'); resolve() }, 3000)
-      child.once('close', () => { clearTimeout(timer); resolve() })
-    })
+    if (!child || child.exitCode !== null || child.signalCode !== null) return
+    const closed = new Promise<void>(resolve => child.once('close', () => resolve()))
+    this.fail(child, new Error('maestro mcp closed'))
+    await closed
   }
 }

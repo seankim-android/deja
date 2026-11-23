@@ -127,6 +127,18 @@ describe('fingerprint v2', () => {
     expect(fingerprintScreenV2(single, { ...config, markerScope: 'last-marker' }).anchors).toEqual(['toolbar.x'])
   })
 
+  test('markers are found after the dynamic, ignore and chrome filters', () => {
+    // `screen.step_2` is a dynamic ID, so it is no marker and cannot drive last-marker slicing.
+    const withDynamic = [el('screen.a'), el('a.x'), el('screen.step_2'), el('a.y')]
+    const scoped = fingerprintScreenV2(withDynamic, { ...config, markerScope: 'last-marker' })
+    expect(scoped).toMatchObject({ marker: 'screen.a', stable: true })
+    expect(scoped.anchors).toEqual(['a.x', 'a.y'])
+    const ignored = fingerprintScreenV2([el('screen.old'), el('screen.new'), el('n.x')], { ...config, ignore: ['screen.old'] })
+    expect(ignored).toMatchObject({ marker: 'screen.new', stable: true })
+    const chrome = fingerprintScreenV2([el('screen.shell'), el('screen.new')], { ...config, chromeIds: ['screen.shell'] })
+    expect(chrome.markers).toEqual(['screen.new'])
+  })
+
   test('a screen with no stable IDs is not stable', () => {
     expect(fingerprintScreenV2([el(null), el('calendar.noAnswer.2026-11-08')], config))
       .toMatchObject({ stable: false, unstableReason: 'no-stable-ids' })
@@ -198,8 +210,16 @@ describe('matchScreenV2', () => {
     expect(match).toMatchObject({ status: 'gap', candidateNodeIds: [], ambiguous: false })
   })
 
+  test('the report never says ok for a gap, an unknown or a changed screen', () => {
+    const elsewhere = view(['screen.other', 'other.x'])
+    expect(observationReport(matchScreenV2(nodes, elsewhere), nodes, false).status).toBe('unknown')
+    expect(observationReport(matchScreenV2(nodes, elsewhere, 'today'), nodes, false).status).toBe('changed')
+    expect(observationReport(matchScreenV2(nodes, fingerprintScreenV2([el(null)], config)), nodes, false).status).toBe('gap')
+    expect(observationReport(matchScreenV2(nodes, view(['screen.settings', 'settings.a'])), nodes, false).status).toBe('matched-scrolled')
+  })
+
   test('a non-ambiguous report carries no candidates', () => {
     const match = matchScreenV2(nodes, view(['screen.today', 'today.answer']))
-    expect(observationReport(match, nodes, true)).toEqual({ status: 'ok', ambiguous: false, candidates: [], truncated: true })
+    expect(observationReport(match, nodes, true)).toEqual({ status: 'matched', ambiguous: false, candidates: [], truncated: true })
   })
 })
