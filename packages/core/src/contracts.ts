@@ -479,8 +479,8 @@ export type RunOutcome = 'passed' | 'remembered' | 'cold-recorded' | 'repaired' 
   'flaky' |
   /**
    * The flow's files could not be gathered or hashed safely (an unsafe or missing reference, a bad
-   * manifest), or the stored files no longer match what the walk recorded. Nothing was run,
-   * recorded or written. Exit 2.
+   * manifest), or the stored files no longer match what the walk recorded. Nothing was
+   * recorded or written, and the flow was not run unless the result carries an `execution`. Exit 2.
    */
   'closure-error'
 

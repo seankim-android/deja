@@ -430,7 +430,8 @@ fails with exit 2 or 4 after it was parsed, the line still prints, with `outcome
 ### Closure errors
 
 `closure-error` (exit `2`, summary `outcome=closure-error failure=unclassified`) means a flow's files could not
-be used safely, so nothing was run, recorded or written. Causes: a reference that is unsafe or
+be used safely, so nothing was recorded or written. The flow was not run, unless the result carries an
+`execution` (the error came after the run). Causes: a reference that is unsafe or
 missing (a variable, an absolute path, a hidden file, a path outside the workspace, a flow in a cycle,
 two spellings of one path, an `assertScreenshot`), a manifest or flow path that is refused, or stored
 files that no longer match what the walk recorded (a subflow swapped before a new-build replay runs).
@@ -439,8 +440,10 @@ summary with `outcome=error`. The exit code is the same; the summary now carries
 A manifest that cannot be parsed still exits `2` with its own message and `outcome=error`. A stored
 file of a classic store that changed on disk is still corrupt memory (exit `4`).
 
-Files a flow reads are `runFlow` and `retry` files, `runScript` files and `addMedia` files. Media is
-hashed as bytes (limit 8 MiB; flows and scripts 1 MiB).
+Files a flow reads are `runFlow` and `retry` files, `runScript` files and `addMedia` files (a list, or a
+`files` list). Media is hashed as bytes (limit 8 MiB; flows and scripts 1 MiB). `assertScreenshot`
+reads a reference image Déjà does not store, so it is refused. `takeScreenshot` and `startRecording`
+write their paths and are not part of the closure.
 
 ### Exit codes
 

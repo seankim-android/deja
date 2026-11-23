@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { mkdir, readFile, realpath, stat, writeFile } from 'node:fs/promises'
 import { dirname, isAbsolute, relative, resolve, sep } from 'node:path'
-import { ClosureRefusedError, findFlowReferences, FlowReferenceError, type StoredFlowFile } from '@deja-qa/core'
+import { ClosureRefusedError, findFlowReferences, FlowFileCommandError, FlowReferenceError, type StoredFlowFile } from '@deja-qa/core'
 
 /** A flow's references cannot be stored safely, so the flow is not remembered. */
 export class FlowClosureError extends ClosureRefusedError {
@@ -140,7 +140,15 @@ export async function collectFlowClosure(root: string, main: string): Promise<Fl
       throw new FlowClosureError(`flows run each other in a cycle: ${posix(relative(root, path))}`)
     }
     if (stack.length >= MAX_DEPTH) throw new FlowClosureError(`flows are nested more than ${MAX_DEPTH} deep`)
-    if (found.has(path)) return
+    const earlier = found.get(path)
+    if (earlier) {
+      // One file read as a flow and as media or a script would be hashed as one and followed as the
+      // other, so its own references could go unchecked.
+      if (earlier.kind !== kind) {
+        throw new FlowClosureError(`one file is used as a ${earlier.kind} and as a ${kind}: ${posix(relative(root, path))}`)
+      }
+      return
+    }
     // Spellings that differ only in case or Unicode normalization name one file on some disks, but
     // two on others, where the stored copy would break. Ask for one spelling.
     const sameName = [...found.keys()].find(other => spellingKey(other) === spellingKey(path))
@@ -320,6 +328,9 @@ export async function checkStoredSubflows(
     try {
       references = findFlowReferences((await readFile(absolute)).toString('utf8'))
     } catch (error) {
+      // A command this build now refuses (assertScreenshot, a malformed addMedia) was never stored by
+      // an older one, which ignored it. Treat the walk as stored before subflows were kept.
+      if (error instanceof FlowFileCommandError) return { status: 'legacy' }
       if (error instanceof FlowReferenceError) {
         return { status: 'invalid', message: `stored flow ${path} cannot be read for references: ${error.message}` }
       }

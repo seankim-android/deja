@@ -19,6 +19,14 @@ export class FlowReferenceError extends Error {
   }
 }
 
+/** A command reads a file in a way Déjà cannot store, or its file list is malformed. */
+export class FlowFileCommandError extends FlowReferenceError {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options)
+    this.name = 'FlowFileCommandError'
+  }
+}
+
 function parseDocuments(contents: string): unknown[] {
   const parsed = parseYamlDocuments(contents)
   if ('error' in parsed) {
@@ -41,15 +49,14 @@ function referencePath(kind: string, value: unknown): string {
  */
 const UNSUPPORTED_FILE_COMMANDS = new Set(['assertScreenshot'])
 
+/** Maestro 2.12 reads `addMedia` as a list of paths, or a mapping with a `files` list. */
 function mediaPaths(value: unknown): string[] {
-  if (typeof value === 'string') return [referencePath('addMedia', value)]
-  if (Array.isArray(value) && value.length > 0) return value.map(item => referencePath('addMedia', item))
-  if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
-    const { file, files } = value as Record<string, unknown>
-    if (file !== undefined) return mediaPaths(file)
-    if (files !== undefined) return mediaPaths(files)
+  const files = typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>).files : value
+  if (!Array.isArray(files) || files.length === 0 || files.some(item => typeof item !== 'string' || item.trim() === '')) {
+    throw new FlowFileCommandError('addMedia needs a list of file paths')
   }
-  throw new FlowReferenceError('addMedia needs file paths')
+  return (files as string[]).map(item => item.trim())
 }
 
 /**
@@ -57,8 +64,8 @@ function mediaPaths(value: unknown): string[] {
  * `when`, `onFlowStart`, `onFlowComplete`, inline `commands`): `runFlow` and `retry` files,
  * `runScript` files and `addMedia` files. Accepts `runFlow: path.yaml` and
  * `runFlow: { file: path.yaml, ... }`. A `runFlow` or `retry` with inline `commands` and no `file`
- * names nothing itself; its commands are still searched. `addMedia` takes a path, a list of paths,
- * or a mapping with `file` or `files`. A command that reads a file in a way this cannot follow
+ * names nothing itself; its commands are still searched. `addMedia` takes a list of paths or a
+ * mapping with a `files` list, as Maestro 2.12 does. A command that reads a file in a way this cannot follow
  * (`assertScreenshot`) is a `FlowReferenceError`.
  */
 export function findFlowReferences(contents: string): FlowReference[] {
@@ -71,7 +78,7 @@ export function findFlowReferences(contents: string): FlowReference[] {
     if (typeof node !== 'object' || node === null) return
     for (const [key, value] of Object.entries(node)) {
       if (UNSUPPORTED_FILE_COMMANDS.has(key)) {
-        throw new FlowReferenceError(
+        throw new FlowFileCommandError(
           `${key} reads a reference image that Déjà does not store or hash, so a stored or manifest flow cannot use it`,
         )
       }

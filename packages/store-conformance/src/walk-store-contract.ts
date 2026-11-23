@@ -724,10 +724,10 @@ export function runWalkStoreContractTests(implementation: WalkStoreContractImple
             '.maestro/subflows/caf\u00e9.yaml': '- tapOn: Cafe\n',
           }, 'Unicode normalization'],
         ['an addMedia file that does not exist',
-          { '.maestro/flows/bad.yaml': '- addMedia: ../media/none.png\n' }, 'does not exist'],
+          { '.maestro/flows/bad.yaml': '- addMedia: [../media/none.png]\n' }, 'does not exist'],
         ['an addMedia file in a hidden folder',
           {
-            '.maestro/flows/bad.yaml': '- addMedia: ../.private/id.png\n',
+            '.maestro/flows/bad.yaml': '- addMedia: [../.private/id.png]\n',
             '.maestro/.private/id.png': 'x',
           }, 'secret or hidden file'],
         ['assertScreenshot, which reads a reference image',

@@ -102,14 +102,19 @@ written. The same holds for a refused reference such as `../.maestro/sub.yaml` f
 live under `.maestro/` to run files there. Other scripts are copied verbatim, so keep secrets out of
 them.
 
-The files a flow reads are `runFlow` and `retry` files, `runScript` files and `addMedia` files (a path,
-a list, or `file`/`files`). `addMedia` files are binary: they are hashed and copied as bytes, up to 8 MiB
+The files a flow reads (Maestro 2.12's command model: `runFlow`, `retry`, `runScript`, `addMedia` and
+`assertScreenshot`) are `runFlow` and `retry` files, `runScript` files and `addMedia` files (a list of
+paths, or a mapping with a `files` list, as Maestro reads it). `takeScreenshot` and `startRecording` take
+output paths, which are written, not read, so they are not part of the closure. `addMedia` files are binary: they are hashed and copied as bytes, up to 8 MiB
 (1 MiB for flows and scripts), never parsed, and scanned as raw bytes for fixture credential values.
 Two paths that differ only in case or Unicode normalization (NFC and NFD spellings) are refused. A
-command that reads a file Déjà cannot store, `assertScreenshot`, is refused. A walk stored before this
-that runs an `addMedia` or `retry` file is treated like a walk from before subflows were kept: it needs
-`remember` again (`legacy-closure-unknown`). With a manifest, such a flow's closure sha changes, so it is
-`flow-changed` until `--verify` or `remember`. The closure goes to
+command that reads a file Déjà cannot store, `assertScreenshot` (a reference image), is refused, and so is
+one path used both as a flow and as media. A walk stored before this whose flow runs an `addMedia` or
+`retry` file, or uses `assertScreenshot`, is read like a walk from before subflows were kept
+(`legacy-closure-unknown`), not as corrupt memory. Those walks could not have passed before: the stored
+copy never held the file. A classic `run` of one is a miss, so it explores again until the flow is
+remembered again. With a manifest, such a flow's closure sha changes, so it is `flow-changed` until
+`--verify` or `remember`. The closure goes to
 `.deja/flows/<goal>/<platform>-<closure sha>/` with its relative layout, and each extra file is
 recorded in `subflowFiles` (`path`, `sha256`). A changed subflow is a different closure folder.
 Lookup checks every stored file: a changed one is refused like a changed main flow, a missing one

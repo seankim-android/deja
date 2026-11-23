@@ -98,7 +98,9 @@ describe('closure errors and a swapped stored subflow become failed results (DEJ
       store.snapshotResult = async () => ({ ...snapshot, files })
       const context = setup(store)
       const result = await context.deja.run(newBuild)
-      expect(result).toMatchObject({ outcome: 'closure-error', passed: false, modelCalls: 0 })
+      expect(result).toMatchObject({
+        outcome: 'closure-error', passed: false, modelCalls: 0, replayedOnNewBuild: { recordedForNewBuild: false },
+      })
       expect(result.errors[0]).toMatch(/recorded checksum|not part of the flow|did not record/)
       expect(context.requests).toEqual([])
       expect(store.persists).toBe(0)
@@ -138,7 +140,11 @@ describe('closure errors and a swapped stored subflow become failed results (DEJ
     store.snapshotResult = async () => { throw new ClosureRefusedError('Cannot store flow: reference uses a variable') }
     const context = setup(store)
     const result = await context.deja.run(newBuild)
-    expect(result).toMatchObject({ outcome: 'closure-error', passed: false, modelCalls: 0, failure: null })
+    expect(result).toMatchObject({
+      outcome: 'closure-error', passed: false, modelCalls: 0, failure: null,
+      cacheStatus: 'miss', cacheMissReason: 'stale-build', replayedOnNewBuild: { recordedForNewBuild: false },
+    })
+    expect(result.modelCallBasis).toContain('was not run')
     expect(result.errors[0]).toContain('reference uses a variable')
     expect(result.errors[0]).toContain('Nothing was stored or recorded')
     expect(context.requests).toEqual([])
@@ -192,6 +198,19 @@ describe('closure errors and a swapped stored subflow become failed results (DEJ
     expect(context.requests).toEqual([])
     store.lookupResult = async () => { throw new InvalidWalkManifestError('not json') }
     await expect(context.deja.run(identity)).rejects.toThrow(/Invalid walk manifest/)
+  })
+
+  test('a refusal after an explorer started is not converted: a model call may have been spent', async () => {
+    const store = new Store()
+    store.lookupResult = async () => ({ status: 'miss', reason: 'not-found' })
+    const deja = new Deja({
+      store, reporter: { report: async () => ({ reportPath: 'r', latestPath: 'l' }) },
+      runner: { run: async () => passed },
+      createExplorer: () => ({
+        explore: async () => { throw new ClosureRefusedError('Consumer flow: would overwrite a different file') },
+      }),
+    })
+    await expect(deja.run(identity)).rejects.toThrow('would overwrite')
   })
 
   test('file names with control characters cannot add lines to the error', async () => {

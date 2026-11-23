@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { FlowReferenceError, findFlowReferences } from '../src/flow-references.ts'
+import { FlowFileCommandError, FlowReferenceError, findFlowReferences } from '../src/flow-references.ts'
 
 describe('findFlowReferences', () => {
   test('finds string and file forms for runFlow and runScript', () => {
@@ -22,8 +22,8 @@ describe('findFlowReferences', () => {
 
   test('finds addMedia files in each spelling, and a retry that names a file', () => {
     expect(findFlowReferences([
-      '- addMedia: one.png',
       '- addMedia:',
+      '    - one.png',
       '    - two.png',
       '    - ../clips/three.mp4',
       '- addMedia:',
@@ -33,7 +33,7 @@ describe('findFlowReferences', () => {
       '    file: again.yaml',
       '- retry:',
       '    commands:',
-      '      - addMedia: nested.gif',
+      '      - addMedia: [nested.gif]',
       '',
     ].join('\n'))).toEqual([
       { kind: 'media', command: 'addMedia', path: 'one.png' },
@@ -49,6 +49,9 @@ describe('findFlowReferences', () => {
     expect(() => findFlowReferences('- addMedia:\n')).toThrow(FlowReferenceError)
     expect(() => findFlowReferences('- addMedia: []\n')).toThrow(FlowReferenceError)
     expect(() => findFlowReferences('- addMedia:\n    - 3\n')).toThrow(FlowReferenceError)
+    // Maestro 2.12 takes a list or a `files` list, not a bare path.
+    expect(() => findFlowReferences('- addMedia: one.png\n')).toThrow(FlowFileCommandError)
+    expect(() => findFlowReferences('- addMedia:\n    file: one.png\n')).toThrow(FlowFileCommandError)
     expect(() => findFlowReferences('- assertScreenshot: home.png\n')).toThrow(/reference image/)
     expect(() => findFlowReferences('- repeat:\n    commands:\n      - assertScreenshot: home\n')).toThrow(FlowReferenceError)
   })

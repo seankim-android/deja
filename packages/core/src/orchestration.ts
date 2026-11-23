@@ -142,18 +142,26 @@ export class Deja {
   }
 
   async run(identity: WalkIdentity, options: DejaRunOptions = {}): Promise<RunResult> {
+    const guard = { modelStarted: false }
     try {
-      return await this.runChecked(identity, options)
+      return await this.runChecked(identity, options, guard)
     } catch (error) {
       // A closure refusal that no path handled with its execution in hand (the first lookup, a
       // snapshot, a revalidation) is still a result. Nothing was written before it threw. A manifest
       // that cannot be read stays a configuration error (exit 2 with its own hint).
-      if (!(error instanceof ClosureRefusedError) || error instanceof InvalidWalkManifestError) throw error
+      // Once an explorer or repairer has started, a model call may have been spent: that error is not
+      // a refusal before anything ran, so it stays thrown.
+      if (guard.modelStarted || !(error instanceof ClosureRefusedError) ||
+          error instanceof InvalidWalkManifestError) throw error
       return this.finish(this.base(identity, 'run', 'not-checked'), this.closureErrorDetails(error.message, null))
     }
   }
 
-  private async runChecked(identity: WalkIdentity, options: DejaRunOptions): Promise<RunResult> {
+  private async runChecked(
+    identity: WalkIdentity,
+    options: DejaRunOptions,
+    guard: { modelStarted: boolean },
+  ): Promise<RunResult> {
     const start = this.base(identity, 'run', 'miss')
     // Exact lookup deliberately precedes every lazy factory, including semantic embeddings. A warm
     // hit cannot construct OpenClaw, an MCP transport, an embedding client, or a repairer.
@@ -178,7 +186,7 @@ export class Deja {
       // With a manifest the goal belongs to the consumer's files. No miss may reach the explorer, and
       // only a stale build may reach the replay policy; the rest is a precise refusal or a verify.
       if (this.manifestMode && (retrieval.miss.reason !== 'stale-build' || options.verify)) {
-        return this.manifestMiss(identity, missStart, retrieval.miss, options)
+        return this.manifestMiss(identity, missStart, retrieval.miss, options, guard)
       }
       if (retrieval.miss.reason === 'stale-build') {
         if (!this.dependencies.createRepairer &&
@@ -196,9 +204,11 @@ export class Deja {
               : 'A stale build requires a configured selector repairer; cold exploration was not substituted'],
           })
         }
+        guard.modelStarted = true
         const repair = await this.dependencies.createRepairer().repair({ identity })
         return this.finish(missStart, this.repairDetails(repair))
       }
+      guard.modelStarted = true
       const exploration = await this.dependencies.createExplorer().explore({ identity })
       return this.finish(missStart, this.explorationDetails(exploration))
     }
@@ -288,6 +298,7 @@ export class Deja {
         this.dependencies.createRepairer) {
       // Keep the previous successful validation intact until the bounded repair diagnoses the same
       // unchanged flow. The repair plugin, not core, owns eligibility and all source/write gates.
+      guard.modelStarted = true
       const repair = await this.dependencies.createRepairer().repair({ identity })
       return this.finish(hitStart, {
         ...this.repairDetails(repair),
@@ -348,11 +359,25 @@ export class Deja {
     // Replay a private copy of the stored flow and everything it runs, so the files that pass are the
     // files that get stored for this build.
     const reportDirectory = `.deja/reports/${this.artifactId('run')}`
-    const snapshot = await store.snapshotCandidate?.(previous.flowPath, `${reportDirectory}/replay`)
+    let snapshot: CandidateSnapshot | undefined
+    try {
+      snapshot = await store.snapshotCandidate?.(previous.flowPath, `${reportDirectory}/replay`)
+    } catch (error) {
+      if (!(error instanceof ClosureRefusedError)) throw error
+      return this.finish(missStart, {
+        ...this.closureErrorDetails(error.message, null),
+        replayedOnNewBuild: { ...replay, recordedForNewBuild: false },
+      })
+    }
     // The lookup above checked the stored files, but the snapshot is what runs and what is stored for
     // this build. It must hold exactly the files the walk recorded, not whatever sits there now.
     const mismatch = snapshot ? snapshotMismatch(walk, snapshot) : null
-    if (mismatch) return this.finish(missStart, this.closureErrorDetails(mismatch, null))
+    if (mismatch) {
+      return this.finish(missStart, {
+        ...this.closureErrorDetails(mismatch, null),
+        replayedOnNewBuild: { ...replay, recordedForNewBuild: false },
+      })
+    }
     const execution = await this.dependencies.runner.run({
       flowPath: snapshot?.candidatePath ?? previous.flowPath,
       artifactDirectory: reportDirectory,
@@ -370,7 +395,10 @@ export class Deja {
           artifactDirectory: reportDirectory,
         }, () => store.lookupPreviousSuccessful(identity), previous)
         if (again instanceof ClosureRefusedError) {
-          return this.finish(replayStart, this.closureErrorDetails(again.message, execution))
+          return this.finish(replayStart, {
+            ...this.closureErrorDetails(again.message, execution),
+            replayedOnNewBuild: { ...replay, recordedForNewBuild: false },
+          })
         }
         if (again === 'changed') return this.finish(replayStart, this.changedBetweenAttempts(execution))
         rerun = rerunVerdict(execution, again)
@@ -610,7 +638,9 @@ export class Deja {
   private closureErrorDetails(message: string, execution: ExecutionResult | null): RunDetails {
     return {
       outcome: 'closure-error', passed: false, modelCalls: 0,
-      modelCallBasis: 'the flow\'s files could not be used safely; nothing was run, recorded or written',
+      modelCallBasis: execution
+        ? 'the flow ran, but its files could not be used safely; nothing was recorded or written'
+        : 'the flow\'s files could not be used safely, so it was not run; nothing was recorded or written',
       assertions: execution?.assertions ?? null, repairCount: 0, yamlPath: null, yamlSha256: null,
       failure: null, artifacts: execution?.artifacts ?? [], diffs: [],
       errors: [`${message.replace(/[\p{Cc}\u2028\u2029]+/gu, ' ')}. Nothing was stored or recorded.`],
@@ -686,6 +716,7 @@ export class Deja {
     missStart: RunStart,
     miss: LookupMiss,
     options: DejaRunOptions,
+    guard: { modelStarted: boolean },
   ): Promise<RunResult> {
     const refuse = (outcome: RunResult['outcome'], message: string) => this.finish(missStart, {
       outcome, passed: false, modelCalls: 0,
@@ -715,6 +746,7 @@ export class Deja {
       case 'not-found': {
         // A new goal: explore it cold, when verified output can be written into the consumer's tree.
         if (this.exploreOutputMissing) return this.finish(missStart, this.manifestExplorationRefused())
+        guard.modelStarted = true
         const exploration = await this.dependencies.createExplorer().explore({ identity })
         return this.finish(missStart, this.explorationDetails(exploration))
       }
@@ -737,7 +769,13 @@ export class Deja {
   ): Promise<RunResult> {
     const { store, runner } = this.dependencies
     const attempt = `.deja/attempts/${this.artifactId('run')}`
-    const snapshot = await store.snapshotCandidate?.(flowPath, `${attempt}/candidate`)
+    let snapshot: CandidateSnapshot | undefined
+    try {
+      snapshot = await store.snapshotCandidate?.(flowPath, `${attempt}/candidate`)
+    } catch (error) {
+      if (!(error instanceof ClosureRefusedError)) throw error
+      return this.finish(missStart, this.closureErrorDetails(error.message, null))
+    }
     const execution = await runner.run({
       flowPath: snapshot?.candidatePath ?? flowPath,
       artifactDirectory: attempt,
@@ -784,8 +822,10 @@ export class Deja {
         ...(snapshot ? { expectedClosureSha256: snapshot.closureSha256 } : {}),
       })
     } catch (error) {
+      if (error instanceof ClosureRefusedError) {
+        return this.finish(verifyStart, this.closureErrorDetails(error.message, execution))
+      }
       const outcome = error instanceof AssertionHashChangedError ? 'assertions-changed'
-        : error instanceof ClosureRefusedError ? 'closure-error'
         : error instanceof ExpectedClosureMismatchError || error instanceof FlowChangedError ? 'flow-changed'
           : error instanceof OwnerRuleError ? 'failed' : null
       if (!outcome) throw error
