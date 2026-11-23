@@ -5,8 +5,10 @@ Status: proposal. Nothing in this document is built yet unless it says "today".
 ## Goal
 
 Today Déjà is a Bun monorepo with one product surface: the `deja` CLI in `apps/cli`.
-The packages under `packages/` have no `package.json` files. They import each other by relative
-paths such as `../../core/src/index.ts`. Nobody outside this repo can install them.
+Today each package and app is a Bun workspace with a private `@deja-qa/*` `package.json`, and they
+import each other only by package name. `scripts/workspace-boundaries.test.ts` fails on a relative
+cross-package import or an undeclared dependency. Nothing is published yet, and the `exports` maps
+still point at `.ts` sources, so nobody outside this repo can install them.
 
 The goal is to let two kinds of users install Déjà from npm:
 
@@ -169,7 +171,7 @@ Sizes: S is under a day, M is a few days, L is a week or more.
 
 | Item | Size | Done when |
 | --- | --- | --- |
-| Bun workspaces and a `package.json` per package; replace relative `../../x/src` imports | M | `bun test` and `bun run build` pass with only package imports |
+| Done: Bun workspaces and a `package.json` per package; replace relative `../../x/src` imports | M | `bun test` and `bun run build` pass with only package imports |
 | Remove `repair` -> `store-local` edge; explorer takes `WalkRunner` | S | a test fails on a forbidden import |
 | tsup build per package, ESM and `.d.ts` | S | `npm pack` of each package installs into an empty Node 20 project and type-checks |
 | Remove `Bun.file`; sqlite driver seam | M | the store conformance suite passes on Node 20 and Bun 1.4 |
@@ -205,7 +207,7 @@ Sizes: S is under a day, M is a few days, L is a week or more.
   - `@deja-qa/core` returns 404 on npm, and `deja-qa` and `dejaqa` are free as unscoped names.
   - `deja-qa.com`, `dejaqa.com`, `deja-qa.dev` and `dejaqa.dev` return 404 from registry RDAP (not
     registered). A registrar can still mark a name premium or reserved.
-  - Still to do: claim the scope with `npm org create deja-qa` while logged in, and buy the domain.
+  - Still to do: create the `deja-qa` org at npmjs.com/org/create, and buy the domain.
   - Test data never uses the project domain. Fixture logins use the reserved `example.com`.
 - **Maestro version pinning.** All evidence is on Maestro 2.12.0, and Maestro Web is beta. The
   runner should read `maestro --version` and refuse or warn outside a tested range. The Action pins
@@ -225,8 +227,8 @@ Sizes: S is under a day, M is a few days, L is a week or more.
 
 ## Next 5 steps
 
-1. Claim the `@deja-qa` scope: run `npm org create deja-qa` while logged in.
-2. Add Bun workspaces and one `package.json` per package, and switch to package imports.
+1. Claim the `@deja-qa` scope: create the `deja-qa` org at npmjs.com/org/create (the npm CLI cannot create orgs).
+2. Done: Bun workspaces, one `package.json` per package, and package imports.
 3. Remove the two forbidden edges (`repair` -> `store-local`, explorer -> concrete runner) and add a
    test that fails on forbidden imports.
 4. Make the packages run on Node 20: drop `Bun.file`, add the sqlite driver seam, and run the store

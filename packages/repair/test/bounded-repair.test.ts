@@ -3,12 +3,12 @@ import { existsSync } from 'node:fs'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import type { MaestroFailureCategory, MaestroRunResult } from '../../maestro/src/index.ts'
+import type { MaestroFailureCategory, MaestroRunResult } from '@deja-qa/maestro'
 import {
   LOCAL_MEMORY_PATH,
   LocalWalkStore,
   MAESTRO_FLOW_SCHEMA_VERSION,
-} from '../../store-local/src/index.ts'
+} from '@deja-qa/store-local'
 import { BoundedCheckoutRepairer } from '../src/index.ts'
 import type { RepairBuildResult } from '../src/build.ts'
 import { CHECKOUT_AFFECTED_FILES } from '../src/policy.ts'

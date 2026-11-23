@@ -8,12 +8,12 @@ import {
   type ExplorationMetrics,
   type PersistenceDetails,
   type VerificationDetails,
-} from '../../../packages/agent-openclaw/src/index.ts'
+} from '@deja-qa/explorer-openclaw'
 import {
   classifyMaestroFailure,
   runMaestro,
   type MaestroRunResult,
-} from '../../../packages/maestro/src/index.ts'
+} from '@deja-qa/maestro'
 
 type ExploreDependencies = {
   root: string

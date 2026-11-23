@@ -3,7 +3,7 @@ import { dirname, resolve } from 'node:path'
 import {
   LOCAL_MEMORY_PATH,
   LocalWalkStore,
-} from '../../store-local/src/index.ts'
+} from '@deja-qa/store-local'
 import type {
   MetadataTamper,
   StoreFailureInjection,

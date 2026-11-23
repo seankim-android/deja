@@ -1,0 +1,16 @@
+{
+  "name": "@deja-qa/explorer-openclaw",
+  "version": "0.1.0",
+  "private": true,
+  "description": "OpenClaw cold explorer (Kimi K3.1 Pro on Cerebras by default)",
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@deja-qa/core": "workspace:*",
+    "@deja-qa/maestro": "workspace:*",
+    "@modelcontextprotocol/sdk": "^1.32.2"
+  }
+}

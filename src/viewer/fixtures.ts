@@ -1,4 +1,4 @@
-import type { RunResult } from '../../packages/core/src/contracts.ts'
+import type { RunResult } from '@deja-qa/core'
 import type { ViewerHistory, ViewerReportEntry } from '../../viewer/contracts.ts'
 
 export type FixtureName = 'cold' | 'warm' | 'repair' | 'regression'

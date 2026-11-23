@@ -1,0 +1,14 @@
+{
+  "name": "@deja-qa/store-sqlite",
+  "version": "0.1.0",
+  "private": true,
+  "description": "SQLite WalkStore (Bun SQLite today)",
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@deja-qa/core": "workspace:*"
+  }
+}

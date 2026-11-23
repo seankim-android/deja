@@ -3,7 +3,7 @@ export {
   type BoundedSelectorRepairerOptions,
 } from './adapter.ts'
 
-import type { WalkStore } from '../../core/src/index.ts'
+import type { WalkStore } from '@deja-qa/core'
 import { createHash } from 'node:crypto'
 import { mkdir, readFile, realpath, rename, writeFile } from 'node:fs/promises'
 import { dirname, relative, resolve, sep } from 'node:path'
@@ -11,14 +11,14 @@ import {
   classifyMaestroFailure,
   type MaestroFailureClassification,
   type MaestroRunResult,
-} from '../../maestro/src/index.ts'
+} from '@deja-qa/maestro'
 import {
   LOCAL_MEMORY_PATH,
   LocalWalkStore,
   MAESTRO_FLOW_SCHEMA_VERSION,
   type LookupHit,
   type WalkIdentity,
-} from '../../store-local/src/index.ts'
+} from '@deja-qa/store-local'
 import { writeRepairProcessArtifacts, type RepairBuildResult } from './build.ts'
 import {
   applyCheckoutSelectorRepair,

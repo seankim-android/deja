@@ -16,7 +16,7 @@ import {
   type WalkIdentity,
   type WalkStore,
   type WalkValidation,
-} from '../../core/src/index.ts'
+} from '@deja-qa/core'
 
 export {
   type ExplorationDetails,
@@ -29,7 +29,7 @@ export {
   type StoredWalk,
   type WalkIdentity,
   type WalkValidation,
-} from '../../core/src/index.ts'
+} from '@deja-qa/core'
 
 export const SQLITE_MEMORY_SCHEMA_VERSION = 2
 export const MAESTRO_FLOW_SCHEMA_VERSION = 'maestro/v1'

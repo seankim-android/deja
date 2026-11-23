@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import type { GoalEmbeddingProvider } from '../../core/src/index.ts'
+import type { GoalEmbeddingProvider } from '@deja-qa/core'
 
 export const LOCAL_LEXICAL_EMBEDDING_PROVIDER = 'local-lexical-v1'
 export const LOCAL_LEXICAL_EMBEDDING_DIMENSIONS = 128

@@ -7,11 +7,11 @@ import type {
   WalkExplorer,
   WalkFailure,
   WalkStore,
-} from '../../core/src/index.ts'
+} from '@deja-qa/core'
 import {
   countFlowAssertions,
   MaestroWalkRunner,
-} from '../../maestro/src/index.ts'
+} from '@deja-qa/maestro'
 import {
   runColdExploration,
   type ColdExploreReport,

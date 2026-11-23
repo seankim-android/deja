@@ -15,7 +15,7 @@ import {
   type WalkIdentity,
   type WalkRunner,
   type WalkStore,
-} from '../../core/src/index.ts'
+} from '@deja-qa/core'
 import {
   readCompositionRunnerTrace,
   type CompositionRunnerTrace,

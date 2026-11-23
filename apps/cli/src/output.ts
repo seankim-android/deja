@@ -2,7 +2,7 @@ import type {
   ReportReceipt,
   RunResult,
   StoredWalk,
-} from '../../../packages/core/src/index.ts'
+} from '@deja-qa/core'
 import { redactJson, type Redactor } from './redaction.ts'
 
 export const HELP = `Déjà — explore once, replay without a model, repair only bounded staleness.

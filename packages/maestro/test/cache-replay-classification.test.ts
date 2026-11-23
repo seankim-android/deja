@@ -8,7 +8,7 @@ import {
   LOCAL_MEMORY_PATH,
   LocalWalkStore,
   MAESTRO_FLOW_SCHEMA_VERSION,
-} from '../../store-local/src/index.ts'
+} from '@deja-qa/store-local'
 
 const cli = resolve(import.meta.dir, '../../../spikes/001-android-deja/scripts/deja.ts')
 const fakeMaestro = resolve(import.meta.dir, 'fixtures/fake-maestro.cjs')
