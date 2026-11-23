@@ -18,7 +18,7 @@ The goal is to let two kinds of users install Déjà from npm:
 2. **An agent framework that wants cached UI walks.** It wants to call "run this goal" from code or
    over MCP, and only pay for a model on a cache miss.
 
-### Usage example (proposed API)
+### Usage example (today: `createDeja` in `@deja-qa/core`)
 
 ```ts
 import { createDeja } from '@deja-qa/core'
@@ -39,14 +39,26 @@ const deja = createDeja({
 const result = await deja.run('checkout')   // RunResult, schema 1
 ```
 
-`createDeja` is a thin wrapper over what the CLI does in `createOrchestration`
-(`apps/cli/src/main.ts`). It would:
+`createDeja` is a thin wrapper over what the CLI used to do in `createOrchestration`. Today the CLI
+calls it too, so there is one code path. It:
 
 - build the `WalkIdentity` from the goal, `appId`, platform, `maestro/v1` and the adapter's build
   fingerprint, so callers do not compute SHA-256 hashes themselves;
 - pass the explorer and repairer as lazy factories, which `Deja` already requires
   (`createExplorer`, `createRepairer?`), so a warm hit never builds a model client;
 - default the `RunReporter` to a no-op, and offer the CLI's `JsonRunReporter` as an option.
+
+Today `createDeja` takes `workspaceRoot`, `app`, `adapter`, `store`, `runner`, lazy `explorer` and
+`repairer` factories, and optional `reporter`, `semantic`, `flowSchemaVersion`, `now` and
+`artifactId`. It returns `{ identity, run, explore, remember }`, each taking the goal text. The
+`adapter` type, `DejaAdapter`, is defined in core (`id`, `platform`, `buildFingerprint`,
+`cacheIdentity`), and the `@deja-qa/maestro` adapters satisfy it structurally, so core imports
+nothing from them. There is no provider-key option: keys stay in the explorer plugin's own
+credential chain.
+
+The usage example above still names `sqliteStore`, `maestroRunner` and `androidAdapter`, which are
+the target shapes. Today you pass `new LocalWalkStore(...)`, `new MaestroWalkRunner(...)` and
+`androidMaestroAdapter(...)`.
 
 `Deja` itself stays exported for callers who want full control.
 
@@ -110,9 +122,8 @@ Contract: `WalkExplorer.explore({ identity })` returns `ExplorationResult`. The 
 - report `modelCalls` and `mcpCalls` honestly, or `null` with a `modelCallBasis` when not measured.
 
 Default: `@deja-qa/explorer-openclaw`, Kimi K3.1 Pro on Cerebras through OpenClaw, Android only.
-Today, Web and iOS use `UnsupportedPlatformExplorer` in `apps/cli`, which returns
-`exploration-rejected` with zero model calls. That class should move to core so every host gets
-the same refusal.
+Today, Web and iOS use `UnsupportedPlatformExplorer`, exported from core, which returns
+`exploration-rejected` with zero model calls, so every host gets the same refusal.
 
 A second explorer (for example a plain MCP client loop on another model) is the real test that the
 contract is general. Until one exists, call the explorer contract "provisional".
@@ -147,8 +158,11 @@ are not negotiable in the engine, not the policy: product assertion failures are
 - Semver per package, released together from one changeset while below 1.0.
 - `WALK_RESULT_SCHEMA_VERSION` (1), the memory schema (2) and `maestro/v1` are part of the public
   contract. A breaking change to any of them is a major version, with a reader for the old schema.
-- `core` exports a `CONTRACT_VERSION`. Plugins declare the range they support in
-  `peerDependencies` on `@deja-qa/core`.
+- `core` exports a `CONTRACT_VERSION` (1 today; bumped on a breaking change to a plugin contract).
+  Plugins declare the range they support in `peerDependencies` on `@deja-qa/core`.
+- Today: `api/<package>.d.ts` is a checked-in snapshot of each published package's declarations,
+  made by `tsc --emitDeclarationOnly` (`bun scripts/api-snapshot.ts`). `bun test` and the Portable
+  checks workflow fail on drift; accept a reviewed change with `bun scripts/api-snapshot.ts --update`.
 
 ## Distribution
 
@@ -187,8 +201,8 @@ Sizes: S is under a day, M is a few days, L is a week or more.
 
 | Item | Size | Done when |
 | --- | --- | --- |
-| `createDeja` facade and `UnsupportedPlatformExplorer` in core | M | the usage example above runs against the Android fixture |
-| API review, freeze contracts, add `CONTRACT_VERSION` | M | an API report (for example api-extractor) is checked in and diffed in CI |
+| Done: `createDeja` facade and `UnsupportedPlatformExplorer` in core | M | the usage example above runs against fakes in `packages/core/test/create-deja.test.ts`; the CLI uses it |
+| Partly done: `CONTRACT_VERSION` and the API snapshots are in. Still to do: the API review and freeze | M | an API report is checked in and diffed in CI |
 | Runner-neutral store conformance package | M | a sample third-party in-memory store passes it under Vitest |
 | `deja-action` | M | a sample repo replays the Android fixture in a workflow run with 0 model calls |
 | `@deja-qa/mcp` server | M | an MCP client calls `deja.run` and gets a schema-1 `RunResult` |

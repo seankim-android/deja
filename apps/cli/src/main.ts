@@ -1,11 +1,10 @@
 import { resolve } from 'node:path'
-import { Deja, type RunResult } from '@deja-qa/core'
+import { createDeja, UnsupportedPlatformExplorer, type RunResult } from '@deja-qa/core'
 import { OpenClawWalkExplorer } from '@deja-qa/explorer-openclaw'
 import {
   InvalidWalkMemoryError,
   LOCAL_MEMORY_PATH,
   LocalWalkStore,
-  MAESTRO_FLOW_SCHEMA_VERSION,
 } from '@deja-qa/store-local'
 import {
   MaestroWalkRunner,
@@ -28,7 +27,6 @@ import {
 import { HELP, renderResult, renderWalks } from './output.ts'
 import { createRedactor, redactJson } from './redaction.ts'
 import { JsonRunReporter, readRunReport } from './reporter.ts'
-import { UnsupportedPlatformExplorer } from './unsupported-platform-explorer.ts'
 
 export type CliIo = {
   stdout: (text: string) => void
@@ -117,7 +115,10 @@ function createOrchestration(
       : {}),
     ...(process.env.JAVA_HOME ? { javaHome: process.env.JAVA_HOME } : {}),
   })
-  const orchestration = new Deja({
+  const orchestration = createDeja({
+    workspaceRoot: configuration.workspaceRoot,
+    app: { appId: configuration.explore.appId, buildPath: configuration.explore.buildPath },
+    adapter: executionAdapter,
     store,
     runner,
     reporter,
@@ -130,13 +131,13 @@ function createOrchestration(
         minimumMargin: configuration.semantic!.minimumMargin,
       },
     } : {}),
-    createExplorer: () => {
+    explorer: ({ identity }) => {
       if (configuration.explore.platform !== 'android') {
         return new UnsupportedPlatformExplorer(configuration.explore.platform)
       }
       return new OpenClawWalkExplorer({
         configuration: configuration.explore,
-        buildFingerprint: currentFingerprint,
+        buildFingerprint: identity.buildFingerprint,
         openClawExecutable: configuration.openClaw!.executable,
         maestroMcpProxy: configuration.openClaw!.mcpProxy,
         runner,
@@ -144,7 +145,7 @@ function createOrchestration(
       })
     },
     ...(configuration.repair && configuration.explore.platform === 'android' ? {
-      createRepairer: () => new BoundedSelectorRepairer({
+      repairer: () => new BoundedSelectorRepairer({
         workspaceRoot: configuration.workspaceRoot,
         policy: configuration.repair!.policy,
         timeoutMs: configuration.repair!.timeBudgetMs,
@@ -161,21 +162,7 @@ function createOrchestration(
       }),
     } : {}),
   })
-  let currentFingerprint = ''
-  return {
-    store,
-    orchestration,
-    identity: async (goalText: string) => {
-      currentFingerprint = await buildFingerprint(configuration, executionAdapter)
-      return {
-        goal: goalText,
-        appId: configuration.explore.appId,
-        platform: configuration.explore.platform,
-        flowSchemaVersion: MAESTRO_FLOW_SCHEMA_VERSION,
-        ...executionAdapter.cacheIdentity({ buildFingerprint: currentFingerprint }),
-      }
-    },
-  }
+  return { store, orchestration }
 }
 
 export async function runCli(argv: string[], io: CliIo = {
@@ -217,7 +204,7 @@ export async function runCli(argv: string[], io: CliIo = {
     }
 
     const reporter = new JsonRunReporter(configuration.workspaceRoot, redact)
-    const { store, orchestration, identity } = createOrchestration(configuration, reporter)
+    const { store, orchestration } = createOrchestration(configuration, reporter)
     if (parsed.command === 'list') {
       if (parsed.positionals.length > 0) throw new CliConfigurationError('list accepts no positional arguments')
       const walks = await store.list()
@@ -230,12 +217,12 @@ export async function runCli(argv: string[], io: CliIo = {
     if (parsed.command === 'remember' && !parsed.flow) {
       throw new CliConfigurationError('remember requires --flow <candidate.yaml>')
     }
-    const identityValue = await identity(goal(parsed.positionals))
+    const goalText = goal(parsed.positionals)
     const result = parsed.command === 'explore'
-      ? await orchestration.explore(identityValue)
+      ? await orchestration.explore(goalText)
       : parsed.command === 'remember'
-        ? await orchestration.remember(identityValue, parsed.flow!)
-        : await orchestration.run(identityValue)
+        ? await orchestration.remember(goalText, parsed.flow!)
+        : await orchestration.run(goalText)
     io.stdout(parsed.json
       ? `${JSON.stringify(redactJson({ ...result, report: reporter.receipt }, redact), null, 2)}\n`
       : renderResult(result, reporter.receipt, redact))
