@@ -12,6 +12,7 @@ import {
   type LookupHit,
   type LookupMiss,
   type PersistedWalk,
+  type RunnerRequest,
   type RunResult,
   type StoredWalk,
   type WalkIdentity,
@@ -40,18 +41,31 @@ function storedFor(identity: WalkIdentity): StoredWalk {
   }
 }
 
+const previousFingerprint = 'c'.repeat(64)
+
 class FakeStore implements WalkStore {
   hit = false
+  /** A walk verified on another build exists, so an exact lookup says `stale-build`. */
+  staleWithPrevious = false
+  persisted: WalkIdentity[] = []
   async lookup(identity: WalkIdentity): Promise<LookupHit | LookupMiss> {
+    if (this.staleWithPrevious) return { status: 'miss', reason: 'stale-build' }
     if (!this.hit) return { status: 'miss', reason: 'not-found' }
     const walk = storedFor(identity)
     return { status: 'hit', walk, flowPath: walk.flowPath, flowSha256: walk.flowSha256 } as LookupHit
   }
-  async lookupPreviousSuccessful(): Promise<LookupMiss> {
-    return { status: 'miss', reason: 'not-found' }
+  async lookupPreviousSuccessful(identity: WalkIdentity): Promise<LookupHit | LookupMiss> {
+    if (!this.staleWithPrevious) return { status: 'miss', reason: 'not-found' }
+    const walk = storedFor({ ...identity, buildFingerprint: previousFingerprint })
+    return { status: 'hit', walk, flowPath: walk.flowPath, flowSha256: walk.flowSha256 } as LookupHit
   }
-  async persistVerifiedCandidate(): Promise<PersistedWalk> {
-    throw new Error('not used')
+  async persistVerifiedCandidate(options: { identity: WalkIdentity }): Promise<PersistedWalk> {
+    this.persisted.push(options.identity)
+    const walk = storedFor(options.identity)
+    return {
+      walk, flowPath: walk.flowPath, flowSha256: walk.flowSha256,
+      storedMetadataPath: '.deja/memory/walks.json', atomicWrite: true,
+    } as PersistedWalk
   }
   async persistVerifiedRepair(): Promise<PersistedWalk> {
     throw new Error('not used')
@@ -222,5 +236,51 @@ describe('createDeja', () => {
     } finally {
       delete process.env.FIXTURE_PROVIDER_KEY
     }
+  })
+
+  describe('staleBuild and per-call options', () => {
+    const iosAdapter: DejaAdapter = { ...adapter, platform: 'ios', cacheIdentity: ({ buildFingerprint }) => ({ buildFingerprint }) }
+
+    test('staleBuild replays the last verified flow on a new build, with no explorer', async () => {
+      const store = new FakeStore()
+      store.staleWithPrevious = true
+      const constructed: string[] = []
+      const explorer = () => {
+        constructed.push('explorer')
+        throw new Error('explorer must not be built')
+      }
+      const without = await createDeja(options(store, { adapter: iosAdapter, explorer })).run('checkout')
+      expect(without.outcome).toBe('repair-rejected')
+      const result = await createDeja(options(store, {
+        adapter: iosAdapter, explorer, staleBuild: 'replay-last-verified',
+      })).run('checkout')
+      expect(result.outcome).toBe('passed')
+      expect(result.modelCalls).toBe(0)
+      expect(result.replayedOnNewBuild?.previousBuildFingerprint).toBe(previousFingerprint)
+      expect(store.persisted).toHaveLength(1)
+      expect(store.persisted[0]?.buildFingerprint).toBe(fingerprint)
+      expect(constructed).toEqual([])
+    })
+
+    test('timeoutMs reaches the runner and an aborted signal stops the run', async () => {
+      const store = new FakeStore()
+      store.hit = true
+      const requests: RunnerRequest[] = []
+      const runner: WalkRunner = {
+        run: async request => {
+          requests.push(request)
+          return passingExecution
+        },
+      }
+      const deja = createDeja(options(store, { runner }))
+      await deja.run('checkout', { timeoutMs: 1234 })
+      expect(requests[0]?.timeoutMs).toBe(1234)
+      await deja.run('checkout')
+      expect(requests[1]?.timeoutMs).toBeUndefined()
+      const controller = new AbortController()
+      controller.abort(new Error('stop'))
+      await expect(deja.run('checkout', { signal: controller.signal })).rejects.toThrow('stop')
+      expect(requests).toHaveLength(2)
+    })
   })
 })

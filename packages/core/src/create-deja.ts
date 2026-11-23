@@ -2,6 +2,7 @@ import type {
   RunReporter,
   RunResult,
   SelectorRepairer,
+  StaleBuildPolicy,
   SemanticRetrievalOptions,
   WalkExplorer,
   WalkIdentity,
@@ -51,17 +52,31 @@ export type CreateDejaOptions = {
   /** Defaults to a reporter that does nothing. */
   reporter?: RunReporter
   semantic?: SemanticRetrievalOptions
+  /** Replay the last verified flow on a new build instead of refusing. Off by default. */
+  staleBuild?: StaleBuildPolicy
   flowSchemaVersion?: string
   now?: () => Date
   artifactId?: (prefix: 'run' | 'remember') => string
 }
 
+/** Per-call options. Both are optional and apply to the runner calls of that one call. */
+export type DejaCallOptions = {
+  /**
+   * Checked before each runner call; an aborted signal rejects with `signal.reason`. A flow that
+   * is already running is not interrupted: use `timeoutMs` to bound it.
+   */
+  signal?: AbortSignal
+  /** Passed to the runner as `RunnerRequest.timeoutMs`, where the runner supports it. */
+  timeoutMs?: number
+}
+
 export type DejaClient = {
   /** The identity `run`, `explore` and `remember` use for this goal. */
   identity(goal: string): Promise<WalkIdentity>
-  run(goal: string): Promise<RunResult>
-  explore(goal: string): Promise<RunResult>
-  remember(goal: string, candidatePath: string): Promise<RunResult>
+  run(goal: string, callOptions?: DejaCallOptions): Promise<RunResult>
+  explore(goal: string, callOptions?: DejaCallOptions): Promise<RunResult>
+  /** `candidatePath` is a file path the runner and store can read (a Maestro YAML on disk today). */
+  remember(goal: string, candidatePath: string, callOptions?: DejaCallOptions): Promise<RunResult>
 }
 
 const noopReporter: RunReporter = {
@@ -82,32 +97,45 @@ export function createDeja(options: CreateDejaOptions): DejaClient {
     }
   }
   // One orchestrator per call, so the factories close over that call's identity.
-  const orchestrator = (walkIdentity: WalkIdentity) => {
+  const orchestrator = (walkIdentity: WalkIdentity, callOptions: DejaCallOptions = {}) => {
     const { explorer, repairer } = options
+    const { signal, timeoutMs } = callOptions
+    const runner: WalkRunner = signal === undefined && timeoutMs === undefined
+      ? options.runner
+      : {
+        run: request => {
+          signal?.throwIfAborted()
+          return options.runner.run({
+            ...request,
+            ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+          })
+        },
+      }
     return new Deja({
       store: options.store,
-      runner: options.runner,
+      runner,
       reporter: options.reporter ?? noopReporter,
       createExplorer: () => explorer({ identity: walkIdentity }),
       ...(repairer ? { createRepairer: () => repairer({ identity: walkIdentity }) } : {}),
       ...(options.semantic ? { semantic: options.semantic } : {}),
+      ...(options.staleBuild ? { staleBuild: options.staleBuild } : {}),
       ...(options.now ? { now: options.now } : {}),
       ...(options.artifactId ? { artifactId: options.artifactId } : {}),
     })
   }
   return {
     identity,
-    run: async goal => {
+    run: async (goal, callOptions) => {
       const value = await identity(goal)
-      return orchestrator(value).run(value)
+      return orchestrator(value, callOptions).run(value)
     },
-    explore: async goal => {
+    explore: async (goal, callOptions) => {
       const value = await identity(goal)
-      return orchestrator(value).explore(value)
+      return orchestrator(value, callOptions).explore(value)
     },
-    remember: async (goal, candidatePath) => {
+    remember: async (goal, candidatePath, callOptions) => {
       const value = await identity(goal)
-      return orchestrator(value).remember(value, candidatePath)
+      return orchestrator(value, callOptions).remember(value, candidatePath)
     },
   }
 }

@@ -9,6 +9,7 @@ export {
   createDeja,
   type CreateDejaOptions,
   type DejaAdapter,
+  type DejaCallOptions,
   type DejaClient,
   type DejaFactoryContext,
 } from './create-deja.ts'
