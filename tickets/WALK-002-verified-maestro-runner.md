@@ -32,10 +32,10 @@ Link unit-test output plus one passing Android report containing `cacheStatus`, 
 
 ## Reproducible evidence
 
-- Focused test output: [`runner-unit-tests.txt`](../spikes/001-android-walkcache/evidence/runner-unit-tests.txt).
+- Focused test output: [`runner-unit-tests.txt`](../spikes/001-android-deja/evidence/runner-unit-tests.txt).
   The final run passed 6 tests and 53 assertions in 1.54s, including output-artifact failure coverage
   and a timeout test that observed an independent bystander surviving while the spawned tree died.
-- Passing Android report: [`runner-android-report.json`](../spikes/001-android-walkcache/evidence/runner-android-report.json).
+- Passing Android report: [`runner-android-report.json`](../spikes/001-android-deja/evidence/runner-android-report.json).
   It records `cacheStatus: "hit"`, `modelCalls: 0`, `passed: true`, `exitCode: 0`,
   `durationMs: 25778`, `monotonicDurationMs: 25779`, and APK SHA-256 `buildFingerprint:
   "4746296fa8aa84ae85761915f651b1488c38ef8f5f4e89af0e9ad19784cfcb05"`.
@@ -71,7 +71,7 @@ From the repository root, reproduce the complete recorded test output:
 
 ```sh
 bun test packages/maestro/test/maestro-runner.test.ts --timeout=10000 --check \
-  2>&1 | tee spikes/001-android-walkcache/evidence/runner-unit-tests.txt
+  2>&1 | tee spikes/001-android-deja/evidence/runner-unit-tests.txt
 ```
 
 Run individual failure paths with these filters (the tests pass by asserting the structured

@@ -43,7 +43,7 @@ Evidence:
 - [Architecture guide](../docs/ARCHITECTURE.md): lifecycle, plugin/adapter boundaries, exact cache
   identity, schema-2 memory and schema-1 run reports, atomic replacement, artifact boundaries, failure
   policy, metric scopes, and secret handling.
-- [README quick-start runtime review](../spikes/001-android-walkcache/evidence/walk012-readme-review.txt):
+- [README quick-start runtime review](../spikes/001-android-deja/evidence/walk012-readme-review.txt):
   prerequisite/device versions and author-executed clean-cache build/install/`remember`/warm
   `run`/`inspect` commands with redacted results. No cold model run, Web run, iOS run, or comparative
   timing benchmark was part of this review.
@@ -56,7 +56,7 @@ Evidence:
   (106 tests / 626 assertions passed; pre-existing React `act(...)` warnings), `bun run build`
   (TypeScript + Vite passed), and `git diff --check` passed.
 
-- [Independent clean-context review and fix verification](../spikes/001-android-walkcache/evidence/walk012-independent-review.md):
+- [Independent clean-context review and fix verification](../spikes/001-android-deja/evidence/walk012-independent-review.md):
   fresh reviewer independently built/installed Android, followed README from a quarantined cache,
   and passed `remember` → warm `run` → `inspect` with 12 assertions and zero model calls. Initial
   NOT-PASS findings were broken ticket links, executable-launch exit documentation, and dead starter
@@ -65,8 +65,8 @@ Evidence:
   **PASS, all three findings and the WALK-012 acceptance gate resolved**. The earlier failed
   clean-context attempt is superseded by this completed review; the author-executed quick start was
   never counted as independent review.
-- Evidence: [focused CLI test](../spikes/001-android-walkcache/evidence/walk012-cli-tests.txt)
-  (5 tests / 64 assertions), [full suite](../spikes/001-android-walkcache/evidence/walk012-all-tests.txt)
-  (106 tests / 626 assertions), [lint](../spikes/001-android-walkcache/evidence/walk012-lint.txt),
-  and [build](../spikes/001-android-walkcache/evidence/walk012-build.txt).
+- Evidence: [focused CLI test](../spikes/001-android-deja/evidence/walk012-cli-tests.txt)
+  (5 tests / 64 assertions), [full suite](../spikes/001-android-deja/evidence/walk012-all-tests.txt)
+  (106 tests / 626 assertions), [lint](../spikes/001-android-deja/evidence/walk012-lint.txt),
+  and [build](../spikes/001-android-deja/evidence/walk012-build.txt).
 

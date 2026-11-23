@@ -34,10 +34,10 @@ From the repository root:
 
 ```sh
 bun test packages/store-local/test/local-store.test.ts --timeout=10000 --check \
-  2>&1 | tee spikes/001-android-walkcache/evidence/local-store-unit-tests.txt
+  2>&1 | tee spikes/001-android-deja/evidence/local-store-unit-tests.txt
 ```
 
-[`local-store-unit-tests.txt`](../spikes/001-android-walkcache/evidence/local-store-unit-tests.txt)
+[`local-store-unit-tests.txt`](../spikes/001-android-deja/evidence/local-store-unit-tests.txt)
 records **17 tests, 54 assertions, 0 failures**. Every acceptance case has a named passing test:
 
 - first-run miss; normalized valid hit with exact app/platform/flow-schema/build/checksum identity;
@@ -62,17 +62,17 @@ documents identity, schema/history, invalid-memory reporting, quarantine, and th
 From the repository root:
 
 ```sh
-bun test --timeout=10000 --check 2>&1 | tee spikes/001-android-walkcache/evidence/local-store-all-tests.txt
-bun run lint 2>&1 | tee spikes/001-android-walkcache/evidence/local-store-lint.txt
-bun run build 2>&1 | tee spikes/001-android-walkcache/evidence/local-store-build.txt
+bun test --timeout=10000 --check 2>&1 | tee spikes/001-android-deja/evidence/local-store-all-tests.txt
+bun run lint 2>&1 | tee spikes/001-android-deja/evidence/local-store-lint.txt
+bun run build 2>&1 | tee spikes/001-android-deja/evidence/local-store-build.txt
 git diff --check
 ```
 
-Results: [`all tests`](../spikes/001-android-walkcache/evidence/local-store-all-tests.txt) passed
+Results: [`all tests`](../spikes/001-android-deja/evidence/local-store-all-tests.txt) passed
 **27 tests / 151 assertions**, including all 6 unchanged WALK-002 runner tests and all 4 unchanged
-WALK-003 cold-lifecycle tests; [`lint`](../spikes/001-android-walkcache/evidence/local-store-lint.txt)
-passed with 0 warnings/errors; [`tsc -b && vite build`](../spikes/001-android-walkcache/evidence/local-store-build.txt)
-passed; and [`git diff --check`](../spikes/001-android-walkcache/evidence/local-store-diff-check.txt)
+WALK-003 cold-lifecycle tests; [`lint`](../spikes/001-android-deja/evidence/local-store-lint.txt)
+passed with 0 warnings/errors; [`tsc -b && vite build`](../spikes/001-android-deja/evidence/local-store-build.txt)
+passed; and [`git diff --check`](../spikes/001-android-deja/evidence/local-store-diff-check.txt)
 reported no errors. Generated `.walkcache/`, `.tmp/`, build, and test-temp artifacts remain ignored.
 
 The production CLI/store/WALK-002 connection also passed a no-emulator smoke from
@@ -92,7 +92,7 @@ not an Android performance measurement.
 
 ### Retained real Android stale-build integration
 
-Curated [`WALK-001 run-summary.json`](../spikes/001-android-walkcache/evidence/run-summary.json)
+Curated [`WALK-001 run-summary.json`](../spikes/001-android-deja/evidence/run-summary.json)
 remains unchanged. Its `repair` evidence records the changed real APK forcing
 `postRebuildOldCacheStatus: "miss"` with exit code 2 before any replacement, followed by independent
 verification in 25,784 ms. The original warm build was

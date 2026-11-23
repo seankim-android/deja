@@ -61,10 +61,10 @@ From the repository root:
 bun test packages/store-conformance/test/conformance.test.ts \
   packages/store-local/test/local-store.test.ts \
   packages/store-sqlite/test/sqlite-store.test.ts --timeout=10000 --check \
-  2>&1 | tee spikes/001-android-walkcache/evidence/walk019-store-conformance.txt
+  2>&1 | tee spikes/001-android-deja/evidence/walk019-store-conformance.txt
 ```
 
-[`walk019-store-conformance.txt`](../spikes/001-android-walkcache/evidence/walk019-store-conformance.txt)
+[`walk019-store-conformance.txt`](../spikes/001-android-deja/evidence/walk019-store-conformance.txt)
 records **50 tests / 177 assertions / 0 failures** across three files:
 
 - the identical 23 shared cases pass against each store (46 tests);
@@ -83,15 +83,15 @@ runner/store orchestration evidence, **not** a real Android/Web/iOS device execu
 
 ```sh
 bun test --timeout=10000 --check \
-  2>&1 | tee spikes/001-android-walkcache/evidence/walk019-all-tests.txt
-bun run lint 2>&1 | tee spikes/001-android-walkcache/evidence/walk019-lint.txt
-bun run build 2>&1 | tee spikes/001-android-walkcache/evidence/walk019-build.txt
+  2>&1 | tee spikes/001-android-deja/evidence/walk019-all-tests.txt
+bun run lint 2>&1 | tee spikes/001-android-deja/evidence/walk019-lint.txt
+bun run build 2>&1 | tee spikes/001-android-deja/evidence/walk019-build.txt
 ```
 
-[`walk019-all-tests.txt`](../spikes/001-android-walkcache/evidence/walk019-all-tests.txt) passes
+[`walk019-all-tests.txt`](../spikes/001-android-deja/evidence/walk019-all-tests.txt) passes
 **138 tests / 743 assertions / 0 failures across 18 files**.
-[`walk019-lint.txt`](../spikes/001-android-walkcache/evidence/walk019-lint.txt) reports 0 warnings and
-0 errors, and [`walk019-build.txt`](../spikes/001-android-walkcache/evidence/walk019-build.txt) passes
+[`walk019-lint.txt`](../spikes/001-android-deja/evidence/walk019-lint.txt) reports 0 warnings and
+0 errors, and [`walk019-build.txt`](../spikes/001-android-deja/evidence/walk019-build.txt) passes
 `tsc -b && vite build`. No emulator, viewer server, model credential, hosted account, or remote
 service is needed. No emulator was started or changed by this ticket.
 

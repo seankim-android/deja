@@ -28,8 +28,8 @@ avoidance separate from execution speed.
 
 ## Acceptance evidence
 
-The demo-ready artifacts are [`walk005-comparison.md`](../spikes/001-android-walkcache/evidence/walk005-comparison.md)
-and [`walk005-comparison.json`](../spikes/001-android-walkcache/evidence/walk005-comparison.json).
+The demo-ready artifacts are [`walk005-comparison.md`](../spikes/001-android-deja/evidence/walk005-comparison.md)
+and [`walk005-comparison.json`](../spikes/001-android-deja/evidence/walk005-comparison.json).
 The JSON embeds every raw sample and exact boundary; the individual reports linked below are the raw
 per-command evidence. All times below are milliseconds, and all eight samples passed the unchanged
 exact `Order #WC-1001 · Mochi sticker pack` outcome assertion.
@@ -38,7 +38,7 @@ exact `Order #WC-1001 · Mochi sticker pack` outcome assertion.
 
 **Shared preconditions:** the installed APK, emulator, goal, app, and stable selector fixture were
 established before the series and held constant. Emulator boot, Gradle build, APK installation, and
-fixture-mode selection are outside both timers. [`walk005-device-conditions.txt`](../spikes/001-android-walkcache/evidence/walk005-device-conditions.txt)
+fixture-mode selection are outside both timers. [`walk005-device-conditions.txt`](../spikes/001-android-deja/evidence/walk005-device-conditions.txt)
 records `walkcache_api_34` / `emulator-5554`, Android 14/API 34, Maestro 2.12.0, and APK SHA-256
 `47ad33ba3cab8d4c1c268b1522e5ee7fd2d799fc3da6fdc884f99a40b7a166aa`. Every raw report independently
 records that build fingerprint and device. Both cold candidates and their paired warm flows used
@@ -68,14 +68,14 @@ its paired cold run.
 
 | Raw report | Pair/mode | Command wall | Nested runner | MCP calls | Model calls | Cache/result |
 | --- | --- | ---: | ---: | ---: | ---: | --- |
-| [`cold-01`](../spikes/001-android-walkcache/evidence/walk005-sample-cold-01.json) | pair-1 cold | 96,997 | 25,215 | 11 | 13 | recorded / PASS |
-| [`cold-02`](../spikes/001-android-walkcache/evidence/walk005-sample-cold-02.json) | pair-2 cold | 96,518 | 25,796 | 12 | 13 | recorded / PASS |
-| [`warm-01`](../spikes/001-android-walkcache/evidence/walk005-sample-warm-01.json) | pair-1 warm | 24,461 | 24,442 | 0 | 0 | hit / PASS |
-| [`warm-02`](../spikes/001-android-walkcache/evidence/walk005-sample-warm-02.json) | pair-1 warm | 24,309 | 24,288 | 0 | 0 | hit / PASS |
-| [`warm-03`](../spikes/001-android-walkcache/evidence/walk005-sample-warm-03.json) | pair-1 warm | 25,589 | 25,568 | 0 | 0 | hit / PASS |
-| [`warm-04`](../spikes/001-android-walkcache/evidence/walk005-sample-warm-04.json) | pair-2 warm | 25,112 | 25,094 | 0 | 0 | hit / PASS |
-| [`warm-05`](../spikes/001-android-walkcache/evidence/walk005-sample-warm-05.json) | pair-2 warm | 25,864 | 25,845 | 0 | 0 | hit / PASS |
-| [`warm-06`](../spikes/001-android-walkcache/evidence/walk005-sample-warm-06.json) | pair-2 warm | 25,146 | 25,127 | 0 | 0 | hit / PASS |
+| [`cold-01`](../spikes/001-android-deja/evidence/walk005-sample-cold-01.json) | pair-1 cold | 96,997 | 25,215 | 11 | 13 | recorded / PASS |
+| [`cold-02`](../spikes/001-android-deja/evidence/walk005-sample-cold-02.json) | pair-2 cold | 96,518 | 25,796 | 12 | 13 | recorded / PASS |
+| [`warm-01`](../spikes/001-android-deja/evidence/walk005-sample-warm-01.json) | pair-1 warm | 24,461 | 24,442 | 0 | 0 | hit / PASS |
+| [`warm-02`](../spikes/001-android-deja/evidence/walk005-sample-warm-02.json) | pair-1 warm | 24,309 | 24,288 | 0 | 0 | hit / PASS |
+| [`warm-03`](../spikes/001-android-deja/evidence/walk005-sample-warm-03.json) | pair-1 warm | 25,589 | 25,568 | 0 | 0 | hit / PASS |
+| [`warm-04`](../spikes/001-android-deja/evidence/walk005-sample-warm-04.json) | pair-2 warm | 25,112 | 25,094 | 0 | 0 | hit / PASS |
+| [`warm-05`](../spikes/001-android-deja/evidence/walk005-sample-warm-05.json) | pair-2 warm | 25,864 | 25,845 | 0 | 0 | hit / PASS |
+| [`warm-06`](../spikes/001-android-deja/evidence/walk005-sample-warm-06.json) | pair-2 warm | 25,146 | 25,127 | 0 | 0 | hit / PASS |
 
 Cold internal lifecycle times were 96,981 and 96,502 ms, exploration times were 71,572 and 70,495 ms,
 and independent verification wrappers were 25,217 and 25,797 ms. The raw reports retain those nested
@@ -100,7 +100,7 @@ and SHA-256 without serializing its credential, prompt, or response. Warm zeroes
 cache-hit execution contract, not missing instrumentation. MCP calls are never treated as model calls.
 
 The historical **24.824 s / 24.510 s** WALK-001 samples remain unchanged in
-[`run-summary.json`](../spikes/001-android-walkcache/evidence/run-summary.json). They are explicitly
+[`run-summary.json`](../spikes/001-android-deja/evidence/run-summary.json). They are explicitly
 marked historical-only and excluded from every new aggregate.
 
 ### Deterministic aggregation and quality gates
@@ -120,16 +120,16 @@ bun run build
 git diff --check
 ```
 
-Evidence: [focused tests](../spikes/001-android-walkcache/evidence/walk005-metrics-unit-tests.txt)
-(4 tests / 27 assertions), [full suite](../spikes/001-android-walkcache/evidence/walk005-all-tests.txt)
-(**47 tests / 208 assertions**, including all 43 previous tests), [lint](../spikes/001-android-walkcache/evidence/walk005-lint.txt)
-(0 warnings/errors), [type-check/build](../spikes/001-android-walkcache/evidence/walk005-build.txt),
-[evidence regeneration validation](../spikes/001-android-walkcache/evidence/walk005-evidence-validation.txt),
-and [diff check](../spikes/001-android-walkcache/evidence/walk005-diff-check.txt). Generated
+Evidence: [focused tests](../spikes/001-android-deja/evidence/walk005-metrics-unit-tests.txt)
+(4 tests / 27 assertions), [full suite](../spikes/001-android-deja/evidence/walk005-all-tests.txt)
+(**47 tests / 208 assertions**, including all 43 previous tests), [lint](../spikes/001-android-deja/evidence/walk005-lint.txt)
+(0 warnings/errors), [type-check/build](../spikes/001-android-deja/evidence/walk005-build.txt),
+[evidence regeneration validation](../spikes/001-android-deja/evidence/walk005-evidence-validation.txt),
+and [diff check](../spikes/001-android-deja/evidence/walk005-diff-check.txt). Generated
 `.walkcache/`, `.tmp/`, APK/build, raw command output, and Maestro artifacts remain ignored. Curated
 reports contain no credentials or environment dumps.
 
-[`walk005-fixture-restored.txt`](../spikes/001-android-walkcache/evidence/walk005-fixture-restored.txt)
+[`walk005-fixture-restored.txt`](../spikes/001-android-deja/evidence/walk005-fixture-restored.txt)
 records the final stable selector setting, running device, and latest exact-hit passing report after
 `warm-06`. No repair, source patch, or failed-test assertion change was made.
 

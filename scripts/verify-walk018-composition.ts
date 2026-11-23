@@ -121,7 +121,13 @@ export async function runWalk018Verification() {
     const loginCandidate = '.deja/attempts/login-segment.yaml'
     await writeFile(resolve(workspaceRoot, loginCandidate), await read(loginSource))
 
-    const previousSource = JSON.parse(await read(`${sourceDirectory}/cold-stored-memory.json`))
+    const recordedSource = JSON.parse(await read(`${sourceDirectory}/cold-stored-memory.json`))
+    // The recorded memory predates the Déjà rename and stores its flow under .walkcache/flows.
+    // Seed the temporary workspace in today's .deja/flows layout; the evidence file is unchanged.
+    const previousSource = {
+      ...recordedSource,
+      flowPath: String(recordedSource.flowPath).replace(/^\.walkcache\//, '.deja/'),
+    }
     const previousFlowPath = previousSource.flowPath
     await mkdir(dirname(resolve(workspaceRoot, previousFlowPath)), { recursive: true })
     await writeFile(resolve(workspaceRoot, previousFlowPath), await read(

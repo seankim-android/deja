@@ -32,10 +32,10 @@ not mistaken for a passing product test.
 
 ## Evidence
 
-- `spikes/001-android-walkcache/README.md`
-- `spikes/001-android-walkcache/evidence/run-summary.json`
-- `spikes/001-android-walkcache/evidence/agent-cold-checkout.yaml`
-- `spikes/001-android-walkcache/evidence/checkout-selector-repair.diff`
+- `spikes/001-android-deja/README.md`
+- `spikes/001-android-deja/evidence/run-summary.json`
+- `spikes/001-android-deja/evidence/agent-cold-checkout.yaml`
+- `spikes/001-android-deja/evidence/checkout-selector-repair.diff`
 - Commit `eba52c3` (`feat: validate Android WalkCache POC`)
 
 ## Measurement boundary

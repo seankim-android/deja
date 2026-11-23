@@ -31,9 +31,9 @@ Orchestration traces prove exact-hit provider laziness, selected-identity valida
 replay, provider fallback, and adversarial rejection; see
 [orchestration tests](../packages/core/test/orchestration.test.ts) and
 [CLI report/output integration](../apps/cli/test/cli.test.ts). The
-[acceptance matrix and honest limitations](../spikes/001-android-walkcache/evidence/walk016-semantic-retrieval.md)
+[acceptance matrix and honest limitations](../spikes/001-android-deja/evidence/walk016-semantic-retrieval.md)
 link the focused 47-test/271-assertion result and the
-[complete committed regression trace](../spikes/001-android-walkcache/evidence/walk016-all-tests.txt).
+[complete committed regression trace](../spikes/001-android-deja/evidence/walk016-all-tests.txt).
 
 The proof uses `local-lexical-v1`, not generalized semantic correctness. It is opt-in, exact-first,
 limited to exact `not-found` misses, constrains candidates through the real store before ranking,

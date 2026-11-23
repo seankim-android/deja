@@ -38,35 +38,35 @@ a constructor/spy test proving zero explorer invocation on a warm hit.
 
 Evidence:
 
-- Configuration and usage: [`walkcache.config.json`](../spikes/001-android-walkcache/walkcache.config.json)
+- Configuration and usage: [`deja.config.json`](../spikes/001-android-deja/deja.config.json) (named `walkcache.config.json` before the rename)
   and [`apps/cli/README.md`](../apps/cli/README.md).
 - Cold miss through the production CLI:
-  [`transcript`](../spikes/001-android-walkcache/evidence/walk008-cold-miss.transcript.txt) and
-  [`report`](../spikes/001-android-walkcache/evidence/walk008-cold-miss-report.json) — passed,
+  [`transcript`](../spikes/001-android-deja/evidence/walk008-cold-miss.transcript.txt) and
+  [`report`](../spikes/001-android-deja/evidence/walk008-cold-miss-report.json) — passed,
   13 model calls, 11 assertions, 95,499 ms, and exit 0. This was the cold discovery path; it is not a
   warm-replay model count.
 - Independently verified `remember` and warm replay:
-  [`remember transcript`](../spikes/001-android-walkcache/evidence/walk008-remember.transcript.txt),
-  [`warm transcript`](../spikes/001-android-walkcache/evidence/walk008-warm.transcript.txt), and
-  [`warm report`](../spikes/001-android-walkcache/evidence/walk008-warm-report.json) — warm passed
+  [`remember transcript`](../spikes/001-android-deja/evidence/walk008-remember.transcript.txt),
+  [`warm transcript`](../spikes/001-android-deja/evidence/walk008-warm.transcript.txt), and
+  [`warm report`](../spikes/001-android-deja/evidence/walk008-warm-report.json) — warm passed
   with 0 model calls, 12 assertions, 24,662 ms, and exit 0.
 - Bounded stale repair:
-  [`transcript`](../spikes/001-android-walkcache/evidence/walk008-stale-repair.transcript.txt),
-  [`report`](../spikes/001-android-walkcache/evidence/walk008-stale-repair-report.json), and
-  [`proposed diff`](../spikes/001-android-walkcache/evidence/walk008-stale-repair.diff) — repaired
+  [`transcript`](../spikes/001-android-deja/evidence/walk008-stale-repair.transcript.txt),
+  [`report`](../spikes/001-android-deja/evidence/walk008-stale-repair-report.json), and
+  [`proposed diff`](../spikes/001-android-deja/evidence/walk008-stale-repair.diff) — repaired
   after one attempt, rebuilt and independently verified, 65,865 ms, never auto-committed.
 - Genuine product regression:
-  [`transcript`](../spikes/001-android-walkcache/evidence/walk008-product-regression.transcript.txt)
-  and [`report`](../spikes/001-android-walkcache/evidence/walk008-product-regression-report.json) —
+  [`transcript`](../spikes/001-android-deja/evidence/walk008-product-regression.transcript.txt)
+  and [`report`](../spikes/001-android-deja/evidence/walk008-product-regression-report.json) —
   `product_assertion`, 0 model calls, 0 repair attempts, no source diff, and exit 1.
-- `list`: [`transcript`](../spikes/001-android-walkcache/evidence/walk008-list.transcript.txt).
+- `list`: [`transcript`](../spikes/001-android-deja/evidence/walk008-list.transcript.txt).
 - Constructor/spy regression: `packages/core/test/orchestration.test.ts` proves a warm hit constructs
   neither an explorer nor its model client and constructs no repairer.
 - Original Maestro YAML, independent of WalkCache or an LLM:
-  [`15-step passing output`](../spikes/001-android-walkcache/evidence/walk008-original-android-flow.txt).
-- Fixture restoration: [`source and device state`](../spikes/001-android-walkcache/evidence/walk008-fixture-restored.txt).
-- Final checks: [`80 tests / 500 assertions`](../spikes/001-android-walkcache/evidence/walk008-all-tests.txt),
-  [`lint`](../spikes/001-android-walkcache/evidence/walk008-lint.txt),
-  [`type-check and production build`](../spikes/001-android-walkcache/evidence/walk008-build.txt),
-  and [`git diff --check`](../spikes/001-android-walkcache/evidence/walk008-diff-check.txt).
+  [`15-step passing output`](../spikes/001-android-deja/evidence/walk008-original-android-flow.txt).
+- Fixture restoration: [`source and device state`](../spikes/001-android-deja/evidence/walk008-fixture-restored.txt).
+- Final checks: [`80 tests / 500 assertions`](../spikes/001-android-deja/evidence/walk008-all-tests.txt),
+  [`lint`](../spikes/001-android-deja/evidence/walk008-lint.txt),
+  [`type-check and production build`](../spikes/001-android-deja/evidence/walk008-build.txt),
+  and [`git diff --check`](../spikes/001-android-deja/evidence/walk008-diff-check.txt).
 

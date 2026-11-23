@@ -50,7 +50,7 @@ WALKCACHE_OPENCLAW="$(command -v openclaw)" \
   bun scripts/walkcache.ts explore checkout --config explore.config.json
 ```
 
-[`explore.config.json`](../spikes/001-android-walkcache/explore.config.json) explicitly configures the
+[`explore.config.json`](../spikes/001-android-deja/explore.config.json) explicitly configures the
 workspace, `dev.walkcache.checkout`, Android, APK path, device, Cerebras HTTPS endpoint, Kimi model,
 timeouts, and public deterministic fixture credentials. The exact non-interactive invocation and MCP
 stdio proxy are documented in [`packages/agent-openclaw/README.md`](../packages/agent-openclaw/README.md).
@@ -60,23 +60,23 @@ operator's existing Cerebras authentication without serializing its credential.
 
 Acceptance artifacts:
 
-- [Authored candidate YAML](../spikes/001-android-walkcache/evidence/explore-candidate.yaml): exact
+- [Authored candidate YAML](../spikes/001-android-deja/evidence/explore-candidate.yaml): exact
   OpenClaw final response, saved only in the attempt before verification. Its 21 steps cover login,
   catalog, cart, checkout, and assertions for `Order confirmed` and `Order #WC-1001 · Mochi sticker pack`.
-- [MCP activity](../spikes/001-android-walkcache/evidence/explore-mcp-activity.jsonl) and
-  [lifecycle activity](../spikes/001-android-walkcache/evidence/explore-activity.jsonl): 13
+- [MCP activity](../spikes/001-android-deja/evidence/explore-mcp-activity.jsonl) and
+  [lifecycle activity](../spikes/001-android-deja/evidence/explore-activity.jsonl): 13
   `tools/call` requests with bounded argument metadata, response durations/errors, clean-state events,
   verification, and persistence. Request id 7 records a failed exploration branch (`isError: true`);
   inline YAML is represented only by byte count/SHA-256.
-- [Independently passing report](../spikes/001-android-walkcache/evidence/explore-android-report.json):
+- [Independently passing report](../spikes/001-android-deja/evidence/explore-android-report.json):
   `passed: true`, `cacheStatus: "recorded"`, runner `WALK-002 runMaestro`, fresh clear-state launch,
   runner exit code 0, runner duration 26,404 ms, verification wrapper 26,406 ms, exploration 80,598 ms,
   overall lifecycle 107,297 ms, 13 MCP calls, and 15 model calls. APK SHA-256 is
   `4746296fa8aa84ae85761915f651b1488c38ef8f5f4e89af0e9ad19784cfcb05`.
-- [Stored metadata](../spikes/001-android-walkcache/evidence/explore-stored-memory.json): atomic store
+- [Stored metadata](../spikes/001-android-deja/evidence/explore-stored-memory.json): atomic store
   metadata and verified flow SHA-256
   `064e0621edf6c3e538fc717d71fca1395dd4cf32f09ec1e8a87f002959748f08`.
-- [Model metric envelope summary](../spikes/001-android-walkcache/evidence/explore-model-metrics.json):
+- [Model metric envelope summary](../spikes/001-android-deja/evidence/explore-model-metrics.json):
   Cerebras `moonshotai-kimi-k3.1-pro-trial`, 15 `assistantTurns`, 13 MCP bridge calls, and unavailable
   usage/cost instrumentation. Raw prompts, responses, output, and generated artifacts remain ignored.
 
@@ -92,14 +92,14 @@ WALKCACHE_FAKE_OPENCLAW_MODE=invalid WALKCACHE_FAKE_OPENCLAW_NO_TURNS=1 \
   bun scripts/walkcache.ts explore checkout --config explore.config.json
 ```
 
-[The rejected candidate](../spikes/001-android-walkcache/evidence/explore-rejected-candidate.yaml),
-[rejected report](../spikes/001-android-walkcache/evidence/explore-rejected-report.json), and
-[activity](../spikes/001-android-walkcache/evidence/explore-rejected-activity.jsonl) record a real
+[The rejected candidate](../spikes/001-android-deja/evidence/explore-rejected-candidate.yaml),
+[rejected report](../spikes/001-android-deja/evidence/explore-rejected-report.json), and
+[activity](../spikes/001-android-deja/evidence/explore-rejected-activity.jsonl) record a real
 WALK-002 failure at that assertion: Maestro exit code 1, runner duration 22,630 ms, verification wrapper
 22,631 ms, `cacheStatus: "rejected"`, and `persistence: null`. The fixture invoked no MCP/model services,
 so metrics are 0 MCP calls and `modelCalls: null`, `modelCallBasis: "unknown"`.
 
-[Byte-preservation evidence](../spikes/001-android-walkcache/evidence/explore-rejection-preservation.json)
+[Byte-preservation evidence](../spikes/001-android-deja/evidence/explore-rejection-preservation.json)
 confirms both files are unchanged before/after rejection:
 
 - Successful YAML SHA-256: `064e0621edf6c3e538fc717d71fca1395dd4cf32f09ec1e8a87f002959748f08`.
@@ -119,10 +119,10 @@ bun run build   # tsc -b plus Vite production build
 git diff --check
 ```
 
-Recorded output: [unit tests](../spikes/001-android-walkcache/evidence/explore-unit-tests.txt)
+Recorded output: [unit tests](../spikes/001-android-deja/evidence/explore-unit-tests.txt)
 (10 tests, 97 assertions, 0 failures, including all six unchanged WALK-002 runner tests),
-[lint](../spikes/001-android-walkcache/evidence/explore-lint.txt) (0 warnings/errors), and
-[type-check/build](../spikes/001-android-walkcache/evidence/explore-build.txt) (passed).
+[lint](../spikes/001-android-deja/evidence/explore-lint.txt) (0 warnings/errors), and
+[type-check/build](../spikes/001-android-deja/evidence/explore-build.txt) (passed).
 
 `modelCalls` is OpenClaw `assistantTurns`, i.e. completed assistant/provider round trips, not a physical
 HTTP retry/token/cost count. Missing values stay `null`/`unknown`. `mcpCalls` counts only proxied

@@ -225,8 +225,10 @@ describe('bounded verified login composition', () => {
       await mkdir(dirname(resolve(workspaceRoot, candidatePath)), { recursive: true })
       await writeFile(resolve(workspaceRoot, candidatePath), await readFile(resolve(
         repo, `${evidence}/segments/login-v1/${loginName}`), 'utf8'))
-      const previous = JSON.parse(await readFile(resolve(
+      const recorded = JSON.parse(await readFile(resolve(
         repo, 'demo/live-evidence/android/cold-stored-memory.json'), 'utf8'))
+      // The recorded memory predates the Déjà rename (.walkcache/flows); seed today's layout.
+      const previous = { ...recorded, flowPath: recorded.flowPath.replace(/^\.walkcache\//, '.deja/') }
       await mkdir(dirname(resolve(workspaceRoot, previous.flowPath)), { recursive: true })
       await writeFile(resolve(workspaceRoot, previous.flowPath), await readFile(resolve(
         repo, 'demo/live-evidence/android/cold-saved-checkout.yaml'), 'utf8'))

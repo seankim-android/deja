@@ -30,49 +30,49 @@ assertions and cache safety.
   [Maestro composer](../packages/maestro/src/subflow-composition.ts), and checksummed
   [local segment store](../packages/store-local/src/verified-subflow-store.ts). Exact goal-cache
   lookup/order/orchestration is unchanged; composition is explicit, not route planning.
-- [Login contract](../spikes/001-android-walkcache/evidence/walk018/login-contract.json) and
-  [independently verified login YAML](../spikes/001-android-walkcache/evidence/walk018/segments/login-v1/android-c415a62dae8b1346213ac1f92c5201d2a8c17e01d98c84e6ab979f4d785f3266.yaml):
+- [Login contract](../spikes/001-android-deja/evidence/walk018/login-contract.json) and
+  [independently verified login YAML](../spikes/001-android-deja/evidence/walk018/segments/login-v1/android-c415a62dae8b1346213ac1f92c5201d2a8c17e01d98c84e6ab979f4d785f3266.yaml):
   required text/credential input descriptors (no metadata values), Android app/build identity,
   clean-launch and pre-action `screen_login` preconditions, catalog output/postcondition, 11 steps
   and 5 assertions.
-- [Composed YAML](../spikes/001-android-walkcache/evidence/walk018/composed/sign-in-and-check-out-mochi-sticker-pack/candidate.yaml)
+- [Composed YAML](../spikes/001-android-deja/evidence/walk018/composed/sign-in-and-check-out-mochi-sticker-pack/candidate.yaml)
   for **Sign in and check out Mochi sticker pack**, plus its
-  [11-step checkout continuation](../spikes/001-android-walkcache/evidence/walk018/continuation/checkout.yaml).
+  [11-step checkout continuation](../spikes/001-android-deja/evidence/walk018/continuation/checkout.yaml).
   One `runFlow` reference replaces all login commands and fixture values. Reused/new steps are **11 /
   11**; reused/new assertions are **5 / 9**; the full journey has 22 steps and all 14 original
   assertions. New exploration, composition, segment verification, and full verification model calls
   are separately reported as **0 / 0 / 0 / 0**.
-- [Clean-state verification and failure-preservation report](../spikes/001-android-walkcache/evidence/walk018/walk018-verification.json):
+- [Clean-state verification and failure-preservation report](../spikes/001-android-deja/evidence/walk018/walk018-verification.json):
   independently execute login; verify the complete composed candidate before persistence; save it;
   replay stored YAML through unchanged exact `WalkCache.run` with `hit`/`passed`, 14 assertions,
   zero model calls and zero explorer constructions; then inject a missing checkout control and prove
   login index/YAML, previous goal flow and complete last-known-good memory remain byte-for-byte
-  unchanged. Raw [clean](../spikes/001-android-walkcache/evidence/walk018/walk018-clean-state-composition.log),
-  [exact-replay](../spikes/001-android-walkcache/evidence/walk018/walk018-exact-replay.log), and
-  [failed](../spikes/001-android-walkcache/evidence/walk018/walk018-failed-composition.log) logs are
+  unchanged. Raw [clean](../spikes/001-android-deja/evidence/walk018/walk018-clean-state-composition.log),
+  [exact-replay](../spikes/001-android-deja/evidence/walk018/walk018-exact-replay.log), and
+  [failed](../spikes/001-android-deja/evidence/walk018/walk018-failed-composition.log) logs are
   linked by the report. Final confirmation and exact WC-1001 item assertions are selected from
   actual runner observations on both clean composition and replay. Additional adversarial evidence
   rejects a wrong WC-9999 final text as a product assertion and rejects a green runner containing a
   late second clean launch through bounded observations; both preserve goal memory, prior flow,
-  segment index, and segment YAML byte-for-byte. Raw [wrong-text](../spikes/001-android-walkcache/evidence/walk018/walk018-wrong-final-text.log)
-  and [late-launch](../spikes/001-android-walkcache/evidence/walk018/walk018-late-second-clear-launch.log)
+  segment index, and segment YAML byte-for-byte. Raw [wrong-text](../spikes/001-android-deja/evidence/walk018/walk018-wrong-final-text.log)
+  and [late-launch](../spikes/001-android-deja/evidence/walk018/walk018-late-second-clear-launch.log)
   logs record `finalProductAssertionPassed: false` and two launches/final `login`, respectively.
   Canonical output evidence additionally replaces the goal directory and composed root with external
   symlinks, tests a dangling link and two non-directory traversal cases, and proves all five reject
   before runner invocation. External sentinel candidates remain unchanged and goal/segment storage
   remains byte-identical; legitimate new nested output still succeeds. See the
-  [canonical-output log](../spikes/001-android-walkcache/evidence/walk018/walk018-canonical-output-containment.log).
-- [42 focused tests / 259 assertions](../spikes/001-android-walkcache/evidence/walk018/walk018-focused-tests.txt)
+  [canonical-output log](../spikes/001-android-deja/evidence/walk018/walk018-canonical-output-containment.log).
+- [42 focused tests / 259 assertions](../spikes/001-android-deja/evidence/walk018/walk018-focused-tests.txt)
   cover schema/identity, rejected independent verification, contract-accounting mismatches, missing
   observation traces, containment-safe same-directory and nested references plus normalized,
   absolute and parent escapes, reference cycles, exact runner/storage integration, runner-failure
   preservation, and filesystem failure **after passing verification**. Separate segment-store cases
   prove index/flow replacement failures preserve the previous segment byte-for-byte.
-  [Full portable suite: 215 tests / 1,105 assertions](../spikes/001-android-walkcache/evidence/walk018/walk018-all-tests.txt);
-  [lint/build](../spikes/001-android-walkcache/evidence/walk018/walk018-lint-build.txt) passed.
+  [Full portable suite: 215 tests / 1,105 assertions](../spikes/001-android-deja/evidence/walk018/walk018-all-tests.txt);
+  [lint/build](../spikes/001-android-deja/evidence/walk018/walk018-lint-build.txt) passed.
 - Independently runnable deriver/verifier: `bun scripts/derive-walk018-composition.ts --check` and
   `bun scripts/verify-walk018-composition.ts --check`; their fresh process executions passed in
-  [reproduction evidence](../spikes/001-android-walkcache/evidence/walk018/walk018-reproduction-check.txt).
+  [reproduction evidence](../spikes/001-android-deja/evidence/walk018/walk018-reproduction-check.txt).
   `git diff --check` passed, and the release-artifact validator was run after committing on the
   clean checkout; see the handoff for its commit-bound result.
 

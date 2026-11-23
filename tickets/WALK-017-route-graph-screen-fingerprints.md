@@ -29,7 +29,7 @@ incomplete graph into a correctness claim.
   [22 deterministic schema/fingerprint/matching tests](../packages/core/test/route-graph.test.ts) and
   [3 curated-evidence tests](../packages/core/test/route-graph-evidence.test.ts). Focused result:
   **25 tests / 73 assertions passed**. Full portable result: **131 tests / 699 assertions passed**.
-- [Small Android route graph](../spikes/001-android-walkcache/evidence/walk017-route-graph.json):
+- [Small Android route graph](../spikes/001-android-deja/evidence/walk017-route-graph.json):
   four nodes and three verified transitions for `dev.walkcache.checkout`, build
   `6aec5fea876938db14007ba3dbcb91f698832fe855886abd9dea1e7b28861759`.
 - [Route-graph guide](../docs/ROUTE_GRAPH.md) documents the closed bounds, non-secret observations,

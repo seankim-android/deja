@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
-/* Deterministic executable fixture: implements only the curated WALK-018 YAML command subset. */
+/* Deterministic executable fixture: implements only the curated WALK-018 YAML command subset.
+ * App identity and copy match the recorded WALK-018 evidence (pre-rename build dev.walkcache.checkout). */
 const { readFileSync } = require('node:fs')
 const { dirname, resolve } = require('node:path')
 
@@ -20,7 +21,7 @@ let failed = false
 
 const visibleByScreen = {
   login: {
-    screen_login: 'Déjà Shop',
+    screen_login: 'WalkCache Shop',
     username_input: null,
     password_input: null,
     login_button: 'Sign in',
@@ -156,7 +157,7 @@ function executeTap(lines) {
 function executeFlow(path, depth) {
   if (depth > 1) return fail('Run nested flow', 'Nested runFlow depth exceeds fixture bound')
   const contents = readFileSync(path, 'utf8')
-  if (!contents.startsWith('appId: dev.deja.checkout\n')) {
+  if (!contents.startsWith('appId: dev.walkcache.checkout\n')) {
     return fail('Read fixture app identity', 'Unexpected appId')
   }
   for (const lines of blocks(contents)) {
@@ -170,14 +171,14 @@ function executeFlow(path, depth) {
     if (command === 'launchApp:') {
       const clearState = property(lines.slice(1), 'clearState')
       if (clearState !== 'true' || depth > 1) {
-        return fail('Launch app "dev.deja.checkout" with clear state', 'App launch failed: clean launch required once')
+        return fail('Launch app "dev.walkcache.checkout" with clear state', 'App launch failed: clean launch required once')
       }
       state.screen = 'login'
       state.focused = null
       state.usernameEntered = false
       state.passwordEntered = false
       state.clearStateLaunches += 1
-      pass('Launch app "dev.deja.checkout" with clear state')
+      pass('Launch app "dev.walkcache.checkout" with clear state')
       observation({ kind: 'launch', clearState: true })
     } else if (command === 'assertVisible:' || command.startsWith('assertVisible:')) {
       executeAssert(lines)
