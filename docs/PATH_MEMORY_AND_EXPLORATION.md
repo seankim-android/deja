@@ -1,8 +1,9 @@
 # Exploration, AI testing and optimization
 
 Status: proposal. Nothing in this document is built. A part counts as working only when its ticket
-in the Linear team DEJA (DEJA-18 to DEJA-23, moving to Linear team DEJA) links
-real run evidence. Older `WALK-0xx` names below are the repo tickets that moved to Linear.
+in the Linear team DEJA (open work is DEJA-18 to DEJA-23) links real run evidence. The `WALK-0xx`
+names below are historical. They are finished repo tickets (see git history): WALK-016 is the
+retrieval work, WALK-017 is `route-graph.ts` and WALK-018 is `subflow.ts`.
 
 ## 0. Scope
 
@@ -14,28 +15,29 @@ Déjà is a generic SDK with three goals:
 3. **Optimization.** Spend fewer model calls and less wall time per explore and repair, and emit
    shorter flows with no duplication.
 
-iOS and Android are both first-class. Every feature must work on both. Web (Chromium) is a distant
-third: the contract allows it, and no ticket here targets it.
+iOS is first-class for now. Android comes second, and web (Chromium) third: the contract allows
+web, and no ticket here targets it. Platform code lives only in drivers. No Android-only or
+iOS-only branch enters core or the explorer.
 
 iOS goes first, because it is the platform this Mac can test (iPhone 17 simulator, iOS 27.2,
 Maestro 2.12). The order is: the platform-neutral contract with iOS observation (DEJA-18), iOS cold
 exploration of one Blankaday flow (DEJA-19), Android parity on an emulator (DEJA-20), then path memory (DEJA-21),
 reuse and optimization (DEJA-22), and repair, gaps and the review queue (DEJA-23). All of them build on the
-`createDeja` facade (DEJA-5).
+`createDeja` facade (DEJA-5, merged: `packages/core/src/create-deja.ts:96`).
 
 Run history across builds is parked in the DEJA backlog. Until it lands, path memory keeps records
 for the current build and the last verified build only (section 4.6).
 
 ## 1. The problem today
 
-- **One YAML per goal.** `WalkStore` (`packages/core/src/contracts.ts:100`) maps an exact identity,
+- **One YAML per goal.** `WalkStore` (`packages/core/src/contracts.ts:149`) maps an exact identity,
   build included, to one flow under `.deja/flows/`. Goals share nothing. Blankaday's
   `sign-in.yaml`, `delete-account.yaml` and `export.yaml` all walk Today, You and Settings, and a
   renamed `you.settings` breaks all three with no shared diagnosis.
 - **The build is in the key.** Blankaday's runner builds a new `.app` each run, so a store keyed by
   build is empty every run (DEJA-1).
 - **Exploration is one Android agent loop.** `packages/agent-openclaw` hands Kimi the Maestro MCP
-  tools and asks for a whole YAML file back (`explorerPrompt`, `packages/agent-openclaw/src/index.ts`).
+  tools and asks for a whole YAML file back (`explorerPrompt`, `packages/agent-openclaw/src/index.ts:179`).
   The model writes the assertions. iOS and web return `exploration-rejected`.
 - **Repair is one fixture policy.** `CheckoutRepairPolicy` fixes one Checkout ID in two files.
 - **Diagnostic memory is narrow.** The WALK-017 route graph (`packages/core/src/route-graph.ts`) is
@@ -43,7 +45,8 @@ for the current build and the last verified build only (section 4.6).
   hand-composed login.
 
 What stays: the deliverable is ordinary Maestro YAML that the owner reviews and runs without Déjà.
-`WalkStore`, memory schema 2 and the WalkStore conformance suite don't change.
+`WalkStore`, memory schema 3 (flows plus their `runFlow` closure, DEJA-2) and the WalkStore
+conformance suite don't change.
 
 ## 2. Test cases from the first consumer
 
@@ -82,6 +85,8 @@ export interface ExplorationDriver {
   act(segment: Segment, env?: Record<string, string>): Promise<StepResult>
   /** The platform's own way back, if any (Android back, iOS nav bar back or edge swipe). */
   backActions(observation: Observation): CandidateAction[]
+  /** Close the keyboard when `observation.keyboardVisible` (`hideKeyboard`, `pressKey: Enter`). */
+  keyboardActions(observation: Observation): CandidateAction[]
   /** Platform system UI the harness may handle without the model. */
   systemUi(observation: Observation): SystemUiState | null
 }
@@ -121,7 +126,7 @@ export type StepResult = {
 ```
 
 The explorer keeps implementing today's `WalkExplorer.explore({ identity })`
-(`contracts.ts:225`). The new `GraphExplorer` takes an `ExplorationDriver`, the `WalkRunner`
+(`contracts.ts:280`). The new `GraphExplorer` takes an `ExplorationDriver`, the `WalkRunner`
 interface (not `MaestroWalkRunner`), an optional `PathStore`, an `ActionChooser`, budgets and a
 goal spec through `createDeja` options. `UnsupportedPlatformExplorer` stays for platforms with no
 driver yet.
@@ -134,7 +139,7 @@ driver yet.
 | Stable ID | `accessibilityIdentifier` (Blankaday: `screen.today`, `you.settings`) | `resource-id`, normalized by dropping the `com.app:id/` prefix; `content-desc` as a fallback label, not an ID |
 | Launch arguments | `launchApp arguments:` become process arguments the app reads (Blankaday: `uiTesting`, `-screenshotState`) | `launchApp arguments:` become intent extras the app must read |
 | Clean state | `clearState: true` resets the app container. The keychain and any server state stay, so the app needs a test mode (Blankaday's `uiTesting` with fixture providers) | `clearState: true` or `pm clear` (as today). Server state stays |
-| Going back | No system back. The nav bar back button (often labeled with the previous title, a text selector) or a left-edge swipe; sheets close with a downward swipe | The `back` command, always available. It can leave the app at the root |
+| Going back | No system back. The nav bar back button (often labeled with the previous title, a text selector) or a left-edge swipe; sheets close with a downward swipe. The edge swipe is coordinate-based. It is the one allowed point action: written by the driver, recorded as `selectorQuality: 'point'`, and listed as a gap | The `back` command, always available. It can leave the app at the root |
 | System alerts | SpringBoard alerts and permission sheets (notifications, photos, location, tracking) sit outside the app. Prefer `launchApp permissions:` or the app's fake (Blankaday's `-notificationAuth`). An unexpected alert stops the step as `system-ui` | Runtime permission dialogs from the permission controller; app dialogs are in-app. Prefer `permissions:` on launch |
 | Keyboard | Software keyboard keys show up as elements (`space`), which are overlays. `pressKey: Enter` submits. On the iOS 27 simulator, `inputText` can attach a hardware keyboard and hide the software one for about 2 s (Blankaday's `subflows/type.yaml` waits for `space`) | IME keyboard. `hideKeyboard` closes it; `pressKey: Enter` submits |
 | Out-of-process UI | Share sheet (`ActivityListView`), photo picker: observable in part, not explorable. The explorer stops at them and reports | Share sheet and pickers from other packages: same rule |
@@ -165,6 +170,7 @@ reset. No ticket here targets it.
 ```ts
 export const PATH_MEMORY_SCHEMA_VERSION = 1
 export const SCREEN_FINGERPRINT_VERSION = 2 // WALK-017 is version 1, Android only
+export const CANONICAL_YAML_VERSION = 1     // section 4.2.1
 
 export type GraphKey = {
   appId: string
@@ -173,6 +179,9 @@ export type GraphKey = {
   browser?: string
   flowSchemaVersion: 'maestro/v1'
   fingerprintVersion: typeof SCREEN_FINGERPRINT_VERSION
+  canonicalVersion: typeof CANONICAL_YAML_VERSION
+  /** Viewport class of the device (section 4.3). A layout shows different anchors per class. */
+  viewportClass: string       // e.g. 'compact' (343x667 up to the Duo outer display), 'regular'
 }
 
 export type LaunchProfile = {
@@ -233,11 +242,11 @@ export type ValidationRecord = {
 }
 
 export type Segment = {
-  segmentId: string           // sha256(canonical commands + closure shas)
+  segmentId: string           // sha256(canonical commands + assertions + closure shas)
   commands: string            // canonical YAML, may contain ${PARAM}
   closure: Array<{ path: string; sha256: string }> // runFlow/runScript files (DEJA-2)
   params: ParamDescriptor[]
-  assertions: string[]        // canonical assertion commands; frozen once approved
+  assertions: string[]        // every product assertion in the segment, mid-flow ones included; frozen once approved
   selectorQuality: 'id' | 'text' | 'point' | 'mixed'
 }
 
@@ -246,6 +255,8 @@ export type Path = {
   contextId: string
   name: string                // section name or '<flow>#<n>'
   segmentIds: string[]
+  /** sha256 of the sorted list of every product assertion in the path (checkpoints excluded). */
+  assertionsSha256: string
   provenance: Provenance
   validations: ValidationRecord[]
 }
@@ -269,18 +280,21 @@ export type GoalComposition = {
   target: GoalTarget | null
 }
 
-/** Approved product assertions. Hash checked on every replay and repair. */
+/** Approved product assertions. Hash checked on every replay and repair. Written only at the verified save (8.2). */
 export type GoalTarget = {
-  source: 'owner-goal-spec' | 'owner-yaml' | 'approved-proposal'
+  source: 'owner-goal-spec' | 'owner-yaml' | 'approved-proposal' | 'auto-approved-proposal'
   assertions: string[]
-  assertionsSha256: string
+  assertionsSha256: string    // covers every product assertion in the goal's flow, mid-flow ones included
   approvedAt: string
+  proposalId?: string
+  /** Only for 'auto-approved-proposal': what the owner can audit later. */
+  autoApproval?: { confidence: number; threshold: number; rulesSha256: string; checks: string[] }
 }
 
 export type GraphVersion = {
   version: number
   at: string
-  trigger: 'import' | 'observed-run' | 'build' | 'approved' | 'auto-merged' | 'revert'
+  trigger: 'import' | 'observed-run' | 'build' | 'approved' | 'auto-approved' | 'auto-merged' | 'revert'
   runId?: string
   proposalId?: string
   buildFingerprint?: string
@@ -301,6 +315,24 @@ export type PathGraph = {
   proposals: Proposal[]       // section 9.3
 }
 ```
+
+#### 4.2.1 Canonical YAML (version 1)
+
+`segmentId`, `pathId` and the assertion hashes are hashes of canonical YAML, so the form is fixed
+here. The `yaml` package (approved, section 17) parses owner flows when they are sectioned, produces
+the canonical form, and is the emitter `stitch` uses.
+
+- Comments are removed before hashing. Line endings are LF, with one trailing newline.
+- Block style only, 2-space indent, no flow collections, no line folding (`lineWidth: 0`).
+- Command lists keep their order. Mapping keys inside a command are sorted.
+- Scalars are plain unless quoting is required; then double quotes. Types are kept as written
+  (`true` stays a boolean, `"123456"` stays a string).
+- An ID used as a selector is regex-escaped (Maestro treats `id` as a regular expression, to be
+  confirmed by DEJA-18, section 13.1), so `settings.export` is written `settings\.export`.
+
+`CANONICAL_YAML_VERSION` is in `GraphKey`. Any change to the output of this form bumps it and starts
+a new graph. The `yaml` version is pinned exactly, and golden-vector tests (inputs and expected
+canonical text) fail when an upgrade changes any output.
 
 Derived transition status, computed on read: `verified-on-build`, `verified-elsewhere` (a
 hypothesis for this build), `failed-on-build`, `stale` (a different screen at one end on this
@@ -328,6 +360,11 @@ the transition is marked `nondeterministic` and skipped. That costs reuse, not c
 5. A `config.screenMarkerPattern` match (Blankaday: `^screen\.`) is the marker. Same marker with a
    subset of stored anchors is `matched-scrolled`, never a hit by itself.
 6. Visible text is never part of a fingerprint. It changes per locale and can hold personal data.
+7. The viewport class is in `GraphKey`. A lazy list shows different rows at 343x667 and on an
+   iPhone 17, so anchors differ. A graph built for one class is never matched on another; a new class
+   starts its own graph. Blankaday needs `compact` and `regular` (the SE and the Duo outer display
+   are `compact`). The class comes from `config.viewportClasses` (width and height ranges in
+   points), never from a device model name.
 
 Matching keeps WALK-017's rules: `ambiguous`, `changed` and `unknown` fail closed. A screen with no
 stable IDs is never a node; it is a gap.
@@ -360,7 +397,7 @@ type stays `ValidationRecord[]`, so the parked item can lift the limit without a
 
 ```text
 .deja/
-  flows/..., memory/walks.json, memory/walks.sqlite   # unchanged WalkStore, schema 2
+  flows/..., memory/walks.json, memory/walks.sqlite   # unchanged WalkStore, schema 3
   paths/<graph-key-sha>/
     graph.json                     # PathGraph, schema 1
     segments/<sha>.yaml
@@ -408,7 +445,7 @@ build-A records never answering for build B, ambiguous fingerprints failing clos
 proposal changing nothing, `applyProposal` by human and by auto producing the same state, and
 injected write failures preserving earlier bytes. The WalkStore suite doesn't change.
 
-**Migration from memory schema 2.** No rewrite of `walks.json` or `walks.sqlite`. A read-only
+**Migration from memory schema 3** (schema 1 and 2 walks are read as today). No rewrite of `walks.json` or `walks.sqlite`. A read-only
 import splits each passing flow at every `launchApp` with `clearState: true` (a warm `launchApp`
 and `stopApp` stay inside the section), writes profiles, segments (each closed by an assertion) and
 paths with `provenance: 'imported'` and one `in-parent-flow` record. No screens or transitions are
@@ -427,10 +464,13 @@ raw iOS log in this repo confirms yet. Without a position, the section is `unkno
 | `PATH_MEMORY_SCHEMA_VERSION` | 1 | The `PathGraph` shape changes; other versions are rejected |
 | `SCREEN_FINGERPRINT_VERSION` | 2 | Fingerprint rules change. It is in `GraphKey`, so a change starts a new graph |
 | `PathGraph.version` | counter | Every accepted change, with its trigger |
-| Adapter ID | `maestro-ios/v1`, `maestro-android/v1` | Command execution changes. Android has no adapter ID in `WalkIdentity` today (`packages/maestro/src/platform-adapter.ts:75`); path memory always records one |
-| Memory schema (WalkStore), result schema | 2, 1 | Unchanged. Reports get optional additive `exploration.graph` and `metrics` sections |
+| `CANONICAL_YAML_VERSION` | 1 | The canonical YAML form changes (section 4.2.1). It is in `GraphKey` |
+| Viewport class | `compact`, `regular` | `config.viewportClasses` changes. It is in `GraphKey` |
+| Adapter ID | `maestro-ios/v1`, `maestro-android/v1` | Command execution changes. The Android adapter's ID is `maestro-android` with no version (`packages/maestro/src/platform-adapter.ts:77`); path memory always records a versioned one |
+| Memory schema (WalkStore), result schema | 3, 1 | Unchanged. Reports get optional additive `exploration.graph` and `metrics` sections |
 
-Device model, OS runtime and Maestro version go on records, not in the key.
+Device model, OS runtime and Maestro version go on records, not in the key. The viewport class is
+the one device fact that is in the key.
 
 ## 7. The exploration algorithm
 
@@ -441,7 +481,7 @@ Device model, OS runtime and Maestro version go on records, not in the key.
 | `reset(ctx)` | `driver.reset`: one-command `launchApp` flow with the profile, then state paths | No |
 | `observe()` | `driver.observe`: `maestro hierarchy` (listed by `maestro --help` on Maestro 2.12) or MCP `inspect_screen`, normalized | No |
 | `act(segment)` | `driver.act`: a flow with no `launchApp` on the live app | No |
-| `settle()` | `waitForAnimationToEnd`, then observe until two reads give the same fingerprint (at most 5 tries); an unsettled screen is never a node | No |
+| `settle()` | `waitForAnimationToEnd` (it compares screenshots, so looping animations can run it to its timeout; see 13.1), then observe until two reads give the same fingerprint (at most 5 tries); an unsettled screen is never a node | No |
 | `verify(flow)` | Today's independent full run through `WalkRunner` from a clean root | No |
 
 **Assumption, not yet proven.** No code in this repo steps a real Maestro run. The only step
@@ -449,25 +489,49 @@ protocol is the fixture's (`packages/maestro/src/execution-observations.ts:23`).
 iOS 27.2 simulator that a flow with no `launchApp` acts on live state, that the hierarchy returns
 SwiftUI identifiers, and what each call costs. If one Maestro process start costs several seconds,
 the MCP session may be the only practical transport. Budgets below are placeholders until DEJA-18.
+Section 13.1 lists every fact DEJA-18 must measure, with go/no-go thresholds. DEJA-19 does not
+start until they are met.
 
 ### 7.2 Action set (no model)
 
 ```text
 actions(obs, goal, graph, ctx):
   for e in obs.elements where e.enabled and e.interactive and not e.overlay:
-    selector = e.id ? {id} : e.label ? {text} : skip          # no point taps from search
-    text-field or secure-field -> one input action per matching fixture value
+    selector = e.id if e.id is unique on the screen          # select by ID, never by copy
+             : {text} only if config.allowTextSelectors      # off by default
+             : skip                                          # no point taps from search
+    text-field or secure-field -> the typing action (below), one per matching fixture value
     otherwise                  -> tap(selector)
   add driver.backActions(obs), scroll(down), scroll(up)
-  drop config.destructiveDeny matches (delete, sign out, purchase, pay) unless the goal spec names them
+  if obs.keyboardVisible: add driver.keyboardActions(obs)   # hideKeyboard, pressKey: Enter
+  add known subflow segments for this context (config.subflowActions), each with its env
+  drop destructive actions (below) unless the goal spec names them
   drop failed branches from this screen on this build
   score: +4 id selector, +3 untried here, +2 * goal-word overlap with id/label,
          +2 first step of a known path to the target, -3 leads back onto the current path
   return top K (default 12), ties broken by id, label, then position
 ```
 
-Typed text comes only from config fixtures (Blankaday: `sam@example.com`, code `123456`) or a
-generated token (`deja-1`). System UI is handled before the action set: a known alert gets its
+**Selectors.** An ID that more than one element carries (SwiftUI passes one identifier down to
+children) is not offered, unless DEJA-18 shows an `index` selector is stable. A text selector is off
+by default. When config turns it on, it is recorded as `selectorQuality: 'text'`, listed as a gap,
+and is never a target assertion for auto-approval. IDs are regex-escaped by `stitch` (4.2.1).
+
+**Typing.** Typed text comes only from config fixtures (Blankaday: `sam@example.com`, code `123456`)
+or a generated token (`deja-1`). A known subflow can replace the generated `inputText` step: on iOS 27
+the hardware-keyboard problem makes Blankaday's `subflows/type.yaml` (it waits for the `space` key)
+the working way to type. Config names it in `config.subflowActions` with its `env` (`TEXT`). It is
+offered as an action, not a hand-composed step, and its closure is stored with the segment.
+
+**Destructive actions** are denied by ID and role, not by English words alone. `config.destructiveDeny`
+is a per-profile list of ID patterns, matched on whole ID tokens (so `paywall` doesn't match `pay`).
+Blankaday's list covers `remove`, `unfriend`, `block`, `report`, `reset`, `clear`, `delete`,
+`signOut` and `purchase`. Roles (a destructive-style button or an alert's destructive action) count
+too. Visible words are a locale-aware hint only: per-locale word lists add to the deny set and
+never remove from it. An app with no test mode (`explore: false`) defaults to an allowlist of IDs
+(`config.allowedIdPatterns`), so nothing outside it is tried.
+
+System UI is handled before the action set: a known alert gets its
 configured answer, and an unknown one stops the step as `system-ui`.
 
 ### 7.3 Model questions are narrow and closed
@@ -497,7 +561,7 @@ export interface ActionChooser {
 ```text
 explore(goal, spec, budgets, chooser):
   key, build = adapter identity; G = pathStore?.graph(key) ?? empty
-  ctx = spec.context ?? config.defaultContext        # must have explore: true
+  ctx = spec.context ?? request.profile ?? config.defaultContext   # must have explore: true
   target = spec.target                                # null -> draft mode (section 8)
   if target == null and chooser is scripted: return rejected('no target and no model')
 
@@ -530,7 +594,7 @@ explore(goal, spec, budgets, chooser):
     if target and satisfies(after, target):
       path = pathFromRoot(ctx, to); flow = stitch(ctx, path, target)
       run = verify(flow)
-      if run.passed and run.observationsMatch(path) and negativeControl(flow, target):
+      if run.passed and run.observationsMatch(path) and gates(flow, target, path):  # 8.3 for proposals
         return save(flow, path)
       demote path; continue
     if not target and to is new and chooser.isGoalScreen(goal, to) == true:
@@ -539,9 +603,27 @@ explore(goal, spec, budgets, chooser):
   return rejected(reason, budgetsUsed, gaps)
 ```
 
-`stitch` is the only writer of YAML: `appId`, one `launchApp` from the profile, state paths as
-`runFlow` references, each segment followed by `extendedWaitUntil` on the next screen's marker,
-then the approved target assertions unchanged.
+`stitch` is the only writer of YAML. For each section of the goal (`GoalComposition.pathIds` can
+hold several) it writes `appId`, one `launchApp` from that section's own profile and arguments,
+state paths as `runFlow` references, each segment followed by `extendedWaitUntil` on the next
+screen's marker, then that section's product assertions unchanged. `today.yaml`, `reveal.yaml`,
+`sign-in.yaml` and `export.yaml` have two clean-launch sections each, so a multi-section goal
+re-emits them in order, each with its own `launchApp arguments:`.
+
+**A natural-language goal and its profile.** The goal text never picks a profile. The explore
+request carries `profile` (a goal such as "export my journal" needs the `uiTesting` profile with
+`-settingsFriends`), or `config.defaultContext` applies. A profile with `explore: false` is
+refused.
+
+**Frontier cost.** `navigate(from)` reaches a frontier screen without a model. If the live app is
+on a screen with a known verified or observed path to `from`, it replays that path (each action
+counts as an `act`). Otherwise it does a `reset` and replays the path from the root (one `reset`
+plus its actions). Both spend the budgets in 7.5 and show in `metrics` as `navigationActions`
+and `navigationResets`. The default order is depth-first with a beam (`config.explore.beamWidth`,
+default 3): it explores the best children of the current screen before returning to a shallower
+one, so most moves cost no reset. `best-first` is an option for shallow apps. At depth 3 to 5
+(Today, You, Settings, Export) 10 resets are not enough for breadth-first, which is why it isn't
+the default. These numbers are re-tuned by DEJA-18's measured step cost.
 
 ### 7.5 Budgets and stopping rules
 
@@ -550,13 +632,16 @@ Budgets are hard limits per run. Nothing carries over between runs.
 | Budget | Explore | Repair | Gap analysis |
 | --- | --- | --- | --- |
 | Model calls | 30 | 3 | 1 per candidate, 10 per run |
-| Actions (`act`) | 60 | 5 | 0 |
-| Resets | 10 | 2 | 0 |
+| Actions (`act`, including `navigate` replays) | 60 | 5 | 0 |
+| Resets (including `navigate` resets) | 10 | 2 | 0 |
 | Depth from root | 20 | prefix + 1 | n/a |
 | Wall time | 15 min | 3 min | 1 min |
-| Full verifications | 3 | 1 | 0 |
+| Full verifications | 3 (4 with target auto-approval) | 1 (2 for an auto-merge) | 0 |
+| Target proposals per goal | 2 per run, 5 per day | n/a | n/a |
 
-These are placeholders until DEJA-18 measures step cost. When the model budget runs out, the run
+A target auto-approval needs two clean verification passes (8.2), so it costs 2 of the verification
+budget; the extra one covers a failed path try. These are placeholders until DEJA-18 measures step
+cost. When the model budget runs out, the run
 continues with the scripted chooser. Stop early when the frontier is empty, a screen is revisited 5
 times with no new transition, the app crashes twice, only denied actions are left, or the goal
 fails WALK-016's adversarial-marker check. Every stop reports the reason, budgets used and model
@@ -567,7 +652,9 @@ calls counted honestly (or `null` with a basis).
 Ranking and tie-breaks are deterministic. A transition becomes verified only from the independent
 full run, never from the step that found it. A screen and segment that reach two screens are
 `nondeterministic`. A verification that fails then passes on a rerun is `flaky` (DEJA-7) and is
-not saved.
+not saved. One clean pass can't show that an assertion is stable (a loading skeleton can pass
+once), so a model-proposed target is saved only after two independent clean passes, and the second
+starts from a fresh `reset` (8.2).
 
 ### 7.7 With no model
 
@@ -611,50 +698,113 @@ show the route held. They are not product assertions and are labeled so in YAML 
 
 ### 8.2 A natural-language goal
 
-1. Explore in draft mode until `isGoalScreen` says yes.
+Nothing is persisted or frozen before the verified save (step 7). Until then, the draft, the
+proposal and any decision live in `.deja/attempts/`, never in `WalkStore` or in a `GoalTarget`.
+
+1. Explore in draft mode until `isGoalScreen` says yes. The explore request names the profile
+   (7.4).
 2. Ask `proposeAssertions` once. It is offered only element IDs (and, if config allows, exact
-   labels) from the final screen's snapshot. The answer picks from them, with a rationale and a
-   confidence. Unknown IDs are discarded. "Nothing warranted" ends the run with a draft and no
+   labels) from the final screen's snapshot. Markers, checkpoint IDs, chrome IDs and system-UI IDs
+   are removed from the offered set first (8.3). The answer picks from the rest, with a rationale
+   and a confidence. Unknown IDs are discarded. "Nothing warranted" ends the run with a draft and no
    proposal.
-3. The harness writes those picks as `assertVisible` commands and runs the checks in 8.3.
-4. The result is a `target-assertions` proposal in the review queue (section 9.3), with the draft
-   YAML in `.deja/attempts/`. It is never saved to `WalkStore`.
-5. The owner's assertion rules run first (config and goal spec: required assertion kinds, IDs or
-   text that must be asserted, selectors never allowed as targets, per-goal minimums). A proposal
-   that breaks a rule is refused whatever its confidence. Rules only tighten the bar.
-6. If every rule and every check in 8.3 passes and the confidence is at or above the configured
-   `targetAutoApproveThreshold`, the proposal is applied through `applyProposal` with trigger
-   `auto-merged` and writes a `GoalTarget` with `source: 'auto-approved-proposal'`. Otherwise a
-   person approves, edits or rejects it, which writes `source: 'approved-proposal'`. Either way the
-   normal path then runs: stitch, verify from clean state, save, and the assertion hash freezes it.
+3. The harness writes those picks as `assertVisible` commands.
+4. **Owner rules** run first (config and goal spec: required assertion kinds, IDs or text that must
+   be asserted, selectors never allowed as targets, per-goal minimums). A proposal that breaks a
+   rule is refused whatever its confidence. Rules only tighten the bar.
+5. **Target gates** (8.3) run next. They are deterministic and they run before the threshold. A
+   gate failure makes the proposal invalid: it is logged, it is never offered to a person, and no
+   threshold is looked at.
+6. **Threshold and decision.** Only now is the confidence compared with
+   `targetAutoApproveThreshold` (8.5). At or above it, the harness records the decision
+   `auto-approve`. Below it, the draft and a `target-assertions` proposal go to the review queue
+   (9.3); a person approves, edits or rejects it, and an approval is recorded as the decision
+   `approve`. The decision is held in the attempt. It changes nothing yet.
+7. **Verified save, in one step.** `stitch` writes the full flow with the proposed target, then:
+   - an auto-approved target needs two clean, independent verification passes, the second from a
+     fresh `reset`; both must pass and match the observed path;
+   - a manually approved target needs one clean pass;
+   - only when the required passes are clean does one call (`applyProposal`) write the
+     `GoalTarget` (`source: 'auto-approved-proposal'` or `'approved-proposal'`), persist the flow,
+     add a `GraphVersion` (trigger `auto-approved` or `approved`), set the proposal status and freeze the
+     assertion hash. Any failed or flaky pass saves nothing and leaves no target. The proposal is
+     marked `rejected` with the reason `verification-failed`, and its assertion set is remembered
+     (8.5).
 
-Target auto-approval is off until the owner sets a threshold (decision 1, section 17).
+Target auto-approval is off until the owner sets a threshold (decision 1, section 17). Its trigger
+and status are `auto-approved`, never `auto-merged` (9.3).
 
-### 8.3 Checks on every target assertion
+### 8.3 Checks on every model-proposed target assertion
 
-- **It passes** in the independent verification run, from a clean root.
-- **Negative control:** it fails on the start screen of the path. An assertion that is already true
-  before the goal is done proves nothing, so the target is rejected.
-- **Specific:** it names an ID or exact text. A bare `.*` pattern or an assertion on system UI is
-  rejected.
-- **Stable:** its ID is in the screen's fingerprint anchors, not an overlay or a dynamic ID.
+The gates are deterministic. Each one runs from recorded snapshots or from a control run, never
+from the model's word. All of them must pass, and they run before the threshold.
+
+1. **Specific and stable.** The assertion is `assertVisible` by an exact ID that is in the final
+   screen's fingerprint anchors, not an overlay, not a dynamic ID, and unique on the screen. IDs are
+   regex-escaped, never interpreted (so `.*` and other metacharacters never match widely). Text
+   selectors and assertions on system UI are rejected.
+2. **Never a marker, checkpoint or chrome ID.** The ID must not match `config.screenMarkerPattern`,
+   must not be a checkpoint of any screen on the path, and must not be in the chrome set: the IDs
+   dropped by 4.3 step 4 (tab bar, navigation bar) plus `config.chromeIdPattern`. A marker proves
+   the route, not the goal.
+3. **Absent on every earlier screen.** The ID is absent from the stored snapshot of the start screen
+   (the screen after `launchApp` and any state paths, which is where the root is defined) and of
+   every earlier screen of the path, including the screen one step short of the goal.
+4. **One-step-short control run.** A run of the flow up to the last segment, then the proposed
+   assertion, must fail. It counts as a control pass only when the runner reports `Assertion is
+   false` or `Element not found` for that step (the diagnostics in
+   `packages/maestro/src/failure-classification.ts`). A crash, a timeout, a runner error or any
+   other output makes the whole proposal invalid. It is never read as "the assertion failed
+   as expected".
+5. **At least the required count.** At least one assertion survives the gates, and the number is at
+   least the owner's per-goal minimum.
+
+The assertion must also pass in the verified save (8.2 step 7).
 
 ### 8.4 Why the model can never weaken an assertion
 
 - The model never writes YAML. It returns indices or offered IDs, and `stitch` writes every line.
-- A target exists only once a person (or the owner's files) approved it. Its `assertionsSha256` is
-  stored with the goal.
-- Replay, repair, composition and deduplication must produce the same canonical assertion set. The
-  engine compares hashes and refuses any flow whose hash differs. A changed target needs a new
-  approval.
+- A target exists only once it is approved by the owner's files, by the owner's rules plus the
+  threshold, or by a person, and only at the verified save (8.2). Its `assertionsSha256` is stored
+  with the goal and the path.
+- `assertionsSha256` covers every product assertion in the flow, mid-flow ones included, as a
+  sorted list that keeps repeats. Replay, repair, composition and deduplication must produce the
+  same list. The engine compares hashes and refuses any flow whose hash differs. Dedup never drops
+  an assertion, not even a repeated one. A changed target needs a new approval.
 - Repair starts only from an action command (tap, input, scroll), never from an assertion. This is
   structural because an ID assertion failure is labeled `unknown`, not `product_assertion`
   (`failure-classification.ts:81-86`), and most of Blankaday's assertions are by ID.
 - No option skips, loosens or deletes an assertion.
 
+### 8.5 The auto-approval threshold
+
+A model's own confidence is poorly calibrated, so it is the last check, behind the gates in 8.3,
+and never the only one.
+
+- `targetAutoApproveThreshold` has a floor of 0.8 and a maximum of 0.99. A value outside that range
+  fails at config load and leaves auto-approval off. It is never clamped silently. The owner picks
+  it from the logged outcomes (below) and lowers it only with evidence.
+- One pending proposal per goal and build. A rejected assertion set (its hash) is remembered and is
+  not proposed again for that goal and build. The answer cache (10.1) returns the same answer for
+  the same input, so a re-ask can't sample past the line.
+- Re-proposing is capped: 2 proposals per goal per run and 5 per goal per day (placeholders, owner
+  config).
+- Every proposal is logged, including refused and invalid ones: goal, assertions, confidence,
+  threshold, the hash of the owner rules, each check's result, the snapshots, the decision and the
+  outcome. The record lives in the `Proposal` (9.3) and in the `GraphVersion` it produced.
+- A saved auto-approved assertion is marked `# deja: auto-approved, unreviewed` in the YAML comments
+  (as checkpoints are marked) and in the run report. A listing command (`deja proposals
+  --unreviewed`) shows which saved tests rest on a model's assertion. A person's later approval
+  removes the mark.
+
 ## 9. Repair, gaps and the review queue
 
 ### 9.1 Repair: re-find one broken step
+
+Repair starts only when the classifier says `repairEligible`: a `selector` failure, which is a
+`Tap on`, `Long press on` or `Input text` step with an `Element not found` diagnostic. The failing
+step is mapped to a transition by its section and its position in that section (5); with no
+position, there is no repair.
 
 ```text
 repairStep(flow, t, build):                          # t: the transition holding the failing action
@@ -673,6 +823,19 @@ repairStep(flow, t, build):                          # t: the transition holding
 The repair becomes a proposal. Applying it calls `persistVerifiedRepair` and writes a diff for the
 owner's YAML file (or a draft PR through DEJA-6). Déjà never commits, pushes or merges.
 
+**Auto-merged repairs.** When the owner turns auto-merge on for `repair`, it applies only in the
+`.deja` store, never in the owner's repository (`.deja/` is out of Git, so this is not an
+auto-commit). And it never applies when the failure could be a product regression:
+
+- the original ID is still absent after the repair, and the replacement has the same role and a
+  similarity to the old ID above a floor (`config.repair.minSimilarity`); a different role or a
+  different label means a person decides;
+- the same product assertions pass before and after: the repaired flow's `assertionsSha256` equals
+  the old one and every assertion passes in two clean verification passes (the second after a fresh
+  `reset`);
+- every auto-merged repair is recorded in the run report, listed first, with the old and new
+  selector and both runs.
+
 ### 9.2 Gap analysis: graph first, one narrow question each
 
 Pure graph analysis picks candidates with no model cost:
@@ -682,7 +845,7 @@ Pure graph analysis picks candidates with no model cost:
 | Bridge | A transition every goal in a context passes through (Today to You to Settings) | Extract a shared subflow; watch it closely |
 | Isolated | A screen with no verified transition in or out, or a path that shares no screen | Explore from it, or drop it |
 | Hub | A screen with many outgoing segments | Check its fingerprint isn't merging screens |
-| Duplicate | Two segments from the same screen to the same screen | Keep the shorter one |
+| Duplicate | Two segments from the same screen to the same screen | Keep the shorter one, as a proposal for a person. It applies without one only when both reach the same observed end state (fingerprint and snapshot anchors), and it never drops an assertion |
 | Conflict | The same screen and segment reaching two screens | A `contradiction` proposal (informational) |
 | Selector gap | A segment using a text or point selector, or a screen with no stable IDs | Add an accessibility ID (DEJA-6) |
 
@@ -700,16 +863,25 @@ export type Proposal = {
   confidence: number            // 0..1, from the graph signal and the model, stated with its basis
   rationale: string
   evidence: { snapshots: SnapshotRef[]; runIds: string[] }
-  status: 'pending' | 'approved' | 'rejected' | 'auto-merged'
+  /** 'approved' and 'auto-approved' are set only at the verified save. 'auto-approved' is for
+   *  `target-assertions` only; 'auto-merged' is for repair, dedup and subflow-extraction only. */
+  status: 'pending' | 'approved' | 'auto-approved' | 'rejected' | 'auto-merged'
+  outcome?: string              // e.g. 'verification-failed', 'gate-failed:absent-on-earlier'
+  audit?: { threshold: number; rulesSha256: string; checks: string[] }  // target-assertions
   createdAt: string
 }
 ```
 
-- `applyProposal(id, by)` is the only way a proposal changes state. Human approval and auto-merge
-  take the same code path, and each adds a `GraphVersion` with trigger `approved` or `auto-merged`.
+- `applyProposal(id, by)` is the only way a proposal changes state. Human approval, target
+  auto-approval and auto-merge take the same code path, and each adds a `GraphVersion` with trigger
+  `approved`, `auto-approved` or `auto-merged`.
 - Auto-merge is off by default. It is on only for kinds the owner lists, above a threshold the owner
-  sets, and only for `repair`, `subflow-extraction` and `dedup`. Each still needs a verified pass.
-  `target-assertions` follow their own rules and threshold (8.2). `gap-id` always needs a person.
+  sets, and only for `repair`, `subflow-extraction` and `dedup`. Each still needs a verified pass
+  (two for a repair, 9.1). Its trigger and status are `auto-merged`.
+- Target auto-approval is a separate path with its own trigger and status, `auto-approved`. It
+  covers `target-assertions` only, follows 8.2 and 8.5, and is never called auto-merge, so a log
+  line or a search for `auto-merged` never means a model-written assertion.
+- `gap-id` always needs a person.
 - A `contradiction` is informational. Applying it changes nothing.
 - `revert(version)` adds a `revert` version that restores an earlier state.
 
@@ -727,7 +899,7 @@ export type Proposal = {
 | Answer cache keyed by screen, offered action set, goal and model ID (current build only) | Repeated model calls in a rerun; still verified |
 | Local repair of one step instead of re-exploring | Model calls and wall time |
 | Shortest verified path among alternatives | Output length |
-| Dedup proposals: drop repeated assertions on one screen, collapse waits, extract shared prefixes into subflows | Output length and duplication |
+| Dedup proposals: collapse waits, extract shared prefixes into subflows (never drops an assertion, 8.4) | Output length and duplication |
 
 ### 10.2 What the SDK measures
 
@@ -738,6 +910,8 @@ Every explore, repair and composition report carries a `metrics` section:
 - `observe`, `act`, `reset` and verification counts, and wall time split into observe, act, model,
   verify and other;
 - reuse: transitions and paths reused, cache hits, steps that came from memory versus new;
+- search cost: `navigationActions` and `navigationResets` (7.4), and target proposals and their
+  outcomes (8.5);
 - output: steps, assertions, checkpoints and subflow references in the saved flow, before and after
   dedup;
 - budgets used and the stop reason.
@@ -751,12 +925,12 @@ speedup claim without raw evidence from equivalent full lifecycles.
 - **Seeded data is the app's job.** Déjà uses only profiles from config or the owner's YAML and
   never invents launch arguments. Exploration runs only on profiles marked `explore: true`.
 - **Preconditions are paths** listed in `config.stateChangingPaths`.
-- **Parameters** use `${NAME}`. `RunnerRequest` (`contracts.ts:182`) gets an optional
+- **Parameters** use `${NAME}`. `RunnerRequest` (`contracts.ts:237`) gets an optional
   `env?: Record<string, string>`. Credential values never reach memory, reports or proposals.
   Literal values in the owner's YAML stay literal.
 - **Closure.** A segment with `runFlow: file:` or `runScript` carries each file's relative path and
   SHA-256, and `segmentId` includes them. A changed subflow is a new segment. Escaping references
-  are rejected (DEJA-2).
+  are rejected. WalkStore already stores the closure (memory schema 3, DEJA-2).
 
 ## 12. Safety rules
 
@@ -764,15 +938,25 @@ These keep TODO.md's standing rules.
 
 1. Never save an unverified candidate. Only a full independent run from a clean root writes to
    `WalkStore` or marks a path verified.
-2. Never weaken a product assertion (section 8.4).
+2. Never weaken a product assertion (section 8.4). No step, dedup included, may drop one.
 3. Never auto-commit a repair. Proposals produce diffs or draft PRs. Auto-merge changes `.deja`
-   only, never the owner's repository.
-4. Fail closed on ambiguous, changed and unknown screens, bad schemas, tampered files and escaping
+   only, never the owner's repository, and only for `repair`, `dedup` and `subflow-extraction`. A
+   repair never auto-merges when the failure could be a product regression (9.1).
+4. Target auto-approval (decision 1) follows this order, and a break at any step approves nothing:
+   owner rules, then the deterministic target gates (8.3), then the threshold (8.5), then two clean
+   independent verification passes, then one atomic verified save (8.2). The rules only tighten the
+   bar. Nothing is persisted or frozen before the save. Every proposal, its confidence and its
+   outcome is logged, and auto-approved assertions are marked unreviewed (8.5). Its trigger and
+   status are `auto-approved`, never `auto-merged`.
+5. Fail closed on ambiguous, changed and unknown screens, bad schemas, tampered files and escaping
    paths. Ambiguity is reported with candidates, never resolved by a guess.
-5. Records never answer for another build.
-6. No secrets in memory, snapshots or prompts. Labels only when config allows.
-7. Explore only safe profiles. Destructive actions are denied unless the goal spec names them.
-8. Honest claims: a platform or saving is claimed only after its ticket links real evidence.
+6. Records never answer for another build.
+7. No secrets in memory, snapshots or prompts. Labels only when config allows. Labels can hold
+   app content such as another person's text, so the model sees them only as a closed offered set,
+   and never when config doesn't allow them.
+8. Explore only safe profiles. Destructive actions are denied by ID and role unless the goal spec
+   names them (7.2).
+9. Honest claims: a platform or saving is claimed only after its ticket links real evidence.
 
 ## 13. How it fits the SDK
 
@@ -781,13 +965,32 @@ factories after, so a warm hit builds no explorer, driver or chooser.
 
 | Package | Adds |
 | --- | --- |
-| `@deja-qa/core` | Driver, chooser, path and proposal types; `PathStore`; pure planner and `stitch`; fingerprint v2; assertion-hash and negative-control checks |
+| `@deja-qa/core` | Driver, chooser, path and proposal types; `PathStore`; pure planner and `stitch`; fingerprint v2; canonical YAML v1; assertion-hash and target-gate checks |
 | `@deja-qa/maestro` | `iosExplorationDriver`, `androidExplorationDriver`, flow sectioning, runner `env` |
 | `@deja-qa/explorer-graph` (new) | `GraphExplorer implements WalkExplorer`, `scriptedChooser`, `openAiCompatibleChooser` |
 | `@deja-qa/store-local`, `@deja-qa/store-sqlite` | `LocalPathStore`, `SQLitePathStore` |
 | `@deja-qa/store-conformance` | `runPathStoreContractTests` |
 | `@deja-qa/repair` | `GraphStepRepairer implements SelectorRepairer` |
 | `@deja-qa/explorer-openclaw` | Unchanged, the existing Android option |
+
+### 13.1 What DEJA-18 must measure before DEJA-19 starts
+
+DEJA-19 does not start until every row is "go". A "no-go" result changes the design as shown, and the
+change is written into this document first. Measure on the iOS 27.2 iPhone 17 simulator, Maestro 2.12,
+on four Blankaday screens (2.1 Today, 3.2 Feed, 6.22 You, 6.7 Settings), keep the raw output, and
+use at least 30 steps where a rate is asked for.
+
+| Fact | Go | No-go and what changes |
+| --- | --- | --- |
+| State survives. A flow with no `launchApp` acts on live state, and the hierarchy returns SwiftUI IDs | 5 of 5 tries | Stop. Redesign the transport |
+| Step cost: median and p90 of observe, act and settle together | Median at most 6 s, p90 at most 12 s | Median over 10 s or p90 over 20 s: try the MCP session transport and measure again. Still over: fewer, larger steps, or no DEJA-19 |
+| Fingerprint repeat rate: the same screen gives the same fingerprint | At least 95% over 20 observations on each screen | Below that, screens never become nodes. Fix the rules or stop |
+| `waitForAnimationToEnd` on looping animations (Blankie, Rive) on 2.1 and 3.2 | Returns before its timeout on at least 95% of 20 tries, or settling on hierarchy equality alone meets the repeat rate | `settle()` uses hierarchy equality only, and the screen's cost is reported |
+| Role and interactive flags in `maestro hierarchy` on iOS | Buttons and fields identified on at least 90% of actionable elements, and text fields vs secure fields told apart on the sign-in screen | Roles come from ID conventions in config and `interactive` means "has an ID". Typing actions are off until secure-field is known |
+| Duplicate SwiftUI IDs, and whether Maestro treats `id` as a regular expression | At most 5% of actionable IDs per screen are duplicates. Regex behavior is known and `stitch`'s escaping works on `settings.export` | Duplicates dropped from the action set and listed as gaps. Over 25% duplicates: no-go |
+| Alerts in the hierarchy (permission sheet, share sheet), and whether `launchApp permissions:` covers notifications | Seen on both, or `permissions:` covers it | `systemUi()` returns null. An unknown alert shows as a screen with no IDs and stops the step |
+| Crash detection | A forced crash is detected on 5 of 5 tries (output or "no app IDs on two reads") | No `crashed` signal: no unattended search. Depends on DEJA-7 |
+| Keyboard dismissal (`hideKeyboard`, `pressKey: Enter`) with the keyboard up on 2.1 Today | Closes it on 5 of 5 tries | Typing goals stay out of scope until it does |
 
 ## 14. Options rejected
 
@@ -832,28 +1035,34 @@ factories after, so a warm hit builds no explorer, driver or chooser.
 | 3 | DEJA-20 Android parity | Optional | Android driver; the same tests and explorer on the emulator |
 | 4 | DEJA-21 path memory store | No | Sections, screens, transitions, provenance, versions, two-slot records |
 | 5 | DEJA-22 reuse and optimization | No | Known-path composition, subflow reuse, caches, metrics, dedup proposals |
-| 6 | DEJA-23 repair, gaps and review queue | Optional | Step repair, graph gap analysis, proposals, auto-merge threshold |
+| 6 | DEJA-23 repair, gaps and review queue | Optional | Step repair, graph gap analysis, proposals, auto-merge threshold, unreviewed-target listing |
 
-DEJA-19 and DEJA-20 keep their graph in memory for the run only. DEJA-21 makes it durable.
+DEJA-19 does not start until DEJA-18 meets every go threshold in 13.1. DEJA-19 and DEJA-20 keep
+their graph in memory for the run only. DEJA-21 makes it durable. Target auto-approval (8.2) and its
+gates (8.3) are built in DEJA-19; auto-merge of repairs, dedup and subflows is DEJA-23. The
+tickets still say "a person always approves a target" and "both first-class" in places. They follow
+this document, and need updating.
 
 ## 17. Decisions
 
 Decided by the owner on 2026-11-22:
 
-1. **Model-proposed target assertions** save on their own only when their confidence is at or above a
-   configured threshold and they pass every target check (section 8). Below the threshold they end in
-   a draft plus a proposal for a person. Owners can add rules in config and the goal spec: required
-   assertion kinds, IDs or text that must be asserted, selectors never allowed as targets, and
-   per-goal minimums. Rules are checked before the threshold, can only tighten the bar, and refuse a
-   proposal whatever its confidence. The approved assertion hash still freezes a saved test.
+1. **Model-proposed target assertions** can save on their own, after the owner's rules, when their
+   confidence is at or above a configured threshold and they pass every target gate (8.3) and the
+   verified save with two clean passes (8.2). Below the threshold they end in a draft plus a proposal
+   for a person. Owners can add rules in config and the goal spec: required assertion kinds, IDs or
+   text that must be asserted, selectors never allowed as targets, and per-goal minimums. Rules are
+   checked before the threshold, can only tighten the bar, and refuse a proposal whatever its
+   confidence. The approved assertion hash still freezes a saved test.
 2. **Auto-merge** is off by default. When on, only `repair`, `subflow-extraction` and `dedup` can
    apply on their own, above an owner-set threshold, inside `.deja` only. `gap-id` always needs a person.
 3. **YAML parser:** the `yaml` npm package is approved, so parsing works on Node and Bun alike.
-6. **Chooser transport:** any OpenAI-compatible chat API with JSON output. OpenClaw stays for Android.
+4. **Chooser transport:** any OpenAI-compatible chat API with JSON output. OpenClaw stays for Android.
+5. **Platform order:** iOS is first-class for now. Android comes second, web third.
 
 Decided as defaults (the owner can override):
 
-4. **Record slots while history is parked:** current build plus last passing build (DEJA-12 tracks
+6. **Record slots while history is parked:** current build plus last passing build (DEJA-12 tracks
    full history).
-5. **Screen markers:** optional `config.screenMarkerPattern`; Blankaday sets `^screen\.`.
-7. **Snapshot labels:** off by default, because UI copy can hold personal data.
+7. **Screen markers:** optional `config.screenMarkerPattern`; Blankaday sets `^screen\.`.
+8. **Snapshot labels:** off by default, because UI copy can hold personal data.
