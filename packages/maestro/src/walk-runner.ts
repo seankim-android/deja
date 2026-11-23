@@ -20,6 +20,8 @@ export type MaestroWalkRunnerOptions = {
   adapter?: MaestroExecutionAdapter
   androidSdkRoot?: string
   javaHome?: string
+  /** Absolute path; every Maestro run overwrites it, so the last run's report is kept. */
+  junitPath?: string
 }
 
 function portable(root: string, path: string) {
@@ -84,6 +86,7 @@ export class MaestroWalkRunner implements WalkRunner {
       timeoutMs,
       ...(this.options.androidSdkRoot ? { androidSdkRoot: this.options.androidSdkRoot } : {}),
       ...(this.options.javaHome ? { javaHome: this.options.javaHome } : {}),
+      ...(this.options.junitPath ? { junitPath: this.options.junitPath } : {}),
       artifacts: { directory: artifactDirectory },
     })
   }
