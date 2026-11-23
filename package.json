@@ -39,6 +39,8 @@
     "build": "tsc -b && vite build",
     "lint": "oxlint",
     "preview": "vite preview",
+    "build:packages": "bun scripts/build-packages.ts",
+    "pack-check": "bun scripts/pack-check.ts",
     "deja": "bun apps/cli/deja.ts"
   },
   "dependencies": {

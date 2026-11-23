@@ -34,6 +34,8 @@ export type IosExploreConfiguration = Omit<ExploreConfiguration,
 
 export type ProductionConfiguration = {
   configPath: string
+  /** Absolute path for Maestro's JUnit report (config `junit`, relative to the config file). */
+  junitPath?: string
   explore: ExploreConfiguration | WebExploreConfiguration | IosExploreConfiguration
   workspaceRoot: string
   maestro: {
@@ -53,6 +55,8 @@ export type ProductionConfiguration = {
     policy: CheckoutRepairPolicy
     timeBudgetMs: number
   }
+  /** WALK-021, iOS only: on a stale build, replay the last verified walk instead of rejecting. */
+  staleBuild?: 'replay-last-verified'
 }
 
 function text(value: unknown, fallback: string, label: string) {
@@ -248,6 +252,17 @@ export async function loadProductionConfiguration(configPath: string): Promise<P
     }
   }
 
+  let staleBuild: ProductionConfiguration['staleBuild']
+  if (raw.staleBuild !== undefined) {
+    if (explore.platform !== 'ios') {
+      throw new CliConfigurationError('WALK-021 staleBuild is supported only for platform: ios')
+    }
+    if (raw.staleBuild !== 'replay-last-verified') {
+      throw new CliConfigurationError('staleBuild must be "replay-last-verified" when present')
+    }
+    staleBuild = raw.staleBuild
+  }
+
   let semantic: ProductionConfiguration['semantic']
   if (raw.semantic !== undefined) {
     if (!raw.semantic || typeof raw.semantic !== 'object' || Array.isArray(raw.semantic)) {
@@ -269,6 +284,9 @@ export async function loadProductionConfiguration(configPath: string): Promise<P
 
   return {
     configPath: absolute,
+    ...(raw.junit !== undefined
+      ? { junitPath: resolve(dirname(absolute), text(raw.junit, '', 'junit')) }
+      : {}),
     explore,
     workspaceRoot: root,
     maestro: {
@@ -286,6 +304,7 @@ export async function loadProductionConfiguration(configPath: string): Promise<P
     ...(openClawConfiguration ? { openClaw: openClawConfiguration } : {}),
     ...(semantic ? { semantic } : {}),
     ...(repair ? { repair } : {}),
+    ...(staleBuild ? { staleBuild } : {}),
   }
 }
 

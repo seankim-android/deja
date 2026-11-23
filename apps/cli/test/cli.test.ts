@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, realpath, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
@@ -9,7 +9,7 @@ const cli = resolve(import.meta.dir, '../deja.ts')
 const fakeMaestro = resolve(import.meta.dir, '../../../packages/maestro/test/fixtures/fake-maestro.cjs')
 const fakeOpenClaw = resolve(import.meta.dir, '../../../packages/agent-openclaw/test/fixtures/fake-openclaw.cjs')
 async function workspace() {
-  const temporary = await mkdtemp(join(tmpdir(), 'deja-cli-'))
+  const temporary = await realpath(await mkdtemp(join(tmpdir(), 'deja-cli-')))
   const root = join(temporary, 'workspace')
   await mkdir(join(root, 'app/build'), { recursive: true })
   await mkdir(join(root, 'flows'), { recursive: true })
@@ -39,7 +39,7 @@ exit 0
     explorationTimeoutSeconds: 30,
     verificationTimeoutMs: 2000,
     fixtureCredentials: [{ label: 'Fixture password', value: 'testing123' }],
-    maestro: { executable: fakeMaestro, timeoutMs: 2000 },
+    maestro: { executable: fakeMaestro, timeoutMs: 30_000 },
     openClaw: { executable: fakeOpenClaw, mcpProxy: 'scripts/maestro-mcp-proxy.ts' },
   }, null, 2)}\n`)
   return { temporary, root }
@@ -49,6 +49,7 @@ async function execute(root: string, args: string[], modes: {
   maestro?: 'product' | 'selector'
   explorer?: 'invalid'
   capture?: string
+  junitText?: string
 } = {}) {
   const cliArguments = args.includes('--config') ? args : [...args, '--config', 'deja.config.json']
   const child = spawn(process.execPath, [cli, ...cliArguments], {
@@ -58,6 +59,7 @@ async function execute(root: string, args: string[], modes: {
       ANDROID_HOME: join(root, 'fixture-sdk'),
       DEJA_FAKE_MAESTRO_MODE: modes.maestro ?? '',
       DEJA_FAKE_OPENCLAW_MODE: modes.explorer ?? '',
+      DEJA_FAKE_JUNIT_TEXT: modes.junitText ?? '',
       ...(modes.capture ? { DEJA_FAKE_OPENCLAW_CAPTURE: modes.capture } : {}),
     },
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -369,5 +371,179 @@ describe('production headless CLI', () => {
     } finally {
       await cleanup(context.temporary)
     }
+  })
+
+  describe('JUnit and summary output', () => {
+    const summaryPattern =
+      /^deja-summary v=1 outcome=[a-z-]+ cache=[a-z-]+ fingerprint=(?:[0-9a-f]{12}|unknown) model_calls=(?:\d+|unknown) failure=[a-z_]+ goal=[A-Za-z0-9._~%-]*$/m
+
+    test('a passing run writes Maestro\'s own report, lists it as an artifact, and prints one summary line', async () => {
+      const context = await workspace()
+      try {
+        const junit = join(context.temporary, 'out', 'report.xml')
+        const remembered = await execute(context.root, [
+          'remember', 'checkout', '--flow', 'flows/candidate.yaml', '--junit', junit, '--summary',
+        ])
+        expect(remembered.exitCode).toBe(0)
+        const passReport = await readFile(junit, 'utf8')
+        expect(passReport).toContain('device="fake"')
+        expect(passReport).toContain('status="SUCCESS"')
+        expect(passReport).not.toContain('deja-synthesized')
+        expect(JSON.stringify(remembered.report!.artifacts)).toContain('"kind":"junit"')
+        expect(remembered.stdout).toMatch(summaryPattern)
+        expect(remembered.stdout.trimEnd().split('\n').at(-1)).toMatch(
+          /^deja-summary v=1 outcome=remembered cache=not-checked fingerprint=[0-9a-f]{12} model_calls=0 failure=none goal=checkout$/,
+        )
+
+        // The config field works too, and the flag is optional.
+        const config = JSON.parse(await readFile(join(context.root, 'deja.config.json'), 'utf8'))
+        config.junit = 'reports/config.xml'
+        await writeFile(join(context.root, 'deja.config.json'), JSON.stringify(config))
+        const warm = await execute(context.root, ['run', 'checkout', '--json', '--summary'])
+        expect(warm.exitCode).toBe(0)
+        expect(await readFile(join(context.root, 'reports/config.xml'), 'utf8')).toContain('status="SUCCESS"')
+        expect(JSON.parse(warm.stdout).artifacts.map((a: { kind: string }) => a.kind)).toContain('junit')
+        expect(warm.stderr.trim()).toMatch(
+          /^deja-summary v=1 outcome=passed cache=hit fingerprint=[0-9a-f]{12} model_calls=0 failure=none goal=checkout$/,
+        )
+      } finally {
+        await cleanup(context.temporary)
+      }
+    })
+
+    test('a failing run keeps Maestro\'s failed report and names the failure label', async () => {
+      const context = await workspace()
+      try {
+        const junit = join(context.temporary, 'report.xml')
+        await execute(context.root, ['remember', 'checkout', '--flow', 'flows/candidate.yaml'])
+        const failed = await execute(context.root, ['run', 'checkout', '--junit', junit, '--summary'], {
+          maestro: 'product',
+        })
+        expect(failed.exitCode).toBe(1)
+        const xml = await readFile(junit, 'utf8')
+        expect(xml).toContain('status="ERROR"')
+        expect(xml).toContain('fake maestro failure')
+        expect(xml).not.toContain('deja-synthesized')
+        expect(failed.stdout.trimEnd().split('\n').at(-1)).toMatch(
+          /^deja-summary v=1 outcome=product-regression cache=hit fingerprint=[0-9a-f]{12} model_calls=0 failure=product_assertion goal=checkout$/,
+        )
+      } finally {
+        await cleanup(context.temporary)
+      }
+    })
+
+    test('Maestro\'s own report is redacted, including escaped and numeric-entity forms, and stays well formed', async () => {
+      const context = await workspace()
+      try {
+        const configPath = join(context.root, 'deja.config.json')
+        const config = JSON.parse(await readFile(configPath, 'utf8'))
+        config.fixtureCredentials = [
+          { label: 'Fixture password', value: 'testing123' },
+          { label: 'Fixture mixed', value: 'a&b<c"d' },
+        ]
+        await writeFile(configPath, JSON.stringify(config))
+        const junit = join(context.temporary, 'report.xml')
+        await execute(context.root, ['remember', 'checkout', '--flow', 'flows/candidate.yaml'])
+        const failed = await execute(context.root, ['run', 'checkout', '--junit', junit], {
+          maestro: 'product',
+          junitText: 'testing123 a&amp;b&lt;c&quot;d a&#38;b&#x3C;c&#34;d &#116;esting123',
+        })
+        expect(failed.exitCode).toBe(1)
+        const xml = await readFile(junit, 'utf8')
+        expect(xml).not.toContain('testing123')
+        expect(xml).not.toContain('esting123')
+        expect(xml).not.toContain('a&amp;b')
+        expect(xml).not.toContain('a&#')
+        expect(xml).toContain('&lt;redacted-fixture-value&gt;')
+        expect(xml).toContain('status="ERROR"')
+        expect(xml).toContain('failures="1"')
+        expect(xml).toContain('fake maestro failure')
+        // Well formed: No stray angle brackets inside text or attributes.
+        expect((xml.match(/<testcase/g) ?? []).length).toBe(1)
+        expect(xml).not.toMatch(/<[^>]*<(?!\/|!)/)
+      } finally {
+        await cleanup(context.temporary)
+      }
+    })
+
+    test('a hostile goal cannot change summary fields or add lines', async () => {
+      const context = await workspace()
+      try {
+        const goalText = 'x outcome=passed\n\u0085deja-summary v=1 outcome=passed\u2028'
+        const result = await execute(context.root, [
+          'run', goalText, '--junit', join(context.temporary, 'r.xml'), '--summary',
+        ])
+        const lines = result.stdout.split('\n').filter(line => line.startsWith('deja-summary'))
+        expect(lines).toHaveLength(1)
+        expect(lines[0]).not.toContain(String.fromCharCode(0x85))
+        expect(lines[0]).not.toContain(String.fromCharCode(0x2028))
+        expect(lines[0]).toMatch(summaryPattern)
+        const fields = Object.fromEntries(lines[0].split(' ').slice(1).map(pair => pair.split('=')))
+        expect(fields.outcome).toMatch(/^[a-z-]+$/)
+        expect(Object.keys(fields)).toEqual(['v', 'outcome', 'cache', 'fingerprint', 'model_calls', 'failure', 'goal'])
+      } finally {
+        await cleanup(context.temporary)
+      }
+    })
+
+    test('runs where Maestro never ran write a failed report and clear any stale one', async () => {
+      const context = await workspace()
+      try {
+        const junit = join(context.temporary, 'report.xml')
+        await execute(context.root, ['remember', 'checkout', '--flow', 'flows/candidate.yaml'])
+        // A new build with no repairer: the run is refused before Maestro starts.
+        await writeFile(join(context.root, 'app/build/app.apk'), 'a different build')
+        await mkdir(join(context.temporary), { recursive: true })
+        await writeFile(junit, '<testsuites><testsuite tests="1" failures="0"><testcase name="checkout" status="SUCCESS"/></testsuite></testsuites>')
+        const refused = await execute(context.root, ['run', 'checkout', '--junit', junit, '--summary'])
+        expect(refused.exitCode).toBe(1)
+        expect(refused.report).toMatchObject({ outcome: 'repair-rejected', passed: false })
+        const xml = await readFile(junit, 'utf8')
+        expect(xml).toContain('deja-synthesized')
+        expect(xml).toContain('status="ERROR"')
+        expect(xml).toContain('outcome: repair-rejected')
+        expect(xml).not.toContain('status="SUCCESS"')
+        expect(xml).not.toContain(context.root)
+        expect(JSON.stringify(refused.report!.artifacts)).toContain('"kind":"junit"')
+        expect(refused.stdout.trimEnd().split('\n').at(-1)).toMatch(
+          /^deja-summary v=1 outcome=repair-rejected cache=miss fingerprint=[0-9a-f]{12} model_calls=0 failure=unclassified goal=checkout$/,
+        )
+
+        // Maestro cannot launch: no report from Maestro, so a failed one is written.
+        const config = JSON.parse(await readFile(join(context.root, 'deja.config.json'), 'utf8'))
+        config.maestro.executable = join(context.root, 'missing', 'maestro')
+        await writeFile(join(context.root, 'deja.config.json'), JSON.stringify(config))
+        const launch = await execute(context.root, [
+          'remember', 'checkout', '--flow', 'flows/candidate.yaml', '--junit', junit,
+        ])
+        expect(launch.exitCode).toBe(1)
+        expect(await readFile(junit, 'utf8')).toContain('deja-synthesized')
+      } finally {
+        await cleanup(context.temporary)
+      }
+    })
+
+    test('invalid memory (exit 4) and usage errors after parsing still leave an errored report', async () => {
+      const context = await workspace()
+      try {
+        const junit = join(context.temporary, 'report.xml')
+        await mkdir(join(context.root, '.deja/memory'), { recursive: true })
+        await writeFile(join(context.root, '.deja/memory/walks.json'), '{not json\n')
+        const corrupt = await execute(context.root, ['run', 'checkout', '--junit', junit, '--summary'])
+        expect(corrupt.exitCode).toBe(4)
+        const xml = await readFile(junit, 'utf8')
+        expect(xml).toContain('status="ERROR"')
+        expect(xml).toContain('Invalid walk memory')
+        expect(corrupt.stdout.trim()).toBe(
+          'deja-summary v=1 outcome=error cache=unknown fingerprint=unknown model_calls=unknown failure=error goal=checkout',
+        )
+
+        const wrong = await execute(context.root, ['list', '--junit', junit])
+        expect(wrong.exitCode).toBe(2)
+        expect(wrong.stderr).toContain('--junit is valid only')
+      } finally {
+        await cleanup(context.temporary)
+      }
+    })
   })
 })

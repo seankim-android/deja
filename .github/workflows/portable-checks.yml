@@ -29,8 +29,12 @@ jobs:
         run: bun run lint
       - name: Unit and integration-contract tests
         run: bun test --timeout=10000
+      - name: Public API snapshots
+        run: bun scripts/api-snapshot.ts
       - name: TypeScript and production viewer build
         run: bun run build
+      - name: Build, pack and install every package
+        run: bun scripts/pack-check.ts
       - name: Validate tracked artifacts and unchanged checkout
         run: bun scripts/validate-release-artifacts.ts
       - name: Confirm tested revision

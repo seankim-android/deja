@@ -8,18 +8,19 @@ import { redactJson, type Redactor } from './redaction.ts'
 export const HELP = `Déjà — explore once, replay without a model, repair only bounded staleness.
 
 Usage:
-  deja explore <goal> [--config <file>] [--json]
-  deja run <goal> [--config <file>] [--json]
-  deja remember <goal> --flow <candidate.yaml> [--config <file>] [--json]
+  deja explore <goal> [--config <file>] [--json] [--junit <file>] [--summary]
+  deja run <goal> [--config <file>] [--json] [--junit <file>] [--summary]
+  deja remember <goal> --flow <candidate.yaml> [--config <file>] [--json] [--junit <file>] [--summary]
   deja list [--config <file>] [--json]
-  deja inspect <report> [--config <file>] [--json]
+  deja inspect <report> [--config <file>] [--json] [--summary]
   deja help
 
 Commands:
   explore   Force verified cold exploration and store only a passing candidate.
   run       Check exact local memory first. Hits never construct an explorer/model client.
             Opt-in semantic fallback applies only to not-found misses and replays verified YAML.
-            Other misses explore cold; stale-build memory enters only bounded selector repair.
+            Other misses explore cold; stale-build memory enters only bounded selector repair,
+            or, with iOS {"staleBuild":"replay-last-verified"}, replays the last verified YAML.
   remember  Independently verify an existing YAML candidate before storing it.
   list      List local walks without constructing an explorer or runner invocation.
   inspect   Summarize a saved run result, artifact paths, failures, and source diffs.
@@ -28,6 +29,11 @@ Options:
   --config <file>  Combined fixture/plugin configuration (default: ./deja.config.json).
   --flow <file>    Candidate YAML for remember; independently runnable without Déjà.
   --json           Emit a redacted machine-readable result instead of human-readable text.
+  --junit <file>   Write Maestro's own JUnit report to <file> (config field: "junit"). If Maestro
+                   never ran or did not pass, a minimal report with one failed testcase is written,
+                   so a missing file is never a pass. Listed as a junit artifact in the result.
+  --summary        Print one line: deja-summary v=1 outcome cache fingerprint model_calls
+                   failure goal (goal last, percent-encoded). Last stdout line, or stderr with --json.
   -h, --help       Show help without loading configuration or constructing plugins.
 
 Semantic retrieval:
@@ -67,6 +73,11 @@ export function renderResult(
     `YAML: ${result.yamlPath ?? 'none'}`,
   ]
   if (result.yamlSha256) lines.push(`YAML SHA-256: ${result.yamlSha256}`)
+  if (result.replayedOnNewBuild) {
+    const replay = result.replayedOnNewBuild
+    lines.push(`Replayed on a new build: this build was not verified; the YAML was last verified on build ${replay.previousBuildFingerprint}`)
+    lines.push(`Stored for this build: ${replay.recordedForNewBuild ? 'yes' : 'no'}`)
+  }
   if (result.semantic) {
     lines.push(`Semantic lookup: ${result.semantic.status}${result.semantic.reason ? ` (${result.semantic.reason})` : ''}`)
     lines.push(`Semantic embedding calls: ${result.semantic.embeddingCalls}`)
@@ -127,4 +138,50 @@ export function renderWalks(walks: StoredWalk[], redact: Redactor) {
     ].join(' '))
   }
   return `${lines.join('\n')}\n`
+}
+
+/** Percent-encodes UTF-8 bytes outside [A-Za-z0-9._~-], so no space, `=`, quote or separator survives. */
+export function encodeSummaryGoal(goal: string) {
+  return [...new TextEncoder().encode(goal)].map(byte => {
+    const character = String.fromCharCode(byte)
+    return /[A-Za-z0-9._~-]/.test(character)
+      ? character
+      : `%${byte.toString(16).toUpperCase().padStart(2, '0')}`
+  }).join('')
+}
+
+/**
+ * One stable, parseable line per run, for CI host reports. Grammar (single physical line):
+ *
+ *   line        = "deja-summary v=1 outcome=" outcome " cache=" cache " fingerprint=" fingerprint
+ *                 " model_calls=" calls " failure=" failure " goal=" goal
+ *   outcome     = 1*( "a-z" / "-" )                    ; a run outcome, or "error"
+ *   cache       = "hit" / "miss" / "not-checked" / "unknown"
+ *   fingerprint = 12 lower-case hex / "unknown"
+ *   calls       = 1*DIGIT / "unknown"
+ *   failure     = 1*( "a-z" / "_" )                    ; category, "unclassified", "none" or "error"
+ *   goal        = *( [A-Za-z0-9._~-] / "%" 2HEXDIG )   ; percent-encoded UTF-8, always last
+ *
+ * Every field before `goal` has a fixed charset, and `goal` cannot contain a space, `=`, quote or
+ * any raw control or separator character, so a goal cannot add or change a field or a line.
+ * `result` is null when no run result exists (usage, config, or memory errors).
+ */
+export function renderSummary(result: RunResult | null, goalText: string, redact: Redactor) {
+  const goal = encodeSummaryGoal(redact(result?.goalKey ?? goalText))
+  if (!result) {
+    return `deja-summary v=1 outcome=error cache=unknown fingerprint=unknown model_calls=unknown failure=error goal=${goal}`
+  }
+  const fingerprint = /^[0-9a-f]{12,}$/.test(result.identity.buildFingerprint)
+    ? result.identity.buildFingerprint.slice(0, 12)
+    : 'unknown'
+  const failure = result.failure?.category ?? (result.passed ? 'none' : 'unclassified')
+  return [
+    'deja-summary v=1',
+    `outcome=${result.outcome}`,
+    `cache=${result.cacheStatus}`,
+    `fingerprint=${fingerprint}`,
+    `model_calls=${result.modelCalls ?? 'unknown'}`,
+    `failure=${failure}`,
+    `goal=${goal}`,
+  ].join(' ')
 }

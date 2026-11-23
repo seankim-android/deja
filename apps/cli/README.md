@@ -45,6 +45,13 @@ Inspecting a failed report returns that report's original failure class; inspect
 returns zero. Help does not load configuration. Invalid memory must be quarantined, not edited into
 a hit.
 
+## JUnit and summary output
+
+`--junit <file>` (or config `junit`) has Maestro write its own JUnit report there. When Maestro never
+ran or did not pass, a minimal failed report is written instead, so a host never reads a missing file
+as a pass. `--summary` prints one `deja-summary v=1 …` line (`goal=` last, percent-encoded). Hosts must treat a missing file as a failure. Both are opt-in; exit codes do not
+change. Details: [docs/REFERENCE.md](../../docs/REFERENCE.md#junit-and-summary-output-for-ci-hosts).
+
 ## WALK-016 opt-in semantic lookup
 
 Add `semantic: { "provider": "local-lexical-v1" }` to enable the local deterministic proof. Optional
@@ -97,6 +104,10 @@ Maestro with `--platform ios --device <UDID>`. It never shares Android install/s
 Only independently reviewed YAML via `remember`, exact zero-model warm replay, native-build
 invalidation, and meaningful product-regression handling are supported. Cold iOS exploration returns
 `exploration-rejected` with 0 model calls; stale builds return `repair-rejected` without a cold
-fallback. The verified target is the dedicated iPhone 17 / iOS 27.0 `walkcache_ios` simulator with
+fallback, unless the config opts in with `"staleBuild": "replay-last-verified"` (WALK-021): then the
+last verified YAML replays once on the new build, a pass is stored for it, and a fail stores nothing.
+A pass replaces the old build's entry and restarts its history (DEJA-12 tracks keeping it).
+
+The verified target is the dedicated iPhone 17 / iOS 27.0 `walkcache_ios` simulator with
 Xcode 27.2 and Maestro 2.12.0. The requested Android compatibility replay was blocked before boot
 by emulator disk capacity, as recorded in the WALK-011 evidence; portable tests do not replace it.

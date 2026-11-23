@@ -1,4 +1,4 @@
-<h1 align="center">Déjà</h1>
+<h1 align="center"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/brand/deja-logo-dark.svg"><img alt="Déjà" src="docs/brand/deja-logo.svg" width="280"></picture></h1>
 
 <p align="center">
 Explore an app once with an AI model. Replay the test later with no model at all.<br>
@@ -53,11 +53,14 @@ Kimi K3.1 Pro on Cerebras is the default, but the model is a setting. Cold explo
 
 ## Use cases
 
-- **Nightly regression runs.** Learn the main flows once. Then run them every night in CI with 0 model calls and no model bill.
-- **Smoke tests on every pull request.** Replay sign-in and checkout on each PR. The model is only called again when a flow is new.
-- **Small UI changes.** When a button ID changes, Déjà makes one scoped fix and shows the diff, so a rename does not break the suite.
-- **Guarding real bugs.** A wrong price or a missing order still fails the test. Déjà never repairs a product bug into a pass.
-- **Agent frameworks.** An agent can learn a UI walk once and reuse it as a plain Maestro file, which any team can read and run without Déjà.
+- **Replay with no model.** Save a flow once, then replay it from a script on a machine with an emulator or simulator. Replay makes 0 model calls and needs no provider key.
+- **Check a flow before you trust it.** A person or a coding agent writes Maestro YAML, and `remember` runs it on its own first. A flow that does not pass is never saved.
+- **Know which build a pass belongs to.** Each saved test is tied to one build fingerprint with its run history, so a pass on an old build never counts for a new one. On iOS a new build fails today; replaying the last verified test on it is planned (DEJA-1).
+- **Sort failures before anyone reads logs.** Each failure gets an advisory label: selector, navigation, product assertion, runner, timeout or unknown. Planned: rerun a failed test once and report flaky results and app crashes separately (DEJA-7).
+- **Keep a test alive after a renamed ID.** On the Android fixture, one changed Checkout ID gets one scoped repair with a diff to review, and a wrong price still fails. Planned: a draft PR that adds a missing accessibility ID to your app (DEJA-6).
+- **Show what was tested before a release.** Planned: one command that checks every listed flow has a pass on the build that was tested, and writes the evidence to a file (DEJA-8).
+- **Let a coding agent check its change in the app.** Planned: an MCP server so an agent can replay saved flows after an edit and read the result (DEJA-9). It replays only, unless you turn exploration on.
+- **Own plain test files.** A saved test is ordinary Maestro YAML. Your team can review it in a pull request and run it without Déjà.
 
 Today, learning and repair work on Android only. Chromium and iOS can replay a saved test. See [Limits](#limits).
 
@@ -141,6 +144,12 @@ We do not claim a speedup. See [docs/REFERENCE.md](docs/REFERENCE.md) for the fu
 
 The full plan is in [docs/SDK_PLAN.md](docs/SDK_PLAN.md).
 
+## Contributing
+
+Outside contributions will require accepting the [CLA](CLA.md) (draft; see [CONTRIBUTING.md](CONTRIBUTING.md)).
+
 ## License
 
 [Apache-2.0](LICENSE)
+
+The Déjà name is covered by the [trademark policy](TRADEMARKS.md) (draft).

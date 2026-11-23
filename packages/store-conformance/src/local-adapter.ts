@@ -48,6 +48,20 @@ async function tamperLocalMetadata(workspaceRoot: string, kind: MetadataTamper) 
   await writeMetadata(workspaceRoot, value)
 }
 
+async function editLocalSubflowMetadata(workspaceRoot: string, kind: 'strip' | 'empty') {
+  const value = await readMetadata(workspaceRoot)
+  if (kind === 'strip') delete value.walks[0].subflowFiles
+  else value.walks[0].subflowFiles = []
+  await writeMetadata(workspaceRoot, value)
+}
+
+async function downgradeLocalToSchema2(workspaceRoot: string) {
+  const value = await readMetadata(workspaceRoot)
+  value.schemaVersion = 2
+  for (const walk of value.walks) delete walk.subflowFiles
+  await writeMetadata(workspaceRoot, value)
+}
+
 export const localStoreContract: WalkStoreContractImplementation = {
   name: 'LocalWalkStore (filesystem + JSON)',
   metadataPath: workspaceRoot => resolve(workspaceRoot, LOCAL_MEMORY_PATH),
@@ -55,6 +69,8 @@ export const localStoreContract: WalkStoreContractImplementation = {
   closeStore: () => {},
   snapshotMetadata: workspaceRoot => readFile(resolve(workspaceRoot, LOCAL_MEMORY_PATH)),
   tamperMetadata: tamperLocalMetadata,
+  editSubflowMetadata: editLocalSubflowMetadata,
+  downgradeToSchema2: downgradeLocalToSchema2,
   setFirstFlowPath: async (workspaceRoot, flowPath) => {
     const value = await readMetadata(workspaceRoot)
     value.walks[0].flowPath = flowPath

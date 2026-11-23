@@ -42,6 +42,7 @@ export {
   type AdapterIdentityInput,
   type AndroidAdapterOptions,
   type IosAdapterOptions,
+  type MaestroCommandOptions,
   type MaestroExecutionAdapter,
   type MaestroPlatform,
   type WebAdapterOptions,
@@ -86,6 +87,8 @@ export type RunMaestroOptions = {
   timeoutMs: number
   androidSdkRoot?: string
   javaHome?: string
+  /** Absolute path for Maestro's own JUnit report (`--format=JUNIT --output=`). Opt-in. */
+  junitPath?: string
   artifacts?: {
     directory: string
   }
@@ -299,8 +302,12 @@ export async function runMaestro(options: RunMaestroOptions): Promise<MaestroRun
 
   const child = spawn(
     options.executable,
-    options.adapter?.commandArguments(flowPath) ??
-      ['--no-ansi', '--device', options.device, 'test', flowPath],
+    options.adapter?.commandArguments(flowPath, { junitPath: options.junitPath }) ??
+      [
+        '--no-ansi', '--device', options.device, 'test',
+        ...(options.junitPath ? ['--format=JUNIT', `--output=${options.junitPath}`] : []),
+        flowPath,
+      ],
     {
       cwd: resolve(options.workspaceRoot),
       env: maestroEnvironment(options),

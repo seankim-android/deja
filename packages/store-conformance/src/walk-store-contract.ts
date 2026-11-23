@@ -1,9 +1,10 @@
 import { describe, expect, test } from 'bun:test'
+import { createHash } from 'node:crypto'
 import { existsSync } from 'node:fs'
-import { mkdir, mkdtemp, readFile, readdir, rename, rm, symlink, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, realpath, readFile, readdir, rename, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { basename, join, resolve } from 'node:path'
-import type { WalkIdentity, WalkStore } from '@deja-qa/core'
+import { ExpectedClosureMismatchError, type WalkIdentity, type WalkStore } from '@deja-qa/core'
 
 export const initialValidation = '2026-11-22T00:00:00.000Z'
 export const laterValidation = '2026-11-22T00:01:00.000Z'
@@ -36,6 +37,10 @@ export type WalkStoreContractImplementation = {
   snapshotMetadata(workspaceRoot: string): Promise<Buffer>
   tamperMetadata(workspaceRoot: string, kind: MetadataTamper): Promise<void>
   setFirstFlowPath(workspaceRoot: string, flowPath: string): Promise<void>
+  /** `strip` removes the first walk's file list; `empty` leaves a valid but empty one. */
+  editSubflowMetadata(workspaceRoot: string, kind: 'strip' | 'empty'): Promise<void>
+  /** Rewrite the metadata as memory schema 2, which has no file lists. */
+  downgradeToSchema2(workspaceRoot: string): Promise<void>
 }
 
 async function temporaryFiles(root: string): Promise<string[]> {
@@ -50,13 +55,13 @@ async function temporaryFiles(root: string): Promise<string[]> {
 }
 
 async function fixture() {
-  const temporary = await mkdtemp(join(tmpdir(), 'deja-store-contract-'))
+  const temporary = await realpath(await mkdtemp(join(tmpdir(), 'deja-store-contract-')))
   const workspaceRoot = join(temporary, 'workspace')
   await mkdir(join(workspaceRoot, '.deja/attempts'), { recursive: true })
   const candidatePath = '.deja/attempts/candidate.yaml'
   await writeFile(
     join(workspaceRoot, candidatePath),
-    'appId: dev.deja.checkout\n- assertVisible: Order confirmed\n',
+    'appId: dev.deja.checkout\n---\n- assertVisible: Order confirmed\n',
   )
   return { temporary, workspaceRoot, candidatePath }
 }
@@ -353,6 +358,48 @@ export function runWalkStoreContractTests(implementation: WalkStoreContractImple
       }
     })
 
+    test('a candidate whose bytes differ from expectedFlowSha256 is refused before any write', async () => {
+      const ctx = await context()
+      try {
+        const { persisted } = await ctx.seed()
+        const store = ctx.makeStore()
+        const beforeMetadata = await implementation.snapshotMetadata(ctx.workspaceRoot)
+        const beforeFlows = await readdir(join(ctx.workspaceRoot, '.deja/flows'), { recursive: true })
+        await expect(store.persistVerifiedCandidate({
+          identity: contractIdentity({ buildFingerprint: 'b'.repeat(64) }),
+          candidatePath: ctx.candidatePath,
+          validation: { passed: true, at: laterValidation }, origin: 'replayed-on-new-build',
+          expectedFlowSha256: 'c'.repeat(64),
+        })).rejects.toThrow('nothing was stored')
+        expect(await implementation.snapshotMetadata(ctx.workspaceRoot)).toEqual(beforeMetadata)
+        expect(await readdir(join(ctx.workspaceRoot, '.deja/flows'), { recursive: true })).toEqual(beforeFlows)
+        expect(await temporaryFiles(ctx.workspaceRoot)).toEqual([])
+        expect((await store.lookup(contractIdentity())).status).toBe('hit')
+        expect(persisted.flowSha256).toHaveLength(64)
+      } finally {
+        await ctx.cleanup()
+      }
+    })
+
+    test('a matching expectedFlowSha256 stores the walk with origin replayed-on-new-build', async () => {
+      const ctx = await context()
+      try {
+        const { persisted } = await ctx.seed()
+        const store = ctx.makeStore()
+        const next = await store.persistVerifiedCandidate({
+          identity: contractIdentity({ buildFingerprint: 'b'.repeat(64) }),
+          candidatePath: ctx.candidatePath,
+          validation: { passed: true, at: laterValidation }, origin: 'replayed-on-new-build',
+          expectedFlowSha256: persisted.flowSha256,
+        })
+        expect(next.walk.origin).toBe('replayed-on-new-build')
+        const hit = await store.lookup(contractIdentity({ buildFingerprint: 'b'.repeat(64) }))
+        expect(hit.status === 'hit' && hit.walk.origin).toBe('replayed-on-new-build')
+      } finally {
+        await ctx.cleanup()
+      }
+    })
+
     test('an interruption before flow rename leaves only ignored temporary files and a first-run miss', async () => {
       const ctx = await context({ failFlowRename: true })
       try {
@@ -498,6 +545,350 @@ export function runWalkStoreContractTests(implementation: WalkStoreContractImple
       } finally {
         await ctx.cleanup()
       }
+    })
+
+    describe('flows that run other files', () => {
+      const main = [
+        'appId: dev.deja.checkout',
+        'onFlowStart:',
+        '  - runScript: ../scripts/seed.js',
+        '---',
+        '- runFlow: ../subflows/sign-in.yaml',
+        '- runFlow:',
+        '    file: ../subflows/note.yaml',
+        '    env: { NOTE: hi }',
+        '- repeat:',
+        '    times: 2',
+        '    commands:',
+        '      - retry:',
+        '          maxRetries: 1',
+        '          commands:',
+        '            - runFlow: ../subflows/note.yaml',
+        '- assertVisible: Order confirmed',
+        '',
+      ].join('\n')
+      const files: Record<string, string> = {
+        '.maestro/flows/main.yaml': main,
+        '.maestro/scripts/seed.js': 'output.seeded = true\n',
+        '.maestro/subflows/sign-in.yaml': '- runFlow: nested/type.yaml\n- assertVisible: Signed in\n',
+        '.maestro/subflows/nested/type.yaml': '- inputText: hello\n- runScript:\n    file: ../../scripts/seed.js\n',
+        '.maestro/subflows/note.yaml': '- tapOn: Note\n',
+      }
+
+      async function withFlows(
+        extra: Record<string, string>,
+        run: (ctx: Awaited<ReturnType<typeof context>>, store: WalkStore) => Promise<void>,
+      ) {
+        const ctx = await context()
+        try {
+          for (const [path, contents] of Object.entries({ ...files, ...extra })) {
+            await mkdir(join(ctx.workspaceRoot, path, '..'), { recursive: true })
+            await writeFile(join(ctx.workspaceRoot, path), contents)
+          }
+          await run(ctx, ctx.makeStore())
+        } finally {
+          await ctx.cleanup()
+        }
+      }
+
+      const remember = (store: WalkStore, candidatePath: string, at = initialValidation) =>
+        store.persistVerifiedCandidate({
+          identity: contractIdentity(),
+          candidatePath,
+          validation: { passed: true, at },
+          origin: 'remember',
+        })
+
+      test('stores nested subflows and scripts with their relative layout, and replays them', async () => {
+        await withFlows({}, async (ctx, store) => {
+          const persisted = await remember(store, join(ctx.workspaceRoot, '.maestro/flows/main.yaml'))
+          const stored = resolve(ctx.workspaceRoot, persisted.flowPath)
+          expect(persisted.flowPath).toMatch(/^\.deja\/flows\/checkout\/android-[a-f0-9]{64}\/flows\/main\.yaml$/)
+          expect(persisted.flowSha256).toBe(
+            createHash('sha256').update(main).digest('hex'),
+          )
+          expect(persisted.walk.subflowFiles?.map(file => file.path.split('/').slice(4).join('/')).sort())
+            .toEqual(['scripts/seed.js', 'subflows/nested/type.yaml', 'subflows/note.yaml', 'subflows/sign-in.yaml'])
+          // The paths written in the main flow still resolve from where the copy lives.
+          for (const [relative, original] of [
+            ['../scripts/seed.js', '.maestro/scripts/seed.js'],
+            ['../subflows/sign-in.yaml', '.maestro/subflows/sign-in.yaml'],
+            ['../subflows/nested/type.yaml', '.maestro/subflows/nested/type.yaml'],
+            ['../subflows/note.yaml', '.maestro/subflows/note.yaml'],
+          ]) {
+            expect(await readFile(resolve(stored, '..', relative), 'utf8')).toBe(files[original])
+          }
+          const reopened = ctx.makeStore()
+          const hit = await reopened.lookup(contractIdentity())
+          expect(hit).toMatchObject({ status: 'hit', flowPath: stored })
+          if (hit.status !== 'hit') throw new Error('expected hit')
+          expect(hit.walk.subflowFiles).toHaveLength(4)
+          expect((await reopened.list())[0].subflowFiles).toEqual(persisted.walk.subflowFiles)
+          expect((await reopened.lookupPreviousSuccessful(contractIdentity())).status).toBe('hit')
+        })
+      })
+
+      test('a flow that runs nothing keeps the single-file layout and records an empty file list', async () => {
+        const ctx = await context()
+        try {
+          const persisted = await remember(ctx.makeStore(), ctx.candidatePath)
+          expect(persisted.flowPath)
+            .toBe(`.deja/flows/checkout/android-${persisted.flowSha256}.yaml`)
+          expect(persisted.walk.subflowFiles).toEqual([])
+        } finally {
+          await ctx.cleanup()
+        }
+      })
+
+      test('a subflow that changed on disk is a new closure and never reuses the old bytes', async () => {
+        await withFlows({}, async (ctx, store) => {
+          const candidate = join(ctx.workspaceRoot, '.maestro/flows/main.yaml')
+          const first = await remember(store, candidate)
+          await writeFile(join(ctx.workspaceRoot, '.maestro/subflows/note.yaml'), '- tapOn: Edited note\n')
+          const second = await remember(store, candidate, laterValidation)
+          expect(second.flowSha256).toBe(first.flowSha256)
+          expect(second.flowPath).not.toBe(first.flowPath)
+          expect(await store.list()).toHaveLength(1)
+          const hit = await ctx.makeStore().lookup(contractIdentity())
+          if (hit.status !== 'hit') throw new Error('expected hit')
+          expect(hit.walk.flowPath).toBe(second.flowPath)
+          expect(await readFile(resolve(hit.flowPath, '../../subflows/note.yaml'), 'utf8'))
+            .toBe('- tapOn: Edited note\n')
+          // The first closure is still on disk, unchanged and unreferenced.
+          expect(await readFile(resolve(ctx.workspaceRoot, first.flowPath, '../../subflows/note.yaml'), 'utf8'))
+            .toBe('- tapOn: Note\n')
+        })
+      })
+
+      test('rejects a tampered stored subflow like a tampered main flow', async () => {
+        await withFlows({}, async (ctx, store) => {
+          const persisted = await remember(store, join(ctx.workspaceRoot, '.maestro/flows/main.yaml'))
+          const stored = resolve(ctx.workspaceRoot, persisted.flowPath)
+          await writeFile(resolve(stored, '../../subflows/nested/type.yaml'), '- tapOn: Delete everything\n')
+          await expect(store.lookup(contractIdentity())).rejects.toThrow('stored subflow checksum does not match')
+          await expect(store.lookupPreviousSuccessful(contractIdentity()))
+            .rejects.toThrow('stored subflow checksum does not match')
+        })
+      })
+
+      test('returns missing-flow when a stored subflow is gone', async () => {
+        await withFlows({}, async (ctx, store) => {
+          const persisted = await remember(store, join(ctx.workspaceRoot, '.maestro/flows/main.yaml'))
+          await rm(resolve(ctx.workspaceRoot, persisted.flowPath, '../../scripts/seed.js'))
+          expect(await store.lookup(contractIdentity())).toEqual({ status: 'miss', reason: 'missing-flow' })
+        })
+      })
+
+      const rejected: [string, Record<string, string>, string][] = [
+        ['a NUL byte in a path',
+          { '.maestro/flows/bad.yaml': '- runFlow: "../subflows/a\\0b.yaml"\n' }, 'NUL byte'],
+        ['a hidden file such as .env',
+          {
+            '.maestro/flows/bad.yaml': '- runScript: ../scripts/.env\n',
+            '.maestro/scripts/.env': 'TOKEN=secret\n',
+          }, 'secret or hidden file'],
+        ['a hidden folder',
+          {
+            '.maestro/flows/bad.yaml': '- runFlow: ../.secrets/login.yaml\n',
+            '.maestro/.secrets/login.yaml': '- tapOn: Secret\n',
+          }, 'secret or hidden file'],
+        ['a nested reference into a hidden folder',
+          {
+            '.maestro/flows/bad.yaml': '- runFlow: ../subflows/hop.yaml\n',
+            '.maestro/subflows/hop.yaml': '- runFlow: ../.git/hooks.yaml\n',
+            '.maestro/.git/hooks.yaml': '- tapOn: Hook\n',
+          }, 'secret or hidden file'],
+        ['a key file',
+          {
+            '.maestro/flows/bad.yaml': '- runScript: ../scripts/server.pem\n',
+            '.maestro/scripts/server.pem': 'key\n',
+          }, 'secret or hidden file'],
+        ['one file spelled two ways',
+          {
+            '.maestro/flows/bad.yaml': '- runFlow: ../subflows/note.yaml\n- runFlow: ../subflows/NOTE.yaml\n',
+          }, 'spelled two ways|does not exist'],
+        ['a flow that is not valid YAML',
+          { '.maestro/flows/bad.yaml': 'appId: a\n- runFlow: ../subflows/note.yaml\n' }, 'not valid YAML'],
+        ['quoted keys that hide a missing file',
+          { '.maestro/flows/bad.yaml': '- "runFlow": ../subflows/none.yaml\n' }, 'does not exist'],
+        ['a reference that leaves the workspace',
+          { '.maestro/flows/bad.yaml': '- runFlow: ../../../outside.yaml\n' }, 'escapes the workspace'],
+        ['a nested reference that leaves the workspace',
+          {
+            '.maestro/flows/bad.yaml': '- runFlow: ../subflows/deep.yaml\n',
+            '.maestro/subflows/deep.yaml': '- runFlow:\n    file: ../../../outside.yaml\n',
+          }, 'escapes the workspace'],
+        ['an absolute path',
+          { '.maestro/flows/bad.yaml': '- runFlow: /etc/hosts\n' }, 'must be a relative path'],
+        ['a path built from a variable',
+          { '.maestro/flows/bad.yaml': '- runFlow: ../subflows/${NAME}.yaml\n' }, 'uses a variable'],
+        ['a reference to a file that does not exist',
+          { '.maestro/flows/bad.yaml': '- runScript: ../scripts/none.js\n' }, 'does not exist'],
+        ['flows that run each other',
+          {
+            '.maestro/flows/bad.yaml': '- runFlow: ../subflows/a.yaml\n',
+            '.maestro/subflows/a.yaml': '- runFlow: b.yaml\n',
+            '.maestro/subflows/b.yaml': '- runFlow: a.yaml\n',
+          }, 'in a cycle'],
+      ]
+      for (const [name, extra, message] of rejected) {
+        test(`rejects ${name} and writes nothing`, async () => {
+          await withFlows(extra, async (ctx, store) => {
+            await writeFile(join(ctx.workspaceRoot, '..', 'outside.yaml'), '- tapOn: Outside\n')
+            await expect(remember(store, join(ctx.workspaceRoot, '.maestro/flows/bad.yaml')))
+              .rejects.toThrow(new RegExp(message))
+            expect(existsSync(join(ctx.workspaceRoot, '.deja/flows'))).toBe(false)
+            expect(existsSync(implementation.metadataPath(ctx.workspaceRoot))).toBe(false)
+          })
+        })
+      }
+
+      for (const kind of ['strip', 'empty'] as const) {
+        test(`refuses a walk whose subflow list was ${kind === 'strip' ? 'stripped' : 'emptied'}, tampered or not`, async () => {
+          await withFlows({}, async (ctx, store) => {
+            const persisted = await remember(store, join(ctx.workspaceRoot, '.maestro/flows/main.yaml'))
+            await writeFile(
+              resolve(ctx.workspaceRoot, persisted.flowPath, '../../subflows/note.yaml'),
+              '- tapOn: Delete everything\n',
+            )
+            await implementation.editSubflowMetadata(ctx.workspaceRoot, kind)
+            const reopened = ctx.makeStore()
+            await expect(reopened.lookup(contractIdentity())).rejects.toThrow()
+            await expect(reopened.lookupPreviousSuccessful(contractIdentity())).rejects.toThrow()
+          })
+        })
+      }
+
+      test('still reads memory schema 2, which has no file lists', async () => {
+        const ctx = await context()
+        try {
+          const { store } = await ctx.seed()
+          await implementation.downgradeToSchema2(ctx.workspaceRoot)
+          const reopened = ctx.makeStore()
+          expect((await reopened.lookup(contractIdentity())).status).toBe('hit')
+          await reopened.recordValidation(contractIdentity(), { passed: true, at: laterValidation })
+          const migrated = await ctx.makeStore().lookup(contractIdentity())
+          expect(migrated.status).toBe('hit')
+          if (migrated.status === 'hit') expect(migrated.walk.subflowFiles).toEqual([])
+          void store
+        } finally {
+          await ctx.cleanup()
+        }
+      })
+
+      test('stores the snapshot it verified, not what a subflow became afterwards', async () => {
+        await withFlows({}, async (ctx, store) => {
+          const snapshot = await store.snapshotCandidate!(
+            join(ctx.workspaceRoot, '.maestro/flows/main.yaml'), '.deja/attempts/one/candidate',
+          )
+          expect(snapshot.candidatePath).toBe('.deja/attempts/one/candidate/flows/main.yaml')
+          // The subflow changes on disk after the snapshot, while verification would be running.
+          await writeFile(join(ctx.workspaceRoot, '.maestro/subflows/note.yaml'), '- tapOn: Sneaky edit\n')
+          const persisted = await store.persistVerifiedCandidate({
+            identity: contractIdentity(), candidatePath: snapshot.candidatePath,
+            validation: { passed: true, at: initialValidation }, origin: 'remember',
+            expectedClosureSha256: snapshot.closureSha256,
+          })
+          expect(await readFile(resolve(ctx.workspaceRoot, persisted.flowPath, '../../subflows/note.yaml'), 'utf8'))
+            .toBe('- tapOn: Note\n')
+        })
+      })
+
+      test('refuses to store a candidate whose closure no longer matches what was verified', async () => {
+        await withFlows({}, async (ctx, store) => {
+          const candidate = join(ctx.workspaceRoot, '.maestro/flows/main.yaml')
+          const snapshot = await store.snapshotCandidate!(candidate, '.deja/attempts/two/candidate')
+          await writeFile(resolve(ctx.workspaceRoot, '.deja/attempts/two/candidate/subflows/note.yaml'), '- tapOn: Changed\n')
+          await expect(store.persistVerifiedCandidate({
+            identity: contractIdentity(), candidatePath: snapshot.candidatePath,
+            validation: { passed: true, at: initialValidation }, origin: 'remember',
+            expectedClosureSha256: snapshot.closureSha256,
+          })).rejects.toThrow('changed after it was verified')
+          await expect(store.persistVerifiedCandidate({
+            identity: contractIdentity(), candidatePath: candidate,
+            validation: { passed: true, at: initialValidation }, origin: 'remember',
+            expectedClosureSha256: 'f'.repeat(64),
+          })).rejects.toThrow('changed after it was verified')
+          expect(existsSync(join(ctx.workspaceRoot, '.deja/flows'))).toBe(false)
+          expect(existsSync(implementation.metadataPath(ctx.workspaceRoot))).toBe(false)
+        })
+      })
+
+      for (const [name, target] of [
+        ['a hidden file', '.maestro/scripts/.token'],
+        ['a file in a hidden folder', '.maestro/.private/real.yaml'],
+        ['an environment file', '.maestro/scripts/real.env'],
+        ['a key file', '.maestro/scripts/real.pem'],
+      ]) {
+        test(`rejects an innocent-looking symlink to ${name}`, async () => {
+          await withFlows({
+            '.maestro/flows/bad.yaml': '- runFlow: ../subflows/tokens.yaml\n',
+            [target]: '- tapOn: Secret\n',
+          }, async (ctx, store) => {
+            await symlink(join(ctx.workspaceRoot, target), join(ctx.workspaceRoot, '.maestro/subflows/tokens.yaml'))
+            await expect(remember(store, join(ctx.workspaceRoot, '.maestro/flows/bad.yaml')))
+              .rejects.toThrow('secret or hidden file')
+            expect(existsSync(join(ctx.workspaceRoot, '.deja/flows'))).toBe(false)
+          })
+        })
+      }
+
+      test('a walk migrated from schema 2 whose flow runs files is a clean miss, not an error', async () => {
+        await withFlows({}, async (ctx, store) => {
+          await remember(store, join(ctx.workspaceRoot, '.maestro/flows/main.yaml'))
+          await implementation.downgradeToSchema2(ctx.workspaceRoot)
+          const reopened = ctx.makeStore()
+          const miss = { status: 'miss' as const, reason: 'legacy-closure-unknown' as const }
+          expect(await reopened.lookup(contractIdentity())).toEqual(miss)
+          // The first schema 3 write migrates the walk. It stays a miss and never throws.
+          await reopened.persistVerifiedCandidate({
+            identity: contractIdentity({ goal: 'other goal' }), candidatePath: ctx.candidatePath,
+            validation: { passed: true, at: laterValidation }, origin: 'remember',
+          })
+          const migrated = ctx.makeStore()
+          expect(await migrated.lookup(contractIdentity())).toEqual(miss)
+          expect(await migrated.lookupPreviousSuccessful(contractIdentity())).toEqual(miss)
+          expect((await migrated.lookup(contractIdentity({ goal: 'other goal' }))).status).toBe('hit')
+        })
+      })
+
+      test('replays a stored closure for a new build and stores the closure that ran', async () => {
+        await withFlows({}, async (ctx, store) => {
+          const first = await remember(store, join(ctx.workspaceRoot, '.maestro/flows/main.yaml'))
+          const snapshot = await store.snapshotCandidate!(
+            resolve(ctx.workspaceRoot, first.flowPath), '.deja/reports/replay-one/replay',
+          )
+          const newBuild = contractIdentity({ buildFingerprint: 'b'.repeat(64) })
+          const second = await store.persistVerifiedCandidate({
+            identity: newBuild, candidatePath: snapshot.candidatePath,
+            validation: { passed: true, at: laterValidation }, origin: 'replayed-on-new-build',
+            expectedFlowSha256: first.flowSha256, expectedClosureSha256: snapshot.closureSha256,
+          })
+          expect(second.walk.subflowFiles).toHaveLength(4)
+          const hit = await ctx.makeStore().lookup(newBuild)
+          expect(hit.status).toBe('hit')
+          if (hit.status !== 'hit') throw new Error('expected hit')
+          expect(await readFile(resolve(hit.flowPath, '../../subflows/note.yaml'), 'utf8')).toBe('- tapOn: Note\n')
+          // A subflow edited in the copy that ran is refused with a typed error.
+          await writeFile(resolve(ctx.workspaceRoot, '.deja/reports/replay-one/replay/subflows/note.yaml'), '- tapOn: Edited\n')
+          await expect(store.persistVerifiedCandidate({
+            identity: contractIdentity({ buildFingerprint: 'c'.repeat(64) }), candidatePath: snapshot.candidatePath,
+            validation: { passed: true, at: laterValidation }, origin: 'replayed-on-new-build',
+            expectedFlowSha256: first.flowSha256, expectedClosureSha256: snapshot.closureSha256,
+          })).rejects.toBeInstanceOf(ExpectedClosureMismatchError)
+        })
+      })
+
+      test('rejects a symlink inside the workspace that points outside it', async () => {
+        await withFlows({ '.maestro/flows/bad.yaml': '- runFlow: ../subflows/link.yaml\n' }, async (ctx, store) => {
+          const outside = join(ctx.temporary, 'outside.yaml')
+          await writeFile(outside, '- tapOn: Outside\n')
+          await symlink(outside, join(ctx.workspaceRoot, '.maestro/subflows/link.yaml'))
+          await expect(remember(store, join(ctx.workspaceRoot, '.maestro/flows/bad.yaml')))
+            .rejects.toThrow('escapes the workspace')
+          expect(existsSync(join(ctx.workspaceRoot, '.deja/flows'))).toBe(false)
+        })
+      })
     })
   })
 }

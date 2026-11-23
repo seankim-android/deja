@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, realpath, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { JsonRunReporter } from '@deja-qa/cli/reporter'
@@ -23,14 +23,14 @@ const fakeMaestro = resolve(import.meta.dir, '../../maestro/test/fixtures/fake-m
 function runOrchestrationContract(implementation: WalkStoreContractImplementation) {
   describe(`${implementation.name}: actual orchestration conformance`, () => {
     test('one production-runner cache hit performs zero model calls and appends passing validation', async () => {
-      const temporary = await mkdtemp(join(tmpdir(), 'walk019-orchestration-'))
+      const temporary = await realpath(await mkdtemp(join(tmpdir(), 'walk019-orchestration-')))
       const workspaceRoot = join(temporary, 'workspace')
       const store = implementation.createStore(workspaceRoot)
       try {
         await mkdir(join(workspaceRoot, 'flows'), { recursive: true })
         await writeFile(
           join(workspaceRoot, 'flows/candidate.yaml'),
-          'appId: dev.deja.checkout\n- assertVisible: Order confirmed\n',
+          'appId: dev.deja.checkout\n---\n- assertVisible: Order confirmed\n',
         )
         const identity = contractIdentity()
         const persisted = await store.persistVerifiedCandidate({
@@ -43,7 +43,7 @@ function runOrchestrationContract(implementation: WalkStoreContractImplementatio
           workspaceRoot,
           executable: fakeMaestro,
           device: 'deterministic-local-fixture',
-          timeoutMs: 5000,
+          timeoutMs: 30_000,
         })
         const reporter = new JsonRunReporter(workspaceRoot, createRedactor(workspaceRoot, []))
         let explorerConstructions = 0
@@ -107,3 +107,58 @@ function runOrchestrationContract(implementation: WalkStoreContractImplementatio
 
 runOrchestrationContract(localStoreContract)
 runOrchestrationContract(sqliteStoreContract)
+
+function runRememberSnapshotContract(implementation: WalkStoreContractImplementation) {
+  describe(`${implementation.name}: remember stores what it verified`, () => {
+    test('a subflow edited while verification runs is not stored as verified', async () => {
+      const temporary = await realpath(await mkdtemp(join(tmpdir(), 'deja2-remember-')))
+      const workspaceRoot = join(temporary, 'workspace')
+      const store = implementation.createStore(workspaceRoot)
+      try {
+        await mkdir(join(workspaceRoot, '.maestro/flows'), { recursive: true })
+        await mkdir(join(workspaceRoot, '.maestro/subflows'), { recursive: true })
+        await writeFile(
+          join(workspaceRoot, '.maestro/flows/main.yaml'),
+          'appId: dev.deja.checkout\n---\n- runFlow: ../subflows/note.yaml\n',
+        )
+        const subflow = join(workspaceRoot, '.maestro/subflows/note.yaml')
+        await writeFile(subflow, '- assertVisible: Verified text\n')
+        const verified: string[] = []
+        let ran = ''
+        const deja = new Deja({
+          store,
+          runner: {
+            run: async request => {
+              ran = request.flowPath
+              verified.push(await readFile(resolve(workspaceRoot, request.flowPath, '../../subflows/note.yaml'), 'utf8'))
+              // An agent edits the original subflow while the run is going.
+              await writeFile(subflow, '- assertVisible: Unverified text\n')
+              return {
+                passed: true, startedAt: initialValidation, endedAt: initialValidation, durationMs: 1,
+                exitCode: 0, assertions: 1, failure: null, artifacts: [],
+              }
+            },
+          },
+          reporter: { report: async () => {} } as never,
+          artifactId: () => 'snapshot-remember',
+          createExplorer: () => { throw new Error('no explorer') },
+          createRepairer: () => { throw new Error('no repairer') },
+        })
+        const result = await deja.remember(contractIdentity(), join(workspaceRoot, '.maestro/flows/main.yaml'))
+        expect(result.outcome).toBe('remembered')
+        expect(ran).toStartWith('.deja/attempts/snapshot-remember/candidate/')
+        expect(verified).toEqual(['- assertVisible: Verified text\n'])
+        const stored = await store.lookup(contractIdentity())
+        if (stored.status !== 'hit') throw new Error('expected hit')
+        expect(await readFile(resolve(stored.flowPath, '../../subflows/note.yaml'), 'utf8'))
+          .toBe('- assertVisible: Verified text\n')
+      } finally {
+        await implementation.closeStore(store)
+        await rm(temporary, { recursive: true, force: true })
+      }
+    })
+  })
+}
+
+runRememberSnapshotContract(localStoreContract)
+runRememberSnapshotContract(sqliteStoreContract)

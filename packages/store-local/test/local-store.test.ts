@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, realpath, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -21,7 +21,7 @@ function identity(): WalkIdentity {
 }
 
 test('upgrades valid WALK-003 schema-one metadata without inventing validation success', async () => {
-  const temporary = await mkdtemp(join(tmpdir(), 'deja-local-legacy-'))
+  const temporary = await realpath(await mkdtemp(join(tmpdir(), 'deja-local-legacy-')))
   const workspaceRoot = join(temporary, 'workspace')
   try {
     await mkdir(join(workspaceRoot, '.deja/attempts'), { recursive: true })
@@ -39,6 +39,7 @@ test('upgrades valid WALK-003 schema-one metadata without inventing validation s
     memory.walks[0].flowPath = oldPath
     delete memory.walks[0].flowSchemaVersion
     delete memory.walks[0].validationHistory
+    delete memory.walks[0].subflowFiles
     await writeFile(join(workspaceRoot, LOCAL_MEMORY_PATH), `${JSON.stringify(memory, null, 2)}\n`)
     expect((await store.lookup(identity())).status).toBe('hit')
     await store.recordValidation(identity(), {

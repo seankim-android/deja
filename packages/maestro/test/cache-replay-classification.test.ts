@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test'
 import { spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, realpath, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import {
@@ -41,7 +41,7 @@ async function execute(workspaceRoot: string) {
 }
 
 test('a failing cache hit stays at zero model calls and its failed validation is not reused', async () => {
-  const temporary = await mkdtemp(join(tmpdir(), 'deja-cache-classification-'))
+  const temporary = await realpath(await mkdtemp(join(tmpdir(), 'deja-cache-classification-')))
   const workspaceRoot = join(temporary, 'workspace')
   try {
     await mkdir(join(workspaceRoot, 'app/build/outputs/apk/debug'), { recursive: true })

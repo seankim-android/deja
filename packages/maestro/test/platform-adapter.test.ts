@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -50,7 +50,7 @@ describe('Maestro execution platform adapters', () => {
   })
 
   test('iOS app fingerprint covers bundle paths and contents', async () => {
-    const temporary = await mkdtemp(join(tmpdir(), 'deja-ios-build-'))
+    const temporary = await realpath(await mkdtemp(join(tmpdir(), 'deja-ios-build-')))
     try {
       const app = join(temporary, 'Fixture.app')
       await mkdir(join(app, '_CodeSignature'), { recursive: true })
@@ -69,7 +69,7 @@ describe('Maestro execution platform adapters', () => {
   })
 
   test('Web build fingerprint covers paths and every deterministic static file', async () => {
-    const temporary = await mkdtemp(join(tmpdir(), 'deja-web-build-'))
+    const temporary = await realpath(await mkdtemp(join(tmpdir(), 'deja-web-build-')))
     try {
       await mkdir(join(temporary, 'public', 'assets'), { recursive: true })
       await writeFile(join(temporary, 'public', 'index.html'), '<main>one</main>')
@@ -86,5 +86,19 @@ describe('Maestro execution platform adapters', () => {
     } finally {
       await rm(temporary, { recursive: true, force: true })
     }
+  })
+
+  test('JUnit options add Maestro\'s own report flags before the flow, and only when asked', () => {
+    const options = { junitPath: '/host/report.xml' }
+    const report = ['--format=JUNIT', '--output=/host/report.xml']
+    expect(androidMaestroAdapter({ device: 'emulator-5554' }).commandArguments('/w/flow.yaml', options))
+      .toEqual(['--no-ansi', '--device', 'emulator-5554', 'test', ...report, '/w/flow.yaml'])
+    expect(iosMaestroAdapter({ device: 'UDID-1' }).commandArguments('/w/flow.yaml', options))
+      .toEqual(['--no-ansi', '--platform', 'ios', '--device', 'UDID-1', 'test', ...report, '/w/flow.yaml'])
+    const web = webMaestroAdapter().commandArguments('/w/flow.yaml', options)
+    expect(web.slice(-3)).toEqual([...report.slice(0, 2), '/w/flow.yaml'].slice(0, 3))
+    expect(web).toContain('--screen-size')
+    expect(androidMaestroAdapter({ device: 'emulator-5554' }).commandArguments('/w/flow.yaml', {}))
+      .toEqual(['--no-ansi', '--device', 'emulator-5554', 'test', '/w/flow.yaml'])
   })
 })

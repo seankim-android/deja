@@ -58,10 +58,12 @@ older validation passed. The flow bytes are left intact for diagnosis.
 
 ## Explicit repair provenance (WALK-007)
 
-`lookupPreviousSuccessful` is a separate diagnostic API used only by the bounded repair lifecycle. It
+`lookupPreviousSuccessful` is a separate diagnostic API used by the bounded repair lifecycle and, when
+opted in, by the WALK-021 iOS `replay-last-verified` stale-build policy. It
 can select an earlier successful build's checksum-verified flow, but it is never a warm-cache hit and
 does not authorize a write by itself. The caller must independently execute that flow and satisfy the
-strict selector classification before planning a patch.
+strict selector classification before planning a patch. The WALK-021 policy instead stores a passing
+replay for the new build through `persistVerifiedCandidate` and stores nothing on a fail.
 
 `persistVerifiedRepair` accepts a passing verification only while the named previous successful
 build/flow still exists unchanged in valid memory. Its atomic replacement has `origin: "repair"`,
