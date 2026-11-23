@@ -147,3 +147,5 @@ The full plan is in [docs/SDK_PLAN.md](docs/SDK_PLAN.md).
 ## License
 
 [Apache-2.0](LICENSE)
+
+The Déjà name is covered by the [trademark policy](TRADEMARKS.md) (draft).
