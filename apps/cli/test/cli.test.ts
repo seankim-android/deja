@@ -380,6 +380,17 @@ describe('production headless CLI', () => {
     }
   })
 
+  test('--version prints the version, "dev" outside a release build, and the contract version', async () => {
+    const context = await workspace()
+    try {
+      const result = await execute(context.root, ['--version'])
+      expect(result.exitCode).toBe(0)
+      expect(result.stdout).toMatch(/^deja \d+\.\d+\.\d+ \(commit dev, contract \d+\)\n$/)
+    } finally {
+      await cleanup(context.temporary)
+    }
+  })
+
   test('help, command errors, bad config, and inspection failures use documented exits', async () => {
     const context = await workspace()
     try {

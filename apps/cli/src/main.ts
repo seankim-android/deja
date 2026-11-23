@@ -40,6 +40,7 @@ import { createRedactor, redactJson } from './redaction.ts'
 import { JsonRunReporter, readRunReport } from './reporter.ts'
 import { renderDoctor, runDoctor, type DoctorProbe } from './doctor.ts'
 import { installEngineCommand, selectEngine } from './engine.ts'
+import { versionLine } from './version.ts'
 
 export type CliIo = {
   stdout: (text: string) => void
@@ -92,6 +93,7 @@ type ParsedArguments = {
   json: boolean
   summary: boolean
   help: boolean
+  version: boolean
 }
 
 function parseArguments(argv: string[]): ParsedArguments {
@@ -103,10 +105,12 @@ function parseArguments(argv: string[]): ParsedArguments {
   let json = false
   let summary = false
   let help = false
+  let version = false
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index]
     if (argument === '--json') json = true
     else if (argument === '--summary') summary = true
+    else if (argument === '--version' || argument === '-v') version = true
     else if (argument === '-h' || argument === '--help' || argument === 'help') help = true
     else if (argument === '--config' || argument === '--flow' || argument === '--junit' || argument === '--store') {
       const value = argv[index + 1]
@@ -133,6 +137,7 @@ function parseArguments(argv: string[]): ParsedArguments {
     json,
     summary,
     help,
+    version,
   }
 }
 
@@ -252,6 +257,10 @@ export async function runCli(argv: string[], io: CliIo = {
   }
   try {
     parsed = parseArguments(argv)
+    if (parsed.version) {
+      io.stdout(versionLine())
+      return 0
+    }
     if (parsed.help || parsed.command === '') {
       io.stdout(HELP)
       return parsed.command === '' && !parsed.help ? 2 : 0
