@@ -121,12 +121,17 @@ export function createDeja(options: CreateDejaOptions): DejaClient {
     const buildFingerprint = await options.adapter.buildFingerprint(
       options.workspaceRoot, options.app.buildPath,
     )
+    const cache = options.adapter.cacheIdentity({ buildFingerprint })
     return {
       goal,
       appId: options.app.appId,
       platform: options.adapter.platform,
       flowSchemaVersion: options.flowSchemaVersion ?? DEFAULT_FLOW_SCHEMA_VERSION,
-      ...options.adapter.cacheIdentity({ buildFingerprint }),
+      ...cache,
+      // A manifest entry names its adapter. The Android adapter leaves it out of the cache identity so
+      // that old stored walks still match; in manifest mode there are none, so name it.
+      ...(options.manifestPath !== undefined && cache.adapter === undefined
+        ? { adapter: options.adapter.id } : {}),
     }
   }
   // One orchestrator per call, so the factories close over that call's identity.
