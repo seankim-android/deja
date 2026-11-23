@@ -40,7 +40,7 @@ import { createRedactor, redactJson } from './redaction.ts'
 import { JsonRunReporter, readRunReport } from './reporter.ts'
 import { renderDoctor, runDoctor, type DoctorProbe } from './doctor.ts'
 import { installEngineCommand, selectEngine } from './engine.ts'
-import { versionLine } from './version.ts'
+import { isCompiledBinary, versionLine } from './version.ts'
 
 export type CliIo = {
   stdout: (text: string) => void
@@ -52,6 +52,8 @@ export type CliDependencies = {
   engineInstall?: InstallEngineOptions
   doctorProbe?: DoctorProbe
   env?: NodeJS.ProcessEnv
+  /** Overrides compiled-binary detection, so a test can exercise the explore refusal. */
+  compiledBinary?: boolean
 }
 
 /** Adds the engine to every report, so the JSON report, the text output and the summary agree. */
@@ -159,6 +161,7 @@ function createOrchestration(
   junitPath: string | undefined,
   storeId: string | undefined,
   executable: string,
+  compiledBinary: boolean,
 ) {
   const store = new LocalWalkStore({
     workspaceRoot: configuration.workspaceRoot,
@@ -206,6 +209,10 @@ function createOrchestration(
     } : {}),
     ...(configuration.staleBuild ? { staleBuild: configuration.staleBuild } : {}),
     explorer: ({ identity }) => {
+      // OpenClaw starts its MCP proxy with process.execPath, which in a compiled binary is deja, not Bun.
+      if (compiledBinary) {
+        throw new CliConfigurationError('explore needs the Bun runtime; use the npm packages. The standalone binary replays stored walks only.')
+      }
       if (configuration.explore.platform !== 'android') {
         return new UnsupportedPlatformExplorer(configuration.explore.platform)
       }
@@ -343,6 +350,7 @@ export async function runCli(argv: string[], io: CliIo = {
     const { store, orchestration } = createOrchestration(
       configuration, reporter, runsMaestro ? junitPath : undefined, parsed.store,
       selected?.resolved.executable ?? '',
+      dependencies.compiledBinary ?? isCompiledBinary(),
     )
     openedStore = store
     if (parsed.command === 'list') {

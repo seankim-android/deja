@@ -9,6 +9,11 @@ set -euo pipefail
 
 : "${DEJA_VERSION:?Set DEJA_VERSION, for example 0.1.0}"
 : "${DEJA_SHA256:?Set DEJA_SHA256 to the checksum for this version and platform}"
+if ! printf '%s' "$DEJA_VERSION" | grep -Eq '^[0-9][0-9A-Za-z.+-]*$'; then
+  echo "DEJA_VERSION must look like 0.1.0, got: $DEJA_VERSION" >&2
+  exit 1
+fi
+DEJA_SHA256="$(printf '%s' "$DEJA_SHA256" | tr 'A-F' 'a-f')"
 repo="${DEJA_REPO:-seankim-android/deja}"
 cache="${DEJA_BIN_CACHE:-$HOME/.cache/deja-bin}"
 
@@ -30,7 +35,7 @@ fi
 mkdir -p "$cache"
 partial="$(mktemp "$cache/$name.XXXXXX")"
 trap 'rm -f "$partial"' EXIT
-curl --fail --silent --show-error --location \
+curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
   --output "$partial" \
   "https://github.com/$repo/releases/download/v${DEJA_VERSION}/$name"
 

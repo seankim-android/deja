@@ -24,3 +24,8 @@ export function versionLine() {
   const commit = typeof __DEJA_COMMIT__ === 'string' ? __DEJA_COMMIT__ : 'dev'
   return `deja ${version} (commit ${commit}, contract ${CONTRACT_VERSION})\n`
 }
+
+/** True inside a `bun build --compile` binary, where `process.execPath` is deja itself, not Bun. */
+export function isCompiledBinary() {
+  return /\$bunfs|~BUN/.test(Bun.main)
+}

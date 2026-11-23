@@ -15,18 +15,20 @@ when he does.
 | `deja-<version>-linux-x64` | Linux on x86-64 (built, not run in CI) |
 | `SHA256SUMS` | checksum of each binary above |
 
+A build from a tree with uncommitted changes reports `<sha>-dirty` as its commit.
 `deja --version` prints `deja <version> (commit <sha>, contract <CONTRACT_VERSION>)`. A run from
 source prints `commit dev`.
 
 The binary runs `run`, `list`, `inspect`, `remember`, `doctor` and `engine install`. One limit:
 `deja explore` with the real OpenClaw explorer starts its MCP proxy script with `process.execPath`,
 which in a compiled binary is `deja` itself. Cold exploration therefore still needs a
-Bun-based setup. Replay of stored walks, which is what a pinned-binary consumer does, does not.
+Bun-based setup. The binary refuses it at once with "explore needs the Bun runtime; use the npm packages". Replay of stored walks, which is what a pinned-binary consumer does, does not.
 
 ## Cut a release (only when Sean asks)
 
 1. Set `version` in `apps/cli/package.json` and merge it to `main` through a pull request.
-2. Tag the merge commit. The tag must be `v` plus that version, or the workflow stops.
+2. Tag the merge commit. The tag must be `v` plus that version, and the tagged commit must be on
+   `main`, or the workflow stops.
 
    ```sh
    git fetch origin && git tag v0.1.0 origin/main && git push origin v0.1.0

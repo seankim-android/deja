@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 import { createHash } from 'node:crypto'
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { spawnSync } from 'node:child_process'
 
@@ -30,11 +31,19 @@ function option(name: string) {
   return values
 }
 
+function git(args: string[]) {
+  const result = spawnSync('git', args, { cwd: root, encoding: 'utf8' })
+  if (result.status !== 0) throw new Error(`git ${args.join(' ')} failed: ${result.stderr}`)
+  return result.stdout
+}
+
+// Changes to tracked or unignored files. A build must leave this exactly as it found it.
+const treeBefore = git(['status', '--porcelain'])
+
 function gitCommit() {
   if (process.env.DEJA_COMMIT) return process.env.DEJA_COMMIT
-  const result = spawnSync('git', ['rev-parse', '--short=12', 'HEAD'], { cwd: root, encoding: 'utf8' })
-  if (result.status !== 0) throw new Error(`git rev-parse failed: ${result.stderr}`)
-  return result.stdout.trim()
+  // A binary built from uncommitted changes must not claim a clean commit.
+  return `${git(['rev-parse', '--short=12', 'HEAD']).trim()}${treeBefore.trim() ? '-dirty' : ''}`
 }
 
 const requested = option('--target')
@@ -49,6 +58,9 @@ const commit = gitCommit()
 await rm(outDirectory, { recursive: true, force: true })
 await mkdir(outDirectory, { recursive: true })
 
+// `bun build --compile` leaves a .<hash>-00000000.bun-build runtime copy (about 85 MB) in its cwd.
+// Run it in a throwaway directory so the repository stays clean.
+const scratch = await mkdtemp(join(tmpdir(), 'deja-build-'))
 const started = performance.now()
 const sums: string[] = []
 for (const target of selected) {
@@ -59,14 +71,19 @@ for (const target of selected) {
     'build', '--compile', `--target=${targets[target]}`,
     '--define', `__DEJA_VERSION__=${JSON.stringify(version)}`,
     '--define', `__DEJA_COMMIT__=${JSON.stringify(commit)}`,
-    'apps/cli/deja.ts', '--outfile', file,
-  ], { cwd: root, encoding: 'utf8' })
+    join(root, 'apps/cli/deja.ts'), '--outfile', file,
+  ], { cwd: scratch, encoding: 'utf8' })
   if (build.status !== 0) throw new Error(`bun build failed for ${target}:\n${build.stdout}${build.stderr}`)
   const bytes = await readFile(file)
   const digest = createHash('sha256').update(bytes).digest('hex')
   await writeFile(`${file}.sha256`, `${digest}  ${name}\n`)
   sums.push(`${digest}  ${name}`)
   console.log(`${name}  ${(bytes.length / 1024 / 1024).toFixed(1)} MiB  ${((performance.now() - targetStarted) / 1000).toFixed(1)}s  sha256 ${digest}`)
+}
+await rm(scratch, { recursive: true, force: true })
+const treeAfter = git(['status', '--porcelain'])
+if (treeAfter !== treeBefore) {
+  throw new Error(`The build changed the working tree:\n${treeAfter}`)
 }
 await writeFile(join(outDirectory, 'SHA256SUMS'), `${sums.join('\n')}\n`)
 console.log(`Built ${selected.length} binar${selected.length === 1 ? 'y' : 'ies'} for ${version} (${commit}) in ${((performance.now() - started) / 1000).toFixed(1)}s`)
