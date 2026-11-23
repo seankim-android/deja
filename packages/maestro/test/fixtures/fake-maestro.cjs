@@ -42,6 +42,19 @@ if (modeArgument === 'grandchild' || modeArgument === 'bystander') {
   }
 
   if (mode === 'nonzero') process.exitCode = 7
+
+  // Like Maestro, write a JUnit report only when asked (`--format=JUNIT --output=<file>`).
+  const output = process.argv.find(argument => argument.startsWith('--output='))
+  if (output && process.argv.includes('--format=JUNIT')) {
+    const failed = Boolean(process.exitCode)
+    writeFileSync(output.slice('--output='.length), `<?xml version='1.0' encoding='UTF-8'?>
+<testsuites>
+    <testsuite name="Test Suite" device="fake" tests="1" failures="${failed ? 1 : 0}" time="0.1">
+        <testcase id="${mode}" name="${mode}" classname="${mode}" time="0.1" status="${failed ? 'ERROR' : 'SUCCESS'}">${failed ? '<failure>fake maestro failure</failure>' : ''}</testcase>
+    </testsuite>
+</testsuites>
+`)
+  }
   if (mode === 'timeout') {
     const markerPath = join(dirname(flowPath), 'timed-out-process-survived.txt')
     spawn(process.execPath, [__filename, 'grandchild', markerPath], { stdio: 'ignore' })

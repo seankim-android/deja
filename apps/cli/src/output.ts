@@ -8,11 +8,11 @@ import { redactJson, type Redactor } from './redaction.ts'
 export const HELP = `Déjà — explore once, replay without a model, repair only bounded staleness.
 
 Usage:
-  deja explore <goal> [--config <file>] [--json]
-  deja run <goal> [--config <file>] [--json]
-  deja remember <goal> --flow <candidate.yaml> [--config <file>] [--json]
+  deja explore <goal> [--config <file>] [--json] [--junit <file>] [--summary]
+  deja run <goal> [--config <file>] [--json] [--junit <file>] [--summary]
+  deja remember <goal> --flow <candidate.yaml> [--config <file>] [--json] [--junit <file>] [--summary]
   deja list [--config <file>] [--json]
-  deja inspect <report> [--config <file>] [--json]
+  deja inspect <report> [--config <file>] [--json] [--summary]
   deja help
 
 Commands:
@@ -28,6 +28,11 @@ Options:
   --config <file>  Combined fixture/plugin configuration (default: ./deja.config.json).
   --flow <file>    Candidate YAML for remember; independently runnable without Déjà.
   --json           Emit a redacted machine-readable result instead of human-readable text.
+  --junit <file>   Write Maestro's own JUnit report to <file> (config field: "junit"). If Maestro
+                   never ran or did not pass, a minimal report with one failed testcase is written,
+                   so a missing file is never a pass. Listed as a junit artifact in the result.
+  --summary        Print one line: deja-summary v=1 goal outcome cache fingerprint model_calls
+                   failure. Last stdout line, or stderr with --json.
   -h, --help       Show help without loading configuration or constructing plugins.
 
 Semantic retrieval:
@@ -127,4 +132,33 @@ export function renderWalks(walks: StoredWalk[], redact: Redactor) {
     ].join(' '))
   }
   return `${lines.join('\n')}\n`
+}
+
+/**
+ * One stable, parseable line per run, for CI host reports:
+ *
+ *   deja-summary v=1 goal="<json string>" outcome=<word> cache=<hit|miss|not-checked|unknown>
+ *     fingerprint=<12 hex|unknown> model_calls=<n|unknown> failure=<category|unclassified|none|error>
+ *
+ * (one physical line; wrapped above). The goal is a JSON string, every other value is a bare word.
+ * `result` is null when no run result exists (usage, config, or memory errors).
+ */
+export function renderSummary(result: RunResult | null, goalText: string, redact: Redactor) {
+  const goal = JSON.stringify(redact(result?.goalKey ?? goalText))
+  if (!result) {
+    return `deja-summary v=1 goal=${goal} outcome=error cache=unknown fingerprint=unknown model_calls=unknown failure=error`
+  }
+  const fingerprint = /^[0-9a-f]{12,}$/.test(result.identity.buildFingerprint)
+    ? result.identity.buildFingerprint.slice(0, 12)
+    : 'unknown'
+  const failure = result.failure?.category ?? (result.passed ? 'none' : 'unclassified')
+  return [
+    'deja-summary v=1',
+    `goal=${goal}`,
+    `outcome=${result.outcome}`,
+    `cache=${result.cacheStatus}`,
+    `fingerprint=${fingerprint}`,
+    `model_calls=${result.modelCalls ?? 'unknown'}`,
+    `failure=${failure}`,
+  ].join(' ')
 }

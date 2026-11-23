@@ -87,4 +87,18 @@ describe('Maestro execution platform adapters', () => {
       await rm(temporary, { recursive: true, force: true })
     }
   })
+
+  test('JUnit options add Maestro\'s own report flags before the flow, and only when asked', () => {
+    const options = { junitPath: '/host/report.xml' }
+    const report = ['--format=JUNIT', '--output=/host/report.xml']
+    expect(androidMaestroAdapter({ device: 'emulator-5554' }).commandArguments('/w/flow.yaml', options))
+      .toEqual(['--no-ansi', '--device', 'emulator-5554', 'test', ...report, '/w/flow.yaml'])
+    expect(iosMaestroAdapter({ device: 'UDID-1' }).commandArguments('/w/flow.yaml', options))
+      .toEqual(['--no-ansi', '--platform', 'ios', '--device', 'UDID-1', 'test', ...report, '/w/flow.yaml'])
+    const web = webMaestroAdapter().commandArguments('/w/flow.yaml', options)
+    expect(web.slice(-3)).toEqual([...report.slice(0, 2), '/w/flow.yaml'].slice(0, 3))
+    expect(web).toContain('--screen-size')
+    expect(androidMaestroAdapter({ device: 'emulator-5554' }).commandArguments('/w/flow.yaml', {}))
+      .toEqual(['--no-ansi', '--device', 'emulator-5554', 'test', '/w/flow.yaml'])
+  })
 })

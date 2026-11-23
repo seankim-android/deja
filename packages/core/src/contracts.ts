@@ -164,7 +164,7 @@ export type WalkFailure = {
 }
 
 export type ArtifactKind = 'yaml' | 'output' | 'attempt' | 'repair-report' |
-  'diff' | 'memory' | 'model-metrics'
+  'diff' | 'memory' | 'model-metrics' | 'junit'
 
 export type RunArtifact = {
   kind: ArtifactKind

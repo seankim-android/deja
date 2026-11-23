@@ -44,7 +44,9 @@ bun run deja -- --help
 | `inspect <report>` | Print a saved, redacted report. Inspecting a failed result returns its original failure class. |
 
 Global options are `--config <file>` (default `./deja.config.json`), `--json`, and
-`-h`/`--help`. `--flow` is valid only with `remember`. Goals may contain multiple words; quote them
+`-h`/`--help`. `--flow` is valid only with `remember`. `--junit <file>` (`explore`, `run`,
+`remember`) and `--summary` (those three and `inspect`) are described in
+[JUnit and summary output](#junit-and-summary-output-for-ci-hosts). Goals may contain multiple words; quote them
 as one shell argument.
 
 ### Configuration
@@ -63,6 +65,7 @@ workspaces.
 | `fixtureCredentials` | Explicit deterministic fixture values only; never real user credentials. Values are redacted from CLI output/reports. |
 | `maestro.executable`, `openClaw.executable`, `openClaw.mcpProxy` | Executable names and the workspace-local Android MCP proxy. |
 | `repair.sourceRoots`, `repair.permittedFileTypes`, `repair.affectedFiles`, `repair.timeBudgetMs` | Closed Android repair allowlist and one shared deadline. No repair block is permitted for Web. |
+| Optional `junit` | Path for Maestro's JUnit report, relative to the config file. Same as `--junit`; the flag wins. Off when neither is set. |
 | Optional `semantic.provider`, `minimumSimilarity`, `minimumMargin` | WALK-016 opt-in local retrieval proof. `local-lexical-v1` is the only implementation; defaults are 0.90 similarity and 0.15 winner margin. Missing/unsupported providers report unavailable and use the ordinary miss lifecycle. |
 | Web-only `adapter`, `browser`, `headless`, `screenSize` | Exact execution/cache identity and Chromium launch settings. Only loopback `appId` URLs and `browser: chromium` are accepted. |
 | iOS `adapter`, `.app` `buildPath`, simulator-UDID `device` | Exact native bundle-tree/adapter identity and explicit `--platform ios` execution on the dedicated simulator. No repair block is permitted. |
@@ -109,6 +112,54 @@ This proves local relevance/fallback plumbing only: **general semantic correctne
 coverage, non-English understanding, and complete adversarial detection are not claimed**. See
 [`packages/semantic-local/README.md`](../packages/semantic-local/README.md) and the deterministic WALK-016
 tests before relying on a goal outside those examples.
+
+### JUnit and summary output for CI hosts
+
+Both are opt-in. Without them, nothing changes. Exit codes are unchanged.
+
+**`--junit <file>`** (or config `junit`) passes `--format=JUNIT --output=<file>` to every Maestro
+run of the command. The file is Maestro's own report, not rewritten by Déjà. If one command runs
+Maestro more than once (cold exploration plus verification, or a failed replay then a repair), each
+run overwrites the file, so it holds the last run's report. The path is added to the `RunResult`
+`artifacts` as `{ "kind": "junit" }`, workspace-relative when inside the workspace.
+
+A host must never read a missing or old file as a pass, so Déjà does this:
+
+1. It deletes any file at that path before the command starts and creates its folder.
+2. After the run, if Maestro wrote a report and either the result passed or the report shows a
+   failure, Maestro's file stays as it is.
+3. Otherwise Déjà writes a minimal report. This happens when Maestro never ran (cache miss
+   refused, stale build with no repairer, rejected goal, checksum or memory refusal, usage or
+   config error after the command was parsed), when Maestro could not launch or was killed before
+   writing, and when the result failed but Maestro's report shows a pass (for example a candidate
+   that passed verification but was rejected). The file has one `<testcase>` named for the goal
+   with `status="ERROR"` and a `<failure>` holding the outcome, failure category and errors
+   (redacted). A passing result with no Maestro report gets a `status="SUCCESS"` case.
+   Every such file has `<property name="source" value="deja-synthesized"/>`.
+
+The `status` values match Maestro's, so a host that treats any `<testcase>` with a status other
+than `SUCCESS` as failing (as Blankaday's `maestro-main.sh` does) works with both. Maestro's own
+file is passed through unchanged; it is not run through Déjà's redaction.
+
+**`--summary`** prints one line per run, last on stdout (with `--json` it goes to stderr, so stdout
+stays one JSON document):
+
+```text
+deja-summary v=1 goal="checkout" outcome=passed cache=hit fingerprint=3f9a1c20b7de model_calls=0 failure=none
+```
+
+| Field | Values |
+| --- | --- |
+| `goal` | Normalized goal as a JSON string (the only quoted field) |
+| `outcome` | A `RunOutcome`, for example `passed`, `remembered`, `cold-recorded`, `repaired`, `product-regression`, `repair-rejected`, `failed`; `error` when no result exists |
+| `cache` | `hit`, `miss`, `not-checked`, or `unknown` (with `error`) |
+| `fingerprint` | First 12 hex characters of the build fingerprint, or `unknown` |
+| `model_calls` | Integer, or `unknown` |
+| `failure` | Failure category (`selector`, `navigation`, `product_assertion`, `runner`, `timeout`, `unknown`), `unclassified` for a failure with no category, `none` for a pass, `error` with `outcome=error` |
+
+Fields keep this order and `v=1` changes only if one is renamed or removed. The goal and all
+values are redacted like other output. When a command fails with exit 2 or 4 after it was parsed,
+the line still prints, with `outcome=error`.
 
 ### Exit codes
 
