@@ -40,6 +40,14 @@ export function holdsForbiddenValue(text: string, values: string[]) {
     decoded.some(item => item.includes(value)))
 }
 
+/**
+ * The same check for a binary file (`addMedia`): the raw bytes in each spelling, and no YAML decode,
+ * which a binary file can only fail or misread.
+ */
+export function bytesHoldForbiddenValue(bytes: Buffer, values: string[]) {
+  return values.some(value => [...spellings(value)].some(form => bytes.includes(form)))
+}
+
 /** The same check for a JSON document, such as the manifest. */
 export function jsonHoldsForbiddenValue(text: string, values: string[]) {
   if (values.length === 0) return false

@@ -173,6 +173,7 @@ function goal(positionals: string[]) {
 function resultExitCode(result: RunResult) {
   if (result.passed) return 0
   if (result.outcome === 'exploration-rejected') return 3
+  if (result.outcome === 'closure-error') return 2
   if (['flow-changed', 'not-validated', 'needs-migration', 'assertions-changed'].includes(result.outcome)) return 6
   if (result.outcome === 'flaky') return 7
   return 1

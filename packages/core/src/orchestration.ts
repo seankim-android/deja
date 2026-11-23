@@ -1,5 +1,6 @@
 import {
   AssertionHashChangedError,
+  ClosureRefusedError,
   ExpectedClosureMismatchError,
   ExpectedFlowChecksumMismatchError,
   FlowChangedError,
@@ -7,6 +8,7 @@ import {
   OwnerRuleError,
   WALK_RESULT_SCHEMA_VERSION,
   type CacheStatus,
+  type CandidateSnapshot,
   type ExecutionResult,
   type ExplorationResult,
   type LookupHit,
@@ -26,6 +28,7 @@ import {
   type WalkRunner,
   type WalkStore,
 } from './contracts.ts'
+import { InvalidWalkManifestError } from './manifest.ts'
 import { ExactFirstWalkRetriever } from './semantic.ts'
 
 type RunStart = Omit<RunResult,
@@ -139,6 +142,18 @@ export class Deja {
   }
 
   async run(identity: WalkIdentity, options: DejaRunOptions = {}): Promise<RunResult> {
+    try {
+      return await this.runChecked(identity, options)
+    } catch (error) {
+      // A closure refusal that no path handled with its execution in hand (the first lookup, a
+      // snapshot, a revalidation) is still a result. Nothing was written before it threw. A manifest
+      // that cannot be read stays a configuration error (exit 2 with its own hint).
+      if (!(error instanceof ClosureRefusedError) || error instanceof InvalidWalkManifestError) throw error
+      return this.finish(this.base(identity, 'run', 'not-checked'), this.closureErrorDetails(error.message, null))
+    }
+  }
+
+  private async runChecked(identity: WalkIdentity, options: DejaRunOptions): Promise<RunResult> {
     const start = this.base(identity, 'run', 'miss')
     // Exact lookup deliberately precedes every lazy factory, including semantic embeddings. A warm
     // hit cannot construct OpenClaw, an MCP transport, an embedding client, or a repairer.
@@ -251,7 +266,10 @@ export class Deja {
     // Opt-in rerun: the same stored bytes once more. It never repairs, explores or counts as a pass.
     let rerun: Rerun | null = null
     if (options.rerunFailed) {
-      const again = await this.rerunOnce(hitRequest, () => this.dependencies.store.lookup(selectedIdentity))
+      const again = await this.rerunOnce(hitRequest, () => this.dependencies.store.lookup(selectedIdentity), lookup)
+      if (again instanceof ClosureRefusedError) {
+        return this.finish(hitStart, this.closureErrorDetails(again.message, execution))
+      }
       if (again === 'changed') return this.finish(hitStart, this.changedBetweenAttempts(execution))
       rerun = rerunVerdict(execution, again)
       if (rerun.verdict === 'flaky') {
@@ -331,6 +349,10 @@ export class Deja {
     // files that get stored for this build.
     const reportDirectory = `.deja/reports/${this.artifactId('run')}`
     const snapshot = await store.snapshotCandidate?.(previous.flowPath, `${reportDirectory}/replay`)
+    // The lookup above checked the stored files, but the snapshot is what runs and what is stored for
+    // this build. It must hold exactly the files the walk recorded, not whatever sits there now.
+    const mismatch = snapshot ? snapshotMismatch(walk, snapshot) : null
+    if (mismatch) return this.finish(missStart, this.closureErrorDetails(mismatch, null))
     const execution = await this.dependencies.runner.run({
       flowPath: snapshot?.candidatePath ?? previous.flowPath,
       artifactDirectory: reportDirectory,
@@ -346,7 +368,10 @@ export class Deja {
         const again = await this.rerunOnce({
           flowPath: snapshot?.candidatePath ?? previous.flowPath,
           artifactDirectory: reportDirectory,
-        }, () => store.lookupPreviousSuccessful(identity))
+        }, () => store.lookupPreviousSuccessful(identity), previous)
+        if (again instanceof ClosureRefusedError) {
+          return this.finish(replayStart, this.closureErrorDetails(again.message, execution))
+        }
         if (again === 'changed') return this.finish(replayStart, this.changedBetweenAttempts(execution))
         rerun = rerunVerdict(execution, again)
         if (rerun.verdict === 'flaky') {
@@ -377,7 +402,16 @@ export class Deja {
     }
 
     // Re-check the replayed bytes are still the verified ones before they become this build's walk.
-    const current = await store.lookupPreviousSuccessful(identity)
+    let current: LookupHit | LookupMiss
+    try {
+      current = await store.lookupPreviousSuccessful(identity)
+    } catch (error) {
+      if (!(error instanceof ClosureRefusedError)) throw error
+      return this.finish(replayStart, {
+        ...this.closureErrorDetails(error.message, execution),
+        replayedOnNewBuild: { ...replay, recordedForNewBuild: false },
+      })
+    }
     if (current.status !== 'hit' || current.walk.flowSha256 !== walk.flowSha256 ||
         current.walk.buildFingerprint !== walk.buildFingerprint) {
       return this.finish(replayStart, {
@@ -402,6 +436,14 @@ export class Deja {
         ...(walk.exploration ? { exploration: walk.exploration } : {}),
       })
     } catch (error) {
+      if (error instanceof ClosureRefusedError || error instanceof FlowChangedError) {
+        return this.finish(replayStart, {
+          ...(error instanceof FlowChangedError
+            ? this.flowChangedDetails(execution, `${error.message}. Nothing was stored for this build.`)
+            : this.closureErrorDetails(error.message, execution)),
+          replayedOnNewBuild: { ...replay, recordedForNewBuild: false },
+        })
+      }
       if (!(error instanceof ExpectedFlowChecksumMismatchError) &&
           !(error instanceof ExpectedClosureMismatchError)) throw error
       return this.finish(replayStart, {
@@ -536,6 +578,9 @@ export class Deja {
       await this.dependencies.store.recordValidation(identity, validation)
       return null
     } catch (error) {
+      if (error instanceof ClosureRefusedError) {
+        return this.finish(start, this.closureErrorDetails(error.message, execution))
+      }
       if (!(error instanceof FlowChangedError)) throw error
       return this.finish(start, this.flowChangedDetails(
         execution, `${error.message}. The run is not recorded as a pass or a failure.`,
@@ -558,6 +603,21 @@ export class Deja {
   }
 
   /**
+   * A closure or manifest refusal as a failed result (`closure-error`): nothing was recorded or
+   * written. The message can hold file names from the user's YAML, so control characters are
+   * dropped before it reaches an output that prints one line per error.
+   */
+  private closureErrorDetails(message: string, execution: ExecutionResult | null): RunDetails {
+    return {
+      outcome: 'closure-error', passed: false, modelCalls: 0,
+      modelCallBasis: 'the flow\'s files could not be used safely; nothing was run, recorded or written',
+      assertions: execution?.assertions ?? null, repairCount: 0, yamlPath: null, yamlSha256: null,
+      failure: null, artifacts: execution?.artifacts ?? [], diffs: [],
+      errors: [`${message.replace(/[\p{Cc}\u2028\u2029]+/gu, ' ')}. Nothing was stored or recorded.`],
+    }
+  }
+
+  /**
    * Replay the same bytes once more, under the same timeout. The files are re-checked before and
    * after: if they changed (manifest mode: the closure no longer matches), nothing is rerun or
    * reported as flaky. No explorer, repairer or model client is touched.
@@ -568,22 +628,36 @@ export class Deja {
     /**
      * What the lookup said when the first attempt began. A `--verify` run starts from a
      * `flow-changed` miss on purpose, so only a difference from this, not the miss itself, counts as
-     * a change between the attempts. Absent means a clean hit.
+     * a change between the attempts.
      */
-    baseline?: LookupHit | LookupMiss,
-  ): Promise<ExecutionResult | 'changed'> {
-    const signature = (result: LookupHit | LookupMiss | undefined) => {
-      if (!result || result.status === 'hit') return 'ok'
-      if (result.reason === 'flow-changed') return `flow-changed:${result.flowChange?.currentClosureSha256 ?? ''}`
+    baseline: LookupHit | LookupMiss,
+  ): Promise<ExecutionResult | 'changed' | ClosureRefusedError> {
+    // null means the lookup says the files changed but not to what, so it is always a change.
+    const signature = (result: LookupHit | LookupMiss) => {
+      if (result.status === 'hit') {
+        const { flowSha256, closureSha256, subflowFiles } = result.walk
+        return `hit:${flowSha256}:${closureSha256 ?? ''}:${(subflowFiles ?? []).map(file => `${file.path}=${file.sha256}`).join(',')}`
+      }
+      if (result.reason === 'flow-changed') {
+        return result.flowChange ? `flow-changed:${result.flowChange.currentClosureSha256}` : null
+      }
       return result.reason === 'missing-flow' ? 'missing-flow' : 'ok'
     }
     const start = signature(baseline)
-    const changed = async () => signature(await recheck()) !== start
-    if (await changed()) return 'changed'
-    const second = await this.dependencies.runner.run({
-      ...request, artifactDirectory: `${request.artifactDirectory}/rerun`,
-    })
-    return await changed() ? 'changed' : second
+    const changed = async () => {
+      const now = signature(await recheck())
+      return now === null || now !== start
+    }
+    try {
+      if (start === null || await changed()) return 'changed'
+      const second = await this.dependencies.runner.run({
+        ...request, artifactDirectory: `${request.artifactDirectory}/rerun`,
+      })
+      return await changed() ? 'changed' : second
+    } catch (error) {
+      if (error instanceof ClosureRefusedError) return error
+      throw error
+    }
   }
 
   /** The second attempt passed, or the two failures differ: not a pass, not a steady failure. */
@@ -676,6 +750,9 @@ export class Deja {
         const again = await this.rerunOnce({
           flowPath: snapshot?.candidatePath ?? flowPath, artifactDirectory: attempt,
         }, () => store.lookup(identity), miss)
+        if (again instanceof ClosureRefusedError) {
+          return this.finish(verifyStart, this.closureErrorDetails(again.message, execution))
+        }
         if (again === 'changed') return this.finish(verifyStart, this.changedBetweenAttempts(execution))
         rerun = rerunVerdict(execution, again)
         if (rerun.verdict === 'flaky') {
@@ -708,6 +785,7 @@ export class Deja {
       })
     } catch (error) {
       const outcome = error instanceof AssertionHashChangedError ? 'assertions-changed'
+        : error instanceof ClosureRefusedError ? 'closure-error'
         : error instanceof ExpectedClosureMismatchError || error instanceof FlowChangedError ? 'flow-changed'
           : error instanceof OwnerRuleError ? 'failed' : null
       if (!outcome) throw error
@@ -793,6 +871,35 @@ function rerunVerdict(first: ExecutionResult, second: ExecutionResult): Rerun {
     verdict: steady ? 'steady' : 'flaky', second,
     attempts: [attemptOf(1, first), attemptOf(2, second)],
   }
+}
+
+/**
+ * Why a snapshot of the stored flow is not the closure the walk recorded, or null if it is. A store
+ * with a manifest records one closure checksum; any other store records the main flow's checksum and
+ * every other file's path and checksum, and the snapshot must hold exactly those files.
+ */
+function snapshotMismatch(walk: StoredWalk, snapshot: CandidateSnapshot): string | null {
+  if (walk.closureSha256 !== undefined) {
+    return snapshot.closureSha256 === walk.closureSha256 ? null
+      : `The flow or a file it runs no longer matches the manifest (${walk.closureSha256}, now ${snapshot.closureSha256}); it was not run`
+  }
+  if (!snapshot.files) return null
+  const expected = new Map([
+    [walk.flowPath, walk.flowSha256],
+    ...(walk.subflowFiles ?? []).map(file => [file.path, file.sha256] as const),
+  ])
+  for (const file of snapshot.files) {
+    const recorded = expected.get(file.path)
+    if (recorded === undefined) {
+      return `The stored flow runs ${file.path}, which the walk did not record; it was not run`
+    }
+    if (recorded !== file.sha256) {
+      return `The stored file ${file.path} no longer matches its recorded checksum; it was not run`
+    }
+  }
+  const held = new Set(snapshot.files.map(file => file.path))
+  const missing = [...expected.keys()].find(path => !held.has(path))
+  return missing ? `The stored file ${missing} is not part of the flow now; it was not run` : null
 }
 
 /** lookupPreviousSuccessful ignores adapter/browser; a replay must stay inside the same family. */

@@ -718,6 +718,20 @@ export function runWalkStoreContractTests(implementation: WalkStoreContractImple
           {
             '.maestro/flows/bad.yaml': '- runFlow: ../subflows/note.yaml\n- runFlow: ../subflows/NOTE.yaml\n',
           }, 'spelled two ways|does not exist'],
+        ['two Unicode spellings of one file',
+          {
+            '.maestro/flows/bad.yaml': '- runFlow: ../subflows/caf\u00e9.yaml\n- runFlow: ../subflows/cafe\u0301.yaml\n',
+            '.maestro/subflows/caf\u00e9.yaml': '- tapOn: Cafe\n',
+          }, 'Unicode normalization'],
+        ['an addMedia file that does not exist',
+          { '.maestro/flows/bad.yaml': '- addMedia: ../media/none.png\n' }, 'does not exist'],
+        ['an addMedia file in a hidden folder',
+          {
+            '.maestro/flows/bad.yaml': '- addMedia: ../.private/id.png\n',
+            '.maestro/.private/id.png': 'x',
+          }, 'secret or hidden file'],
+        ['assertScreenshot, which reads a reference image',
+          { '.maestro/flows/bad.yaml': '- assertScreenshot: home.png\n' }, 'reference image'],
         ['a flow that is not valid YAML',
           { '.maestro/flows/bad.yaml': 'appId: a\n- runFlow: ../subflows/note.yaml\n' }, 'not valid YAML'],
         ['quoted keys that hide a missing file',
@@ -785,6 +799,36 @@ export function runWalkStoreContractTests(implementation: WalkStoreContractImple
         } finally {
           await ctx.cleanup()
         }
+      })
+
+      test('stores addMedia and retry files as bytes, and checks them like any subflow', async () => {
+        // Not UTF-8: reading it as text or YAML would change or refuse it.
+        const picture = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0xff, 0xfe, 0x00, 0x81, 0xc3, 0x28, 0x0a])
+        const extra = {
+          '.maestro/flows/media.yaml': [
+            '- addMedia:', '    - ../media/pic.png', '- retry:', '    maxRetries: 1', '    file: ../subflows/note.yaml', '',
+          ].join('\n'),
+        }
+        await withFlows(extra, async (ctx, store) => {
+          await mkdir(join(ctx.workspaceRoot, '.maestro/media'), { recursive: true })
+          await writeFile(join(ctx.workspaceRoot, '.maestro/media/pic.png'), picture)
+          const candidate = join(ctx.workspaceRoot, '.maestro/flows/media.yaml')
+          const snapshot = await store.snapshotCandidate!(candidate, '.deja/attempts/media/candidate')
+          expect(snapshot.files?.map(file => file.path).sort()).toEqual([
+            '.maestro/flows/media.yaml', '.maestro/media/pic.png', '.maestro/subflows/note.yaml',
+          ])
+          expect(snapshot.files?.find(file => file.path === '.maestro/media/pic.png')?.sha256)
+            .toBe(createHash('sha256').update(picture).digest('hex'))
+          expect(await readFile(join(ctx.workspaceRoot, '.deja/attempts/media/candidate/media/pic.png'))).toEqual(picture)
+          const persisted = await remember(store, candidate)
+          const stored = resolve(ctx.workspaceRoot, persisted.flowPath)
+          expect(persisted.walk.subflowFiles?.map(file => file.path.split('/').slice(4).join('/')).sort())
+            .toEqual(['media/pic.png', 'subflows/note.yaml'])
+          expect(await readFile(resolve(stored, '../../media/pic.png'))).toEqual(picture)
+          expect((await ctx.makeStore().lookup(contractIdentity())).status).toBe('hit')
+          await writeFile(resolve(stored, '../../media/pic.png'), Buffer.from([0x00]))
+          await expect(ctx.makeStore().lookup(contractIdentity())).rejects.toThrow('stored subflow checksum does not match')
+        })
       })
 
       test('stores the snapshot it verified, not what a subflow became afterwards', async () => {

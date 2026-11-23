@@ -92,7 +92,8 @@ Exit codes:
   1  Product/unknown/runner failure (including executable launch), rejected candidate,
      or rejected/failed bounded repair.
   2  Usage, configuration, engine (missing, checksum, untested version), report-inspection, or
-     direct I/O error.
+     direct I/O error. Also closure-error: the flow's files cannot be used safely, or no longer
+     match what was recorded. Nothing was run, recorded or written.
   3  Cold exploration did not produce a verified reusable walk.
   4  Invalid/corrupt local memory; quarantine it and use cold exploration to recover.
   5  Store locked: another run is writing the same store. Use a different --store <id>.

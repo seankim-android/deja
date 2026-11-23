@@ -7,7 +7,7 @@ export declare function checkManifestPath(path: string): string;
 export declare function checkStoredSubflows(root: string, flowPath: string, subflowFiles: StoredFlowFile[] | undefined, legacyClosure?: boolean): Promise<StoredClosureCheck>;
 export declare function closureAssertions(closure: FlowClosure): ClosureAssertion[];
 export declare function collectFlowClosure(root: string, main: string): Promise<FlowClosure>;
-export declare class ConsumerFlowError extends Error {
+export declare class ConsumerFlowError extends ClosureRefusedError {
     constructor(message: string, options?: ErrorOptions);
 }
 export declare class ConsumerFlows {
@@ -50,7 +50,7 @@ export type ConsumerPlan = {
     filesWritten: string[];
     commit(): Promise<boolean>;
 };
-export declare class FlowClosureError extends Error {
+export declare class FlowClosureError extends ClosureRefusedError {
     constructor(message: string, options?: ErrorOptions);
 }
 export declare class ForbiddenValueTooShortError extends Error {
@@ -217,6 +217,10 @@ export declare class WriterLock {
 export type CandidateClosureSnapshot = {
     candidatePath: string;
     closureSha256: string;
+    files: {
+        path: string;
+        sha256: string;
+    }[];
 };
 // referenced
 export type ClosureAssertion = FlowAssertion & {
@@ -227,7 +231,8 @@ export type ClosureFile = {
     path: string;
     sha256: string;
     bytes: Buffer;
-    kind: 'flow' | 'script';
+    kind: 'flow' | 'script' | 'media';
+    source: string;
 };
 // referenced
 export type FlowClosure = {
