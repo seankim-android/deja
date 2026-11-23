@@ -10,6 +10,8 @@ import { spawnSync } from 'node:child_process'
  *   - the git tree is clean,
  *   - every `types` and `default` target in `exports` and `bin` exists, and
  *   - `dist/` is newer than its sources and holds no output of a deleted source file.
+ * Publish only with `bun publish`, never `npm publish` (npm would ship `workspace:*` ranges), and
+ * never with `--ignore-scripts` (that skips this guard).
  * `bun pm pack` does not run this, so pack-check and local packing are not blocked.
  */
 
@@ -23,6 +25,10 @@ const manifest = JSON.parse(readFileSync(join(folder, 'package.json'), 'utf8')) 
 
 if (process.env.DEJA_PUBLISH_PROCESS !== 'DEJA-16') {
   failures.push('only the DEJA-16 publish process may publish (it sets DEJA_PUBLISH_PROCESS=DEJA-16)')
+}
+
+if (!(process.env.npm_config_user_agent ?? '').startsWith('bun/')) {
+  failures.push('publish with `bun publish`, never `npm publish` (npm would ship workspace:* ranges)')
 }
 
 const status = spawnSync('git', ['status', '--porcelain'], { cwd: folder, encoding: 'utf8' })
@@ -56,7 +62,7 @@ for (const output of outputs) {
 }
 
 if (failures.length) {
-  console.error(`publish-guard: refusing to publish ${manifest.name}:\n${failures.map(line => `  - ${line}`).join('\n')}`)
+  console.error(`publish-guard: refusing to publish ${manifest.name}:\n${failures.map(line => `  - ${line}`).join('\n')}\nOnly \`bun publish\`, never \`npm publish\` (npm would ship workspace:*), and never with --ignore-scripts.`)
   process.exit(1)
 }
 console.log(`publish-guard: ${manifest.name} ok`)

@@ -94,7 +94,9 @@ try {
   }, null, 2))
   // The only registry fetch is @modelcontextprotocol/sdk and its tree. Pin the SDK to the version
   // the repo is locked to, prefer the cache and retry, so a registry blip or a new release does not
-  // fail an unrelated PR.
+  // fail an unrelated PR. skipLibCheck stays false so a broken import inside our own packed
+  // `.d.ts` cannot silently become `any`. If a third-party type ever breaks it, add a pass that
+  // fails only on errors under node_modules/@deja-qa/.
   const sdkVersion = (JSON.parse(await readFile(join(repo, 'node_modules/@modelcontextprotocol/sdk/package.json'), 'utf8')) as { version: string }).version
   const consumer = JSON.parse(await readFile(join(project, 'package.json'), 'utf8'))
   consumer.dependencies['@modelcontextprotocol/sdk'] = sdkVersion
@@ -115,7 +117,7 @@ try {
   await writeFile(join(project, 'tsconfig.json'), JSON.stringify({
     compilerOptions: {
       target: 'es2023', module: 'nodenext', moduleResolution: 'nodenext', strict: true, noEmit: true,
-      skipLibCheck: true, types: ['node'], typeRoots: [join(repo, 'node_modules/@types')],
+      skipLibCheck: false, types: ['node'], typeRoots: [join(repo, 'node_modules/@types')],
     },
     files: ['check.ts'],
   }, null, 2))
@@ -126,7 +128,7 @@ try {
   await writeFile(join(project, 'tsconfig.bun.json'), JSON.stringify({
     compilerOptions: {
       target: 'es2023', module: 'esnext', moduleResolution: 'bundler', customConditions: ['bun'], strict: true,
-      noEmit: true, skipLibCheck: true, types: ['node'], typeRoots: [join(repo, 'node_modules/@types')],
+      noEmit: true, skipLibCheck: false, types: ['node'], typeRoots: [join(repo, 'node_modules/@types')],
     },
     files: ['check.ts'],
   }, null, 2))
