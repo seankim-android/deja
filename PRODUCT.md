@@ -31,7 +31,7 @@ Learn once with a model, then replay with no model. Verification gates every sav
 ## Operating Context
 
 - CLI (`deja`) and Bun workspace packages under the `@deja-qa` scope (not yet published to npm).
-- Maestro 2.12. Exploration and repair work on the Android emulator only; iOS and Chromium support replay only, and a new iOS build doesn't replay yet.
+- Maestro 2.12. Exploration and repair work on the Android emulator only; iOS and Chromium support replay only. On a new iOS build, replaying the last verified test is opt-in and off by default.
 - Optional cold exploration runs through the OpenClaw harness. Remember, replay and repair work without OpenClaw or any model. The default model is Kimi K3.1 Pro on Cerebras, and any OpenAI-compatible model can be configured.
 - An optional local run viewer (`viewer/`).
 
