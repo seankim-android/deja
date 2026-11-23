@@ -180,11 +180,16 @@ export type ConsumerFlowsOptions = {
   forbiddenValues?: string[]
 }
 
+/** The message without the store's own "Cannot store flow:" lead, which reads wrong in a lint. */
+function lintReason(message: string) {
+  return message.replace(/^Cannot store flow: /, '')
+}
+
 export type ManifestCheckEntry = {
   goal: string
   flow: string
   /** `closure-error`: the flow's files cannot be read safely (`reason`). `missing-file`: `file` is gone. */
-  status: 'ok' | 'flow-changed' | 'assertions-changed' | 'missing-file' | 'closure-error'
+  status: 'ok' | 'flow-changed' | 'assertions-changed' | 'missing-file' | 'closure-error' | 'identity-mismatch'
   manifestClosureSha256: string
   manifestAssertionsSha256: string
   currentClosureSha256?: string
@@ -194,6 +199,16 @@ export type ManifestCheckEntry = {
   /** `missing-file`: the workspace-relative path of the missing file (the flow or a file it runs). */
   file?: string
   reason?: string
+  /** `identity-mismatch`: the first field `run` would refuse the entry on, with both values. */
+  identity?: { field: 'appId' | 'platform' | 'adapter' | 'browser'; manifest: string | null; config: string | null }
+}
+
+/** What `run` matches an entry on besides the goal. `browser` is null unless the platform is web. */
+export type ManifestCheckIdentity = {
+  appId: string
+  platform: string
+  adapter: string
+  browser: string | null
 }
 
 export type ManifestCheck = {
@@ -321,7 +336,7 @@ export class ConsumerFlows {
    * hashes with `collectFlowClosure` and `assertionsSha256`, the same code `run` uses.
    * A missing manifest file is refused here, because an empty manifest would pass every check.
    */
-  async check(options: { untracked?: boolean } = {}): Promise<ManifestCheck> {
+  async check(options: { untracked?: boolean; identity?: ManifestCheckIdentity } = {}): Promise<ManifestCheck> {
     const { root, target } = await this.manifestFile()
     try {
       await stat(target)
@@ -331,18 +346,48 @@ export class ConsumerFlows {
     const manifest = await this.load()
     const used = new Set<string>()
     const entries: ManifestCheckEntry[] = []
+    const wanted = options.identity
+    const sameIdentity = (entry: ManifestWalk) => wanted !== undefined && entry.appId === wanted.appId &&
+      entry.platform === wanted.platform && entry.adapter === wanted.adapter &&
+      (entry.browser ?? null) === wanted.browser
     for (const walk of manifest.walks) {
       used.add(walk.flow)
       const base = {
         goal: walk.goal, flow: walk.flow,
         manifestClosureSha256: walk.closureSha256, manifestAssertionsSha256: walk.assertionsSha256,
       }
+      if (wanted) {
+        // The same narrowing `lookup` does for `run`: a goal with an entry for this app, platform,
+        // adapter and browser is fine, even if other entries of that goal belong to another platform.
+        const sameGoal = manifest.walks.filter(entry => normalizeGoal(entry.goal).key === normalizeGoal(walk.goal).key)
+        if (!sameGoal.some(sameIdentity)) {
+          const steps = [
+            { field: 'appId' as const, keep: (entry: ManifestWalk) => entry.appId === wanted.appId, config: wanted.appId, of: (entry: ManifestWalk) => entry.appId },
+            { field: 'platform' as const, keep: (entry: ManifestWalk) => entry.platform === wanted.platform, config: wanted.platform, of: (entry: ManifestWalk) => entry.platform },
+            { field: 'adapter' as const, keep: (entry: ManifestWalk) => entry.adapter === wanted.adapter, config: wanted.adapter, of: (entry: ManifestWalk) => entry.adapter },
+            { field: 'browser' as const, keep: (entry: ManifestWalk) => (entry.browser ?? null) === wanted.browser, config: wanted.browser, of: (entry: ManifestWalk) => entry.browser ?? null },
+          ]
+          let remaining = sameGoal
+          for (const step of steps) {
+            const next = remaining.filter(step.keep)
+            if (next.length === 0) {
+              entries.push({
+                ...base, status: 'identity-mismatch',
+                identity: { field: step.field, manifest: step.of(walk), config: step.config },
+              })
+              break
+            }
+            remaining = next
+          }
+          continue
+        }
+      }
       let consumer: Awaited<ReturnType<ConsumerFlows['inspect']>>
       try {
         consumer = await this.inspect(walk)
       } catch (error) {
         if (error instanceof ClosureRefusedError || error instanceof FlowReferenceError) {
-          entries.push({ ...base, status: 'closure-error', reason: error.message })
+          entries.push({ ...base, status: 'closure-error', reason: lintReason(error.message) })
           continue
         }
         throw error
@@ -357,7 +402,7 @@ export class ConsumerFlows {
         assertionsHash = assertionsSha256(consumer.closure)
       } catch (error) {
         if (error instanceof ClosureRefusedError || error instanceof FlowReferenceError) {
-          entries.push({ ...base, status: 'closure-error', reason: error.message, currentClosureSha256: consumer.closure.sha256 })
+          entries.push({ ...base, status: 'closure-error', reason: lintReason(error.message), currentClosureSha256: consumer.closure.sha256 })
           continue
         }
         throw error
@@ -392,7 +437,10 @@ export class ConsumerFlows {
     const scan = async (folder: string, recursive: boolean) => {
       let names: Dirent[]
       try {
-        names = await readdir(resolve(root, folder), { withFileTypes: true })
+        // A symlinked folder that leaves the workspace is skipped, so no outside name is listed.
+        const canonical = await realpath(resolve(root, folder))
+        if (canonical !== root && !inside(root, canonical)) return
+        names = await readdir(canonical, { withFileTypes: true })
       } catch {
         return
       }

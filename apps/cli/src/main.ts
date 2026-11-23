@@ -79,6 +79,8 @@ type ParsedArguments = {
   acceptAssertionChange: boolean
   dryRun: boolean
   untracked: boolean
+  /** The `--config` value as typed, when it was given. */
+  configGiven?: string
 }
 
 function parseArguments(argv: string[]): ParsedArguments {
@@ -100,9 +102,13 @@ function parseArguments(argv: string[]): ParsedArguments {
   let acceptAssertionChange = false
   let dryRun = false
   let untracked = false
+  let afterDashes = false
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index]
-    if (argument === '--json') json = true
+    // After `--` every word is a positional, so a goal that starts with `-` can be given.
+    if (afterDashes) positionals.push(argument)
+    else if (argument === '--') afterDashes = true
+    else if (argument === '--json') json = true
     else if (argument === '--summary') summary = true
     else if (argument === '--version' || argument === '-v') version = true
     else if (argument === '--verify') verify = true
@@ -134,6 +140,7 @@ function parseArguments(argv: string[]): ParsedArguments {
     command,
     positionals,
     configPath: configPath ?? defaultConfigPath(),
+    ...(configPath ? { configGiven: configPath } : {}),
     ...(flow ? { flow } : {}),
     ...(junit ? { junit } : {}),
     ...(store ? { store } : {}),
@@ -314,6 +321,7 @@ export async function runCli(argv: string[], io: CliIo = {
       // Read-only and static: no store, no lock, no engine, no device, no manifest write.
       return await runManifestCheck({
         configuration, redact, json: parsed.json, untracked: parsed.untracked, io,
+        ...(parsed.configGiven ? { configGiven: parsed.configGiven } : {}),
       })
     }
 

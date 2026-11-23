@@ -1,10 +1,11 @@
 import { describe, expect, test } from 'bun:test'
 import { spawn } from 'node:child_process'
-import { mkdir, mkdtemp, readdir, readFile, realpath, rm, stat, utimes, writeFile } from 'node:fs/promises'
+import { spawnSync } from 'node:child_process'
+import { mkdir, symlink, mkdtemp, readdir, readFile, realpath, rm, stat, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { serializeWalkManifest, type WalkManifest } from '@deja-qa/core'
-import { assertionsSha256, collectFlowClosure } from '@deja-qa/store-local'
+import { assertionsSha256, collectFlowClosure, ConsumerFlows } from '@deja-qa/store-local'
 import { runCli } from '../src/main.ts'
 
 const cli = resolve(import.meta.dir, '../deja.ts')
@@ -120,10 +121,10 @@ describe('deja manifest check', () => {
       const result = await check(root)
       expect(result.exitCode).toBe(8)
       expect(result.stdout).toContain('flow-changed')
-      expect(result.stdout).toContain('fix: deja run today --verify')
+      expect(result.stdout).toContain('fix: deja run today --verify --config ')
       const json = JSON.parse((await check(root, '--json')).stdout)
       expect(json.ok).toBe(false)
-      expect(json.entries[0]).toMatchObject({ status: 'flow-changed', fix: 'deja run today --verify' })
+      expect(json.entries[0]).toMatchObject({ status: 'flow-changed', fix: expect.stringMatching(/^deja run today --verify --config \S+$/) })
       expect(json.entries[0].currentClosureSha256).not.toBe(json.entries[0].manifestClosureSha256)
       expect(result.stdout).not.toContain(root)
     } finally {
@@ -146,7 +147,7 @@ describe('deja manifest check', () => {
       expect(result.exitCode).toBe(8)
       expect(result.stdout).toContain('assertions-changed')
       expect(result.stdout).toContain(
-        'fix: deja remember today --flow .maestro/flows/today.yaml --accept-assertion-change')
+        'fix: deja remember today --flow .maestro/flows/today.yaml --accept-assertion-change --config ')
     } finally {
       await rm(temporary, { recursive: true, force: true })
     }
@@ -278,6 +279,145 @@ describe('deja manifest check', () => {
       expect(result.stdout).toContain('8 of 8 entries match')
       // Measured in tens of milliseconds; the bound is generous so a slow CI disk does not flake.
       expect(elapsed).toBeLessThan(1000)
+    } finally {
+      await rm(temporary, { recursive: true, force: true })
+    }
+  })
+
+  test.each([
+    ['appId', (walk: Record<string, unknown>) => { walk.appId = 'dev.other.app' }],
+    ['platform', (walk: Record<string, unknown>) => { walk.platform = 'android' }],
+    ['adapter', (walk: Record<string, unknown>) => { walk.adapter = 'maestro-ios/v0' }],
+  ])('an entry whose %s differs from the config is identity-mismatch, exit 8', async (field, change) => {
+    const { temporary, root } = await remembered()
+    try {
+      const file = join(root, 'deja.walks.json')
+      const manifest = JSON.parse(await readFile(file, 'utf8'))
+      change(manifest.walks[0])
+      await writeFile(file, JSON.stringify(manifest))
+      const result = await check(root, '--json')
+      expect(result.exitCode).toBe(8)
+      const entry = JSON.parse(result.stdout).entries[0]
+      expect(entry.status).toBe('identity-mismatch')
+      expect(entry.identity.field).toBe(field)
+      expect(entry.fix).toBeUndefined()
+      expect((await check(root)).stdout).toContain(`${field} differs`)
+    } finally {
+      await rm(temporary, { recursive: true, force: true })
+    }
+  })
+
+  test('the browser is compared too, and an entry for another platform is fine when the goal has one for this config', async () => {
+    const { temporary, root } = await remembered()
+    try {
+      const walk = JSON.parse(await readFile(join(root, 'deja.walks.json'), 'utf8')).walks[0]
+      const other = { ...walk, platform: 'android', adapter: 'maestro-android/v1' }
+      const web = { ...walk, platform: 'web', adapter: 'maestro-web/v1', browser: 'firefox' }
+      const flows = new ConsumerFlows({ workspaceRoot: root, manifestPath: 'deja.walks.json' })
+      const write = (walks: unknown[]) => writeFile(join(root, 'deja.walks.json'), JSON.stringify({ manifestVersion: 1, hashVersion: 1, walks }))
+      const identity = { appId: walk.appId, platform: 'web', adapter: 'maestro-web/v1', browser: 'chromium' }
+      await write([web])
+      expect((await flows.check({ identity })).entries[0]).toMatchObject({ status: 'identity-mismatch', identity: { field: 'browser', manifest: 'firefox', config: 'chromium' } })
+      await write([walk, other])
+      const both = await flows.check({ identity: { ...identity, platform: 'ios', adapter: 'maestro-ios/v1', browser: null } })
+      expect(both.entries.map(entry => entry.status)).toEqual(['ok', 'ok'])
+    } finally {
+      await rm(temporary, { recursive: true, force: true })
+    }
+  })
+
+  test('the printed fix is safe to paste: quoted, escaped, `--` before a dash goal, and --config as typed', async () => {
+    const { temporary, root } = await remembered()
+    try {
+      const goals = ['it\'s $(touch PWNED) `x` "q" *', '-rf', 'two\nlines\u001b[2K', 'a b']
+      const walk = JSON.parse(await readFile(join(root, 'deja.walks.json'), 'utf8')).walks[0]
+      const walks = goals.map(goal => ({ ...walk, goal, closureSha256: '0'.repeat(64) }))
+      await writeFile(join(root, 'deja.walks.json'), JSON.stringify({ manifestVersion: 1, hashVersion: 1, walks }))
+      const result = await check(root, '--json')
+      const fixes: string[] = JSON.parse(result.stdout).entries.map((entry: { fix: string }) => entry.fix)
+      expect(fixes).toHaveLength(4)
+      for (const [index, goal] of goals.entries()) {
+        const words = spawnSync('bash', ['-c', `printf '%s\\0' ${fixes[index].replace(/^deja /, '').replace(/ --config \S+/, '')}`], { cwd: root }).stdout.toString().split('\0').slice(0, -1)
+        expect(words).toContain(goal)
+        expect(words).toContain('--verify')
+      }
+      await expect(stat(join(root, 'PWNED'))).rejects.toBeDefined()
+      expect(fixes[1]).toMatch(/^deja run --verify --config \S+ -- '-rf'$/)
+      // The table shows no raw control character.
+      const text = (await check(root)).stdout
+      // eslint-disable-next-line no-control-regex
+      expect(text).not.toMatch(/[\u0000-\u0008\u000b-\u001f\u007f]/)
+      expect(text).toContain('two\\nlines\\x1b[2K')
+    } finally {
+      await rm(temporary, { recursive: true, force: true })
+    }
+  })
+
+  test('the CLI reads goals after `--`, and the fix omits --config for the default config', async () => {
+    const { temporary, root } = await remembered()
+    try {
+      const run = (args: string[]) => spawnSync(process.execPath, [cli, ...args], { cwd: root, encoding: 'utf8' })
+      await writeFile(join(root, '.maestro/subflows/type.yaml'), `${TYPE}# edited\n`)
+      const result = run(['manifest', 'check'])
+      expect(result.status).toBe(8)
+      expect(result.stdout).toContain('fix: deja run today --verify\n')
+      expect(run(['run', '--', 'x', '--verify']).stderr).not.toContain('Unknown option')
+    } finally {
+      await rm(temporary, { recursive: true, force: true })
+    }
+  })
+
+  test('a flowsDir that is a symlink out of the workspace is not listed', async () => {
+    const { temporary, root } = await remembered({ flowsDir: '.maestro/linkflows' })
+    try {
+      const outside = join(temporary, 'outside')
+      await mkdir(join(outside, 'secretdir'), { recursive: true })
+      await writeFile(join(outside, 'OUTSIDE-SECRET-NAME.yaml'), '- launchApp\n')
+      await writeFile(join(outside, 'secretdir/deep.yml'), '- launchApp\n')
+      await symlink(outside, join(root, '.maestro/linkflows'))
+      const result = await check(root, '--untracked', '--json')
+      expect(result.exitCode).toBe(0)
+      expect(result.stdout).not.toContain('OUTSIDE')
+      expect(result.stdout).not.toContain('deep.yml')
+      expect(JSON.parse(result.stdout).untracked).toEqual([])
+    } finally {
+      await rm(temporary, { recursive: true, force: true })
+    }
+  })
+
+  test('retry and runScript files are part of the closure and assertions', async () => {
+    const { temporary, root } = await remembered()
+    try {
+      await mkdir(join(root, '.maestro/scripts'), { recursive: true })
+      await writeFile(join(root, '.maestro/subflows/again.yaml'), '- tapOn: Save\n- assertVisible:\n    id: "saved"\n')
+      await writeFile(join(root, '.maestro/scripts/seed.js'), 'output.value = 1\n')
+      const flow = '.maestro/flows/members.yaml'
+      await writeFile(join(root, flow), '- retry:\n    maxRetries: 2\n    file: ../subflows/again.yaml\n- runScript: ../scripts/seed.js\n')
+      const closure = await collectFlowClosure(root, join(root, flow))
+      expect(closure.files.map(file => file.source).sort()).toEqual([
+        '.maestro/flows/members.yaml', '.maestro/scripts/seed.js', '.maestro/subflows/again.yaml'])
+      const walk = JSON.parse(await readFile(join(root, 'deja.walks.json'), 'utf8')).walks[0]
+      await writeFile(join(root, 'deja.walks.json'), JSON.stringify({ manifestVersion: 1, hashVersion: 1, walks: [{
+        ...walk, goal: 'members', flow, closureSha256: closure.sha256, assertionsSha256: assertionsSha256(closure),
+      }] }))
+      expect((await check(root)).exitCode).toBe(0)
+      await writeFile(join(root, '.maestro/scripts/seed.js'), 'output.value = 2\n')
+      expect(JSON.parse((await check(root, '--json')).stdout).entries[0].status).toBe('flow-changed')
+      await writeFile(join(root, '.maestro/scripts/seed.js'), 'output.value = 1\n')
+      await writeFile(join(root, '.maestro/subflows/again.yaml'), '- tapOn: Save\n')
+      expect(JSON.parse((await check(root, '--json')).stdout).entries[0].status).toBe('flow-changed')
+    } finally {
+      await rm(temporary, { recursive: true, force: true })
+    }
+  })
+
+  test('a closure-error reason has no store wording', async () => {
+    const { temporary, root } = await remembered()
+    try {
+      await writeFile(join(root, '.maestro/subflows/type.yaml'), '- runFlow: ${NAME}.yaml\n')
+      const entry = JSON.parse((await check(root, '--json')).stdout).entries[0]
+      expect(entry.reason).toContain('reference uses a variable')
+      expect(entry.reason).not.toContain('Cannot store flow')
     } finally {
       await rm(temporary, { recursive: true, force: true })
     }

@@ -1,6 +1,6 @@
 // typescript 7.0.2
 // entry . (./src/index.ts)
-// exports: ConsumerFlowError, ConsumerFlows, ConsumerFlowsOptions, ConsumerPlan, FlowClosureError, ForbiddenValueTooShortError, InvalidStoreIdError, InvalidSubflowMemoryError, InvalidWalkMemoryError, LOCAL_MEMORY_CONSUMER_SCHEMA_VERSION, LOCAL_MEMORY_PATH, LOCAL_MEMORY_SCHEMA_VERSION, LocalVerifiedSubflowStore, LocalVerifiedSubflowStoreOptions, LocalWalkStore, LocalWalkStoreOptions, LockHolder, LockTestHooks, MAESTRO_FLOW_SCHEMA_VERSION, MIN_FORBIDDEN_VALUE_LENGTH, ManifestChangedError, ManifestCheck, ManifestCheckEntry, ManifestLockedError, MaterializePlan, MigrationContext, MissingFlowFileError, StoreLockContentionError, StoreLockUnavailableError, StoreLockedError, VERIFIED_SUBFLOW_INDEX_PATH, WalkMemory, WriterLock, assertionsSha256, checkFlowsDir, checkManifestPath, checkStoredSubflows, closureAssertions, collectFlowClosure, normalizeGoal, planStoredClosure, readConsumerWalkFields, readStoredFlowFiles, runMigration, snapshotFlowClosure, storeMetadataPath
+// exports: ConsumerFlowError, ConsumerFlows, ConsumerFlowsOptions, ConsumerPlan, FlowClosureError, ForbiddenValueTooShortError, InvalidStoreIdError, InvalidSubflowMemoryError, InvalidWalkMemoryError, LOCAL_MEMORY_CONSUMER_SCHEMA_VERSION, LOCAL_MEMORY_PATH, LOCAL_MEMORY_SCHEMA_VERSION, LocalVerifiedSubflowStore, LocalVerifiedSubflowStoreOptions, LocalWalkStore, LocalWalkStoreOptions, LockHolder, LockTestHooks, MAESTRO_FLOW_SCHEMA_VERSION, MIN_FORBIDDEN_VALUE_LENGTH, ManifestChangedError, ManifestCheck, ManifestCheckEntry, ManifestCheckIdentity, ManifestLockedError, MaterializePlan, MigrationContext, MissingFlowFileError, StoreLockContentionError, StoreLockUnavailableError, StoreLockedError, VERIFIED_SUBFLOW_INDEX_PATH, WalkMemory, WriterLock, assertionsSha256, checkFlowsDir, checkManifestPath, checkStoredSubflows, closureAssertions, collectFlowClosure, normalizeGoal, planStoredClosure, readConsumerWalkFields, readStoredFlowFiles, runMigration, snapshotFlowClosure, storeMetadataPath
 export declare function assertionsSha256(closure: FlowClosure): string;
 export declare function checkFlowsDir(path: string): string;
 export declare function checkManifestPath(path: string): string;
@@ -22,6 +22,7 @@ export declare class ConsumerFlows {
     private inspect;
     check(options?: {
         untracked?: boolean;
+        identity?: ManifestCheckIdentity;
     }): Promise<ManifestCheck>;
     private untrackedFlows;
     snapshot(candidatePath: string): Promise<CandidateSnapshot>;
@@ -154,7 +155,7 @@ export type ManifestCheck = {
 export type ManifestCheckEntry = {
     goal: string;
     flow: string;
-    status: 'ok' | 'flow-changed' | 'assertions-changed' | 'missing-file' | 'closure-error';
+    status: 'ok' | 'flow-changed' | 'assertions-changed' | 'missing-file' | 'closure-error' | 'identity-mismatch';
     manifestClosureSha256: string;
     manifestAssertionsSha256: string;
     currentClosureSha256?: string;
@@ -162,6 +163,17 @@ export type ManifestCheckEntry = {
     assertionsAlsoChanged?: true;
     file?: string;
     reason?: string;
+    identity?: {
+        field: 'appId' | 'platform' | 'adapter' | 'browser';
+        manifest: string | null;
+        config: string | null;
+    };
+};
+export type ManifestCheckIdentity = {
+    appId: string;
+    platform: string;
+    adapter: string;
+    browser: string | null;
 };
 export declare class ManifestLockedError extends Error {
     readonly lockPath: string;

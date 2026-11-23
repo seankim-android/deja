@@ -280,13 +280,22 @@ It never runs a fix. Eight flows take tens of milliseconds.
 | `ok` | Closure and assertion hashes match | none |
 | `flow-changed` | The flow or a file it runs differs from `closureSha256` | `deja run <goal> --verify` |
 | `assertions-changed` | Files match, but the assertions differ from `assertionsSha256` | `deja remember <goal> --flow <path> --accept-assertion-change` |
+| `identity-mismatch` | `run` would not use the entry: its `appId`, `platform`, `adapter` or `browser` differs from the config (`identity` names the first field, with both values). Same matching `run` does | none: fix the manifest entry or the config |
 | `missing-file` | The flow, or a file it runs, is gone (`file` names it) | none: restore the file or change the manifest |
 | `closure-error` | The files cannot be used safely (a variable path, a cycle, a size cap, a secret-looking file) (`reason`) | none: fix the flow |
 
+`ok` means the files and the identity match the manifest. It is not a promise that `run` replays:
+`not-validated` and `stale-build` depend on the store's history, `ownerRules` are enforced when a
+walk is saved, and the build fingerprint needs a build. A static check cannot see them. An entry for
+another platform is fine when the goal also has an entry for this config, as in `run`.
+
 When the closure and the assertions both differ, the status is `flow-changed` (the same order `run`
 uses), `assertionsAlsoChanged` is `true`, and the text adds the `remember` command to use if
-`--verify` then reports `assertions-changed`. Goals and paths with spaces are shell-quoted in the
-fix command.
+`--verify` then reports `assertions-changed`. The fix command keeps your
+`--config` as typed (it is left out for the default `./deja.config.json`), shell-quotes the goal and
+paths, writes control characters as `$'...'` escapes, and puts a goal that starts with `-` after
+`--` (the CLI reads every word after `--` as a positional). Control and bidi characters in goals and
+paths are shown as escapes in the text output.
 
 Exit `0` when every entry is `ok`. Exit `8` when any entry is not. Exit `2` for a manifest that is
 malformed, of an unknown `manifestVersion` or `hashVersion`, or missing (an absent file is refused
@@ -297,7 +306,7 @@ manifestAssertionsSha256, currentClosureSha256?, currentAssertionsSha256?, asser
 file?, reason?, fix? }], "untracked"? }`. Paths are workspace-relative and redacted like other output.
 
 `--untracked` also lists `.yaml`/`.yml` files that no entry's closure uses, under `flowsDir` (all
-levels) and in the folder of each entry's main flow (that folder only). It only reports: the exit
+levels) and in the folder of each entry's main flow (that folder only). A scan folder that is a symlink out of the workspace is skipped. It only reports: the exit
 code is not changed. An entry that has a `missing-file` or `closure-error` has no known closure, so
 its subflows may show up as untracked until that is fixed.
 
@@ -690,7 +699,7 @@ directory, so give an absolute `--config` path unless the client starts in the p
 | `4` | Invalid/corrupt local memory; quarantine it and recover through verified cold exploration |
 | `7` | Flaky (`--rerun-failed`): the replay failed, then passed or failed differently on a rerun of the same YAML. Not a pass; the first failure is recorded |
 | `6` | Manifest mode: `flow-changed`, `not-validated`, `needs-migration` or `assertions-changed`. Nothing was replayed or written. Run with `--verify`, or review the change and run `remember` |
-| `8` | `manifest check`: at least one entry is `flow-changed`, `assertions-changed`, `missing-file` or `closure-error`. A manifest that is malformed, of an unknown version or missing exits `2` |
+| `8` | `manifest check`: at least one entry is `flow-changed`, `assertions-changed`, `identity-mismatch`, `missing-file` or `closure-error`. A manifest that is malformed, of an unknown version or missing exits `2` |
 | `10` | `gate`: the gate is closed. At least one goal is `failed`, `flaky`, `not-run` or `flow-changed` |
 | `11` | `gate`: it could not decide. The store, a stored walk or flow, or the build could not be read or trusted (`invalid`), or the evidence file could not be written |
 | `5` | The store is locked by another run (`STORE_LOCKED`), two runs collided taking over a stale lock (`STORE_LOCK_CONTENTION`), or the filesystem cannot hold the lock (`STORE_LOCK_UNAVAILABLE`). Use a different `--store <id>` per device; for contention, run again |

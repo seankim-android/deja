@@ -40,7 +40,8 @@ Commands:
   manifest check
             With a manifest: static lint. Hashes every entry's flow, the files it runs and its assertions
             the way run does, and compares them with the manifest. Prints ok, flow-changed,
-            assertions-changed, missing-file or closure-error per entry, with the hashes and the
+            assertions-changed, identity-mismatch (appId, platform, adapter or browser differs from the config),
+            missing-file or closure-error per entry, with the hashes and the
             command that fixes it. Exit 0 when all match. It needs no device, Maestro or model, opens
             no store and writes nothing. It never runs a fix.
   list      List local walks without constructing an explorer or runner invocation.
@@ -96,6 +97,8 @@ Options:
                    attempt keys appear only when --rerun-failed reran. Last stdout line, or stderr with --json.
   -v, --version    Print the version, git commit and contract version.
   -h, --help       Show help without loading configuration or constructing plugins.
+  --               Every word after it is a positional, so a goal that starts with - can be given:
+                   deja run --verify -- -goal.
 
 Semantic retrieval:
   Opt in with {"semantic":{"provider":"local-lexical-v1"}} in the config file.
@@ -128,8 +131,8 @@ Exit codes:
   5  Store locked: another run is writing the same store. Use a different --store <id>.
   6  Manifest: flow-changed, not-validated, needs-migration or assertions-changed. Nothing was
      replayed or written. Run with --verify, or review the change and run remember.
-  8  manifest check: at least one entry is flow-changed, assertions-changed, missing-file or
-     closure-error. A manifest that is malformed, of an unknown version or missing exits 2.
+  8  manifest check: at least one entry is flow-changed, assertions-changed, identity-mismatch,
+     missing-file or closure-error. A manifest that is malformed, of an unknown version or missing exits 2.
   7  Flaky (--rerun-failed): the replay failed, then passed or failed differently on a rerun of
      the same YAML. Not a pass. The first failure is recorded in history. The host decides.
   10 gate: closed. At least one goal is failed, flaky, not-run or flow-changed.
