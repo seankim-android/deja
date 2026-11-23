@@ -129,7 +129,7 @@ OpenClaw reads the provider key from its own settings, so Déjà never stores it
 - Rerun a failed test once, and report flaky results and app crashes separately.
 - Open a draft PR that adds a missing accessibility ID to your app.
 - Check that every listed flow passed on the tested build, and write the evidence to a file.
-- An MCP server so a coding agent can replay saved flows after an edit.
+- Done: an MCP server (`deja mcp`) so a coding agent can replay saved flows after an edit. Tested against a fake Maestro; a real iOS session is still to do. See [docs/REFERENCE.md](docs/REFERENCE.md#mcp-server).
 - Ship a pinned test runner, and read existing runner configuration so teams can adopt Déjà without rewriting tests.
 - Later: cold exploration on iOS and web, more repair policies, and a hosted cache.
 

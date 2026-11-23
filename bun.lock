@@ -41,6 +41,7 @@
         "@deja-qa/repair": "workspace:*",
         "@deja-qa/semantic-local": "workspace:*",
         "@deja-qa/store-local": "workspace:*",
+        "@modelcontextprotocol/sdk": "^1.32.2",
       },
     },
     "packages/agent-openclaw": {

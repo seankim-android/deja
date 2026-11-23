@@ -1,14 +1,9 @@
 import { readFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import {
-  createDeja,
   InvalidWalkManifestError,
-  UnsupportedPlatformExplorer,
-  type EngineReport,
-  type RunReporter,
   type RunResult,
 } from '@deja-qa/core'
-import { OpenClawWalkExplorer } from '@deja-qa/explorer-openclaw'
 import {
   ConsumerFlowError,
   InvalidWalkMemoryError,
@@ -17,25 +12,11 @@ import {
   StoreLockedError,
   StoreLockUnavailableError,
 } from '@deja-qa/store-local'
+import { dejaHome, type InstallEngineOptions } from '@deja-qa/maestro'
 import {
-  dejaHome,
-  MaestroWalkRunner,
-  type InstallEngineOptions,
-  androidMaestroAdapter,
-  iosMaestroAdapter,
-  webMaestroAdapter,
-} from '@deja-qa/maestro'
-import { BoundedSelectorRepairer } from '@deja-qa/repair'
-import {
-  LOCAL_LEXICAL_EMBEDDING_PROVIDER,
-  LocalLexicalEmbeddingProvider,
-} from '@deja-qa/semantic-local'
-import {
-  buildFingerprint,
   CliConfigurationError,
   defaultConfigPath,
   loadProductionConfiguration,
-  type ProductionConfiguration,
 } from './config.ts'
 import { prepareJunit, JunitReporter, writeErroredJunit } from './junit.ts'
 import { HELP, renderMigration, renderResult, renderSummary, renderWalks } from './output.ts'
@@ -43,6 +24,7 @@ import { createRedactor, redactJson } from './redaction.ts'
 import { JsonRunReporter, readRunReport } from './reporter.ts'
 import { renderDoctor, runDoctor, type DoctorProbe } from './doctor.ts'
 import { installEngineCommand, selectEngine } from './engine.ts'
+import { createOrchestration, EngineRunReporter } from './orchestration.ts'
 import { isCompiledBinary, versionLine } from './version.ts'
 
 export type CliIo = {
@@ -57,21 +39,6 @@ export type CliDependencies = {
   env?: NodeJS.ProcessEnv
   /** Overrides compiled-binary detection, so a test can exercise the explore refusal. */
   compiledBinary?: boolean
-}
-
-/** Adds the engine to every report, so the JSON report, the text output and the summary agree. */
-class EngineRunReporter implements RunReporter {
-  private readonly inner: RunReporter
-  private readonly engine: EngineReport
-  constructor(inner: RunReporter, engine: EngineReport) {
-    this.inner = inner
-    this.engine = engine
-  }
-  report(result: RunResult) {
-    // The JUnit reporter adds its artifact to this same object, so do not copy it.
-    result.engine = this.engine
-    return this.inner.report(result)
-  }
 }
 
 async function configuredOverride(configPath: string) {
@@ -171,106 +138,6 @@ function resultExitCode(result: RunResult) {
   return 1
 }
 
-function createOrchestration(
-  configuration: ProductionConfiguration,
-  reporter: RunReporter,
-  junitPath: string | undefined,
-  storeId: string | undefined,
-  executable: string,
-  compiledBinary: boolean,
-) {
-  const store = new LocalWalkStore({
-    workspaceRoot: configuration.workspaceRoot,
-    ...(storeId ? { storeId } : {}),
-    ...(configuration.manifest ? {
-      manifest: {
-        path: configuration.manifest,
-        ...(configuration.flowsDir ? { flowsDir: configuration.flowsDir } : {}),
-        // A fixture login must never end up in a file that gets committed.
-        forbiddenValues: configuration.explore.fixtureCredentials.map(credential => credential.value),
-      },
-    } : {}),
-  })
-  const executionAdapter = configuration.explore.platform === 'web'
-    ? webMaestroAdapter({
-      adapterId: configuration.explore.adapter,
-      headless: configuration.explore.headless,
-      screenSize: configuration.explore.screenSize,
-    })
-    : configuration.explore.platform === 'ios'
-      ? iosMaestroAdapter({
-        device: configuration.explore.device,
-        adapterId: configuration.explore.adapter,
-      })
-    : androidMaestroAdapter({ device: configuration.explore.device })
-  const runner = new MaestroWalkRunner({
-    workspaceRoot: configuration.workspaceRoot,
-    executable,
-    device: executionAdapter.device,
-    adapter: executionAdapter,
-    timeoutMs: configuration.maestro.timeoutMs,
-    ...(junitPath ? { junitPath } : {}),
-    ...(process.env.ANDROID_HOME || process.env.ANDROID_SDK_ROOT
-      ? { androidSdkRoot: process.env.ANDROID_HOME ?? process.env.ANDROID_SDK_ROOT }
-      : {}),
-    ...(process.env.JAVA_HOME ? { javaHome: process.env.JAVA_HOME } : {}),
-  })
-  const orchestration = createDeja({
-    workspaceRoot: configuration.workspaceRoot,
-    app: { appId: configuration.explore.appId, buildPath: configuration.explore.buildPath },
-    adapter: executionAdapter,
-    store,
-    ...(configuration.manifest ? { manifestPath: configuration.manifest } : {}),
-    runner,
-    reporter,
-    ...(configuration.semantic ? {
-      semantic: {
-        createProvider: () => configuration.semantic!.provider === LOCAL_LEXICAL_EMBEDDING_PROVIDER
-          ? new LocalLexicalEmbeddingProvider()
-          : null,
-        minimumSimilarity: configuration.semantic!.minimumSimilarity,
-        minimumMargin: configuration.semantic!.minimumMargin,
-      },
-    } : {}),
-    ...(configuration.staleBuild ? { staleBuild: configuration.staleBuild } : {}),
-    explorer: ({ identity }) => {
-      // OpenClaw starts its MCP proxy with process.execPath, which in a compiled binary is deja, not Bun.
-      if (compiledBinary) {
-        throw new CliConfigurationError('explore needs the Bun runtime; use the npm packages. The standalone binary replays stored walks only.')
-      }
-      if (configuration.explore.platform !== 'android') {
-        return new UnsupportedPlatformExplorer(configuration.explore.platform)
-      }
-      return new OpenClawWalkExplorer({
-        configuration: configuration.explore,
-        buildFingerprint: identity.buildFingerprint,
-        openClawExecutable: configuration.openClaw!.executable,
-        maestroMcpProxy: configuration.openClaw!.mcpProxy,
-        runner,
-        store,
-      })
-    },
-    ...(configuration.repair && configuration.explore.platform === 'android' && !configuration.manifest ? {
-      repairer: () => new BoundedSelectorRepairer({
-        workspaceRoot: configuration.workspaceRoot,
-        policy: configuration.repair!.policy,
-        timeoutMs: configuration.repair!.timeBudgetMs,
-        apkPath: resolve(configuration.workspaceRoot, configuration.explore.buildPath),
-        device: configuration.explore.device,
-        store,
-        memoryPath: store.relativeMemoryPath,
-        runner,
-        fingerprint: () => buildFingerprint(configuration, executionAdapter),
-        ...(process.env.ANDROID_HOME || process.env.ANDROID_SDK_ROOT
-          ? { androidSdkRoot: process.env.ANDROID_HOME ?? process.env.ANDROID_SDK_ROOT }
-          : {}),
-        ...(process.env.JAVA_HOME ? { javaHome: process.env.JAVA_HOME } : {}),
-      }),
-    } : {}),
-  })
-  return { store, orchestration, adapterId: executionAdapter.id }
-}
-
 export async function runCli(argv: string[], io: CliIo = {
   stdout: text => process.stdout.write(text),
   stderr: text => process.stderr.write(text),
@@ -297,8 +164,20 @@ export async function runCli(argv: string[], io: CliIo = {
       io.stdout(HELP)
       return parsed.command === '' && !parsed.help ? 2 : 0
     }
-    if (!['explore', 'run', 'remember', 'list', 'inspect', 'migrate', 'engine', 'doctor'].includes(parsed.command)) {
+    if (!['explore', 'run', 'remember', 'list', 'inspect', 'migrate', 'engine', 'doctor', 'mcp'].includes(parsed.command)) {
       throw new CliConfigurationError(`Unknown command: ${parsed.command}`)
+    }
+    if (parsed.command === 'mcp') {
+      if (parsed.positionals.length > 0 || parsed.junit || parsed.flow || parsed.summary || parsed.json ||
+          parsed.verify || parsed.acceptAssertionChange || parsed.dryRun) {
+        throw new CliConfigurationError('mcp accepts only --config and --store')
+      }
+      const { runMcpServer } = await import('./mcp.ts')
+      await runMcpServer(
+        ['--config', parsed.configPath, ...(parsed.store ? ['--store', parsed.store] : [])],
+        { env, ...(dependencies.compiledBinary !== undefined ? { compiledBinary: dependencies.compiledBinary } : {}) },
+      )
+      return 0
     }
     if (parsed.command === 'engine') {
       if (parsed.positionals.length !== 1 || parsed.positionals[0] !== 'install') {

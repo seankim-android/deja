@@ -19,8 +19,12 @@ function packageVersion() {
   return 'unknown'
 }
 
+export function versionNumber() {
+  return typeof __DEJA_VERSION__ === 'string' ? __DEJA_VERSION__ : packageVersion()
+}
+
 export function versionLine() {
-  const version = typeof __DEJA_VERSION__ === 'string' ? __DEJA_VERSION__ : packageVersion()
+  const version = versionNumber()
   const commit = typeof __DEJA_COMMIT__ === 'string' ? __DEJA_COMMIT__ : 'dev'
   return `deja ${version} (commit ${commit}, contract ${CONTRACT_VERSION})\n`
 }

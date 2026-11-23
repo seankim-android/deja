@@ -69,6 +69,8 @@ export type ProductionConfiguration = {
    * your own file (config `flowsDir`, default `.maestro/flows/deja`), relative to `workspaceRoot`.
    */
   flowsDir?: string
+  /** `deja mcp` only. `explore` registers the `deja_explore` tool, which spends model calls. Off by default. */
+  mcp?: { explore: boolean }
   /** WALK-021, iOS only: on a stale build, replay the last verified walk instead of rejecting. */
   staleBuild?: 'replay-last-verified'
 }
@@ -315,6 +317,20 @@ export async function loadProductionConfiguration(configPath: string): Promise<P
     staleBuild = raw.staleBuild
   }
 
+  let mcp: ProductionConfiguration['mcp']
+  if (raw.mcp !== undefined) {
+    if (!raw.mcp || typeof raw.mcp !== 'object' || Array.isArray(raw.mcp)) {
+      throw new CliConfigurationError('mcp must be an object')
+    }
+    const configured = raw.mcp as Record<string, unknown>
+    const unknown = Object.keys(configured).filter(key => key !== 'explore')
+    if (unknown.length > 0) throw new CliConfigurationError(`Unknown mcp setting: ${unknown.join(', ')}`)
+    if (configured.explore !== undefined && typeof configured.explore !== 'boolean') {
+      throw new CliConfigurationError('mcp.explore must be a boolean')
+    }
+    mcp = { explore: configured.explore === true }
+  }
+
   let semantic: ProductionConfiguration['semantic']
   if (raw.semantic !== undefined) {
     if (!raw.semantic || typeof raw.semantic !== 'object' || Array.isArray(raw.semantic)) {
@@ -356,6 +372,7 @@ export async function loadProductionConfiguration(configPath: string): Promise<P
     ...(semantic ? { semantic } : {}),
     ...(repair ? { repair } : {}),
     ...(staleBuild ? { staleBuild } : {}),
+    ...(mcp ? { mcp } : {}),
     ...(manifest ? { manifest } : {}),
     ...(flowsDir ? { flowsDir } : {}),
   }

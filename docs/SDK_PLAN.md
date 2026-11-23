@@ -192,8 +192,9 @@ are not negotiable in the engine, not the policy: product assertion failures are
   list of goals, upload `.deja/reports/` as an artifact, and fail on exit codes 1, 3 and 4.
   Replay only by default; cold exploration in CI needs an explicit input and a provider key secret.
   It must run on a runner that has an emulator or simulator; the Action does not provide devices.
-- **MCP server.** `@deja-qa/mcp` exposing `deja.run`, `deja.remember`, `deja.list` and `deja.inspect`.
-  `deja.explore` stays off unless the host enables it, since it spends model calls.
+- **MCP server.** `deja mcp` in `@deja-qa/cli` (DEJA-9) exposing `deja_run`, `deja_remember`, `deja_list` and
+  `deja_inspect` (underscores, since the Claude API rejects dots). It is part of the CLI, not a separate
+  `@deja-qa/mcp` package, to avoid a cycle with the CLI's config and runner assembly. `deja_explore` stays off unless the host enables it, since it spends model calls.
   `@modelcontextprotocol/sdk` is already a root dependency.
 
 ## Phased roadmap
@@ -218,7 +219,7 @@ Sizes: S is under a day, M is a few days, L is a week or more.
 | Partly done: `CONTRACT_VERSION` and the API snapshots are in. Still to do: the API review and freeze | M | an API report is checked in and diffed in CI |
 | Runner-neutral store conformance package | M | a sample third-party in-memory store passes it under Vitest |
 | `deja-action` | M | a sample repo replays the Android fixture in a workflow run with 0 model calls |
-| `@deja-qa/mcp` server | M | an MCP client calls `deja.run` and gets a schema-1 `RunResult` |
+| Done: MCP server (`deja mcp`) | M | an MCP client calls `deja_run` and gets a schema-1 `RunResult` |
 | Docs site from `docs/` | S | published; every claim links to the code or evidence, like the README |
 
 ### Phase 2: wider coverage
