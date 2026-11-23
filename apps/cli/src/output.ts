@@ -18,6 +18,7 @@ Usage:
   deja inspect <report> [--config <file>] [--json] [--summary]
   deja engine install [--json]
   deja doctor [--config <file>] [--json]
+  deja mcp [--config <file>] [--store <id>]
   deja help
   deja --version
 
@@ -41,6 +42,9 @@ Commands:
             Download Déjà's pinned Maestro into $DEJA_HOME/maestro/<version> (default
             ~/.local/share/deja), check its sha256 and extract it atomically. A valid install is
             skipped. It never touches ~/.maestro or any other Maestro.
+  mcp       Serve saved walks to a coding agent over MCP on stdio: deja_list, deja_run, deja_inspect,
+            deja_remember, and deja_explore only if the config sets "mcp": {"explore": true}.
+            Replay only: no repair, no verify, no assertion override. Stdout carries the protocol.
   doctor    Report the engine (version, path, pinned or override), Java, Xcode and simulator
             runtimes, and whether they match the tested range. Exit 1 if the engine is missing or
             out of range, or Java is too old.
