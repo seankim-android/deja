@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, realpath, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -28,7 +28,7 @@ function contract(): SubflowContract {
 }
 
 async function fixture() {
-  const temporary = await mkdtemp(join(tmpdir(), 'walk018-segment-store-'))
+  const temporary = await realpath(await mkdtemp(join(tmpdir(), 'walk018-segment-store-')))
   const workspaceRoot = join(temporary, 'workspace')
   await mkdir(join(workspaceRoot, '.deja/attempts'), { recursive: true })
   const candidatePath = '.deja/attempts/login.yaml'

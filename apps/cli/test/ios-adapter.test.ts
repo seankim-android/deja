@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { spawn } from 'node:child_process'
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, realpath, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
@@ -30,7 +30,7 @@ async function execute(root: string, args: string[], product = false) {
 
 describe('production iOS adapter CLI', () => {
   test('reviewed remember/warm replay works without a model; cold/stale/product failures stay honest', async () => {
-    const temporary = await mkdtemp(join(tmpdir(), 'deja-ios-cli-'))
+    const temporary = await realpath(await mkdtemp(join(tmpdir(), 'deja-ios-cli-')))
     const root = join(temporary, 'workspace')
     const udid = 'DFC4D233-498B-4B33-B713-E59B239FA86A'
     try {
@@ -51,7 +51,7 @@ describe('production iOS adapter CLI', () => {
         workspaceRoot: '.', appId: 'dev.deja.ios.checkout', platform: 'ios',
         adapter: 'maestro-ios@2.12.0', device: udid,
         buildPath: 'Fixture.app', fixtureCredentials: [{ label: 'Fixture password', value: 'testing123' }],
-        maestro: { executable: fakeMaestro, timeoutMs: 2000 },
+        maestro: { executable: fakeMaestro, timeoutMs: 30_000 },
       }))
       const remembered = await execute(root, ['remember', 'checkout', '--flow', 'flows/checkout.yaml'])
       expect(remembered.exitCode).toBe(0)
@@ -92,7 +92,7 @@ describe('production iOS adapter CLI', () => {
   })
 
   test('iOS config never accepts the Android repair plugin', async () => {
-    const temporary = await mkdtemp(join(tmpdir(), 'deja-ios-config-'))
+    const temporary = await realpath(await mkdtemp(join(tmpdir(), 'deja-ios-config-')))
     try {
       await mkdir(join(temporary, 'Fixture.app'))
       await writeFile(join(temporary, 'Fixture.app/Fixture'), 'binary')

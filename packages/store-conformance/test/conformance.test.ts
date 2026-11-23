@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, realpath, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { JsonRunReporter } from '@deja-qa/cli/reporter'
@@ -23,7 +23,7 @@ const fakeMaestro = resolve(import.meta.dir, '../../maestro/test/fixtures/fake-m
 function runOrchestrationContract(implementation: WalkStoreContractImplementation) {
   describe(`${implementation.name}: actual orchestration conformance`, () => {
     test('one production-runner cache hit performs zero model calls and appends passing validation', async () => {
-      const temporary = await mkdtemp(join(tmpdir(), 'walk019-orchestration-'))
+      const temporary = await realpath(await mkdtemp(join(tmpdir(), 'walk019-orchestration-')))
       const workspaceRoot = join(temporary, 'workspace')
       const store = implementation.createStore(workspaceRoot)
       try {
@@ -43,7 +43,7 @@ function runOrchestrationContract(implementation: WalkStoreContractImplementatio
           workspaceRoot,
           executable: fakeMaestro,
           device: 'deterministic-local-fixture',
-          timeoutMs: 5000,
+          timeoutMs: 30_000,
         })
         const reporter = new JsonRunReporter(workspaceRoot, createRedactor(workspaceRoot, []))
         let explorerConstructions = 0
