@@ -14,9 +14,9 @@ Shared Maestro YAML does not establish cross-platform support. See the
 [Android evidence](../spikes/001-android-deja/README.md),
 [Chromium fixture and command boundary](../spikes/002-web-deja/README.md),
 [native iOS fixture and command boundary](../spikes/003-ios-deja/README.md), and
-[WALK-010](../tickets/WALK-010-verified-web-proof.md)/[WALK-011](../tickets/WALK-011-verified-ios-proof.md)
-for the evidence behind this matrix. The post-WALK-011 Android compatibility attempt was blocked
-before boot by insufficient emulator disk space; its exact limit is linked from WALK-011.
+the WALK-010/WALK-011 evidence files in those folders for the evidence behind this matrix. The
+post-WALK-011 Android compatibility attempt was blocked before boot by insufficient emulator disk
+space ([its record](../spikes/003-ios-deja/evidence/walk011-android-compatibility.txt)).
 
 **No measured wall-clock speedup is claimed for the current CLI.** Warm replay eliminates model
 calls; it does not make Maestro itself instant. Historical WALK-005 spike samples measured complete
@@ -38,7 +38,7 @@ bun run deja -- --help
 | Command | Behavior |
 | --- | --- |
 | `explore <goal>` | Force Android cold exploration; independently verify and persist only a passing candidate. Web and iOS return `exploration-rejected` with zero model calls. |
-| `run <goal>` | Compute exact identity and check memory first. A hit replays YAML; a normal miss explores; eligible Android stale-build memory enters one bounded repair. A failed hit is recorded and is not reusable. |
+| `run <goal>` | Compute exact identity and check memory first. A hit replays YAML; a normal miss explores; eligible Android stale-build memory enters one bounded repair; iOS with `staleBuild: "replay-last-verified"` replays the last verified YAML instead. A failed hit is recorded and is not reusable. |
 | `remember <goal> --flow <candidate.yaml>` | Independently execute reviewed YAML and persist only after a complete pass. A bad product assertion remains a failure. |
 | `list` | List valid local walks; does not invoke a runner, explorer, or model. |
 | `inspect <report>` | Print a saved, redacted report. Inspecting a failed result returns its original failure class. |
@@ -66,6 +66,7 @@ workspaces.
 | Optional `semantic.provider`, `minimumSimilarity`, `minimumMargin` | WALK-016 opt-in local retrieval proof. `local-lexical-v1` is the only implementation; defaults are 0.90 similarity and 0.15 winner margin. Missing/unsupported providers report unavailable and use the ordinary miss lifecycle. |
 | Web-only `adapter`, `browser`, `headless`, `screenSize` | Exact execution/cache identity and Chromium launch settings. Only loopback `appId` URLs and `browser: chromium` are accepted. |
 | iOS `adapter`, `.app` `buildPath`, simulator-UDID `device` | Exact native bundle-tree/adapter identity and explicit `--platform ios` execution on the dedicated simulator. No repair block is permitted. |
+| iOS-only optional `staleBuild` | WALK-021. Off by default (a stale build returns `repair-rejected`). `"replay-last-verified"` replays the latest verified walk's stored YAML on a new build fingerprint, after the store re-checks its checksum. A pass stores that same YAML for the new build, so the next run is an exact hit. That pass **replaces the old build's entry** (one entry per goal, app, platform, adapter and browser) and **restarts its validation and repair history** at one entry, so rolling back to the old build triggers another replay. Keeping history across builds is tracked as DEJA-12. The stored walk has `origin: "replayed-on-new-build"` (not `remember`), because only the automatic replay verified it on this build and no person reviewed it there. The store refuses the write, before storing anything, if the file's bytes differ from the replayed ones. A fail reports the real Maestro failure and stores nothing, so every later run on that build replays again (one Maestro run each); it never repairs or explores. Model calls are 0 either way, and the report's `replayedOnNewBuild` names the build the YAML was last verified on. No prior verified walk keeps `repair-rejected`. Any other value, or any other platform, is a configuration error, and core also refuses the policy when `identity.platform` is not `ios`. |
 
 When a corresponding JSON executable/timeout field is omitted, `DEJA_MAESTRO`,
 `DEJA_OPENCLAW`, and `DEJA_TIMEOUT_MS` supply defaults. `ANDROID_HOME`/
@@ -202,14 +203,14 @@ The package scripts also include `preview` for the built viewer.
 - [`spikes/001-android-deja/`](../spikes/001-android-deja/README.md) — preserved Android fixture/evidence.
 - [`spikes/002-web-deja/`](../spikes/002-web-deja/README.md) — bounded Chromium fixture/evidence.
 - [`spikes/003-ios-deja/`](../spikes/003-ios-deja/README.md) — bounded native iOS simulator fixture/evidence.
-- [`TODO.md`](../TODO.md) and [`tickets/README.md`](../tickets/README.md) — repo-local backlog, status, and dependencies.
+- [`TODO.md`](../TODO.md) — standing rules. The backlog, status and dependencies are in the Linear team DEJA.
 - [`docs/PROJECT_PLAN.md`](PROJECT_PLAN.md) — historical hackathon scope and plan; current verified behavior is defined by ticket evidence, not aspirations.
 
-Déjà uses repo-local `WALK-` tickets, not Linear objects. A ticket becomes `done` only when
-all acceptance criteria link reproducible commands and secret-free evidence; its ticket checklist,
-evidence links, and `TODO.md` state change together. Record exact commands and measured values, use
-`unknown` when instrumentation is unavailable, and preserve prior evidence. Completing a repository
-ticket does not authorize social posts, external submission, or other publication.
+The backlog lives in the Linear team DEJA (open work moved there from the old repo-local `WALK-`
+tickets, which stay in git history). An issue is done only when all acceptance criteria link
+reproducible commands and secret-free evidence in this repo. Record exact commands and measured
+values, use `unknown` when instrumentation is unavailable, and preserve prior evidence. Closing an
+issue does not authorize social posts, external submission, or other publication.
 
 Licensed under [Apache-2.0](../LICENSE).
 

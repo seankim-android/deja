@@ -53,7 +53,8 @@ export type StoredWalk = WalkIdentity & {
   flowSha256: string
   lastValidation: WalkValidation
   validationHistory: StoredValidation[]
-  origin?: 'remember' | 'explore' | 'repair'
+  /** `replayed-on-new-build` (WALK-021): an earlier build's verified YAML, replayed once on this build. */
+  origin?: 'remember' | 'explore' | 'repair' | 'replayed-on-new-build'
   exploration?: ExplorationDetails
   repairHistory?: RepairProvenance[]
 }
@@ -77,8 +78,21 @@ export type PersistVerifiedOptions = {
   identity: WalkIdentity
   candidatePath: string
   validation: WalkValidation
-  origin: 'remember' | 'explore'
+  origin: 'remember' | 'explore' | 'replayed-on-new-build'
   exploration?: ExplorationDetails
+  /**
+   * When set, the store hashes the candidate bytes it is about to write and refuses, before writing
+   * anything, if they differ. Callers that replayed a candidate pass the sha256 of what actually ran.
+   */
+  expectedFlowSha256?: string
+}
+
+/** Thrown before any write when the candidate bytes differ from `expectedFlowSha256`. */
+export class ExpectedFlowChecksumMismatchError extends Error {
+  constructor(expected: string, actual: string) {
+    super(`Verified candidate bytes (${actual}) differ from the expected checksum (${expected}); nothing was stored`)
+    this.name = 'ExpectedFlowChecksumMismatchError'
+  }
 }
 
 export type PersistVerifiedRepairOptions = Omit<PersistVerifiedOptions, 'origin' | 'exploration'> & {
@@ -254,6 +268,23 @@ export type CacheStatus = 'hit' | 'miss' | 'not-checked'
 export type RunOutcome = 'passed' | 'remembered' | 'cold-recorded' | 'repaired' |
   'rejected' | 'exploration-rejected' | 'product-regression' | 'repair-rejected' | 'failed'
 
+/**
+ * Opt-in WALK-021 policy for a stale-build miss with no repairer: replay the latest verified walk's
+ * stored YAML against the new build. A pass stores that same verified YAML for the new build.
+ */
+export type StaleBuildPolicy = 'replay-last-verified'
+
+/** Optional additive run-report data; schema 1 reports without it remain readable. */
+export type NewBuildReplayReport = {
+  policy: StaleBuildPolicy
+  /** The build the replayed YAML was last verified on; never the build this run executed. */
+  previousBuildFingerprint: string
+  previousFlowSha256: string
+  previousValidatedAt: string
+  /** True only when the pass was stored as a verified walk for the new build fingerprint. */
+  recordedForNewBuild: boolean
+}
+
 export type RunResult = {
   schemaVersion: typeof WALK_RESULT_SCHEMA_VERSION
   command: 'explore' | 'run' | 'remember'
@@ -280,6 +311,7 @@ export type RunResult = {
   execution?: ExecutionResult
   exploration?: ExplorationResult
   repair?: RepairResult
+  replayedOnNewBuild?: NewBuildReplayReport
 }
 
 export type ReportReceipt = {

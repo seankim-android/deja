@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, realpath, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -24,7 +24,7 @@ const ids = `<resources>
 `
 
 async function fixture() {
-  const temporary = await mkdtemp(join(tmpdir(), 'deja-repair-policy-'))
+  const temporary = await realpath(await mkdtemp(join(tmpdir(), 'deja-repair-policy-')))
   const root = join(temporary, 'workspace')
   await mkdir(join(root, 'app/src/main/java/dev/deja/checkout'), { recursive: true })
   await mkdir(join(root, 'app/src/main/res/values'), { recursive: true })

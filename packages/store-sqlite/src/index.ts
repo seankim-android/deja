@@ -4,6 +4,7 @@ import { lstatSync, mkdirSync, realpathSync, statSync } from 'node:fs'
 import { mkdir, readFile, realpath, rename, stat, writeFile } from 'node:fs/promises'
 import { dirname, isAbsolute, relative, resolve, sep } from 'node:path'
 import {
+  ExpectedFlowChecksumMismatchError,
   normalizeGoal as normalizeGoalContract,
   type ExplorationDetails,
   type LookupHit,
@@ -338,8 +339,9 @@ export class SQLiteWalkStore implements WalkStore {
         latest.flowSha256 !== row.flow_sha256) {
       throw new InvalidWalkMemoryError('lastValidation must equal the latest history entry for the stored flow')
     }
-    if (row.origin !== null && row.origin !== 'remember' && row.origin !== 'explore' && row.origin !== 'repair') {
-      throw new InvalidWalkMemoryError('walk origin must be remember, explore, or repair')
+    if (row.origin !== null && row.origin !== 'remember' && row.origin !== 'explore' &&
+        row.origin !== 'repair' && row.origin !== 'replayed-on-new-build') {
+      throw new InvalidWalkMemoryError('walk origin must be remember, explore, repair, or replayed-on-new-build')
     }
     let exploration: ExplorationDetails | undefined
     if (row.exploration_json !== null) {
@@ -521,6 +523,9 @@ export class SQLiteWalkStore implements WalkStore {
     if (repair) readRepairProvenance(repair.repair)
     const candidateBytes = await readFile(candidate)
     const flowSha256 = sha256(candidateBytes)
+    if (options.expectedFlowSha256 !== undefined && options.expectedFlowSha256 !== flowSha256) {
+      throw new ExpectedFlowChecksumMismatchError(options.expectedFlowSha256, flowSha256)
+    }
     const platformSlug = flowSlug(normalizeGoalContract(identity.platform).key)
     const flowPath = `.deja/flows/${flowSlug(identity.goalKey)}/${platformSlug}-${flowSha256}.yaml`
     await this.atomicWriteFlow(resolve(root, flowPath), candidateBytes)
