@@ -238,6 +238,8 @@ export type RunnerRequest = {
   flowPath: string
   artifactDirectory: string
   timeoutMs?: number
+  /** Flow variables passed to the runner (`maestro -e KEY=VALUE`). Result schema stays 1. */
+  env?: Record<string, string>
 }
 
 export type ExecutionResult = {

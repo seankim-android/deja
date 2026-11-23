@@ -1,11 +1,30 @@
 // typescript 7.0.2
 // entry . (./src/index.ts)
-// exports: MetadataTamper, StoreFailureInjection, WalkStoreContractImplementation, contractIdentity, initialValidation, laterValidation, localStoreContract, runWalkStoreContractTests, runWriterLockContractTests, sqliteStoreContract
+// exports: ContractScene, ExplorationDriverContractImplementation, MetadataTamper, StoreFailureInjection, WalkStoreContractImplementation, contractIdentity, initialValidation, laterValidation, localStoreContract, runExplorationDriverContractTests, runWalkStoreContractTests, runWriterLockContractTests, sqliteStoreContract
 export declare function contractIdentity(overrides?: Partial<WalkIdentity>): WalkIdentity;
+export type ContractScene = {
+    ids: string[];
+    labels?: string[];
+    ghost?: string[];
+    keyboard?: boolean;
+    extra?: number;
+};
+export type ExplorationDriverContractImplementation = {
+    name: string;
+    appId: string;
+    backIds: string[];
+    fingerprint: FingerprintConfig;
+    create(scene: ContractScene): {
+        driver: ExplorationDriver;
+        relaunches(): number;
+        failNextAct(): void;
+    };
+};
 export declare const initialValidation = "2026-11-22T00:00:00.000Z";
 export declare const laterValidation = "2026-11-22T00:01:00.000Z";
 export declare const localStoreContract: WalkStoreContractImplementation;
 export type MetadataTamper = 'malformed' | 'unsupported-schema' | 'invalid-entry' | 'duplicate-identity';
+export declare function runExplorationDriverContractTests(implementation: ExplorationDriverContractImplementation): void;
 export declare function runWalkStoreContractTests(implementation: WalkStoreContractImplementation): void;
 export declare function runWriterLockContractTests(implementation: WalkStoreContractImplementation): void;
 export declare const sqliteStoreContract: WalkStoreContractImplementation;

@@ -1,0 +1,152 @@
+{
+  "schema": "deja-18-ios-facts/1",
+  "maestro": "2.12.0 (~/.local/share/deja/maestro/2.12.0)",
+  "device": "BA555783-AC7E-46E3-B749-34F9499B2C2B",
+  "loadAverageAtEnd": [
+    127.8095703125,
+    180.46826171875,
+    234.84326171875
+  ],
+  "facts": {
+    "1_waitForAnimationToEnd_on_today": {
+      "baseline": [
+        {
+          "passed": true,
+          "ms": 27447,
+          "load1": 95.0595703125,
+          "note": ""
+        },
+        {
+          "passed": true,
+          "ms": 28883,
+          "load1": 225.75146484375,
+          "note": ""
+        },
+        {
+          "passed": true,
+          "ms": 20954,
+          "load1": 320.28369140625,
+          "note": ""
+        }
+      ],
+      "settle": [
+        {
+          "passed": true,
+          "ms": 23579,
+          "load1": 125.65576171875,
+          "note": ""
+        },
+        {
+          "passed": true,
+          "ms": 25401,
+          "load1": 279.736328125,
+          "note": ""
+        },
+        {
+          "passed": true,
+          "ms": 20753,
+          "load1": 350.95556640625,
+          "note": ""
+        }
+      ]
+    },
+    "3_duplicate_ids_on_today": {
+      "idsWithAnId": 68,
+      "distinctIds": 60,
+      "duplicated": {
+        "calendar.pages": 6,
+        "reveal.note.field": 2,
+        "reveal.note.photo": 2,
+        "Toolbar": 2
+      }
+    },
+    "3_selector_probes": {
+      "literal_id_matches": {
+        "passed": true,
+        "ms": 16065,
+        "load1": 319.88134765625,
+        "note": ""
+      },
+      "dot_matches_any_char": {
+        "passed": true,
+        "ms": 16747,
+        "load1": 296.3779296875,
+        "note": ""
+      },
+      "wildcard_pattern": {
+        "passed": true,
+        "ms": 15832,
+        "load1": 278.61279296875,
+        "note": ""
+      },
+      "partial_is_not_a_match": {
+        "passed": false,
+        "ms": 34065,
+        "load1": 245.1064453125,
+        "note": "==== Debug output (logs & screenshots) ==== |  | ~/.maestro/tests/2026-11-22_190244"
+      },
+      "escaped_dot_matches_literal": {
+        "passed": true,
+        "ms": 19900,
+        "load1": 250.3046875,
+        "note": ""
+      }
+    },
+    "6_keyboard_dismissal": {
+      "pressKey_Enter": {
+        "keyboardShownBefore": true,
+        "step": {
+          "passed": true,
+          "ms": 20967,
+          "load1": 363.43359375,
+          "note": ""
+        },
+        "keyboardGoneAfter": true
+      },
+      "hideKeyboard": {
+        "keyboardShownBefore": true,
+        "step": {
+          "passed": false,
+          "ms": 29417,
+          "load1": 342.31103515625,
+          "note": "==== Debug output (logs & screenshots) ==== |  | ~/.maestro/tests/2026-11-22_190601"
+        },
+        "keyboardGoneAfter": false
+      },
+      "tap_outside": {
+        "keyboardShownBefore": true,
+        "step": {
+          "passed": true,
+          "ms": 17354,
+          "load1": 481.58251953125,
+          "note": ""
+        },
+        "keyboardGoneAfter": false
+      }
+    },
+    "4_in_app_alert": {
+      "emptyOKInHierarchy": false,
+      "systemPermissionSheet": "not measured: Blankaday in uiTesting mode shows none, and no dedicated trigger was built"
+    },
+    "5_crash": {
+      "signalSent": "SIGSEGV to the Blankaday Dev process in the dedicated simulator",
+      "hierarchyAfter": {
+        "ok": true,
+        "ids": 68,
+        "hasToday": true
+      },
+      "tapAfter": {
+        "passed": true,
+        "ms": 15691,
+        "load1": 173.20361328125,
+        "note": ""
+      },
+      "assertAfter": {
+        "passed": false,
+        "ms": 29384,
+        "load1": 127.8095703125,
+        "note": "==== Debug output (logs & screenshots) ==== |  | ~/.maestro/tests/2026-11-22_191921"
+      }
+    }
+  }
+}

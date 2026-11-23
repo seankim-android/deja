@@ -1,6 +1,6 @@
 // typescript 7.0.2
 // entry . (./src/index.ts)
-// exports: AdapterCacheIdentity, AdapterIdentityInput, AndroidAdapterOptions, COMPOSITION_MODEL_METRICS, CompositionRunnerObservation, CompositionRunnerTrace, IosAdapterOptions, LoginCompositionResult, MAESTRO_COMPOSITE_FLOW_SCHEMA, MAESTRO_FLOW_SCHEMA_VERSION, MaestroArtifactPaths, MaestroCommandOptions, MaestroExecutionAdapter, MaestroFailureCategory, MaestroFailureClassification, MaestroFailureInput, MaestroFlowContainment, MaestroLoginComposer, MaestroLoginComposerOptions, MaestroPlatform, MaestroRunResult, MaestroRunnerError, MaestroRunnerErrorKind, MaestroWalkRunner, MaestroWalkRunnerOptions, RunMaestroOptions, SegmentVerificationResult, WebAdapterOptions, androidMaestroAdapter, classifyMaestroFailure, composeMaestroLoginFlow, countFlowAssertions, countMaestroAssertions, countMaestroSteps, iosMaestroAdapter, readCompositionRunnerTrace, readMaestroContinuation, resolveFlowPath, runMaestro, validateMaestroFlowReference, webMaestroAdapter
+// exports: AdapterCacheIdentity, AdapterIdentityInput, AndroidAdapterOptions, COMPOSITION_MODEL_METRICS, CompositionRunnerObservation, CompositionRunnerTrace, IosAdapterOptions, IosExplorationDriverOptions, LoginCompositionResult, MAESTRO_COMPOSITE_FLOW_SCHEMA, MAESTRO_FLOW_SCHEMA_VERSION, MaestroArtifactPaths, MaestroCommandOptions, MaestroExecutionAdapter, MaestroFailureCategory, MaestroFailureClassification, MaestroFailureInput, MaestroFlowContainment, MaestroFlowResult, MaestroHierarchyResult, MaestroLoginComposer, MaestroLoginComposerOptions, MaestroPlatform, MaestroRunResult, MaestroRunnerError, MaestroRunnerErrorKind, MaestroTransport, MaestroWalkRunner, MaestroWalkRunnerOptions, McpMaestroTransport, McpMaestroTransportOptions, ProcessMaestroTransport, ProcessMaestroTransportOptions, RunMaestroOptions, SegmentVerificationResult, WebAdapterOptions, androidMaestroAdapter, classifyMaestroFailure, composeMaestroLoginFlow, countFlowAssertions, countMaestroAssertions, countMaestroSteps, escapeRegex, idSelector, iosExplorationDriver, iosFingerprintRules, iosMaestroAdapter, parseMaestroHierarchy, readCompositionRunnerTrace, readMaestroContinuation, resolveFlowPath, runMaestro, tapSegment, validateMaestroFlowReference, waitVisibleSegment, webMaestroAdapter
 export type AdapterCacheIdentity = AdapterIdentityInput & {
     adapter?: string;
     browser?: string;
@@ -34,10 +34,21 @@ export type CompositionRunnerTrace = {
 export declare function countFlowAssertions(flowPath: string): Promise<number | null>;
 export declare function countMaestroAssertions(contents: string): number;
 export declare function countMaestroSteps(contents: string): number;
+export declare function escapeRegex(text: string): string;
+export declare function idSelector(id: string): string;
 export type IosAdapterOptions = {
     device: string;
     adapterId?: string;
 };
+export declare function iosExplorationDriver(options: IosExplorationDriverOptions): ExplorationDriver & {
+    readonly appId: string | null;
+};
+export type IosExplorationDriverOptions = {
+    transport: MaestroTransport;
+    sheetPattern?: RegExp;
+    now?: () => Date;
+};
+export declare const iosFingerprintRules: FingerprintRules;
 export declare function iosMaestroAdapter(options: IosAdapterOptions): MaestroExecutionAdapter;
 export type LoginCompositionResult = {
     status: 'composed' | 'rejected' | 'persist-failed';
@@ -92,6 +103,17 @@ export type MaestroFlowContainment = {
     workspaceRoot: string;
     flowDirectory: string;
 };
+export type MaestroFlowResult = {
+    passed: boolean;
+    exitCode: number | null;
+    output: string;
+    durationMs: number;
+    timedOut: boolean;
+};
+export type MaestroHierarchyResult = {
+    raw: unknown;
+    durationMs: number;
+};
 export declare class MaestroLoginComposer {
     private readonly options;
     constructor(options: MaestroLoginComposerOptions);
@@ -132,11 +154,17 @@ export type MaestroRunResult = {
     errors: MaestroRunnerError[];
     artifacts?: MaestroArtifactPaths;
 };
+export interface MaestroTransport {
+    readonly kind: 'process' | 'mcp';
+    hierarchy(): Promise<MaestroHierarchyResult>;
+    runFlow(yaml: string, env?: Record<string, string>): Promise<MaestroFlowResult>;
+    close(): Promise<void>;
+}
 export declare class MaestroWalkRunner implements WalkRunner {
     readonly executable: string;
     private readonly options;
     constructor(options: MaestroWalkRunnerOptions);
-    runFlow(flowPath: string, artifactDirectory: string, timeoutMs?: number): Promise<MaestroRunResult>;
+    runFlow(flowPath: string, artifactDirectory: string, timeoutMs?: number, env?: Record<string, string>): Promise<MaestroRunResult>;
     adapt(result: MaestroRunResult): Promise<ExecutionResult>;
     run(request: RunnerRequest): Promise<ExecutionResult>;
 }
@@ -150,6 +178,44 @@ export type MaestroWalkRunnerOptions = {
     javaHome?: string;
     junitPath?: string;
 };
+export declare class McpMaestroTransport implements MaestroTransport {
+    readonly kind: 'mcp';
+    private child;
+    private buffer;
+    private nextId;
+    private readonly pending;
+    private ready;
+    startupMs: number;
+    private readonly options;
+    constructor(options: McpMaestroTransportOptions);
+    private fail;
+    private send;
+    private request;
+    private start;
+    private call;
+    hierarchy(): Promise<MaestroHierarchyResult>;
+    runFlow(yaml: string, env?: Record<string, string>): Promise<MaestroFlowResult>;
+    close(): Promise<void>;
+}
+export type McpMaestroTransportOptions = {
+    executable: string;
+    device: string;
+    timeoutMs?: number;
+};
+export declare function parseMaestroHierarchy(raw: unknown): RawElement[];
+export declare class ProcessMaestroTransport implements MaestroTransport {
+    readonly kind: 'process';
+    private readonly options;
+    constructor(options: ProcessMaestroTransportOptions);
+    hierarchy(): Promise<MaestroHierarchyResult>;
+    runFlow(yaml: string, env?: Record<string, string>): Promise<MaestroFlowResult>;
+    close(): Promise<void>;
+}
+export type ProcessMaestroTransportOptions = {
+    executable: string;
+    device: string;
+    timeoutMs?: number;
+};
 export declare function readCompositionRunnerTrace(workspaceRoot: string, execution: ExecutionResult): Promise<CompositionRunnerTrace | null>;
 export declare function readMaestroContinuation(path: string): Promise<string>;
 export declare function resolveFlowPath(workspaceRoot: string, flowPath: string): string;
@@ -162,6 +228,7 @@ export type RunMaestroOptions = {
     workspaceRoot: string;
     flowPath: string;
     timeoutMs: number;
+    env?: Record<string, string>;
     androidSdkRoot?: string;
     javaHome?: string;
     junitPath?: string;
@@ -176,7 +243,9 @@ export type SegmentVerificationResult = {
     execution: ExecutionResult;
     errors: string[];
 };
+export declare function tapSegment(id: string): Segment;
 export declare function validateMaestroFlowReference(reference: string, containment?: MaestroFlowContainment): string;
+export declare function waitVisibleSegment(id: string, timeoutMs?: number): Segment;
 export type WebAdapterOptions = {
     device?: string;
     headless?: boolean;
