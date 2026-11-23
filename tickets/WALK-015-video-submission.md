@@ -41,3 +41,10 @@ public-post approval, the official submission destination/process and authorized
 confirmed post/upload URLs. Slack delivery is not evidence of either external action. The historical
 9:00–10:00 AM buffer cannot be reserved retroactively.
 
+
+## Submission record (Nov 22, 2026, about 5 PM PT)
+
+- X: https://x.com/kssc0112/status/2124667198837059953 (main post with video, plus a 2-reply thread with the template)
+- Reddit: https://www.reddit.com/r/Cerebras/comments/1y34xuv/i_made_kimi_k31_pro_on_cerebras_test_my_app_once/ (flair "Kimi K3.1 Pro Hackathon")
+- Discord: #share-your-demo, tag General Demo
+- Video: `demo/deja-demo.mp4`, 55.3 s, narrated. No TPS claim, so no Speed Bounty entry.

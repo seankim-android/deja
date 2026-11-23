@@ -2,14 +2,12 @@
 
 ## Done
 
+Submitted on Nov 22, 2026: [X post](https://x.com/kssc0112/status/2124667198837059953), [r/cerebras post](https://www.reddit.com/r/Cerebras/comments/1y34xuv/i_made_kimi_k31_pro_on_cerebras_test_my_app_once/), and the Discord #share-your-demo post (General Demo).
+
 Tickets WALK-001 to WALK-014 and WALK-016 to WALK-020 are complete. History and evidence: [tickets/README.md](tickets/README.md).
 
 ## Open
 
-- [ ] [WALK-015](tickets/WALK-015-video-submission.md): Publish the required X post tagging `@Cerebras` and `@Kimi_Moonshot` with `#KimiOnCerebras`.
-- [ ] [WALK-015](tickets/WALK-015-video-submission.md): Submit the repository and video links through the official event process.
-- [ ] [WALK-015](tickets/WALK-015-video-submission.md): Check that the upload is visible and the submission is confirmed.
-- [ ] [WALK-015](tickets/WALK-015-video-submission.md): Record the final URLs, time, and confirmation in the ticket.
 - [ ] Make Déjà a consumable SDK: see [docs/SDK_PLAN.md](docs/SDK_PLAN.md).
 
 ## Standing rules
