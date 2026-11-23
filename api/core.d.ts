@@ -204,6 +204,11 @@ export type FlowAssertion = {
     entry: string;
     command: string;
     id: string | null;
+    always: boolean;
+    call?: {
+        kind: 'flow' | 'script';
+        path: string;
+    };
 };
 export declare class FlowChangedError extends Error {
     constructor(manifestClosureSha256: string, currentClosureSha256: string);

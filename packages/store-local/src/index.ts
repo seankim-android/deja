@@ -746,6 +746,7 @@ export {
   ConsumerFlowError,
   ConsumerFlows,
   ManifestChangedError,
+  ManifestLockedError,
   assertionsSha256,
   checkManifestPath,
   closureAssertions,

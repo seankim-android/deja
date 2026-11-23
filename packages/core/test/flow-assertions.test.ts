@@ -60,9 +60,9 @@ describe('flow assertions (hash form version 1)', () => {
     ].join('\n')
     expect(entries(yaml)).toEqual([
       '|repeat|params={"times":2}',
-      'repeat>commands|assertVisible|{"id":"row"}',
+      'repeat{"times":2}>commands|assertVisible|{"id":"row"}',
       '|runFlow|params={"when":{"visible":"Banner"}}',
-      'runFlow>commands|assertVisible|"inline"',
+      'runFlow{"when":{"visible":"Banner"}}>commands|assertVisible|"inline"',
       '|runFlow|params={}',
       '|retry|params={"maxRetries":3}',
     ])
@@ -77,11 +77,41 @@ describe('flow assertions (hash form version 1)', () => {
     expect(looping('A')).not.toEqual(looping('B'))
     const flow = (env: string) => entries(`- runFlow:\n    file: a.yaml\n    env:\n      CODE: "${env}"\n`)
     expect(flow('1')).not.toEqual(flow('2'))
-    expect(flow('1')).toEqual(['|runFlow|params={}', 'runFlow|env|{"CODE":"1"}'])
+    expect(flow('1')).toEqual(['|runFlow|params={"env":{"CODE":"1"}}'])
     expect(entries('appId: a\nenv:\n  NAME: x\n---\n- assertVisible: "${NAME}"\n'))
       .toEqual(['|env|{"NAME":"x"}', '|assertVisible|"${NAME}"'])
     // A label is not behavior.
     expect(entries('- runFlow:\n    file: a.yaml\n    label: One\n')).toEqual(entries('- runFlow:\n    file: a.yaml\n    label: Two\n'))
+  })
+
+  test('counts inline scripts and reports which lines always run', () => {
+    const yaml = [
+      '- evalScript: ${output.ok = true}',
+      '- assertTrue: ${output.ok}',
+      '- assertVisible:',
+      '    id: "soft"',
+      '    optional: true',
+      '- runFlow:',
+      '    file: a.yaml',
+      '    when:',
+      '      platform: iOS',
+      '- runFlow: b.yaml',
+      '- runScript: c.js',
+      '- repeat:',
+      '    times: 1',
+      '    commands:',
+      '      - assertVisible: "inside"',
+      '',
+    ].join('\n')
+    const items = findFlowAssertions(yaml)
+    expect(items.map(item => [item.command, item.always])).toEqual([
+      ['evalScript', true], ['assertTrue', true], ['assertVisible', false], ['runFlow', false],
+      ['runFlow', true], ['runScript', true], ['repeat', true], ['assertVisible', false],
+    ])
+    expect(items[0].entry).toBe('|evalScript|"${output.ok = true}"')
+    expect(items.filter(item => item.call).map(item => [item.call!.kind, item.call!.path]))
+      .toEqual([['flow', 'a.yaml'], ['flow', 'b.yaml'], ['script', 'c.js']])
+    expect(findFlowAssertions('appId: a\nonFlowStart:\n  - assertVisible: "x"\n').map(item => item.always)).toEqual([true])
   })
 
   test('finds assertions in every document and in onFlowStart', () => {

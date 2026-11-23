@@ -87,7 +87,7 @@ export function checkManifestFlowPath(value: unknown, where = 'flow'): string {
   if (segments.some(segment => segment === '' || segment === '.' || segment === '..')) {
     throw new InvalidWalkManifestError(`${where} must not hold empty, . or .. segments: ${value}`)
   }
-  if (segments[0] === '.deja') {
+  if (segments[0].toLowerCase() === '.deja') {
     throw new InvalidWalkManifestError(`${where} must be the consumer's own file, not under .deja/: ${value}`)
   }
   if (!/\.ya?ml$/i.test(value)) throw new InvalidWalkManifestError(`${where} must be a YAML file: ${value}`)
@@ -188,6 +188,63 @@ export function manifestWalkKey(walk: Pick<ManifestWalk, 'goal' | 'appId' | 'pla
   ])
 }
 
+/**
+ * The first key that appears twice in one JSON object, or null. `JSON.parse` keeps the last of two
+ * equal keys, so a hash that a bad merge left twice would be read without a sign of it.
+ */
+function duplicateKey(text: string): string | null {
+  let index = 0
+  const skip = () => { while (index < text.length && ' \t\r\n'.includes(text[index])) index += 1 }
+  const string = (): string => {
+    const start = index
+    index += 1
+    while (index < text.length && text[index] !== '"') index += text[index] === '\\' ? 2 : 1
+    index += 1
+    return JSON.parse(text.slice(start, index)) as string
+  }
+  const value = (): string | null => {
+    skip()
+    const character = text[index]
+    if (character === '{') {
+      index += 1
+      const seen = new Set<string>()
+      skip()
+      while (index < text.length && text[index] !== '}') {
+        skip()
+        const key = string()
+        if (seen.has(key)) return key
+        seen.add(key)
+        skip()
+        index += 1 // :
+        const nested = value()
+        if (nested !== null) return nested
+        skip()
+        if (text[index] === ',') index += 1
+        skip()
+      }
+      index += 1
+      return null
+    }
+    if (character === '[') {
+      index += 1
+      skip()
+      while (index < text.length && text[index] !== ']') {
+        const nested = value()
+        if (nested !== null) return nested
+        skip()
+        if (text[index] === ',') index += 1
+        skip()
+      }
+      index += 1
+      return null
+    }
+    if (character === '"') { string(); return null }
+    while (index < text.length && !',}] \t\r\n'.includes(text[index])) index += 1
+    return null
+  }
+  return value()
+}
+
 /** Read a manifest. Fails closed on an unknown version, an unknown field, an unsafe value or a duplicate. */
 export function parseWalkManifest(contents: string): WalkManifest {
   let parsed: unknown
@@ -196,6 +253,8 @@ export function parseWalkManifest(contents: string): WalkManifest {
   } catch (error) {
     throw new InvalidWalkManifestError('not valid JSON', { cause: error })
   }
+  const repeated = duplicateKey(contents)
+  if (repeated !== null) throw new InvalidWalkManifestError(`the field "${repeated}" appears twice in one object`)
   if (!object(parsed)) throw new InvalidWalkManifestError('expected an object')
   if (parsed.manifestVersion !== WALK_MANIFEST_VERSION) {
     throw new InvalidWalkManifestError(`unsupported manifestVersion: ${String(parsed.manifestVersion)}`)

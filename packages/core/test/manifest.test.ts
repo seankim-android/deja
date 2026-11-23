@@ -59,10 +59,21 @@ describe('walk manifest', () => {
     }
   })
 
+  test('refuses a field that appears twice in one object', () => {
+    const good = serializeWalkManifest({ ...emptyWalkManifest(), walks: [entry()] })
+    const twice = good.replace('"closureSha256"', `"assertionsSha256": "${sha('c')}",\n      "closureSha256"`)
+    expect(twice).not.toBe(good)
+    expect(() => parseWalkManifest(twice)).toThrow(/appears twice/)
+    expect(() => parseWalkManifest('{"manifestVersion":1,"manifestVersion":1,"hashVersion":1,"walks":[]}')).toThrow(/appears twice/)
+    // Equal keys in different objects, and braces inside strings, are fine.
+    const text = serializeWalkManifest({ ...emptyWalkManifest(), walks: [entry({ goal: 'a {"x": 1, "x": 2} b' }), entry({ goal: 'Other' })] })
+    expect(parseWalkManifest(text).walks).toHaveLength(2)
+  })
+
   test('refuses unsafe flow paths', () => {
     for (const flow of [
       '/abs/today.yaml', '../today.yaml', '.maestro/../../today.yaml', '.maestro\\flows\\today.yaml',
-      'C:/today.yaml', '.deja/flows/today.yaml', '.maestro//today.yaml', './today.yaml', 'today.json', '',
+      'C:/today.yaml', '.deja/flows/today.yaml', '.DEJA/flows/today.yaml', '.Deja/x.yaml', '.maestro//today.yaml', './today.yaml', 'today.json', '',
     ]) {
       expect(() => parseWalkManifest(manifestText([entry({ flow })]))).toThrow(InvalidWalkManifestError)
     }

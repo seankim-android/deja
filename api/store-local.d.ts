@@ -1,10 +1,10 @@
 // typescript 7.0.2
 // entry . (./src/index.ts)
-// exports: ConsumerFlowError, ConsumerFlows, ConsumerFlowsOptions, ConsumerPlan, FlowClosureError, InvalidStoreIdError, InvalidSubflowMemoryError, InvalidWalkMemoryError, LOCAL_MEMORY_CONSUMER_SCHEMA_VERSION, LOCAL_MEMORY_PATH, LOCAL_MEMORY_SCHEMA_VERSION, LocalVerifiedSubflowStore, LocalVerifiedSubflowStoreOptions, LocalWalkStore, LocalWalkStoreOptions, LockHolder, LockTestHooks, MAESTRO_FLOW_SCHEMA_VERSION, ManifestChangedError, MissingFlowFileError, StoreLockContentionError, StoreLockUnavailableError, StoreLockedError, VERIFIED_SUBFLOW_INDEX_PATH, WalkMemory, WriterLock, assertionsSha256, checkManifestPath, checkStoredSubflows, closureAssertions, collectFlowClosure, normalizeGoal, planStoredClosure, readConsumerWalkFields, readStoredFlowFiles, snapshotFlowClosure, storeMetadataPath
+// exports: ConsumerFlowError, ConsumerFlows, ConsumerFlowsOptions, ConsumerPlan, FlowClosureError, InvalidStoreIdError, InvalidSubflowMemoryError, InvalidWalkMemoryError, LOCAL_MEMORY_CONSUMER_SCHEMA_VERSION, LOCAL_MEMORY_PATH, LOCAL_MEMORY_SCHEMA_VERSION, LocalVerifiedSubflowStore, LocalVerifiedSubflowStoreOptions, LocalWalkStore, LocalWalkStoreOptions, LockHolder, LockTestHooks, MAESTRO_FLOW_SCHEMA_VERSION, ManifestChangedError, ManifestLockedError, MissingFlowFileError, StoreLockContentionError, StoreLockUnavailableError, StoreLockedError, VERIFIED_SUBFLOW_INDEX_PATH, WalkMemory, WriterLock, assertionsSha256, checkManifestPath, checkStoredSubflows, closureAssertions, collectFlowClosure, normalizeGoal, planStoredClosure, readConsumerWalkFields, readStoredFlowFiles, snapshotFlowClosure, storeMetadataPath
 export declare function assertionsSha256(closure: FlowClosure): string;
 export declare function checkManifestPath(path: string): string;
 export declare function checkStoredSubflows(root: string, flowPath: string, subflowFiles: StoredFlowFile[] | undefined, legacyClosure?: boolean): Promise<StoredClosureCheck>;
-export declare function closureAssertions(closure: FlowClosure): FlowAssertion[];
+export declare function closureAssertions(closure: FlowClosure): ClosureAssertion[];
 export declare function collectFlowClosure(root: string, main: string): Promise<FlowClosure>;
 export declare class ConsumerFlowError extends Error {
     constructor(message: string, options?: ErrorOptions);
@@ -25,7 +25,7 @@ export declare class ConsumerFlows {
     withLock<T>(work: () => Promise<T>): Promise<T>;
     plan(walks: StoredWalk[], identity: NormalizedIdentity, options: PersistVerifiedOptions): Promise<ConsumerPlan>;
     checkManifest(manifest: WalkManifest): string;
-    private write;
+    writeManifest(manifest: WalkManifest): Promise<void>;
 }
 export type ConsumerFlowsOptions = {
     workspaceRoot: string;
@@ -125,6 +125,10 @@ export declare const MAESTRO_FLOW_SCHEMA_VERSION = "maestro/v1";
 export declare class ManifestChangedError extends Error {
     constructor();
 }
+export declare class ManifestLockedError extends Error {
+    readonly lockPath: string;
+    constructor(lockPath: string);
+}
 export declare class MissingFlowFileError extends FlowClosureError {
     constructor(path: string);
 }
@@ -171,6 +175,10 @@ export declare class WriterLock {
 export type CandidateClosureSnapshot = {
     candidatePath: string;
     closureSha256: string;
+};
+// referenced
+export type ClosureAssertion = FlowAssertion & {
+    reachedAlways: boolean;
 };
 // referenced
 export type ClosureFile = {
