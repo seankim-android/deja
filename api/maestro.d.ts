@@ -1,6 +1,6 @@
 // typescript 7.0.2
 // entry . (./src/index.ts)
-// exports: AdapterCacheIdentity, AdapterIdentityInput, AndroidAdapterOptions, COMPOSITION_MODEL_METRICS, CompositionRunnerObservation, CompositionRunnerTrace, IosAdapterOptions, LoginCompositionResult, MAESTRO_COMPOSITE_FLOW_SCHEMA, MAESTRO_FLOW_SCHEMA_VERSION, MaestroArtifactPaths, MaestroExecutionAdapter, MaestroFailureCategory, MaestroFailureClassification, MaestroFailureInput, MaestroFlowContainment, MaestroLoginComposer, MaestroLoginComposerOptions, MaestroPlatform, MaestroRunResult, MaestroRunnerError, MaestroRunnerErrorKind, MaestroWalkRunner, MaestroWalkRunnerOptions, RunMaestroOptions, SegmentVerificationResult, WebAdapterOptions, androidMaestroAdapter, classifyMaestroFailure, composeMaestroLoginFlow, countFlowAssertions, countMaestroAssertions, countMaestroSteps, iosMaestroAdapter, readCompositionRunnerTrace, readMaestroContinuation, resolveFlowPath, runMaestro, validateMaestroFlowReference, webMaestroAdapter
+// exports: AdapterCacheIdentity, AdapterIdentityInput, AndroidAdapterOptions, COMPOSITION_MODEL_METRICS, CompositionRunnerObservation, CompositionRunnerTrace, IosAdapterOptions, LoginCompositionResult, MAESTRO_COMPOSITE_FLOW_SCHEMA, MAESTRO_FLOW_SCHEMA_VERSION, MaestroArtifactPaths, MaestroCommandOptions, MaestroExecutionAdapter, MaestroFailureCategory, MaestroFailureClassification, MaestroFailureInput, MaestroFlowContainment, MaestroLoginComposer, MaestroLoginComposerOptions, MaestroPlatform, MaestroRunResult, MaestroRunnerError, MaestroRunnerErrorKind, MaestroWalkRunner, MaestroWalkRunnerOptions, RunMaestroOptions, SegmentVerificationResult, WebAdapterOptions, androidMaestroAdapter, classifyMaestroFailure, composeMaestroLoginFlow, countFlowAssertions, countMaestroAssertions, countMaestroSteps, iosMaestroAdapter, readCompositionRunnerTrace, readMaestroContinuation, resolveFlowPath, runMaestro, validateMaestroFlowReference, webMaestroAdapter
 export type AdapterCacheIdentity = AdapterIdentityInput & {
     adapter?: string;
     browser?: string;
@@ -61,6 +61,9 @@ export type MaestroArtifactPaths = {
     stderrPath: string;
     outputPath: string;
 };
+export type MaestroCommandOptions = {
+    junitPath?: string;
+};
 export interface MaestroExecutionAdapter {
     readonly id: string;
     readonly platform: MaestroPlatform;
@@ -68,7 +71,7 @@ export interface MaestroExecutionAdapter {
     readonly device: string;
     cacheIdentity(input: AdapterIdentityInput): AdapterCacheIdentity;
     buildFingerprint(workspaceRoot: string, buildPath: string): Promise<string>;
-    commandArguments(flowPath: string): string[];
+    commandArguments(flowPath: string, options?: MaestroCommandOptions): string[];
 }
 export type MaestroFailureCategory = 'selector' | 'navigation' | 'product_assertion' | 'runner' | 'timeout' | 'unknown';
 export type MaestroFailureClassification = {
@@ -145,6 +148,7 @@ export type MaestroWalkRunnerOptions = {
     adapter?: MaestroExecutionAdapter;
     androidSdkRoot?: string;
     javaHome?: string;
+    junitPath?: string;
 };
 export declare function readCompositionRunnerTrace(workspaceRoot: string, execution: ExecutionResult): Promise<CompositionRunnerTrace | null>;
 export declare function readMaestroContinuation(path: string): Promise<string>;
@@ -160,6 +164,7 @@ export type RunMaestroOptions = {
     timeoutMs: number;
     androidSdkRoot?: string;
     javaHome?: string;
+    junitPath?: string;
     artifacts?: {
         directory: string;
     };
