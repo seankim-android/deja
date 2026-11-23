@@ -236,6 +236,8 @@ export type MaestroWalkRunnerOptions = {
     junitPath?: string;
     appId?: string;
     crashReportDirectory?: string;
+    crashReportGraceMs?: number;
+    crashReportPollMs?: number;
 };
 export declare class McpMaestroTransport implements MaestroTransport {
     readonly kind: 'mcp';
