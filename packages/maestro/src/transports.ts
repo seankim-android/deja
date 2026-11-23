@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { maestroChildEnv } from './runtime-home.ts'
 import type { MaestroFlowResult, MaestroHierarchyResult, MaestroTransport } from './ios-exploration.ts'
 
 type Spawned = { stdout: string; stderr: string; exitCode: number | null; timedOut: boolean; durationMs: number }
@@ -38,10 +39,6 @@ function tail(text: string, lines = 12) {
   return text.trim().split('\n').slice(-lines).join('\n')
 }
 
-function maestroEnv(): NodeJS.ProcessEnv {
-  return { ...process.env, MAESTRO_CLI_NO_ANALYTICS: '1', MAESTRO_CLI_ANALYSIS_NOTIFICATION_DISABLED: 'true' }
-}
-
 export type ProcessMaestroTransportOptions = {
   /** Path to the `maestro` executable. */
   executable: string
@@ -63,7 +60,7 @@ export class ProcessMaestroTransport implements MaestroTransport {
       this.options.executable,
       ['--no-ansi', '--platform', 'ios', '--device', this.options.device, 'hierarchy'],
       this.options.timeoutMs ?? 120_000,
-      maestroEnv(),
+      maestroChildEnv(this.options.executable),
     )
     if (result.exitCode !== 0) throw new Error(`maestro hierarchy failed (${result.timedOut ? 'timeout' : result.exitCode}): ${tail(result.stderr)}`)
     // Maestro may print log lines before the JSON object.
@@ -82,7 +79,7 @@ export class ProcessMaestroTransport implements MaestroTransport {
         this.options.executable,
         ['--no-ansi', '--platform', 'ios', '--device', this.options.device, 'test', ...variables, flow],
         this.options.timeoutMs ?? 120_000,
-        maestroEnv(),
+        maestroChildEnv(this.options.executable),
       )
       return {
         passed: result.exitCode === 0 && !result.timedOut,
@@ -188,7 +185,7 @@ export class McpMaestroTransport implements MaestroTransport {
   private start(): Promise<void> {
     if (this.ready) return this.ready
     const started = performance.now()
-    const child = spawn(this.options.executable, ['mcp'], { env: maestroEnv(), stdio: ['pipe', 'pipe', 'ignore'] })
+    const child = spawn(this.options.executable, ['mcp'], { env: maestroChildEnv(this.options.executable), stdio: ['pipe', 'pipe', 'ignore'] })
     this.child = child
     this.buffer = ''
     child.once('error', error => this.fail(child, error))

@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process'
 import type { MaestroExecutionAdapter, MaestroPlatform } from './platform-adapter.ts'
+import { maestroChildEnv } from './runtime-home.ts'
 import { realpathSync, statSync } from 'node:fs'
 import { mkdir, realpath, writeFile } from 'node:fs/promises'
 import { delimiter, dirname, resolve, sep } from 'node:path'
@@ -58,6 +59,7 @@ export {
   pinnedExecutablePath,
   probeMaestroVersion,
   resolveMaestroEngine,
+  withoutJvmNotices,
   systemUnzip,
   verifyInstalledEngine,
   type EngineRangeStatus,
@@ -70,6 +72,12 @@ export {
   type ResolvedEngine,
   type ZipExtractor,
 } from './engine.ts'
+export {
+  RUNTIME_HOME_OVERRIDE_DIRECTORY,
+  maestroChildEnv,
+  maestroRuntimeHome,
+  type MaestroChildEnvOptions,
+} from './runtime-home.ts'
 
 export { escapeRegex, idSelector, tapSegment, waitVisibleSegment } from './selectors.ts'
 
@@ -243,11 +251,7 @@ function validateOptions(options: RunMaestroOptions) {
 }
 
 function maestroEnvironment(options: RunMaestroOptions) {
-  const env: NodeJS.ProcessEnv = {
-    ...process.env,
-    MAESTRO_CLI_NO_ANALYTICS: '1',
-    MAESTRO_CLI_ANALYSIS_NOTIFICATION_DISABLED: 'true',
-  }
+  const env = maestroChildEnv(options.executable)
   const pathPrefixes: string[] = []
   if (options.androidSdkRoot) {
     env.ANDROID_HOME = options.androidSdkRoot

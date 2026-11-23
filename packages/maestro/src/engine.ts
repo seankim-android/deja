@@ -6,6 +6,7 @@ import { homedir } from 'node:os'
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path'
 import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
+import { maestroChildEnv } from './runtime-home.ts'
 
 /**
  * The one Maestro release this Déjà release runs by default. No silent upgrades: a new pin is a
@@ -275,11 +276,16 @@ export type ResolveEngineOptions = {
   probeVersion?: (executable: string) => Promise<string>
 }
 
+/** The JVM prints "Picked up JAVA_TOOL_OPTIONS: ..." (with our runtime path) on stderr. It is not version text. */
+export function withoutJvmNotices(output: string) {
+  return output.split('\n').filter(line => !/^(NOTE: )?Picked up (JAVA_TOOL_OPTIONS|JDK_JAVA_OPTIONS|_JAVA_OPTIONS)/.test(line)).join('\n')
+}
+
 export function probeMaestroVersion(executable: string, timeoutMs = 20_000) {
   return new Promise<string>((resolveProbe, reject) => {
     const child = spawn(executable, ['--version'], {
       stdio: ['ignore', 'pipe', 'pipe'],
-      env: { ...process.env, MAESTRO_CLI_NO_ANALYTICS: '1', MAESTRO_CLI_ANALYSIS_NOTIFICATION_DISABLED: 'true' },
+      env: maestroChildEnv(executable),
     })
     let out = ''
     child.stdout.setEncoding('utf8')
@@ -291,7 +297,7 @@ export function probeMaestroVersion(executable: string, timeoutMs = 20_000) {
       reject(new Error(`"${executable} --version" did not finish within ${timeoutMs} ms`))
     }, timeoutMs)
     child.once('error', error => { clearTimeout(timer); reject(error) })
-    child.once('close', () => { clearTimeout(timer); resolveProbe(out) })
+    child.once('close', () => { clearTimeout(timer); resolveProbe(withoutJvmNotices(out)) })
   })
 }
 

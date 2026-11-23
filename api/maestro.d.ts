@@ -1,6 +1,6 @@
 // typescript 7.0.2
 // entry . (./src/index.ts)
-// exports: AdapterCacheIdentity, AdapterIdentityInput, AndroidAdapterOptions, COMPOSITION_MODEL_METRICS, CompositionRunnerObservation, CompositionRunnerTrace, EngineRangeStatus, EngineSource, FetchLike, FindCrashReportOptions, InstallEngineOptions, InstallEngineResult, IosAdapterOptions, IosExplorationDriverOptions, LoginCompositionResult, MAESTRO_COMPOSITE_FLOW_SCHEMA, MAESTRO_ENGINE_PIN, MAESTRO_FLOW_SCHEMA_VERSION, MAESTRO_TESTED_RANGE, MaestroArtifactPaths, MaestroCommandOptions, MaestroCrashSignal, MaestroEngineError, MaestroEnginePin, MaestroExecutionAdapter, MaestroFailureCategory, MaestroFailureClassification, MaestroFailureInput, MaestroFlowContainment, MaestroFlowResult, MaestroHierarchyResult, MaestroLoginComposer, MaestroLoginComposerOptions, MaestroPlatform, MaestroRunResult, MaestroRunnerError, MaestroRunnerErrorKind, MaestroTransport, MaestroWalkRunner, MaestroWalkRunnerOptions, McpMaestroTransport, McpMaestroTransportOptions, ProcessMaestroTransport, ProcessMaestroTransportOptions, ResolveEngineOptions, ResolvedEngine, RunMaestroOptions, SegmentVerificationResult, WebAdapterOptions, ZipExtractor, androidMaestroAdapter, assertSafeEntries, checkMaestroRange, classifyMaestroFailure, composeMaestroLoginFlow, countFlowAssertions, countMaestroAssertions, countMaestroSteps, defaultCrashReportDirectory, dejaHome, detectCrashInOutput, engineDirectory, escapeRegex, findCrashReport, idSelector, installMaestroEngine, iosExplorationDriver, iosFingerprintRules, iosMaestroAdapter, normalizeEngineVersion, parseMaestroHierarchy, parseMaestroVersion, pinnedExecutablePath, probeMaestroVersion, readCompositionRunnerTrace, readMaestroContinuation, resolveFlowPath, resolveMaestroEngine, runMaestro, systemUnzip, tapSegment, validateMaestroFlowReference, verifyInstalledEngine, waitVisibleSegment, webMaestroAdapter
+// exports: AdapterCacheIdentity, AdapterIdentityInput, AndroidAdapterOptions, COMPOSITION_MODEL_METRICS, CompositionRunnerObservation, CompositionRunnerTrace, EngineRangeStatus, EngineSource, FetchLike, FindCrashReportOptions, InstallEngineOptions, InstallEngineResult, IosAdapterOptions, IosExplorationDriverOptions, LoginCompositionResult, MAESTRO_COMPOSITE_FLOW_SCHEMA, MAESTRO_ENGINE_PIN, MAESTRO_FLOW_SCHEMA_VERSION, MAESTRO_TESTED_RANGE, MaestroArtifactPaths, MaestroChildEnvOptions, MaestroCommandOptions, MaestroCrashSignal, MaestroEngineError, MaestroEnginePin, MaestroExecutionAdapter, MaestroFailureCategory, MaestroFailureClassification, MaestroFailureInput, MaestroFlowContainment, MaestroFlowResult, MaestroHierarchyResult, MaestroLoginComposer, MaestroLoginComposerOptions, MaestroPlatform, MaestroRunResult, MaestroRunnerError, MaestroRunnerErrorKind, MaestroTransport, MaestroWalkRunner, MaestroWalkRunnerOptions, McpMaestroTransport, McpMaestroTransportOptions, ProcessMaestroTransport, ProcessMaestroTransportOptions, RUNTIME_HOME_OVERRIDE_DIRECTORY, ResolveEngineOptions, ResolvedEngine, RunMaestroOptions, SegmentVerificationResult, WebAdapterOptions, ZipExtractor, androidMaestroAdapter, assertSafeEntries, checkMaestroRange, classifyMaestroFailure, composeMaestroLoginFlow, countFlowAssertions, countMaestroAssertions, countMaestroSteps, defaultCrashReportDirectory, dejaHome, detectCrashInOutput, engineDirectory, escapeRegex, findCrashReport, idSelector, installMaestroEngine, iosExplorationDriver, iosFingerprintRules, iosMaestroAdapter, maestroChildEnv, maestroRuntimeHome, normalizeEngineVersion, parseMaestroHierarchy, parseMaestroVersion, pinnedExecutablePath, probeMaestroVersion, readCompositionRunnerTrace, readMaestroContinuation, resolveFlowPath, resolveMaestroEngine, runMaestro, systemUnzip, tapSegment, validateMaestroFlowReference, verifyInstalledEngine, waitVisibleSegment, webMaestroAdapter, withoutJvmNotices
 export type AdapterCacheIdentity = AdapterIdentityInput & {
     adapter?: string;
     browser?: string;
@@ -113,6 +113,14 @@ export type MaestroArtifactPaths = {
     stderrPath: string;
     outputPath: string;
 };
+export declare function maestroChildEnv(executable: string, options?: MaestroChildEnvOptions): NodeJS.ProcessEnv;
+export type MaestroChildEnvOptions = {
+    env?: NodeJS.ProcessEnv;
+    home?: string;
+    pin?: MaestroEnginePin;
+    realHome?: string;
+    skipCreate?: boolean;
+};
 export type MaestroCommandOptions = {
     junitPath?: string;
 };
@@ -210,6 +218,7 @@ export type MaestroRunResult = {
     errors: MaestroRunnerError[];
     artifacts?: MaestroArtifactPaths;
 };
+export declare function maestroRuntimeHome(executable: string, options?: MaestroChildEnvOptions): string;
 export interface MaestroTransport {
     readonly kind: 'process' | 'mcp';
     hierarchy(): Promise<MaestroHierarchyResult>;
@@ -321,6 +330,7 @@ export type RunMaestroOptions = {
         directory: string;
     };
 };
+export declare const RUNTIME_HOME_OVERRIDE_DIRECTORY = "override";
 export type SegmentVerificationResult = {
     status: 'verified' | 'rejected';
     passed: boolean;
@@ -340,6 +350,7 @@ export type WebAdapterOptions = {
     adapterId?: string;
 };
 export declare function webMaestroAdapter(options?: WebAdapterOptions): MaestroExecutionAdapter;
+export declare function withoutJvmNotices(output: string): string;
 export type ZipExtractor = {
     list(zipPath: string): Promise<string[]>;
     extract(zipPath: string, destination: string): Promise<void>;
