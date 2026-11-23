@@ -467,15 +467,16 @@ What the server will not do, whatever a tool call says:
   keys), plus the values of key-like environment variables and the shapes of common secrets. An environment variable is key-like when
   its name (split on `_`, `-`, `.` and camelCase, with trailing digits dropped) contains PASSWORD, PASSWD, SECRET, TOKEN,
   APIKEY, CREDENTIAL, PRIVATEKEY or ACCESSKEY anywhere (`PGPASSWORD`, `APITOKEN`, `TOKEN2`), or has a whole part KEY, PASS, PWD,
-  AUTH, SESSION, COOKIE, PAT, JWT or PRIVATE, or a part that is API, SECRET, ACCESS, PRIVATE, DB, SSH, AUTH, SIGNING, ENCRYPTION
-  or MASTER followed by KEY or PASS (`DBPASS`, `SSHKEY`). `KEYBOARD`, `MONKEY`, `KEYS_DIR`, `AUTHOR`, `SESSIONNAME`, `PASSAGE` and
+  AUTH, SESSION, COOKIE, PAT, JWT, SK or PRIVATE, or a part that is API, SECRET, ACCESS, PRIVATE, DB, SSH, AUTH, SIGNING, ENCRYPTION,
+  MASTER or PG followed by KEY or PASS (`DBPASS`, `SSHKEY`, `PGPASS`). `KEYBOARD`, `MONKEY`, `KEYS_DIR`, `AUTHOR`, `SESSIONNAME`, `PASSAGE` and
   `COMPASS` do not match, and the shell's own `PWD` and `OLDPWD` are left out. A key-like variable always redacts its value:
   from 4 characters for password-type names (`PASSWORD`, `PASSWD`, `PASS`, `PWD`), from 8 for the others. So an ordinary word in one
   (a `KEY` set to `dvorak-layout`) is hidden too; hiding too much is the safe side. A secret in a variable whose name has none of these words is
   caught only if its value has one of the shapes below. Value shapes
-  redacted anywhere: `sk-`, `sk_`, `pk-`, `pk_`, `rk-`, `rk_` keys, `ghp_`, `gho_`, `ghs_`, `ghu_` and `github_pat_` tokens, `AKIA` and
-  `ASIA` AWS key IDs, `xoxa-`, `xoxb-`, `xoxp-` and `xoxr-` Slack tokens, `Bearer` tokens of 20 or more characters, and the password
-  in any `scheme://user:password@host` URL (only the password part). Artifact paths are relative to the workspace.
+  redacted anywhere: `sk-`, `sk_`, `pk-`, `pk_`, `rk-`, `rk_` keys, `ghp_`, `gho_`, `ghs_`, `ghu_`, `ghr_` and `github_pat_` tokens, `AKIA` and
+  `ASIA` AWS key IDs, `xoxa-`, `xoxb-`, `xoxe-`, `xoxp-`, `xoxr-` and `xoxs-` Slack tokens, `Bearer` tokens of 20 or more characters, and the password
+  in any `scheme://user:password@host` URL (only the password part, which runs to the last `@` before the path; the user may be empty).
+  Every pattern is bounded and linear: a 1 MB hostile string goes through the redactor in well under 100 ms (tested). Artifact paths are relative to the workspace.
 - One writer per store: a second `deja_run`, `deja_remember` or `deja_explore` while one is running is
   refused at once with `error.code` `STORE_LOCKED`. `deja_list` and `deja_inspect` never take the lock.
   Run one `deja mcp --store <id>` per device.

@@ -105,9 +105,9 @@ const TOOLS: Record<string, ToolSpec> = {
 /** Distinctive words that almost never occur in an ordinary name: matched anywhere in the name (`PGPASSWORD`, `APITOKEN`). */
 const SECRET_WORDS = ['PASSWORD', 'PASSWD', 'SECRET', 'TOKEN', 'APIKEY', 'CREDENTIAL', 'PRIVATEKEY', 'ACCESSKEY']
 /** Short or ambiguous words: matched only as a whole part of the name (`SSH_KEY`, not `KEYBOARD`). */
-const SECRET_PARTS = new Set(['KEY', 'PASS', 'PWD', 'AUTH', 'SESSION', 'COOKIE', 'PAT', 'JWT', 'PRIVATE'])
+const SECRET_PARTS = new Set(['KEY', 'PASS', 'PWD', 'AUTH', 'SESSION', 'COOKIE', 'PAT', 'JWT', 'PRIVATE', 'SK'])
 /** `DBPASS`, `SSHKEY`: a part that ends in KEY or PASS after one of these is still a secret; `COMPASS`, `MONKEY` are not. */
-const SECRET_PREFIXES = new Set(['API', 'SECRET', 'ACCESS', 'PRIVATE', 'DB', 'SSH', 'AUTH', 'SIGNING', 'ENCRYPTION', 'MASTER'])
+const SECRET_PREFIXES = new Set(['API', 'SECRET', 'ACCESS', 'PRIVATE', 'DB', 'SSH', 'AUTH', 'SIGNING', 'ENCRYPTION', 'MASTER', 'PG'])
 
 /** The shortest value worth hiding: 4 for password-type names (`hunter2`), 8 for every other key-like name. */
 const PASSWORD_FLOOR = 4
@@ -160,13 +160,15 @@ export function providerKeyRedactor(env: NodeJS.ProcessEnv): Redactor {
     let redacted = text
     for (const value of values) redacted = redacted.split(value).join('<redacted-secret>')
     return redacted
-      // scheme://user:password@host (DATABASE_URL, REDIS_URL): only the password goes.
-      .replace(/([A-Za-z][A-Za-z0-9+.-]*:\/\/[^\s:/?#@]+:)[^\s@/]+(@)/g, '$1<redacted-secret>$2')
+      // scheme://user:password@host (DATABASE_URL, REDIS_URL, an empty user too): only the password goes. It runs to the
+      // last `@` before the path, so a raw `@` inside it does not leak the tail. Every run is bounded and a match can only
+      // start at the start of a scheme, so a long hostile string cannot make this quadratic.
+      .replace(/(?<![A-Za-z0-9+.-])([A-Za-z][A-Za-z0-9+.-]{0,31}:\/\/[^\s:/?#@]{0,256}:)[^\s/?#]{1,1024}(?=@)/g, '$1<redacted-secret>')
       .replace(/(?<![A-Za-z0-9_-])(?:sk|pk|rk)[-_][A-Za-z0-9_-]{16,}/g, '<redacted-secret>')
-      .replace(/(?<![A-Za-z0-9_-])gh[pous]_[A-Za-z0-9]{20,}/g, '<redacted-secret>')
+      .replace(/(?<![A-Za-z0-9_-])gh[pousr]_[A-Za-z0-9]{20,}/g, '<redacted-secret>')
       .replace(/(?<![A-Za-z0-9_-])github_pat_[A-Za-z0-9_]{20,}/g, '<redacted-secret>')
       .replace(/(?<![A-Z0-9])(?:AKIA|ASIA)[A-Z0-9]{16}(?![A-Z0-9])/g, '<redacted-secret>')
-      .replace(/(?<![A-Za-z0-9_-])xox[abpr]-[A-Za-z0-9-]{10,}/g, '<redacted-secret>')
+      .replace(/(?<![A-Za-z0-9_-])xox[abeprs]-[A-Za-z0-9-]{10,}/g, '<redacted-secret>')
       .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]{20,}/gi, 'Bearer <redacted-secret>')
   }
 }
