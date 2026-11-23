@@ -40,6 +40,11 @@ function formatDuration(milliseconds: number) {
 }
 
 function lifecycleCopy(report: RunResult) {
+  if (report.replayedOnNewBuild) {
+    return report.passed
+      ? 'Stale build → last verified YAML replayed on an unverified build → stored for this build'
+      : `Stale build → last verified YAML replayed on an unverified build → ${report.outcome}, nothing stored`
+  }
   switch (report.outcome) {
     case 'cold-recorded': return 'Cache miss → verified cold exploration → reusable walk stored'
     case 'passed': return 'Exact local hit → standalone YAML replay → validation recorded'

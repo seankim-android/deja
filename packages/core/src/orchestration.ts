@@ -8,6 +8,7 @@ import {
   type RunReporter,
   type SelectorRepairer,
   type SemanticRetrievalOptions,
+  type StaleBuildPolicy,
   type StoredWalk,
   type WalkExplorer,
   type WalkIdentity,
@@ -37,6 +38,11 @@ export type DejaDependencies = {
   createRepairer?: () => SelectorRepairer
   /** Optional WALK-016 proof. Its provider factory is lazy and exact hits never invoke it. */
   semantic?: SemanticRetrievalOptions
+  /**
+   * Opt-in WALK-021 policy, used only on a stale-build miss with no repairer. Absent means the
+   * stale build is rejected as before. It never explores, repairs, or constructs a lazy factory.
+   */
+  staleBuild?: StaleBuildPolicy
   now?: () => Date
   artifactId?: (prefix: 'run' | 'remember') => string
 }
@@ -106,6 +112,11 @@ export class Deja {
         })
       }
       if (retrieval.miss.reason === 'stale-build') {
+        if (!this.dependencies.createRepairer &&
+            this.dependencies.staleBuild === 'replay-last-verified') {
+          const replayed = await this.replayLastVerified(identity, missStart)
+          if (replayed) return replayed
+        }
         if (!this.dependencies.createRepairer) {
           return this.finish(missStart, {
             outcome: 'repair-rejected', passed: false, modelCalls: 0,
@@ -211,6 +222,98 @@ export class Deja {
     })
   }
 
+  /**
+   * Replay the latest verified walk of another build against this build. Returns null when no
+   * eligible previous walk exists, so the caller keeps its ordinary stale-build rejection.
+   */
+  private async replayLastVerified(
+    identity: WalkIdentity,
+    missStart: RunStart,
+  ): Promise<RunResult | null> {
+    const { store } = this.dependencies
+    // The store re-hashes the stored YAML against its recorded checksum here and throws on any
+    // mismatch, exactly as an exact hit does. No other await sits between this and the replay.
+    const previous = await store.lookupPreviousSuccessful(identity)
+    if (previous.status !== 'hit' || !sameReplayFamily(previous.walk, identity)) return null
+    const walk = previous.walk
+    const replay = {
+      policy: 'replay-last-verified' as const,
+      previousBuildFingerprint: walk.buildFingerprint,
+      previousFlowSha256: walk.flowSha256,
+      previousValidatedAt: walk.lastValidation.at,
+    }
+    const execution = await this.dependencies.runner.run({
+      flowPath: previous.flowPath,
+      artifactDirectory: `.deja/reports/${this.artifactId('run')}`,
+    })
+    const replayStart = { ...missStart, execution }
+    const modelCallBasis = 'stale build replayed the last verified YAML; explorer, repairer, and model factories were not invoked'
+
+    if (!execution.passed) {
+      // The new build has no walk to mark failed, and the previous build's walk stays verified.
+      // Nothing is persisted, repaired, or explored.
+      const productRegression = execution.failure?.category === 'product_assertion'
+      return this.finish(replayStart, {
+        outcome: productRegression ? 'product-regression' : 'failed', passed: false,
+        modelCalls: 0, modelCallBasis,
+        assertions: execution.assertions, repairCount: 0,
+        yamlPath: walk.flowPath, yamlSha256: walk.flowSha256,
+        failure: execution.failure, artifacts: execution.artifacts, diffs: [],
+        errors: [
+          `The last verified walk (build ${walk.buildFingerprint}) failed on this unverified build; it was not stored, repaired, or explored`,
+        ],
+        replayedOnNewBuild: { ...replay, recordedForNewBuild: false },
+      })
+    }
+
+    // Re-check the replayed bytes are still the verified ones before they become this build's walk.
+    const current = await store.lookupPreviousSuccessful(identity)
+    if (current.status !== 'hit' || current.walk.flowSha256 !== walk.flowSha256 ||
+        current.walk.buildFingerprint !== walk.buildFingerprint) {
+      return this.finish(replayStart, {
+        outcome: 'failed', passed: false, modelCalls: 0, modelCallBasis,
+        assertions: execution.assertions, repairCount: 0,
+        yamlPath: walk.flowPath, yamlSha256: walk.flowSha256,
+        failure: null, artifacts: execution.artifacts, diffs: [],
+        errors: ['The last verified walk changed during replay; nothing was stored for this build'],
+        replayedOnNewBuild: { ...replay, recordedForNewBuild: false },
+      })
+    }
+    const persisted = await store.persistVerifiedCandidate({
+      identity,
+      candidatePath: current.flowPath,
+      validation: { passed: true, at: execution.endedAt },
+      origin: 'remember',
+      ...(walk.exploration ? { exploration: walk.exploration } : {}),
+    })
+    if (persisted.flowSha256 !== walk.flowSha256) {
+      // Bytes changed between the checksum check and the write. Mark the new entry failed so the
+      // next lookup is a failed-validation miss, never an exact hit on bytes that never ran.
+      await store.recordValidation(identity, { passed: false, at: execution.endedAt })
+      return this.finish(replayStart, {
+        outcome: 'failed', passed: false, modelCalls: 0, modelCallBasis,
+        assertions: execution.assertions, repairCount: 0,
+        yamlPath: persisted.flowPath, yamlSha256: persisted.flowSha256,
+        failure: null, artifacts: execution.artifacts, diffs: [],
+        errors: ['Stored YAML checksum differs from the replayed walk; it was marked failed for this build'],
+        replayedOnNewBuild: { ...replay, recordedForNewBuild: false },
+      })
+    }
+    return this.finish(replayStart, {
+      outcome: 'passed', passed: true, modelCalls: 0, modelCallBasis,
+      assertions: execution.assertions, repairCount: 0,
+      yamlPath: persisted.flowPath, yamlSha256: persisted.flowSha256,
+      failure: null,
+      artifacts: [
+        ...execution.artifacts,
+        { kind: 'yaml', path: persisted.flowPath, sha256: persisted.flowSha256 },
+        { kind: 'memory', path: persisted.storedMetadataPath },
+      ],
+      diffs: [], errors: [],
+      replayedOnNewBuild: { ...replay, recordedForNewBuild: true },
+    })
+  }
+
   async explore(identity: WalkIdentity): Promise<RunResult> {
     const start = this.base(identity, 'explore', 'not-checked')
     const exploration = await this.dependencies.createExplorer().explore({ identity })
@@ -286,6 +389,13 @@ export class Deja {
       repair,
     }
   }
+}
+
+/** lookupPreviousSuccessful ignores adapter/browser; a replay must stay inside the same family. */
+function sameReplayFamily(walk: StoredWalk, identity: WalkIdentity) {
+  return (walk.adapter ?? null) === (identity.adapter ?? null) &&
+    (walk.browser ?? null) === (identity.browser ?? null) &&
+    walk.buildFingerprint !== identity.buildFingerprint
 }
 
 function walkIdentity(walk: StoredWalk): WalkIdentity {

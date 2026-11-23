@@ -254,6 +254,23 @@ export type CacheStatus = 'hit' | 'miss' | 'not-checked'
 export type RunOutcome = 'passed' | 'remembered' | 'cold-recorded' | 'repaired' |
   'rejected' | 'exploration-rejected' | 'product-regression' | 'repair-rejected' | 'failed'
 
+/**
+ * Opt-in WALK-021 policy for a stale-build miss with no repairer: replay the latest verified walk's
+ * stored YAML against the new build. A pass stores that same verified YAML for the new build.
+ */
+export type StaleBuildPolicy = 'replay-last-verified'
+
+/** Optional additive run-report data; schema 1 reports without it remain readable. */
+export type NewBuildReplayReport = {
+  policy: StaleBuildPolicy
+  /** The build the replayed YAML was last verified on; never the build this run executed. */
+  previousBuildFingerprint: string
+  previousFlowSha256: string
+  previousValidatedAt: string
+  /** True only when the pass was stored as a verified walk for the new build fingerprint. */
+  recordedForNewBuild: boolean
+}
+
 export type RunResult = {
   schemaVersion: typeof WALK_RESULT_SCHEMA_VERSION
   command: 'explore' | 'run' | 'remember'
@@ -280,6 +297,7 @@ export type RunResult = {
   execution?: ExecutionResult
   exploration?: ExplorationResult
   repair?: RepairResult
+  replayedOnNewBuild?: NewBuildReplayReport
 }
 
 export type ReportReceipt = {
