@@ -1,4 +1,4 @@
-import { open, readdir, stat } from 'node:fs/promises'
+import { open, lstat, readdir } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 
@@ -20,6 +20,10 @@ export type MaestroCrashSignal = {
  * `AppCrashReport.message` ("App crashed"), AndroidDriver's "App crashed (unknown cause)", and
  * IOSDriver's "<label>: <bundle> (pid N) was terminated by <signal>." Anchored to the whole line, so
  * a flow or app that merely prints similar words inside another message does not match.
+ *
+ * Known limit: The 2.12.0 sources show no prefix or format on these lines that a flow cannot produce, so a flow
+ * whose own output (for example an `echo`) is exactly one of these lines can spoof the label. The
+ * label is advisory and never repair-eligible, so the cost is a wrong label, not a repair.
  */
 const CRASH_LINES = [
   /^App crashed(?: \((?:SIG[A-Z]+|signal \d+|unknown cause)\))?$/,
@@ -49,6 +53,8 @@ export type FindCrashReportOptions = {
 
 // Maestro's IPSParser reads these keys. The header and the first part of the body are enough.
 const HEADER_BYTES = 32 * 1024
+/** Real reports run to hundreds of KB; anything far beyond is not a crash report. */
+const MAX_REPORT_BYTES = 64 * 1024 * 1024
 const PROCESS_NAME = /^[A-Za-z0-9 ._+-]{1,64}$/
 
 function escapeRegex(text: string) {
@@ -84,8 +90,9 @@ export async function findCrashReport(options: FindCrashReportOptions): Promise<
   const inWindow: { name: string; mtimeMs: number }[] = []
   for (const name of names) {
     try {
-      const info = await stat(join(options.directory, name))
-      if (info.isFile() && info.mtimeMs >= options.sinceMs && info.mtimeMs <= options.untilMs) {
+      // lstat, and a regular file only: a symlink could point anywhere, so it is never read.
+      const info = await lstat(join(options.directory, name))
+      if (info.isFile() && !info.isSymbolicLink() && info.size <= MAX_REPORT_BYTES && info.mtimeMs >= options.sinceMs && info.mtimeMs <= options.untilMs) {
         inWindow.push({ name, mtimeMs: info.mtimeMs })
       }
     } catch {

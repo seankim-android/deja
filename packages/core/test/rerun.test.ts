@@ -220,4 +220,25 @@ describe('opt-in rerun of a failed replay (DEJA-7)', () => {
     expect(store.persists).toBe(0)
     expect(store.validations).toEqual([])
   })
+
+  test('--verify --rerun-failed: a rerun pass is flaky, and the manifest and history are untouched', async () => {
+    const store = new Store() as Store & { manifestPath?: string }
+    store.manifestPath = 'deja.walks.json'
+    const notValidated: LookupMiss = { status: 'miss', reason: 'not-validated', flowPath: '/consumer/flow.yaml' }
+    store.lookupResults = [notValidated]
+    const reporter = new Reporter()
+    const results = [run(false, 'selector'), run(true)]
+    let calls = 0
+    const deja = new Deja({
+      store, reporter, artifactId: prefix => `${prefix}-test`,
+      runner: { run: async () => results[calls++] },
+      createExplorer: () => { throw new Error('no explorer') },
+    })
+    const result = await deja.run(identity, { verify: true, rerunFailed: true })
+    expect(result).toMatchObject({ outcome: 'flaky', passed: false, modelCalls: 0 })
+    expect(result.attempts?.map(attempt => attempt.passed)).toEqual([false, true])
+    expect(calls).toBe(2)
+    expect(store.persists).toBe(0)
+    expect(store.validations).toEqual([])
+  })
 })

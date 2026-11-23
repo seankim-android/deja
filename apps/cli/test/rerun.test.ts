@@ -121,11 +121,11 @@ describe('deja run --rerun-failed', () => {
     try {
       await execute(root, ['remember', 'checkout', '--flow', 'flows/checkout.yaml'])
       const different = await execute(root, ['run', 'checkout', '--rerun-failed'], {
-        DEJA_FAKE_MAESTRO_SCRIPT: 'selector,product', DEJA_FAKE_MAESTRO_COUNTER: join(temporary, 'c'),
+        DEJA_FAKE_MAESTRO_SCRIPT: 'crash,product', DEJA_FAKE_MAESTRO_COUNTER: join(temporary, 'c'),
       })
       expect(different.exitCode).toBe(7)
       expect((await latest(root)).attempts?.map(attempt => attempt.failure?.category))
-        .toEqual(['selector', 'product_assertion'])
+        .toEqual(['app_crash', 'product_assertion'])
     } finally {
       await rm(temporary, { recursive: true, force: true })
     }

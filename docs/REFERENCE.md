@@ -301,6 +301,18 @@ timeout or a runner error still wins over it. Two signals count:
    and keeps only its file name and process name (`failure.crash.reportFile`, `.process`). It never
    copies the contents, which can hold personal data.
 
+Limits of the labels, which stay advisory:
+
+- A crash report can land a few seconds after the process dies, so after a failed iOS attempt Déjà
+  waits up to 10 s for it (`crashReportGraceMs`) before the next attempt starts. A report is
+  attributed to the attempt whose window it falls in. A failed assertion never waits.
+- The `.ips` match is by app ID and time only. Parallel runs of the same app ID on one Mac (several
+  simulators, several worktrees) can give a run a false `app_crash` from another run's crash. A
+  report does not name the simulator, so this cannot be checked. Symlinks are skipped.
+- The 2.12.0 sources show no prefix or format on those lines that a flow cannot produce (not seen in live output). A flow whose own
+  output (for example `echo`) is exactly one of those lines can spoof the label. The cost is a wrong
+  advisory label, never a repair.
+
 Not yet recorded on a real simulator: see `spikes/003-ios-deja/README.md` for the first-launch crash
 mode that will produce the evidence.
 

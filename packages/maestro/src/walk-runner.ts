@@ -32,6 +32,14 @@ export type MaestroWalkRunnerOptions = {
   appId?: string
   /** Seam: where crash reports are written. Defaults to ~/Library/Logs/DiagnosticReports. */
   crashReportDirectory?: string
+  /**
+   * How long after a failed run a crash report may still land. The system often writes it a few
+   * seconds after the process dies. Default 10 s. The next attempt starts only after this wait ends
+   * or the report is found, so a report is attributed to the attempt it was written for.
+   */
+  crashReportGraceMs?: number
+  /** Poll interval while waiting inside the grace window. Default 500 ms. */
+  crashReportPollMs?: number
 }
 
 function portable(root: string, path: string) {
@@ -107,12 +115,23 @@ export class MaestroWalkRunner implements WalkRunner {
   private async crashReportSignal(result: MaestroRunResult) {
     if (result.passed || this.options.adapter?.platform !== 'ios' || !this.options.appId) return null
     if (detectCrashInOutput(result.output)) return null
-    return findCrashReport({
+    // A failed assertion is a product answer, not a symptom a crash could hide behind, so it never waits.
+    const grace = /^Assertion is false:/m.test(result.output) ? 0 : this.options.crashReportGraceMs ?? 10_000
+    const poll = this.options.crashReportPollMs ?? 500
+    const search = {
       directory: this.options.crashReportDirectory ?? defaultCrashReportDirectory(),
       appId: this.options.appId,
       sinceMs: Date.parse(result.startedAt),
-      untilMs: Date.parse(result.endedAt),
-    })
+      untilMs: Date.parse(result.endedAt) + grace,
+    }
+    // Poll until the report lands or the grace window closes. A report written later than that
+    // belongs to no attempt we can name, so it is not used.
+    const deadline = Date.now() + grace
+    for (;;) {
+      const found = await findCrashReport(search)
+      if (found || Date.now() >= deadline) return found
+      await new Promise(resolve => setTimeout(resolve, Math.min(poll, Math.max(1, deadline - Date.now()))))
+    }
   }
 
   async adapt(result: MaestroRunResult): Promise<ExecutionResult> {

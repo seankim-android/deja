@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
-import { mkdir, mkdtemp, rm, utimes, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, symlink, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -7,6 +7,8 @@ import {
   defaultCrashReportDirectory,
   detectCrashInOutput,
   findCrashReport,
+  iosMaestroAdapter,
+  MaestroWalkRunner,
 } from '../src/index.ts'
 
 const execution = [{ kind: 'execution' } as const]
@@ -163,5 +165,102 @@ describe('crash report finder', () => {
 
   test('the default directory is the macOS diagnostic reports folder', () => {
     expect(defaultCrashReportDirectory('/Users/example')).toBe('/Users/example/Library/Logs/DiagnosticReports')
+  })
+})
+
+describe('crash report hostile input and attribution', () => {
+  const appId = 'dev.deja.ios.checkout'
+  const header = `{"app_name":"P"}\n{"procName":"P","bundleInfo":{"CFBundleIdentifier":"${appId}"}}`
+
+  test('a symlinked .ips is never read, even when it points at a real matching report', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'deja-ips-link-'))
+    try {
+      const target = join(dir, 'target.txt')
+      await writeFile(target, header)
+      await symlink(target, join(dir, 'Link.ips'))
+      const now = Date.now()
+      expect(await findCrashReport({ directory: dir, appId, sinceMs: now - 60_000, untilMs: now + 60_000 })).toBeNull()
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('an oversized report is matched from its head only, and an app ID past the head does not match', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'deja-ips-big-'))
+    try {
+      await writeFile(join(dir, 'Big.ips'), `${header}\n${'x'.repeat(5_000_000)}`)
+      await writeFile(join(dir, 'Far.ips'), `{"app_name":"P"}\n${' '.repeat(100_000)}"CFBundleIdentifier":"${appId}"`)
+      const now = Date.now()
+      const found = await findCrashReport({ directory: dir, appId, sinceMs: now - 60_000, untilMs: now + 60_000 })
+      expect(found).toEqual({ source: 'crash-report', reportFile: 'Big.ips', process: 'P' })
+      await rm(join(dir, 'Big.ips'))
+      expect(await findCrashReport({ directory: dir, appId, sinceMs: now - 60_000, untilMs: now + 60_000 })).toBeNull()
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('a report between two attempts belongs to the earlier one, not the next', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'deja-ips-attr-'))
+    try {
+      const end1 = Date.parse('2026-11-23T01:00:10Z')
+      const start2 = Date.parse('2026-11-23T01:00:14Z')
+      const end2 = Date.parse('2026-11-23T01:00:30Z')
+      await writeFile(join(dir, 'Late.ips'), header)
+      const landed = new Date('2026-11-23T01:00:12Z')
+      await utimes(join(dir, 'Late.ips'), landed, landed)
+      const grace = 10_000
+      expect(await findCrashReport({ directory: dir, appId, sinceMs: Date.parse('2026-11-23T01:00:00Z'), untilMs: end1 + grace }))
+        .toMatchObject({ reportFile: 'Late.ips' })
+      expect(await findCrashReport({ directory: dir, appId, sinceMs: start2, untilMs: end2 + grace })).toBeNull()
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('MaestroWalkRunner crash report written after the attempt ends', () => {
+  test('a report that lands a moment after a failed attempt gives app_crash, not selector', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'deja-ips-late-'))
+    const reports = join(dir, 'reports')
+    await mkdir(reports)
+    try {
+      const runner = new MaestroWalkRunner({
+        workspaceRoot: dir, executable: '/unused', device: 'sim', timeoutMs: 1000,
+        adapter: iosMaestroAdapter({ device: 'sim' }), appId: 'dev.deja.ios.checkout',
+        crashReportDirectory: reports, crashReportGraceMs: 3000, crashReportPollMs: 25,
+      })
+      const ended = new Date()
+      const output = 'Tap on id: checkout_button... FAILED\n\nElement not found: Id matching regex: checkout_button\n'
+      setTimeout(() => {
+        void writeFile(join(reports, 'Late-2026.ips'),
+          '{"app_name":"P"}\n{"procName":"P","bundleInfo":{"CFBundleIdentifier":"dev.deja.ios.checkout"}}')
+      }, 200)
+      const adapted = await runner.adapt({
+        platform: 'ios', device: 'sim', flowPath: join(dir, 'flow.yaml'),
+        startedAt: new Date(ended.getTime() - 1000).toISOString(), endedAt: ended.toISOString(),
+        durationMs: 1000, monotonicDurationMs: 1000, exitCode: 1, signal: null, timedOut: false,
+        passed: false, stdout: output, stderr: '', output, errors: [{ kind: 'execution', message: 'x' }],
+      })
+      expect(adapted.failure).toMatchObject({
+        category: 'app_crash', repairEligible: false, crash: { source: 'crash-report', reportFile: 'Late-2026.ips' },
+      })
+
+      // With no report in the grace window the same output stays the repair-eligible selector label.
+      const quiet = new MaestroWalkRunner({
+        workspaceRoot: dir, executable: '/unused', device: 'sim', timeoutMs: 1000,
+        adapter: iosMaestroAdapter({ device: 'sim' }), appId: 'dev.deja.ios.checkout',
+        crashReportDirectory: join(dir, 'empty'), crashReportGraceMs: 100, crashReportPollMs: 25,
+      })
+      const second = await quiet.adapt({
+        platform: 'ios', device: 'sim', flowPath: join(dir, 'flow.yaml'),
+        startedAt: new Date(Date.now() - 1000).toISOString(), endedAt: new Date().toISOString(),
+        durationMs: 1000, monotonicDurationMs: 1000, exitCode: 1, signal: null, timedOut: false,
+        passed: false, stdout: output, stderr: '', output, errors: [{ kind: 'execution', message: 'x' }],
+      })
+      expect(second.failure).toMatchObject({ category: 'selector', repairEligible: true })
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
   })
 })
