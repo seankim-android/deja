@@ -13,7 +13,7 @@ package without rewriting it normally.
 
 - App ID: `dev.deja.checkout`
 - Journey: login -> add Mochi sticker pack -> checkout -> order confirmation
-- Test-only input: `qa@deja.dev` / `testing123` (accepted by the local fixture app)
+- Test-only input: `qa@example.com` / `testing123` (accepted by the local fixture app)
 - Missing selector: the Checkout button has text but no stable resource ID in the first iteration
 - Product assertion: `Order #WC-1001` must appear after checkout
 

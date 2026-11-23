@@ -11,7 +11,7 @@ tags:
     id: screen_login
 - tapOn:
     id: username_input
-- inputText: qa@deja.dev
+- inputText: qa@example.com
 - tapOn:
     id: password_input
 - inputText: testing123

@@ -6,8 +6,8 @@ url: http://127.0.0.1:4174
 - assertVisible: Déjà Web Shop
 - tapOn:
     id: username
-- inputText: qa@deja.dev
-- assertVisible: qa@deja.dev
+- inputText: qa@example.com
+- assertVisible: qa@example.com
 - tapOn:
     id: password
 - inputText: testing123

@@ -12,7 +12,7 @@
   "fixtureCredentials": [
     {
       "label": "Fixture email",
-      "value": "qa@deja.dev"
+      "value": "qa@example.com"
     },
     {
       "label": "Fixture password",

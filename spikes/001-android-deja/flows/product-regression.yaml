@@ -12,8 +12,8 @@ appId: dev.deja.checkout
 - assertVisible: Déjà Shop
 - tapOn:
     id: dev.deja.checkout:id/username_input
-- inputText: qa@deja.dev
-- assertVisible: qa@deja.dev
+- inputText: qa@example.com
+- assertVisible: qa@example.com
 - tapOn:
     id: dev.deja.checkout:id/password_input
 - inputText: testing123

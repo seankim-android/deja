@@ -9,7 +9,7 @@ function bindFixture() {
   document.getElementById('login_button').addEventListener('click', () => {
     const email = document.getElementById('username').value
     const password = document.getElementById('password').value
-    if (email === 'qa@deja.dev' && password === 'testing123') showScreen('screen_catalog')
+    if (email === 'qa@example.com' && password === 'testing123') showScreen('screen_catalog')
     else document.getElementById('login_error').hidden = false
   })
   document.getElementById('add_to_cart').addEventListener('click', () => showScreen('screen_cart'))

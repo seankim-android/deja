@@ -44,7 +44,7 @@ async function fixture(goal = 'checkout') {
     buildPath,
     device: 'emulator-5554',
     fixtureCredentials: [
-      { label: 'Fixture email', value: 'qa@deja.dev' },
+      { label: 'Fixture email', value: 'qa@example.com' },
       { label: 'Fixture password', value: 'testing123' },
     ],
     openClawModel: 'cerebras/moonshotai-kimi-k3.1-pro-trial',

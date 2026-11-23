@@ -70,7 +70,7 @@ private struct CheckoutView: View {
                     .accessibilityIdentifier("login_error")
             }
             Button("Log in") {
-                if email == "qa@deja.dev" && password == "testing123" {
+                if email == "qa@example.com" && password == "testing123" {
                     loginError = ""
                     screen = .catalog
                 } else {
