@@ -40,7 +40,7 @@ describe('flow assertions (hash form version 1)', () => {
     expect(entries('- assertVisible:\n    id: "a"\n    enabled: true\n')).not.toEqual(base)
   })
 
-  test('records where an assertion sits and every runFlow condition', () => {
+  test('records where an assertion sits, and the parameters of every runFlow, repeat and retry', () => {
     const yaml = [
       '- repeat:',
       '    times: 2',
@@ -53,19 +53,35 @@ describe('flow assertions (hash form version 1)', () => {
       '    commands:',
       '      - assertVisible: "inline"',
       '- runFlow: ../subflows/type.yaml',
-      '- runFlow:',
-      '    file: ../subflows/other.yaml',
-      '    env:',
-      '      TEXT: "x"',
+      '- retry:',
+      '    maxRetries: 3',
+      '    file: ../subflows/flaky.yaml',
       '',
     ].join('\n')
     expect(entries(yaml)).toEqual([
+      '|repeat|params={"times":2}',
       'repeat>commands|assertVisible|{"id":"row"}',
-      '|runFlow|when={"visible":"Banner"}',
+      '|runFlow|params={"when":{"visible":"Banner"}}',
       'runFlow>commands|assertVisible|"inline"',
-      '|runFlow|when=null',
-      '|runFlow|when=null',
+      '|runFlow|params={}',
+      '|retry|params={"maxRetries":3}',
     ])
+  })
+
+  test('a weaker repeat, retry, condition or env value changes the entries', () => {
+    const base = (times: string, extra = '') => entries(
+      `- repeat:\n    times: ${times}\n    commands:\n      - assertVisible: "row"\n${extra}`)
+    expect(base('2')).not.toEqual(base('0'))
+    const looping = (condition: string) => entries(
+      `- repeat:\n    while:\n      visible: "${condition}"\n    commands:\n      - assertVisible: "row"\n`)
+    expect(looping('A')).not.toEqual(looping('B'))
+    const flow = (env: string) => entries(`- runFlow:\n    file: a.yaml\n    env:\n      CODE: "${env}"\n`)
+    expect(flow('1')).not.toEqual(flow('2'))
+    expect(flow('1')).toEqual(['|runFlow|params={}', 'runFlow|env|{"CODE":"1"}'])
+    expect(entries('appId: a\nenv:\n  NAME: x\n---\n- assertVisible: "${NAME}"\n'))
+      .toEqual(['|env|{"NAME":"x"}', '|assertVisible|"${NAME}"'])
+    // A label is not behavior.
+    expect(entries('- runFlow:\n    file: a.yaml\n    label: One\n')).toEqual(entries('- runFlow:\n    file: a.yaml\n    label: Two\n'))
   })
 
   test('finds assertions in every document and in onFlowStart', () => {

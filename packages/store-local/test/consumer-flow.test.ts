@@ -37,7 +37,7 @@ describe('closure assertions (hash form version 1)', () => {
     expect(closureAssertions(closure).map(assertion => assertion.entry).sort()).toEqual([
       '|assertNotVisible|{"id":"today.error"}',
       '|assertVisible|{"id":"screen.today"}',
-      '|runFlow|when=null',
+      '|runFlow|params={}',
       '|runScript|sha256=1bd1958618755ba737b2107d401518d9efac80e6baaf85b3a46c54ac44a6c6a9',
     ].sort())
   })
@@ -45,7 +45,7 @@ describe('closure assertions (hash form version 1)', () => {
   test('hash golden vector', async () => {
     const closure = await closureOf(files, '.maestro/flows/main.yaml')
     expect(closure.sha256).toBe('0390f482a200fb8e79b697e5d9cd8afaf313ed0c911aceb651762c1746e254d3')
-    expect(assertionsSha256(closure)).toBe('05b020748c3f356c9b070378a30696484631fb77fc89b7ca1694ae9f6af8ff0e')
+    expect(assertionsSha256(closure)).toBe('2bc5bbb3f2fd1d009dac2ab61f905cf72638efc31ef9d97440cc7912b46087a3')
   })
 
   test('is stable under reordering and file renames, and moves with a changed assertion or script', async () => {

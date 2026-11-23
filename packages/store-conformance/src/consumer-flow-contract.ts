@@ -253,6 +253,20 @@ export function runConsumerFlowContractTests(implementation: WalkStoreContractIm
           await expect(ctx.persist(store, { origin: 'verify' })).rejects.toBeInstanceOf(AssertionHashChangedError)
         }
         await ctx.write(MAIN, MAIN_YAML)
+        // The values an assertion depends on count too: env, and how often a repeat runs.
+        for (const edit of [
+          MAIN_YAML.replace('TEXT: "Popcorn"', 'TEXT: "Other"'),
+          MAIN_YAML.replace('---\n', 'env:\n  NAME: x\n---\n'),
+        ]) {
+          await ctx.write(MAIN, edit)
+          await expect(ctx.persist(store, { origin: 'verify' })).rejects.toBeInstanceOf(AssertionHashChangedError)
+        }
+        await ctx.write(MAIN, `${MAIN_YAML}- repeat:\n    times: 2\n    commands:\n      - tapOn: more\n`)
+        await ctx.persist(store, { assertionChange: 'accept' })
+        await ctx.write(MAIN, `${MAIN_YAML}- repeat:\n    times: 0\n    commands:\n      - tapOn: more\n`)
+        await expect(ctx.persist(store, { origin: 'verify' })).rejects.toBeInstanceOf(AssertionHashChangedError)
+        await ctx.write(MAIN, MAIN_YAML)
+        await ctx.persist(store, { assertionChange: 'accept' })
         // A script's bytes count: assertTrue can read what it sets.
         await ctx.write('.maestro/subflows/s.js', 'output.ok = true\n')
         await ctx.write(MAIN, `${MAIN_YAML}- runScript: ../subflows/s.js\n`)
@@ -517,7 +531,9 @@ export function runConsumerFlowContractTests(implementation: WalkStoreContractIm
         })
         try {
           await expect(ctx.persist(store)).rejects.toBeInstanceOf(InvalidWalkManifestError)
+          // Refused before anything was written: neither the manifest nor the store exists.
           expect(existsSync(join(ctx.workspaceRoot, MANIFEST))).toBe(false)
+          expect(existsSync(implementation.metadataPath(ctx.workspaceRoot))).toBe(false)
         } finally {
           await implementation.closeStore(store)
         }

@@ -368,6 +368,8 @@ export class ConsumerFlows {
     }
     const changed = !existing || serializeWalkManifest({ ...manifest, walks: [existing] }) !==
       serializeWalkManifest({ ...manifest, walks: [next] })
+    // Refuse before memory or the manifest is written, not after.
+    if (changed) this.checkManifest({ ...manifest, walks: [...manifest.walks.filter(item => manifestWalkKey(item) !== key), next] })
 
     const previous = walks.find(walk => sameLogical(walk, identity) && walk.closureSha256 === closure.sha256)
     const entry = { passed: true as const, at: options.validation.at, flowSha256: mainSha }
@@ -398,13 +400,19 @@ export class ConsumerFlows {
     }
   }
 
-  private async write(manifest: WalkManifest) {
+  /** Throws if the manifest's bytes would hold a fixture value. Never names the value. */
+  checkManifest(manifest: WalkManifest) {
     const text = serializeWalkManifest(manifest)
     for (const value of this.forbiddenValues) {
       if (text.includes(value)) {
         throw new InvalidWalkManifestError('the manifest would hold a fixture credential value; nothing was written')
       }
     }
+    return text
+  }
+
+  private async write(manifest: WalkManifest) {
+    const text = this.checkManifest(manifest)
     const { root, target } = await this.manifestFile()
     await mkdir(dirname(target), { recursive: true })
     const parent = await realpath(dirname(target))

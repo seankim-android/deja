@@ -24,6 +24,7 @@ export declare class ConsumerFlows {
     assertUnchanged(walks: StoredWalk[], identity: NormalizedIdentity): Promise<LookupHit | LookupMiss>;
     withLock<T>(work: () => Promise<T>): Promise<T>;
     plan(walks: StoredWalk[], identity: NormalizedIdentity, options: PersistVerifiedOptions): Promise<ConsumerPlan>;
+    checkManifest(manifest: WalkManifest): string;
     private write;
 }
 export type ConsumerFlowsOptions = {
