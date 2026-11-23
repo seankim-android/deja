@@ -103,6 +103,11 @@ export type McpMaestroTransportOptions = {
   executable: string
   device: string
   timeoutMs?: number
+  /**
+   * Arms a request timeout and returns a function that cancels it. Tests inject a manual one so a
+   * timeout fires when the test says so, never on real time. Defaults to `setTimeout`.
+   */
+  schedule?: (run: () => void, delayMs: number) => () => void
 }
 
 type Pending = {
@@ -110,6 +115,11 @@ type Pending = {
   owner: ReturnType<typeof spawn>
   resolve: (value: any) => void
   reject: (error: Error) => void
+}
+
+function defaultSchedule(run: () => void, delayMs: number) {
+  const timer = setTimeout(run, delayMs)
+  return () => clearTimeout(timer)
 }
 
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/
@@ -168,14 +178,14 @@ export class McpMaestroTransport implements MaestroTransport {
     const child = this.child
     return new Promise((resolve, reject) => {
       if (!child) return reject(new Error('maestro mcp is not running'))
-      const timer = setTimeout(() => {
+      const cancel = (this.options.schedule ?? defaultSchedule)(() => {
         // A request that timed out may still be running inside Maestro, so the session is dropped.
         this.fail(child, new Error(`MCP ${method} timed out`))
       }, this.options.timeoutMs ?? 120_000)
       this.pending.set(id, {
         owner: child,
-        resolve: value => { clearTimeout(timer); resolve(value) },
-        reject: error => { clearTimeout(timer); reject(error) },
+        resolve: value => { cancel(); resolve(value) },
+        reject: error => { cancel(); reject(error) },
       })
       try {
         this.send({ jsonrpc: '2.0', id, method, params })

@@ -1,6 +1,6 @@
 // typescript 7.0.2
 // entry . (./src/index.ts)
-// exports: BoundedCheckoutRepairOptions, BoundedCheckoutRepairReport, BoundedCheckoutRepairer, BoundedSelectorRepairer, BoundedSelectorRepairerOptions, CHECKOUT_AFFECTED_FILES, CHECKOUT_COMPONENT_PATH, CHECKOUT_IDS_PATH, CheckoutRepairPlan, CheckoutRepairPolicy, PlannedRepairFile, RepairBuildInstallOptions, RepairBuildOptions, RepairBuildResult, RepairExecutionReport, createCheckoutRepairDiff, planCheckoutSelectorRepair, runCheckoutBuildAndInstall, runCheckoutGradleBuild
+// exports: BoundedCheckoutRepairOptions, BoundedCheckoutRepairReport, BoundedCheckoutRepairer, BoundedSelectorRepairer, BoundedSelectorRepairerOptions, CHECKOUT_AFFECTED_FILES, CHECKOUT_COMPONENT_PATH, CHECKOUT_IDS_PATH, CheckoutRepairPlan, CheckoutRepairPolicy, PlannedRepairFile, RepairBuildInstallOptions, RepairBuildOptions, RepairBuildResult, RepairClock, RepairExecutionReport, createCheckoutRepairDiff, planCheckoutSelectorRepair, runCheckoutBuildAndInstall, runCheckoutGradleBuild
 export declare class BoundedCheckoutRepairer {
     private readonly options;
     private consumed;
@@ -13,6 +13,7 @@ export type BoundedCheckoutRepairOptions = {
     appId: string;
     platform: 'android';
     timeoutMs: number;
+    clock?: RepairClock;
     policy: CheckoutRepairPolicy;
     attemptId?: string;
     store: WalkStore;
@@ -134,6 +135,10 @@ export type RepairBuildResult = {
     errors: string[];
     installCommand?: string[];
     installExitCode?: number | null;
+};
+export type RepairClock = {
+    now: () => number;
+    schedule: (run: () => void, delayMs: number) => () => void;
 };
 export type RepairExecutionReport = {
     startedAt: string;

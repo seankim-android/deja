@@ -137,7 +137,8 @@ export function runWriterLockContractTests(implementation: WalkStoreContractImpl
           const firsts = await Promise.all(children.map(child => child.first))
           expect(firsts.filter(line => line === 'ACQUIRED')).toHaveLength(1)
           expect(firsts.filter(line => line === 'LOCKED:STORE_LOCKED')).toHaveLength(1)
-          for (const child of children) child.process.stdin.write('go\n')
+          // Only the winner is waiting for a line; the loser has already exited with LOCKED.
+          children[firsts.indexOf('ACQUIRED')].process.stdin.write('go\n')
           const codes = await Promise.all(children.map(child => child.exited))
           expect(codes.sort()).toEqual([0, 3])
           expect(existsSync(lockPathOf(implementation, workspaceRoot))).toBe(false)

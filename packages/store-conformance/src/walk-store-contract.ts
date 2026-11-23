@@ -62,6 +62,11 @@ async function temporaryFiles(root: string): Promise<string[]> {
   return found
 }
 
+/** Every entry under .deja/flows, sorted: readdir order is not defined and differs between calls on Linux. */
+async function flowEntries(workspaceRoot: string): Promise<string[]> {
+  return (await readdir(join(workspaceRoot, '.deja/flows'), { recursive: true })).sort()
+}
+
 async function fixture() {
   const temporary = await realpath(await mkdtemp(join(tmpdir(), 'deja-store-contract-')))
   const workspaceRoot = join(temporary, 'workspace')
@@ -375,7 +380,7 @@ export function runWalkStoreContractTests(implementation: WalkStoreContractImple
         const { persisted } = await ctx.seed()
         const store = ctx.makeStore()
         const beforeMetadata = await implementation.snapshotMetadata(ctx.workspaceRoot)
-        const beforeFlows = await readdir(join(ctx.workspaceRoot, '.deja/flows'), { recursive: true })
+        const beforeFlows = await flowEntries(ctx.workspaceRoot)
         await expect(store.persistVerifiedCandidate({
           identity: contractIdentity({ buildFingerprint: 'b'.repeat(64) }),
           candidatePath: ctx.candidatePath,
@@ -383,7 +388,7 @@ export function runWalkStoreContractTests(implementation: WalkStoreContractImple
           expectedFlowSha256: 'c'.repeat(64),
         })).rejects.toThrow('nothing was stored')
         expect(await implementation.snapshotMetadata(ctx.workspaceRoot)).toEqual(beforeMetadata)
-        expect(await readdir(join(ctx.workspaceRoot, '.deja/flows'), { recursive: true })).toEqual(beforeFlows)
+        expect(await flowEntries(ctx.workspaceRoot)).toEqual(beforeFlows)
         expect(await temporaryFiles(ctx.workspaceRoot)).toEqual([])
         expect((await store.lookup(contractIdentity())).status).toBe('hit')
         expect(persisted.flowSha256).toHaveLength(64)
