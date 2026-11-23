@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { mkdir, readFile, realpath, rename, stat, writeFile } from 'node:fs/promises'
+import { link, lstat, mkdir, readFile, realpath, rename, stat, unlink, writeFile } from 'node:fs/promises'
 import { dirname, isAbsolute, relative, resolve, sep } from 'node:path'
 import {
   AssertionHashChangedError,
@@ -27,7 +27,7 @@ import {
   type WalkIdentity,
   type WalkManifest,
 } from '@deja-qa/core'
-import { collectFlowClosure, MissingFlowFileError, type FlowClosure } from './flow-closure.ts'
+import { closureSha256Of, collectFlowClosure, MissingFlowFileError, type FlowClosure } from './flow-closure.ts'
 import { StoreLockedError, WriterLock } from './writer-lock.ts'
 
 /** The verified flow is not the consumer's own file, so manifest mode cannot keep it. */
@@ -125,6 +125,11 @@ export type ConsumerFlowsOptions = {
   workspaceRoot: string
   /** Relative to the workspace root. */
   manifestPath: string
+  /**
+   * Where a verified explore result is written, relative to the workspace root (for example
+   * `.maestro/flows/deja`). Without it explore output has nowhere to go and is refused.
+   */
+  flowsDir?: string
   /** Fixture values that must never be written into the manifest. */
   forbiddenValues?: string[]
 }
@@ -135,8 +140,40 @@ export type ConsumerPlan = {
   remaining: StoredWalk[]
   flowPath: string
   flowSha256: string
+  /** New files this save wrote into the consumer's tree (explore output). */
+  filesWritten: string[]
   /** Write the manifest if its entry changed. Call after memory is written, under `withLock`. */
   commit(): Promise<boolean>
+}
+
+export type MaterializePlan = {
+  /** The main flow's workspace path once written. */
+  flow: string
+  /** The closure sha the files will have in the consumer's tree. */
+  closureSha256: string
+  assertionsSha256: string
+  mainSha256: string
+  /** The closure sha of the source files, to check against what was verified. */
+  sourceClosureSha256: string
+  files: { path: string; bytes: Buffer; sha256: string; exists: boolean }[]
+  /** Destinations that already hold different bytes (or are not plain files). Never overwritten. */
+  conflicts: string[]
+}
+
+function flowSlug(goalKey: string) {
+  const slug = goalKey.replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
+  if (!slug) throw new TypeError('The normalized goal must contain a letter or number')
+  return slug
+}
+
+/** A folder inside the workspace, outside `.deja/`. */
+export function checkFlowsDir(path: string) {
+  if (typeof path !== 'string' || isAbsolute(path) || path.includes('\\') || path.includes('\0') ||
+      path.split('/').some(segment => segment === '' || segment === '.' || segment === '..') ||
+      path.split('/')[0] === '.deja') {
+    throw new InvalidWalkManifestError(`the flows folder must be a relative folder outside .deja/: ${path}`)
+  }
+  return path
 }
 
 /**
@@ -145,11 +182,13 @@ export type ConsumerPlan = {
  */
 export class ConsumerFlows {
   readonly manifestPath: string
+  readonly flowsDir: string | undefined
   private readonly workspaceRoot: string
   private readonly forbiddenValues: string[]
 
   constructor(options: ConsumerFlowsOptions) {
     this.manifestPath = checkManifestPath(options.manifestPath)
+    this.flowsDir = options.flowsDir === undefined ? undefined : checkFlowsDir(options.flowsDir)
     this.workspaceRoot = resolve(options.workspaceRoot)
     this.forbiddenValues = (options.forbiddenValues ?? []).filter(value => value.length >= 3)
   }
@@ -319,24 +358,49 @@ export class ConsumerFlows {
    */
   async plan(walks: StoredWalk[], identity: NormalizedIdentity, options: PersistVerifiedOptions): Promise<ConsumerPlan> {
     if (!identity.adapter) throw new TypeError('A manifest walk needs the adapter in its identity')
-    const { root, canonical, flow } = await this.consumerCandidate(options.candidatePath)
+    const key = manifestWalkKey({
+      goal: identity.goal, appId: identity.appId, platform: identity.platform,
+      adapter: identity.adapter, ...(identity.browser !== undefined ? { browser: identity.browser } : {}),
+    })
+    const manifest = await this.load()
+    const existing = manifest.walks.find(entry => manifestWalkKey(entry) === key)
+
+    // Explore output starts under `.deja/attempts`. It becomes a new file of the consumer's, once.
+    let candidatePath = options.candidatePath
+    let filesWritten: string[] = []
+    if (await this.isUnderDeja(options.candidatePath) && options.origin === 'explore' && this.flowsDir) {
+      if (existing) {
+        throw new ConsumerFlowError(`the manifest already lists "${identity.goal}"; edit your flow and run remember instead`)
+      }
+      const root = await this.canonicalRoot()
+      const source = await realpath(isAbsolute(options.candidatePath) ? options.candidatePath : resolve(root, options.candidatePath))
+      const materialize = await this.planMaterialize(source, identity.goalKey)
+      if (options.expectedClosureSha256 !== undefined && options.expectedClosureSha256 !== materialize.sourceClosureSha256) {
+        throw new ExpectedClosureMismatchError(options.expectedClosureSha256, materialize.sourceClosureSha256)
+      }
+      if (options.expectedFlowSha256 !== undefined && options.expectedFlowSha256 !== materialize.mainSha256) {
+        throw new ExpectedFlowChecksumMismatchError(options.expectedFlowSha256, materialize.mainSha256)
+      }
+      if (materialize.conflicts.length > 0) {
+        throw new ConsumerFlowError(`would overwrite a different file: ${materialize.conflicts.join(', ')}; nothing was written`)
+      }
+      filesWritten = await this.writeMaterialized(materialize)
+      candidatePath = materialize.flow
+    }
+
+    const { root, canonical, flow } = await this.consumerCandidate(candidatePath)
     const closure = await collectFlowClosure(root, canonical)
     const mainSha = closure.files.find(file => file.path === closure.main)!.sha256
     if (options.expectedFlowSha256 !== undefined && options.expectedFlowSha256 !== mainSha) {
       throw new ExpectedFlowChecksumMismatchError(options.expectedFlowSha256, mainSha)
     }
-    if (options.expectedClosureSha256 !== undefined && options.expectedClosureSha256 !== closure.sha256) {
+    if (filesWritten.length === 0 && options.expectedClosureSha256 !== undefined &&
+        options.expectedClosureSha256 !== closure.sha256) {
       throw new ExpectedClosureMismatchError(options.expectedClosureSha256, closure.sha256)
     }
     const assertions = closureAssertions(closure)
     const assertionsHash = assertionsSha256(closure)
 
-    const manifest = await this.load()
-    const key = manifestWalkKey({
-      goal: identity.goal, appId: identity.appId, platform: identity.platform,
-      adapter: identity.adapter, ...(identity.browser !== undefined ? { browser: identity.browser } : {}),
-    })
-    const existing = manifest.walks.find(entry => manifestWalkKey(entry) === key)
     if ((options.origin === 'verify' || options.origin === 'replayed-on-new-build') && !existing) {
       throw new ConsumerFlowError(`the manifest has no entry for "${identity.goal}"; only remember can add one`)
     }
@@ -384,7 +448,7 @@ export class ConsumerFlows {
     }
     const remaining = walks.filter(item => !sameLogical(item, identity))
     return {
-      walk, remaining, flowPath: flow, flowSha256: mainSha,
+      walk, remaining, flowPath: flow, flowSha256: mainSha, filesWritten,
       commit: async () => {
         if (!changed) return false
         // Re-read under the lock: another store may have changed this entry since the plan was made.
@@ -392,13 +456,107 @@ export class ConsumerFlows {
         const now = current.walks.find(item => manifestWalkKey(item) === key)
         if (JSON.stringify(now ?? null) !== JSON.stringify(existing ?? null)) throw new ManifestChangedError()
         const walksNext = [...current.walks.filter(item => manifestWalkKey(item) !== key), next]
-        await this.write({ ...current, walks: walksNext })
+        await this.writeManifest({ ...current, walks: walksNext })
         return true
       },
     }
   }
 
-  private async write(manifest: WalkManifest) {
+  private async isUnderDeja(candidatePath: string) {
+    const root = await this.canonicalRoot()
+    try {
+      const canonical = await realpath(isAbsolute(candidatePath) ? candidatePath : resolve(root, candidatePath))
+      return inside(root, canonical) && posix(relative(root, canonical)).split('/')[0] === '.deja'
+    } catch (error) {
+      if (errorCode(error) === 'ENOENT') return false
+      throw error
+    }
+  }
+
+  /**
+   * Where a flow and its files would be written in the consumer's tree, without writing: a single
+   * file becomes `<flowsDir>/<goal>.yaml`, a flow with subflows becomes the folder
+   * `<flowsDir>/<goal>/` with its layout kept, so relative references still resolve.
+   */
+  async planMaterialize(sourceMain: string, goalKey: string): Promise<MaterializePlan> {
+    if (!this.flowsDir) {
+      throw new ConsumerFlowError('no flows folder is configured, so nothing can be written into your tree')
+    }
+    const root = await this.canonicalRoot()
+    const source = await collectFlowClosure(root, sourceMain)
+    const slug = flowSlug(goalKey)
+    const single = source.files.length === 1
+    const placed = source.files.map(file => ({
+      file,
+      path: single ? `${this.flowsDir}/${slug}.yaml` : `${this.flowsDir}/${slug}/${file.path}`,
+      closurePath: single ? `${slug}.yaml` : file.path,
+    }))
+    const main = placed.find(item => item.file.path === source.main)!
+    checkManifestFlowPath(main.path, 'flow')
+    const files: MaterializePlan['files'] = []
+    const conflicts: string[] = []
+    for (const item of placed) {
+      let exists = false
+      try {
+        const info = await lstat(resolve(root, item.path))
+        if (info.isFile() && sha256(await readFile(resolve(root, item.path))) === item.file.sha256) exists = true
+        else conflicts.push(item.path)
+      } catch (error) {
+        if (errorCode(error) !== 'ENOENT' && errorCode(error) !== 'ENOTDIR') throw error
+      }
+      files.push({ path: item.path, bytes: item.file.bytes, sha256: item.file.sha256, exists })
+    }
+    const closureSha256 = closureSha256Of(placed.map(item => ({ path: item.closurePath, sha256: item.file.sha256 })))
+    return {
+      flow: main.path,
+      closureSha256,
+      assertionsSha256: assertionsSha256(source),
+      mainSha256: main.file.sha256,
+      sourceClosureSha256: source.sha256,
+      files,
+      conflicts,
+    }
+  }
+
+  /** Write the files that are not there yet. Each is created exclusively: nothing is overwritten. */
+  async writeMaterialized(plan: MaterializePlan): Promise<string[]> {
+    if (plan.conflicts.length > 0) {
+      throw new ConsumerFlowError(`would overwrite a different file: ${plan.conflicts.join(', ')}; nothing was written`)
+    }
+    const root = await this.canonicalRoot()
+    const written: string[] = []
+    for (const file of plan.files) {
+      const destination = resolve(root, file.path)
+      if (!file.exists) {
+        await mkdir(dirname(destination), { recursive: true })
+        const parent = await realpath(dirname(destination))
+        if (parent !== root && !inside(root, parent)) {
+          throw new ConsumerFlowError(`the destination escapes the workspace: ${file.path}`)
+        }
+        const temporary = `${destination}.${process.pid}-${randomUUID()}.tmp`
+        await writeFile(temporary, file.bytes)
+        try {
+          // A hard link fails if the name exists, so a file made since the plan is never replaced.
+          await link(temporary, destination)
+        } catch (error) {
+          if (errorCode(error) === 'EEXIST') {
+            throw new ConsumerFlowError(`would overwrite a file that appeared during the save: ${file.path}`)
+          }
+          throw error
+        } finally {
+          await unlink(temporary).catch(() => {})
+        }
+        written.push(file.path)
+      }
+      if (sha256(await readFile(destination)) !== file.sha256) {
+        throw new ConsumerFlowError(`${file.path} does not hold the verified bytes after the write`)
+      }
+    }
+    return written
+  }
+
+  /** Write the manifest atomically, as Déjà's fixed bytes. Call under `withLock`. */
+  async writeManifest(manifest: WalkManifest) {
     const text = serializeWalkManifest(manifest)
     for (const value of this.forbiddenValues) {
       if (text.includes(value)) {

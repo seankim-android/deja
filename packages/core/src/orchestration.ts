@@ -88,6 +88,11 @@ export class Deja {
     return this.dependencies.store.manifestPath !== undefined
   }
 
+  /** Manifest mode without a flows folder: a verified explore result would have nowhere to go. */
+  private get exploreOutputMissing() {
+    return this.manifestMode && this.dependencies.store.manifestFlowsDir === undefined
+  }
+
   private now() {
     return (this.dependencies.now ?? (() => new Date()))()
   }
@@ -368,7 +373,17 @@ export class Deja {
 
   async explore(identity: WalkIdentity): Promise<RunResult> {
     const start = this.base(identity, 'explore', 'not-checked')
-    if (this.manifestMode) return this.finish(start, this.manifestExplorationRefused())
+    if (this.exploreOutputMissing) return this.finish(start, this.manifestExplorationRefused())
+    if (this.manifestMode) {
+      // A forced exploration would spend a model run on a goal whose flow is already the consumer's.
+      const current = await this.dependencies.store.lookup(identity)
+      if (current.status === 'hit' || current.reason !== 'not-found') {
+        return this.finish(start, {
+          ...this.manifestExplorationRefused(),
+          errors: ['The manifest already lists this goal, so it was not explored. Edit your flow and run remember, or run it.'],
+        })
+      }
+    }
     const exploration = await this.dependencies.createExplorer().explore({ identity })
     return this.finish(start, this.explorationDetails(exploration))
   }
@@ -449,7 +464,7 @@ export class Deja {
       modelCallBasis: 'manifest mode: cold exploration was not attempted, so no model client was built',
       assertions: null, repairCount: 0, yamlPath: null, yamlSha256: null,
       failure: null, artifacts: [], diffs: [],
-      errors: ['Cold exploration is not available with a manifest yet. Write the flow in your own files, then run remember.'],
+      errors: ['Cold exploration needs a flows folder with a manifest, so its result can be written into your tree. Set one, or write the flow in your own files and run remember.'],
     }
   }
 
@@ -506,8 +521,10 @@ export class Deja {
       case 'failed-validation':
         return refuse('failed', 'The last run of this flow on this build failed. Fix the app or the flow, or run with --verify.')
       case 'not-found': {
-        const result = this.manifestExplorationRefused()
-        return this.finish(missStart, result)
+        // A new goal: explore it cold, when verified output can be written into the consumer's tree.
+        if (this.exploreOutputMissing) return this.finish(missStart, this.manifestExplorationRefused())
+        const exploration = await this.dependencies.createExplorer().explore({ identity })
+        return this.finish(missStart, this.explorationDetails(exploration))
       }
       default:
         return refuse('failed', `The manifest does not match this run (${miss.reason}).`)

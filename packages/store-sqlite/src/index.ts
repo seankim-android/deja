@@ -11,6 +11,8 @@ import {
   type ExplorationDetails,
   type LookupHit,
   type LookupMiss,
+  type MigrateOptions,
+  type MigrationReport,
   type PersistedWalk,
   type PersistVerifiedOptions,
   type PersistVerifiedRepairOptions,
@@ -24,6 +26,7 @@ import {
 import {
   checkStoredSubflows,
   ConsumerFlows,
+  runMigration,
   collectFlowClosure,
   readConsumerWalkFields,
   planStoredClosure,
@@ -78,6 +81,11 @@ export type SQLiteWalkStoreOptions = {
     path: string
     /** Fixture values that must never be written into the manifest. */
     forbiddenValues?: string[]
+    /**
+     * Where a verified explore result is written as a new file of the consumer's, relative to the
+     * workspace (for example `.maestro/flows/deja`). Without it, explore output is refused.
+     */
+    flowsDir?: string
   }
   /** Test-only deterministic filesystem failure injection; production uses fs.rename. */
   renameFile?: (temporaryPath: string, destinationPath: string) => Promise<void>
@@ -249,6 +257,8 @@ export class SQLiteWalkStore implements WalkStore {
   private database: Database | null = null
   /** The manifest's workspace-relative path, when this store replays the consumer's own files. */
   readonly manifestPath: string | undefined
+  /** The folder where explore output is written, when this store can take it. */
+  readonly manifestFlowsDir: string | undefined
   private readonly consumer: ConsumerFlows | null
 
   constructor(options: SQLiteWalkStoreOptions) {
@@ -258,9 +268,11 @@ export class SQLiteWalkStore implements WalkStore {
         workspaceRoot: this.workspaceRoot,
         manifestPath: options.manifest.path,
         ...(options.manifest.forbiddenValues ? { forbiddenValues: options.manifest.forbiddenValues } : {}),
+        ...(options.manifest.flowsDir !== undefined ? { flowsDir: options.manifest.flowsDir } : {}),
       })
       : null
     this.manifestPath = this.consumer?.manifestPath
+    this.manifestFlowsDir = this.consumer?.flowsDir
     this.relativeMemoryPath = storeMetadataPath(SQLITE_MEMORY_PATH, options.storeId)
     this.memoryPath = resolve(this.workspaceRoot, this.relativeMemoryPath)
     this.renameFile = options.renameFile ?? rename
@@ -730,7 +742,7 @@ export class SQLiteWalkStore implements WalkStore {
         flowSha256: plan.flowSha256,
         storedMetadataPath: this.relativeMemoryPath,
         atomicWrite: true,
-        manifest: { path: consumer.manifestPath, changed },
+        manifest: { path: consumer.manifestPath, changed, ...(plan.filesWritten.length > 0 ? { filesWritten: plan.filesWritten } : {}) },
       }
     })
   }
@@ -756,6 +768,26 @@ export class SQLiteWalkStore implements WalkStore {
     const walks = this.loadMemory()
     this.validateUniqueIdentities(walks)
     return [...walks]
+  }
+
+  /** Manifest mode: move the schema 3 walks into the consumer's own files. See `runMigration`. */
+  async migrateToManifest(options: MigrateOptions = {}): Promise<MigrationReport> {
+    const consumer = this.consumer
+    if (!consumer) throw new Error('migrateToManifest needs a store built with a manifest')
+    if (!options.dryRun) this.acquireWriter()
+    const migrate = async () => {
+      const walks = this.loadMemory()
+      this.validateUniqueIdentities(walks)
+      return runMigration({
+        root: await this.canonicalRoot(),
+        consumer,
+        walks,
+        options,
+        memoryFile: canonicalMetadataTarget(this.workspaceRoot, this.memoryPath).path,
+        writeWalks: next => this.replaceMetadata(next),
+      })
+    }
+    return options.dryRun ? migrate() : consumer.withLock(migrate)
   }
 
   async lookup(identityInput: WalkIdentity): Promise<LookupHit | LookupMiss> {
