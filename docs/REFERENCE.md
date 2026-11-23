@@ -228,6 +228,24 @@ ignored directory, then run verified cold exploration. Never delete curated file
 `spikes/*/evidence/` as part of cleanup. Only reviewed, secret-free reports, logs, flows, and diffs
 belong in committed evidence.
 
+## Bring your own model
+
+Only cold exploration uses a model. Remember, replay and repair work without OpenClaw or any model,
+and replay never needs a provider key. Cold exploration runs through OpenClaw, so any model with an
+OpenAI-compatible chat API and tool calls can be configured in `deja.config.json`:
+
+```json
+{
+  "openClawModel": "cerebras/moonshotai-kimi-k3.1-pro-trial",
+  "openClawBaseUrl": "https://api.cerebras.ai/v1"
+}
+```
+
+`openClawModel` is `provider/model`, and `openClawBaseUrl` must be an `https://` URL. OpenClaw
+reads the provider key from its own settings, so Déjà never stores it. Changing the model only
+changes how a test is first learned. Only Kimi K3.1 Pro on Cerebras has been measured. Other models
+should work but are not tested yet.
+
 ## Safety rules
 
 - **Secrets:** use only deterministic fixture values. Raw prompts, model responses, screen content,
@@ -257,6 +275,17 @@ support boundary. It does not claim instant replay. [`demo/SCRIPT.md`](../demo/S
 claim to raw artifacts; [`demo/rehearsal/`](../demo/rehearsal/REVIEW.md) records the rejected 65-second
 take and two complete 58-second decode/evidence rehearsals. Regenerate with
 `python3 demo/generate_video.py && python3 demo/rehearse.py` (Pillow and FFmpeg required).
+
+## Tech stack
+
+- Bun and TypeScript
+- OpenClaw
+- Kimi K3.1 Pro on Cerebras (`moonshotai-kimi-k3.1-pro-trial`)
+- Maestro 2.12, installed by the host (Déjà does not install or manage it yet)
+- MCP SDK
+- React viewer (read-only, optional)
+
+Déjà was formerly called WalkCache.
 
 ## Development
 
