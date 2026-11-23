@@ -32,7 +32,7 @@ github.com/seankim-android/deja
 2. First reply, the submission template (276 characters):
 ```
 Project Name: Déjà
-Team Members: solo, @kssc0112 (also u/MenuSecret3697)
+Team Members: @kssc0112 (solo)
 Project Description: Kimi K3.1 Pro on Cerebras tests an Android app once through OpenClaw. Déjà saves the test after all 14 checks pass, then replays it with 0 model calls.
 GitHub Repository: github.com/seankim-android/deja
 ```
