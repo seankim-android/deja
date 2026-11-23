@@ -105,7 +105,12 @@ export type McpMaestroTransportOptions = {
   timeoutMs?: number
 }
 
-type Pending = { resolve: (value: any) => void; reject: (error: Error) => void }
+type Pending = {
+  /** The child that owns this request. Only that child's failure may reject it. */
+  owner: ReturnType<typeof spawn>
+  resolve: (value: any) => void
+  reject: (error: Error) => void
+}
 
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/
 
@@ -143,9 +148,12 @@ export class McpMaestroTransport implements MaestroTransport {
       this.ready = null
       this.buffer = ''
     }
-    const waiting = [...this.pending.values()]
-    this.pending.clear()
-    for (const entry of waiting) entry.reject(error)
+    // Reject only this child's requests: a late event from an old child must not touch a new one.
+    for (const [id, entry] of [...this.pending]) {
+      if (entry.owner !== child) continue
+      this.pending.delete(id)
+      entry.reject(error)
+    }
     if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
   }
 
@@ -165,6 +173,7 @@ export class McpMaestroTransport implements MaestroTransport {
         this.fail(child, new Error(`MCP ${method} timed out`))
       }, this.options.timeoutMs ?? 120_000)
       this.pending.set(id, {
+        owner: child,
         resolve: value => { clearTimeout(timer); resolve(value) },
         reject: error => { clearTimeout(timer); reject(error) },
       })
@@ -186,6 +195,8 @@ export class McpMaestroTransport implements MaestroTransport {
     child.stdin!.on('error', error => this.fail(child, error))
     child.once('close', () => this.fail(child, new Error('maestro mcp exited')))
     child.stdout!.setEncoding('utf8').on('data', (chunk: string) => {
+      // A killed child's late output must not reach the current session's buffer.
+      if (this.child !== child) return
       this.buffer += chunk
       for (let end = this.buffer.indexOf('\n'); end >= 0; end = this.buffer.indexOf('\n')) {
         const line = this.buffer.slice(0, end)

@@ -158,6 +158,31 @@ describe('iosExplorationDriver', () => {
     expect(flows.filter(flow => flow.includes('launchApp'))).toHaveLength(1)
   })
 
+  test('act parses the segment: every bypass of the relaunch guard is refused, data that only looks like one passes', async () => {
+    const flows: string[] = []
+    const driver = iosExplorationDriver({ transport: transportFor(() => today, flows) })
+    await driver.reset({ appId: 'com.blankaday.dev', clearState: false, arguments: {} }, [])
+    const refused = [
+      '- {launchApp: {}}\n', '- "launchApp"\n', "- 'stopApp'\n", '- {killApp: x}\n',
+      '- runFlow: other.yaml\n', '- runFlow:\n    file: other.yaml\n', '- {runFlow: {file: other.yaml}}\n',
+      '- runFlow:\n    file: other.yaml\n    commands:\n      - tapOn: x\n',
+      '- runScript: a.js\n', '- evalScript: ${1}\n',
+      '- repeat:\n    times: 2\n    commands:\n      - launchApp\n',
+      '- retry:\n    commands:\n      - clearState\n',
+      '- runFlow:\n    when:\n      visible: x\n    commands:\n      - openLink: a://b\n',
+      '- tapOn: x\n- {clearKeychain: {}}\n', 'appId: other.app\n---\n- tapOn: x\n', '- tapOn: [unclosed\n',
+    ]
+    const before = flows.length
+    for (const yaml of refused) await expect(driver.act({ label: 'bad', yaml })).rejects.toThrow(TypeError)
+    expect(flows.length).toBe(before)
+    for (const yaml of [
+      '- inputText: |\n    appId is here\n    launchApp too\n',
+      '- inputText: launchApp\n',
+      '- runFlow:\n    commands:\n      - tapOn: x\n',
+      '- repeat:\n    times: 2\n    commands:\n      - swipe:\n          direction: DOWN\n',
+    ]) expect((await driver.act({ label: 'ok', yaml })).passed).toBe(true)
+  })
+
   test('act refuses segments that relaunch or rebind the app, and reset validates the profile', async () => {
     const flows: string[] = []
     const driver = iosExplorationDriver({ transport: transportFor(() => today, flows) })
@@ -345,12 +370,44 @@ for await (const chunk of process.stdin) {
 await Bun.write(${JSON.stringify(pidFile)}, String(process.pid))
 await Bun.sleep(60000)
 `)
-      const transport = new McpMaestroTransport({ executable, device: 'u', timeoutMs: 400 })
+      const transport = new McpMaestroTransport({ executable, device: 'u', timeoutMs: 1500 })
       await expect(transport.hierarchy()).rejects.toThrow('timed out')
+      for (let i = 0; i < 50 && !(await Bun.file(pidFile).exists()); i++) await Bun.sleep(100)
       const pid = Number(await readFile(pidFile, 'utf8'))
       await Bun.sleep(300)
       expect(() => process.kill(pid, 0)).toThrow()
       await expect(transport.hierarchy()).rejects.toThrow('timed out')
+      await transport.close()
+    } finally {
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
+
+  test('a timed-out call does not poison the next one: the old child exiting late must not reject the new child', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'deja-mcp-stale-'))
+    try {
+      const counter = join(directory, 'spawns')
+      const executable = await fakeExecutable(directory, `
+import { appendFileSync } from 'node:fs'
+appendFileSync(${JSON.stringify(counter)}, 'x')
+const first = (await Bun.file(${JSON.stringify(counter)}).text()).length === 1
+const reply = (id, result) => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id, result }) + '\\n')
+let buffer = ''
+for await (const chunk of process.stdin) {
+  buffer += new TextDecoder().decode(chunk)
+  for (let end = buffer.indexOf('\\n'); end >= 0; end = buffer.indexOf('\\n')) {
+    const message = JSON.parse(buffer.slice(0, end)); buffer = buffer.slice(end + 1)
+    if (message.method === 'initialize') reply(message.id, { protocolVersion: '2024-11-05' })
+    if (message.method === 'tools/call' && !first) reply(message.id, { content: [{ type: 'text', text: 'Flow COMPLETED' }] })
+    // The first child never answers a tool call, so the first call times out.
+  }
+}
+`)
+      const transport = new McpMaestroTransport({ executable, device: 'u', timeoutMs: 700 })
+      await expect(transport.runFlow('appId: a\n---\n- tapOn: x\n')).rejects.toThrow('timed out')
+      // The second call starts at once, before the killed child's close event is handled.
+      expect((await transport.runFlow('appId: a\n---\n- tapOn: x\n')).passed).toBe(true)
+      expect((await readFile(counter, 'utf8')).length).toBe(2)
       await transport.close()
     } finally {
       await rm(directory, { recursive: true, force: true })

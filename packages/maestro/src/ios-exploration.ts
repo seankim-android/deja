@@ -11,6 +11,7 @@ import type {
   SystemUiState,
 } from '@deja-qa/core'
 import { normalizeElements, normalizedSnapshot } from '@deja-qa/core'
+import { parseAllDocuments } from 'yaml'
 import { tapSegment } from './selectors.ts'
 
 /** Result of one hierarchy read. `raw` is whatever the transport got back, parsed from JSON. */
@@ -214,12 +215,50 @@ function validateProfile(profile: LaunchProfile) {
   }
 }
 
-/** Commands a live-app segment must never hold: they relaunch, reset or rebind the app. */
-const FORBIDDEN_SEGMENT = /^\s*(?:-\s*)?(launchApp|openLink|clearState|clearKeychain|stopApp|killApp|appId)\b/m
+/** Commands a live-app segment must never hold: they relaunch, reset, rebind or run outside code. */
+const FORBIDDEN_COMMANDS = new Set([
+  'launchApp', 'stopApp', 'killApp', 'clearState', 'clearKeychain', 'openLink', 'appId',
+  'runScript', 'evalScript',
+])
+
+/**
+ * Walk the parsed segment. Any forbidden command name used as a key, or as a bare command string in
+ * a list, is refused at any depth (`repeat`, `retry`, `when`, inline `runFlow` commands). `runFlow`
+ * is allowed only with inline `commands`: a file reference could hold anything. Text values (such as
+ * an `inputText` block scalar) are data and pass.
+ */
+function forbiddenIn(node: unknown, inList = false): string | null {
+  if (typeof node === 'string') return inList && FORBIDDEN_COMMANDS.has(node.trim()) ? node.trim() : null
+  if (Array.isArray(node)) {
+    for (const item of node) {
+      const found = forbiddenIn(item, true)
+      if (found) return found
+    }
+    return null
+  }
+  if (node && typeof node === 'object') {
+    for (const [key, value] of Object.entries(node as Record<string, unknown>)) {
+      if (FORBIDDEN_COMMANDS.has(key)) return key
+      if (key === 'runFlow') {
+        const inline = typeof value === 'object' && value !== null && !Array.isArray(value) &&
+          Array.isArray((value as Record<string, unknown>).commands) && !('file' in (value as object))
+        if (!inline) return 'runFlow with a file'
+      }
+      const found = forbiddenIn(value)
+      if (found) return found
+    }
+  }
+  return null
+}
 
 function checkSegment(segment: Segment) {
-  if (FORBIDDEN_SEGMENT.test(segment.yaml) || /\bclearState\s*:/.test(segment.yaml)) {
-    throw new TypeError(`Segment "${segment.label}" must not set appId or use launchApp, openLink, clearState or stopApp`)
+  const documents = parseAllDocuments(segment.yaml)
+  if (documents.length !== 1 || documents[0].errors.length > 0) {
+    throw new TypeError(`Segment "${segment.label}" is not one valid YAML document`)
+  }
+  const found = forbiddenIn(documents[0].toJS())
+  if (found) {
+    throw new TypeError(`Segment "${segment.label}" must not use ${found}: a live-app segment never relaunches, rebinds or runs code`)
   }
 }
 
