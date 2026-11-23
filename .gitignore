@@ -40,3 +40,7 @@ demo/rehearsal/scene-*.png
 demo/film/frames/
 demo/film/vo/*.mp3
 demo/film/vo/*.wav
+demo/film/bg.png
+demo/film/mask.png
+demo/film/cap*.png
+demo/film/device.mp4

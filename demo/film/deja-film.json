@@ -3,7 +3,7 @@
   "theme": "paper",
   "model": "Kimi K3.1 Pro",
   "popin": {
-    "video": "/Users/sean/Development/deja/demo/walkcache-live-demo.mp4"
+    "video": "/Users/sean/Development/deja/demo/film/device.mp4"
   },
   "claim": {
     "number": 0,
@@ -13,15 +13,16 @@
   "scenes": [
     {
       "scene": "intro",
+      "ms": 8000,
       "intro": {
         "title": "Déjà",
-        "description": "Kimi on Cerebras tests your app once. Déjà saves that test. Later runs replay it with zero model calls. Formerly WalkCache."
+        "description": "AI testing agents call the model on every run, even when nothing changed. Déjà lets the agent learn a test once, then replay it with no model. Formerly WalkCache."
       }
     },
     {
       "scene": "popin",
-      "clip_from": 1500,
-      "ms": 41000
+      "clip_from": 0,
+      "ms": 40800
     },
     {
       "scene": "claim"
