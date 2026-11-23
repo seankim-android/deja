@@ -181,6 +181,7 @@ async function runRepair(
     policy: context.policy,
     attemptId: 'repair-focused-test',
     store: context.store,
+    memoryPath: LOCAL_MEMORY_PATH,
     fingerprint: async () => fingerprint,
     runFlow: async (_flowPath, _artifactDirectory, timeoutMs) => {
       expect(timeoutMs).toBeGreaterThan(0)

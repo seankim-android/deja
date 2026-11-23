@@ -10,7 +10,9 @@
   },
   "dependencies": {
     "@deja-qa/core": "workspace:*",
-    "@deja-qa/maestro": "workspace:*",
+    "@deja-qa/maestro": "workspace:*"
+  },
+  "devDependencies": {
     "@deja-qa/store-local": "workspace:*"
   }
 }

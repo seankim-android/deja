@@ -95,4 +95,25 @@ describe('workspace boundaries', () => {
       specifiers(file).filter(specifier => specifier.startsWith('@deja-qa/')).map(specifier => `${file}: ${specifier}`))
     expect(imports).toEqual([])
   })
+
+  test('only the CLI and the store conformance suite depend on concrete stores at runtime', () => {
+    // Plugins take a WalkStore; choosing LocalWalkStore or SQLiteWalkStore is the host's job.
+    const allowed = new Set(['@deja-qa/cli', '@deja-qa/store-conformance'])
+    const stores = new Set(['@deja-qa/store-local', '@deja-qa/store-sqlite'])
+    const violations = workspaces
+      .filter(({ manifest }) => !allowed.has(manifest.name) && !stores.has(manifest.name))
+      .flatMap(({ directory, manifest }) => Object.keys(manifest.dependencies ?? {})
+        .filter(name => stores.has(name)).map(name => `${directory}: ${name}`))
+    expect(violations).toEqual([])
+  })
+
+  test('the explorer takes a runner and never constructs the concrete Maestro runner', () => {
+    const explorer = workspaces.find(workspace => workspace.manifest.name === '@deja-qa/explorer-openclaw')!
+    const violations = sourceFiles(join(explorer.directory, 'src')).filter(file => {
+      const contents = readFileSync(join(repo, file), 'utf8')
+      return /new\s+MaestroWalkRunner\b/.test(contents) ||
+        /import\s*\{[^}]*(?<!type\s)\bMaestroWalkRunner\b[^}]*\}\s*from\s*'@deja-qa\/maestro'/.test(contents)
+    })
+    expect(violations).toEqual([])
+  })
 })

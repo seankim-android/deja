@@ -3,22 +3,16 @@ export {
   type BoundedSelectorRepairerOptions,
 } from './adapter.ts'
 
-import type { WalkStore } from '@deja-qa/core'
+import type { LookupHit, WalkIdentity, WalkStore } from '@deja-qa/core'
 import { createHash } from 'node:crypto'
 import { mkdir, readFile, realpath, rename, writeFile } from 'node:fs/promises'
 import { dirname, relative, resolve, sep } from 'node:path'
 import {
   classifyMaestroFailure,
+  MAESTRO_FLOW_SCHEMA_VERSION,
   type MaestroFailureClassification,
   type MaestroRunResult,
 } from '@deja-qa/maestro'
-import {
-  LOCAL_MEMORY_PATH,
-  LocalWalkStore,
-  MAESTRO_FLOW_SCHEMA_VERSION,
-  type LookupHit,
-  type WalkIdentity,
-} from '@deja-qa/store-local'
 import { writeRepairProcessArtifacts, type RepairBuildResult } from './build.ts'
 import {
   applyCheckoutSelectorRepair,
@@ -58,8 +52,13 @@ export type BoundedCheckoutRepairOptions = {
   timeoutMs: number
   policy: CheckoutRepairPolicy
   attemptId?: string
-  store?: WalkStore
-  memoryPath?: string
+  /** The walk store the repaired flow is persisted through. */
+  store: WalkStore
+  /**
+   * Workspace-relative path of the store's durable memory file. Repair proves this file is
+   * byte-for-byte unchanged unless a verified repair is persisted.
+   */
+  memoryPath: string
   fingerprint: () => Promise<string>
   runFlow: (flowPath: string, artifactDirectory: string, timeoutMs: number) => Promise<MaestroRunResult>
   build: (timeoutMs: number) => Promise<RepairBuildResult>
@@ -107,7 +106,7 @@ export type BoundedCheckoutRepairReport = {
     buildFingerprint: string
     flowPath: string
     flowSha256: string
-    memoryPath: typeof LOCAL_MEMORY_PATH
+    memoryPath: string
     memorySha256: string
   }
   diagnosisBuildFingerprint: string
@@ -285,7 +284,7 @@ async function executeBoundedCheckoutRepair(
   const deadline = new RepairDeadline(options.timeoutMs)
   const started = new Date()
   const monotonicStart = performance.now()
-  const store = options.store ?? new LocalWalkStore({ workspaceRoot: root })
+  const store = options.store
   const diagnosisDirectory = resolve(attemptDirectory, 'diagnosis')
   const buildDirectory = resolve(attemptDirectory, 'build')
   const verificationDirectory = resolve(attemptDirectory, 'verification')
@@ -310,7 +309,9 @@ async function executeBoundedCheckoutRepair(
 
   const sourceFiles = [...CHECKOUT_AFFECTED_FILES]
   const beforeSource = await sourceTreeDigest(root, sourceFiles)
-  const beforeMemoryPath = options.memoryPath ?? resolve(root, LOCAL_MEMORY_PATH)
+  const beforeMemoryPath = resolve(root, options.memoryPath)
+  if (!inside(root, beforeMemoryPath)) throw new Error('Walk memory path escapes workspace')
+  const relativeMemoryPath = portablePath(root, beforeMemoryPath)
   beforeMemory = await readFile(beforeMemoryPath)
   const identityBase = {
     goal: options.goal,
@@ -400,7 +401,7 @@ async function executeBoundedCheckoutRepair(
       buildFingerprint: previous.walk.buildFingerprint,
       flowPath: portablePath(root, previous.flowPath),
       flowSha256: previous.walk.flowSha256,
-      memoryPath: LOCAL_MEMORY_PATH,
+      memoryPath: relativeMemoryPath,
       memorySha256: sha256(beforeMemory),
     }
 
@@ -509,7 +510,7 @@ async function executeBoundedCheckoutRepair(
       buildFingerprint: previousHit.walk.buildFingerprint,
       flowPath: portablePath(root, previousHit.flowPath),
       flowSha256: previousHit.walk.flowSha256,
-      memoryPath: LOCAL_MEMORY_PATH,
+      memoryPath: relativeMemoryPath,
       memorySha256: sha256(beforeMemory),
     }
     if (rollbackError) {

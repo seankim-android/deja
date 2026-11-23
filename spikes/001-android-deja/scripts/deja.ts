@@ -223,6 +223,8 @@ async function repair(goalKey: string, configPath: string) {
     appId,
     platform: 'android',
     timeoutMs: timeBudgetMs,
+    store: walkStore,
+    memoryPath: LOCAL_MEMORY_PATH,
     policy: {
       workspaceRoot: root,
       sourceRoots: parsed.sourceRoots,

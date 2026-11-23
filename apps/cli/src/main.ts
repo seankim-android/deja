@@ -3,6 +3,7 @@ import { Deja, type RunResult } from '@deja-qa/core'
 import { OpenClawWalkExplorer } from '@deja-qa/explorer-openclaw'
 import {
   InvalidWalkMemoryError,
+  LOCAL_MEMORY_PATH,
   LocalWalkStore,
   MAESTRO_FLOW_SCHEMA_VERSION,
 } from '@deja-qa/store-local'
@@ -150,6 +151,7 @@ function createOrchestration(
         apkPath: resolve(configuration.workspaceRoot, configuration.explore.buildPath),
         device: configuration.explore.device,
         store,
+        memoryPath: LOCAL_MEMORY_PATH,
         runner,
         fingerprint: () => buildFingerprint(configuration, executionAdapter),
         ...(process.env.ANDROID_HOME || process.env.ANDROID_SDK_ROOT
