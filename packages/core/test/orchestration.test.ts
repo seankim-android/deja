@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { readFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import {
-  WalkCache,
+  Deja,
   normalizeGoal,
   type ExecutionResult,
   type ExplorationResult,
@@ -34,7 +34,7 @@ const timestamp = '2026-11-22T00:00:00.000Z'
 const storedWalk: StoredWalk = {
   ...identity,
   goalKey: 'checkout',
-  flowPath: '.walkcache/flows/checkout/fixture.yaml',
+  flowPath: '.deja/flows/checkout/fixture.yaml',
   flowSha256: 'f'.repeat(64),
   lastValidation: { passed: true, at: timestamp },
   validationHistory: [{ passed: true, at: timestamp, flowSha256: 'f'.repeat(64) }],
@@ -60,7 +60,7 @@ class FakeStore implements WalkStore {
       walk: storedWalk,
       flowPath: storedWalk.flowPath,
       flowSha256: storedWalk.flowSha256,
-      storedMetadataPath: '.walkcache/memory/walks.json',
+      storedMetadataPath: '.deja/memory/walks.json',
       atomicWrite: true,
     }
   }
@@ -84,7 +84,7 @@ class FakeReporter implements RunReporter {
   results: RunResult[] = []
   async report(result: RunResult) {
     this.results.push(result)
-    return { reportPath: '.walkcache/reports/test.json', latestPath: '.walkcache/reports/latest.json' }
+    return { reportPath: '.deja/reports/test.json', latestPath: '.deja/reports/latest.json' }
   }
 }
 
@@ -94,7 +94,7 @@ function failure(category: FailureCategory) {
     advisory: true as const,
     repairEligible: category === 'selector' || category === 'navigation',
     failingStep: `fixture ${category} step`,
-    rawArtifactPath: '.walkcache/reports/output.log',
+    rawArtifactPath: '.deja/reports/output.log',
   }
 }
 
@@ -107,7 +107,7 @@ function execution(passed: boolean, category?: FailureCategory): ExecutionResult
     exitCode: passed ? 0 : 1,
     assertions: 9,
     failure: passed || !category ? null : failure(category),
-    artifacts: [{ kind: 'output', path: '.walkcache/reports/output.log' }],
+    artifacts: [{ kind: 'output', path: '.deja/reports/output.log' }],
   }
 }
 
@@ -126,7 +126,7 @@ function exploration(passed = true): ExplorationResult {
     flowPath: passed ? storedWalk.flowPath : null,
     flowSha256: passed ? storedWalk.flowSha256 : null,
     failure: passed ? null : failure('product_assertion'),
-    artifacts: [{ kind: 'attempt', path: '.walkcache/attempts/explore-test' }],
+    artifacts: [{ kind: 'attempt', path: '.deja/attempts/explore-test' }],
     errors: passed ? [] : ['verification rejected'],
   }
 }
@@ -143,9 +143,9 @@ function repair(status: RepairResult['status'] = 'repaired'): RepairResult {
     flowPath: storedWalk.flowPath,
     flowSha256: storedWalk.flowSha256,
     failure: passed ? null : failure('selector'),
-    artifacts: [{ kind: 'repair-report', path: '.walkcache/patches/repair-test/repair-report.json' }],
+    artifacts: [{ kind: 'repair-report', path: '.deja/patches/repair-test/repair-report.json' }],
     diffs: passed ? [{
-      path: '.walkcache/patches/repair-test/proposed.patch',
+      path: '.deja/patches/repair-test/proposed.patch',
       affectedFiles: ['fixture/component.ext'],
       contents: '- old selector\n+ new selector\n',
       autoCommit: false,
@@ -171,7 +171,7 @@ function fixture(
   let repairCalls = 0
   let explorationResult = exploration()
   let repairResult = repair()
-  const cache = new WalkCache({
+  const cache = new Deja({
     store,
     reporter,
     ...(now ? { now } : {}),

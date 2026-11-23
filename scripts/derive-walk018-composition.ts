@@ -7,7 +7,7 @@ import { validateSubflowContract } from '../packages/core/src/subflow.ts'
 
 const repo = resolve(import.meta.dir, '..')
 const sourceDirectory = 'demo/live-evidence/android'
-const evidenceDirectory = 'spikes/001-android-walkcache/evidence/walk018'
+const evidenceDirectory = 'spikes/001-android-deja/evidence/walk018'
 const acceptedFlowSha256 = 'e95532ce04a4e125d3bd56e1b9d5d367b31dd67eed4441c56271ca52f3c3d0a1'
 const buildFingerprint = '6aec5fea876938db14007ba3dbcb91f698832fe855886abd9dea1e7b28861759'
 const runId = 'walk020-android-checkout-06'

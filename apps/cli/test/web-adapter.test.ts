@@ -4,13 +4,13 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
-const cli = resolve(import.meta.dir, '../walkcache.ts')
+const cli = resolve(import.meta.dir, '../deja.ts')
 const fakeMaestro = resolve(import.meta.dir, '../../../packages/maestro/test/fixtures/fake-maestro.cjs')
 
 async function execute(root: string, args: string[], product = false) {
-  const child = spawn(process.execPath, [cli, ...args, '--config', 'walkcache.config.json'], {
+  const child = spawn(process.execPath, [cli, ...args, '--config', 'deja.config.json'], {
     cwd: root,
-    env: { ...process.env, WALKCACHE_FAKE_MAESTRO_MODE: product ? 'product' : '' },
+    env: { ...process.env, DEJA_FAKE_MAESTRO_MODE: product ? 'product' : '' },
     stdio: ['ignore', 'pipe', 'pipe'],
   })
   const stdout: string[] = []
@@ -24,13 +24,13 @@ async function execute(root: string, args: string[], product = false) {
     child.once('close', code => resolveExit(code))
   })
   let report: Record<string, unknown> | null = null
-  try { report = JSON.parse(await readFile(join(root, '.walkcache/reports/latest.json'), 'utf8')) } catch {}
+  try { report = JSON.parse(await readFile(join(root, '.deja/reports/latest.json'), 'utf8')) } catch {}
   return { exitCode, stdout: stdout.join(''), stderr: stderr.join(''), report }
 }
 
 describe('production Web adapter CLI', () => {
   test('verified remember/warm replay works without a model; unsupported cold and stale/product failures stay honest', async () => {
-    const temporary = await mkdtemp(join(tmpdir(), 'walkcache-web-cli-'))
+    const temporary = await mkdtemp(join(tmpdir(), 'deja-web-cli-'))
     const root = join(temporary, 'workspace')
     try {
       await mkdir(join(root, 'public'), { recursive: true })
@@ -42,7 +42,7 @@ describe('production Web adapter CLI', () => {
 - openLink: http://127.0.0.1:4174
 - assertVisible: Order confirmed
 `)
-      await writeFile(join(root, 'walkcache.config.json'), JSON.stringify({
+      await writeFile(join(root, 'deja.config.json'), JSON.stringify({
         workspaceRoot: '.', appId: 'http://127.0.0.1:4174', platform: 'web',
         browser: 'chromium', adapter: 'maestro-web@2.12.0', device: 'chromium',
         buildPath: 'public', fixtureCredentials: [{ label: 'Fixture password', value: 'testing123' }],

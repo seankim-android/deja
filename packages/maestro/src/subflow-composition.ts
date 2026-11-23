@@ -343,7 +343,7 @@ export class MaestroLoginComposer {
     }
     const execution = await this.options.runner.run({
       flowPath: candidatePath,
-      artifactDirectory: `.walkcache/reports/${this.artifactId('login-verification')}`,
+      artifactDirectory: `.deja/reports/${this.artifactId('login-verification')}`,
     })
     if (!execution.passed) {
       return {
@@ -405,9 +405,9 @@ export class MaestroLoginComposer {
     const continuation = validateContinuation(continuationYaml)
     const root = resolve(this.options.workspaceRoot)
     const goalSlug = flowSlug(identity.goal)
-    const candidatePath = `.walkcache/composed/${goalSlug}/candidate.yaml`
+    const candidatePath = `.deja/composed/${goalSlug}/candidate.yaml`
     const candidateDirectory = resolve(root, dirname(candidatePath))
-    const finalDirectory = resolve(root, `.walkcache/flows/${goalSlug}`)
+    const finalDirectory = resolve(root, `.deja/flows/${goalSlug}`)
     const segmentPath = resolve(root, lookup.segment.flowPath)
     const segmentReference = portable(relative(candidateDirectory, segmentPath))
     // LocalWalkStore moves bytes one peer directory sideways. Prove that move cannot change runFlow
@@ -435,7 +435,7 @@ export class MaestroLoginComposer {
 
     const execution = await this.options.runner.run({
       flowPath: candidatePath,
-      artifactDirectory: `.walkcache/reports/${this.artifactId('composition-verification')}`,
+      artifactDirectory: `.deja/reports/${this.artifactId('composition-verification')}`,
     })
     const newSteps = countMaestroSteps(continuation)
     const newAssertions = countMaestroAssertions(continuation)

@@ -21,7 +21,7 @@ const cart: ScreenObservation[] = [{ kind: 'android-resource-id', value: 'screen
 function fixture(): RouteGraph {
   return {
     schemaVersion: 1,
-    appId: 'dev.walkcache.checkout',
+    appId: 'dev.deja.checkout',
     platform: 'android',
     buildFingerprint,
     screenFingerprintVersion: 1,

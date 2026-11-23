@@ -15,7 +15,7 @@ import { LocalVerifiedSubflowStore, LocalWalkStore } from '../../store-local/src
 import { runWalk018Verification } from '../../../scripts/verify-walk018-composition.ts'
 
 const repo = resolve(import.meta.dir, '../../..')
-const evidence = 'spikes/001-android-walkcache/evidence/walk018'
+const evidence = 'spikes/001-android-deja/evidence/walk018'
 const identity: WalkIdentity = {
   goal: 'Sign in and check out Mochi sticker pack',
   appId: 'dev.walkcache.checkout', platform: 'android', flowSchemaVersion: 'maestro/v1',
@@ -216,12 +216,12 @@ describe('bounded verified login composition', () => {
 
   test('goal-store replacement failure retains memory and verified login bytes after a passing run', async () => {
     const temporary = await mkdtemp(join(tmpdir(), 'walk018-persist-failure-'))
-    const priorFailure = process.env.WALKCACHE_COMPOSITION_FAIL
-    delete process.env.WALKCACHE_COMPOSITION_FAIL
+    const priorFailure = process.env.DEJA_COMPOSITION_FAIL
+    delete process.env.DEJA_COMPOSITION_FAIL
     try {
       const workspaceRoot = temporary
       const loginName = 'android-c415a62dae8b1346213ac1f92c5201d2a8c17e01d98c84e6ab979f4d785f3266.yaml'
-      const candidatePath = '.walkcache/attempts/login-segment.yaml'
+      const candidatePath = '.deja/attempts/login-segment.yaml'
       await mkdir(dirname(resolve(workspaceRoot, candidatePath)), { recursive: true })
       await writeFile(resolve(workspaceRoot, candidatePath), await readFile(resolve(
         repo, `${evidence}/segments/login-v1/${loginName}`), 'utf8'))
@@ -230,7 +230,7 @@ describe('bounded verified login composition', () => {
       await mkdir(dirname(resolve(workspaceRoot, previous.flowPath)), { recursive: true })
       await writeFile(resolve(workspaceRoot, previous.flowPath), await readFile(resolve(
         repo, 'demo/live-evidence/android/cold-saved-checkout.yaml'), 'utf8'))
-      const memoryPath = resolve(workspaceRoot, '.walkcache/memory/walks.json')
+      const memoryPath = resolve(workspaceRoot, '.deja/memory/walks.json')
       await mkdir(dirname(memoryPath), { recursive: true })
       await writeFile(memoryPath, `${JSON.stringify({ schemaVersion: 2, walks: [previous] }, null, 2)}\n`)
       const runner = new MaestroWalkRunner({
@@ -274,8 +274,8 @@ describe('bounded verified login composition', () => {
       expect(await normalWalks.lookup(identity)).toEqual({ status: 'miss', reason: 'not-found' })
       expect((await normalWalks.lookup({ ...identity, goal: previous.goal })).status).toBe('hit')
     } finally {
-      if (priorFailure === undefined) delete process.env.WALKCACHE_COMPOSITION_FAIL
-      else process.env.WALKCACHE_COMPOSITION_FAIL = priorFailure
+      if (priorFailure === undefined) delete process.env.DEJA_COMPOSITION_FAIL
+      else process.env.DEJA_COMPOSITION_FAIL = priorFailure
       await rm(temporary, { recursive: true, force: true })
     }
   })

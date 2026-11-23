@@ -1,7 +1,7 @@
 {
-  "name": "walkcache",
+  "name": "deja",
   "version": "0.1.0",
-  "description": "Verified Maestro QA walk caching, zero-model warm replay, and bounded Android selector repair",
+  "description": "Déjà: verified Maestro QA walk caching, zero-model warm replay, and bounded selector repair",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
@@ -12,22 +12,29 @@
     "url": "https://github.com/seankim-android/deja/issues"
   },
   "keywords": [
+    "deja",
     "maestro",
     "qa",
     "testing",
     "android",
+    "ios",
+    "web",
+    "test-caching",
     "openclaw"
   ],
   "engines": {
     "bun": ">=1.4.0"
   },
   "type": "module",
+  "bin": {
+    "deja": "apps/cli/deja.ts"
+  },
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "oxlint",
     "preview": "vite preview",
-    "walkcache": "bun apps/cli/walkcache.ts"
+    "deja": "bun apps/cli/deja.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.2",

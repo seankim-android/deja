@@ -13,7 +13,7 @@ import {
 function identity(): WalkIdentity {
   return {
     goal: 'Checkout',
-    appId: 'dev.walkcache.checkout',
+    appId: 'dev.deja.checkout',
     platform: 'android',
     flowSchemaVersion: MAESTRO_FLOW_SCHEMA_VERSION,
     buildFingerprint: 'a'.repeat(64),
@@ -21,18 +21,18 @@ function identity(): WalkIdentity {
 }
 
 test('upgrades valid WALK-003 schema-one metadata without inventing validation success', async () => {
-  const temporary = await mkdtemp(join(tmpdir(), 'walkcache-local-legacy-'))
+  const temporary = await mkdtemp(join(tmpdir(), 'deja-local-legacy-'))
   const workspaceRoot = join(temporary, 'workspace')
   try {
-    await mkdir(join(workspaceRoot, '.walkcache/attempts'), { recursive: true })
-    const candidatePath = '.walkcache/attempts/candidate.yaml'
-    await writeFile(join(workspaceRoot, candidatePath), 'appId: dev.walkcache.checkout\n')
+    await mkdir(join(workspaceRoot, '.deja/attempts'), { recursive: true })
+    const candidatePath = '.deja/attempts/candidate.yaml'
+    await writeFile(join(workspaceRoot, candidatePath), 'appId: dev.deja.checkout\n')
     const store = new LocalWalkStore({ workspaceRoot })
     const persisted = await store.persistVerifiedCandidate({
       identity: identity(), candidatePath,
       validation: { passed: true, at: '2026-11-22T00:00:00.000Z' }, origin: 'explore',
     })
-    const oldPath = '.walkcache/flows/checkout/android.yaml'
+    const oldPath = '.deja/flows/checkout/android.yaml'
     await rename(join(workspaceRoot, persisted.flowPath), join(workspaceRoot, oldPath))
     const memory = JSON.parse(await readFile(join(workspaceRoot, LOCAL_MEMORY_PATH), 'utf8'))
     memory.schemaVersion = 1

@@ -27,7 +27,7 @@ function walk(goal: string, overrides: Partial<StoredWalk> = {}): StoredWalk {
     ...baseIdentity,
     goal,
     goalKey: normalizeGoal(goal).key,
-    flowPath: '.walkcache/flows/test/android.yaml',
+    flowPath: '.deja/flows/test/android.yaml',
     flowSha256,
     lastValidation: { passed: true, at: timestamp },
     validationHistory: [{ passed: true, at: timestamp, flowSha256 }],

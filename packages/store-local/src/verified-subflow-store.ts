@@ -14,7 +14,7 @@ import {
   type VerifiedSubflowStore,
 } from '../../core/src/subflow.ts'
 
-export const VERIFIED_SUBFLOW_INDEX_PATH = '.walkcache/segments/index.json'
+export const VERIFIED_SUBFLOW_INDEX_PATH = '.deja/segments/index.json'
 
 const CONTRACT_KEYS = [
   'schemaVersion', 'segmentId', 'identity', 'inputs', 'outputs', 'preconditions',
@@ -81,7 +81,7 @@ function readSegment(value: unknown): VerifiedSubflow {
     throw new InvalidSubflowMemoryError('segment contract is invalid', { cause: error })
   }
   if (typeof value.flowPath !== 'string' || isAbsolute(value.flowPath) ||
-      !value.flowPath.startsWith('.walkcache/segments/') ||
+      !value.flowPath.startsWith('.deja/segments/') ||
       value.flowPath.split('/').includes('..') || !fingerprint(value.flowSha256) ||
       !object(value.lastValidation) || value.lastValidation.passed !== true ||
       !timestamp(value.lastValidation.at)) {
@@ -186,7 +186,7 @@ export class LocalVerifiedSubflowStore implements VerifiedSubflowStore {
     const index = await this.loadIndex()
     const bytes = await readFile(candidate)
     const flowSha256 = createHash('sha256').update(bytes).digest('hex')
-    const flowPath = `.walkcache/segments/${slug(contract.segmentId)}/${
+    const flowPath = `.deja/segments/${slug(contract.segmentId)}/${
       slug(contract.identity.platform)}-${flowSha256}.yaml`
     await this.atomicWrite(resolve(root, flowPath), bytes)
     const segment: VerifiedSubflow = {
@@ -205,7 +205,7 @@ export class LocalVerifiedSubflowStore implements VerifiedSubflowStore {
 
   private async storedFlowPath(segment: VerifiedSubflow): Promise<string | null> {
     const root = await this.canonicalRoot()
-    const segmentRoot = resolve(root, '.walkcache/segments')
+    const segmentRoot = resolve(root, '.deja/segments')
     const candidate = resolve(root, segment.flowPath)
     if (!inside(segmentRoot, candidate)) {
       throw new InvalidSubflowMemoryError('stored segment escapes its flow directory')

@@ -1,0 +1,41 @@
+appId: dev.deja.checkout
+---
+- launchApp:
+    appId: dev.deja.checkout
+    clearState: true
+
+# Login: confirm the cleared app starts at the expected screen.
+- assertVisible:
+    id: dev.deja.checkout:id/screen_login
+- assertVisible: Déjà Shop
+- tapOn:
+    id: dev.deja.checkout:id/username_input
+- inputText: qa@deja.dev
+- assertVisible: qa@deja.dev
+- tapOn:
+    id: dev.deja.checkout:id/password_input
+- inputText: testing123
+- tapOn:
+    id: dev.deja.checkout:id/login_button
+
+# Catalog: verify the requested product before adding it.
+- assertVisible:
+    id: dev.deja.checkout:id/screen_catalog
+- assertVisible: Mochi sticker pack
+- assertVisible: $5.00 · 6 stickers
+- tapOn:
+    id: dev.deja.checkout:id/add_to_cart
+
+# Cart: verify quantity, product, and total before checkout.
+- assertVisible:
+    id: dev.deja.checkout:id/screen_cart
+- assertVisible: 1 × Mochi sticker pack
+- assertVisible: "Total: $5.00"
+- tapOn:
+    id: dev.deja.checkout:id/checkout_button
+
+# Confirmation: verify both the screen and exact fixture order.
+- assertVisible:
+    id: dev.deja.checkout:id/order_confirmation
+- assertVisible: Order confirmed
+- assertVisible: "Order #WC-1001 · Mochi sticker pack"

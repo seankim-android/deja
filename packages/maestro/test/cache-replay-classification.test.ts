@@ -10,7 +10,7 @@ import {
   MAESTRO_FLOW_SCHEMA_VERSION,
 } from '../../store-local/src/index.ts'
 
-const cli = resolve(import.meta.dir, '../../../spikes/001-android-walkcache/scripts/walkcache.ts')
+const cli = resolve(import.meta.dir, '../../../spikes/001-android-deja/scripts/deja.ts')
 const fakeMaestro = resolve(import.meta.dir, 'fixtures/fake-maestro.cjs')
 
 async function execute(workspaceRoot: string) {
@@ -18,11 +18,11 @@ async function execute(workspaceRoot: string) {
     cwd: workspaceRoot,
     env: {
       ...process.env,
-      WALKCACHE_DEVICE: 'test-device',
-      WALKCACHE_FAKE_MAESTRO_MODE: 'selector',
-      WALKCACHE_MAESTRO: fakeMaestro,
-      WALKCACHE_OPENCLAW: join(workspaceRoot, 'model-must-not-be-invoked'),
-      WALKCACHE_TIMEOUT_MS: '2000',
+      DEJA_DEVICE: 'test-device',
+      DEJA_FAKE_MAESTRO_MODE: 'selector',
+      DEJA_MAESTRO: fakeMaestro,
+      DEJA_OPENCLAW: join(workspaceRoot, 'model-must-not-be-invoked'),
+      DEJA_TIMEOUT_MS: '2000',
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   })
@@ -36,12 +36,12 @@ async function execute(workspaceRoot: string) {
     child.once('error', error => stderr.push(String(error)))
     child.once('close', code => resolveExit(code))
   })
-  const report = JSON.parse(await readFile(join(workspaceRoot, '.walkcache/reports/latest.json'), 'utf8'))
+  const report = JSON.parse(await readFile(join(workspaceRoot, '.deja/reports/latest.json'), 'utf8'))
   return { exitCode, stdout: stdout.join(''), stderr: stderr.join(''), report }
 }
 
 test('a failing cache hit stays at zero model calls and its failed validation is not reused', async () => {
-  const temporary = await mkdtemp(join(tmpdir(), 'walkcache-cache-classification-'))
+  const temporary = await mkdtemp(join(tmpdir(), 'deja-cache-classification-'))
   const workspaceRoot = join(temporary, 'workspace')
   try {
     await mkdir(join(workspaceRoot, 'app/build/outputs/apk/debug'), { recursive: true })
@@ -49,12 +49,12 @@ test('a failing cache hit stays at zero model calls and its failed validation is
     const apk = Buffer.from('deterministic fake APK for cache orchestration')
     await writeFile(join(workspaceRoot, 'app/build/outputs/apk/debug/app-debug.apk'), apk)
     const buildFingerprint = createHash('sha256').update(apk).digest('hex')
-    await writeFile(join(workspaceRoot, 'flows/candidate.yaml'), 'appId: dev.walkcache.checkout\n')
+    await writeFile(join(workspaceRoot, 'flows/candidate.yaml'), 'appId: dev.deja.checkout\n')
     const store = new LocalWalkStore({ workspaceRoot })
     const persisted = await store.persistVerifiedCandidate({
       identity: {
         goal: 'checkout',
-        appId: 'dev.walkcache.checkout',
+        appId: 'dev.deja.checkout',
         platform: 'android',
         flowSchemaVersion: MAESTRO_FLOW_SCHEMA_VERSION,
         buildFingerprint,

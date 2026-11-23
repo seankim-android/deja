@@ -14,7 +14,7 @@ import { fixtures } from '../../src/viewer/fixtures.ts'
 let root: string
 
 beforeEach(async () => {
-  root = await mkdtemp(join(tmpdir(), 'walkcache-viewer-'))
+  root = await mkdtemp(join(tmpdir(), 'deja-viewer-'))
 })
 
 afterEach(async () => {
@@ -29,7 +29,7 @@ async function put(relative: string, contents: string) {
 }
 
 const report = fixtures.warm.entry.report!
-const reportPath = '.walkcache/reports/latest.json'
+const reportPath = '.deja/reports/latest.json'
 const yamlPath = report.yamlPath!
 
 describe('read-only local viewer API', () => {
@@ -39,8 +39,8 @@ describe('read-only local viewer API', () => {
 
   test('valid, malformed, missing, and in-progress reports retain their states', async () => {
     await put(reportPath, JSON.stringify(report))
-    await put('.walkcache/reports/bad.json', '{nope')
-    await put('.walkcache/reports/current.json', JSON.stringify({ schemaVersion: 1, endedAt: null }))
+    await put('.deja/reports/bad.json', '{nope')
+    await put('.deja/reports/current.json', JSON.stringify({ schemaVersion: 1, endedAt: null }))
     const listed = await listWorkspaceReports(root)
     expect(listed.reports.find(entry => entry.path === reportPath)?.report?.passed).toBe(true)
     expect(listed.reports.find(entry => entry.path.endsWith('bad.json'))?.state).toBe('malformed')
@@ -52,31 +52,31 @@ describe('read-only local viewer API', () => {
 
   test('only an artifact declared by its authorizing report can be read', async () => {
     await put(reportPath, JSON.stringify(report))
-    await put(yamlPath, 'appId: dev.walkcache.checkout\n')
-    await put('.walkcache/flows/checkout/undeclared.yaml', 'do not load\n')
+    await put(yamlPath, 'appId: dev.deja.checkout\n')
+    await put('.deja/flows/checkout/undeclared.yaml', 'do not load\n')
     const artifact = await readDeclaredArtifact(root, reportPath, yamlPath)
-    expect(artifact.contents).toContain('dev.walkcache.checkout')
-    await expect(readDeclaredArtifact(root, reportPath, '.walkcache/flows/checkout/undeclared.yaml')).rejects.toThrow('not declared')
+    expect(artifact.contents).toContain('dev.deja.checkout')
+    await expect(readDeclaredArtifact(root, reportPath, '.deja/flows/checkout/undeclared.yaml')).rejects.toThrow('not declared')
   })
 
   test('arbitrary paths, traversal, raw logs, and credential-like paths are rejected', async () => {
-    for (const path of ['/etc/passwd', '.walkcache/../secret.yaml', '.walkcache/secrets/run.yaml', '.walkcache/reports/output.log']) {
+    for (const path of ['/etc/passwd', '.deja/../secret.yaml', '.deja/secrets/run.yaml', '.deja/reports/output.log']) {
       expect(safeArtifactPath(path)).toBe(false)
       await expect(readDeclaredArtifact(root, reportPath, path)).rejects.toThrow()
     }
   })
 
-  test('a declared symlink that escapes .walkcache is never followed', async () => {
+  test('a declared symlink that escapes .deja is never followed', async () => {
     await put(reportPath, JSON.stringify(report))
     const outside = await put('outside.yaml', 'outside\n')
-    await mkdir(join(root, '.walkcache/flows/checkout'), { recursive: true })
+    await mkdir(join(root, '.deja/flows/checkout'), { recursive: true })
     await symlink(outside, join(root, yamlPath))
     await expect(readDeclaredArtifact(root, reportPath, yamlPath)).rejects.toThrow()
   })
 
   test('validation history returns recorded outcomes and rejects malformed memory', async () => {
     expect((await readValidationHistory(root, 'checkout')).state).toBe('missing')
-    await put('.walkcache/memory/walks.json', JSON.stringify({
+    await put('.deja/memory/walks.json', JSON.stringify({
       schemaVersion: 2,
       walks: [{ goalKey: 'checkout', validationHistory: [
         { passed: true, at: report.endedAt, flowSha256: report.yamlSha256 },
@@ -85,7 +85,7 @@ describe('read-only local viewer API', () => {
     }))
     const history = await readValidationHistory(root, 'checkout')
     expect(history.entries.map(entry => entry.passed)).toEqual([true, false])
-    await put('.walkcache/memory/walks.json', '{bad')
+    await put('.deja/memory/walks.json', '{bad')
     expect((await readValidationHistory(root, 'checkout')).state).toBe('malformed')
   })
 })

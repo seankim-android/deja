@@ -8,7 +8,7 @@ import {
 } from '../src/index.ts'
 import { deriveWalk017AndroidGraph } from '../../../scripts/derive-walk017-route-graph.ts'
 
-const graphPath = 'spikes/001-android-walkcache/evidence/walk017-route-graph.json'
+const graphPath = 'spikes/001-android-deja/evidence/walk017-route-graph.json'
 
 async function curatedGraph() {
   return validateRouteGraph(JSON.parse(await readFile(resolve(process.cwd(), graphPath), 'utf8')))

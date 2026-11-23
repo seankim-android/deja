@@ -9,7 +9,7 @@ import { runMaestro, type RunMaestroOptions } from '../src/index.ts'
 const fakeMaestro = resolve(import.meta.dir, 'fixtures/fake-maestro.cjs')
 
 async function fixture(flowName = 'success.yaml') {
-  const temporary = await mkdtemp(join(tmpdir(), 'walkcache-maestro-'))
+  const temporary = await mkdtemp(join(tmpdir(), 'deja-maestro-'))
   const workspaceRoot = join(temporary, 'workspace')
   const flowDirectory = join(workspaceRoot, 'flows')
   await mkdir(flowDirectory, { recursive: true })
@@ -40,13 +40,13 @@ describe('verified Maestro runner', () => {
     const androidSdkRoot = join(workspaceRoot, 'android-sdk')
     const javaHome = join(workspaceRoot, 'java')
     const secret = 'not-for-reports-secret-value'
-    process.env.WALKCACHE_TEST_SECRET = secret
+    process.env.DEJA_TEST_SECRET = secret
     try {
       const result = await runMaestro({
         ...options,
         androidSdkRoot,
         javaHome,
-        artifacts: { directory: '.walkcache/test-run' },
+        artifacts: { directory: '.deja/test-run' },
       })
 
       expect(result.passed).toBe(true)
@@ -78,7 +78,7 @@ describe('verified Maestro runner', () => {
       expect(JSON.stringify(result)).not.toContain(secret)
       expect(await readFile(artifacts.outputPath, 'utf8')).not.toContain(secret)
     } finally {
-      delete process.env.WALKCACHE_TEST_SECRET
+      delete process.env.DEJA_TEST_SECRET
       await cleanup(temporary)
     }
   })

@@ -30,7 +30,7 @@ function identity(overrides: Partial<WalkIdentity> = {}): WalkIdentity {
 }
 
 async function fixture() {
-  const root = await mkdtemp(join(tmpdir(), 'walkcache-semantic-store-'))
+  const root = await mkdtemp(join(tmpdir(), 'deja-semantic-store-'))
   await mkdir(join(root, 'candidates'), { recursive: true })
   const store = new LocalWalkStore({ workspaceRoot: root })
   const seed = async (goal: string, overrides: Partial<WalkIdentity> = {}) => {

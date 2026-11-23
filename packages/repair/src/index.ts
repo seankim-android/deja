@@ -48,7 +48,7 @@ export {
   type PlannedRepairFile,
 } from './policy.ts'
 
-const EXPECTED_FAILING_STEP = 'Tap on id: dev.walkcache.checkout:id/checkout_button'
+const EXPECTED_FAILING_STEP = 'Tap on id: dev.deja.checkout:id/checkout_button'
 
 export type BoundedCheckoutRepairOptions = {
   workspaceRoot: string
@@ -272,14 +272,14 @@ export class BoundedCheckoutRepairer {
 async function executeBoundedCheckoutRepair(
   options: BoundedCheckoutRepairOptions,
 ): Promise<BoundedCheckoutRepairReport> {
-  if (options.goal.trim().toLowerCase() !== 'checkout' || options.appId !== 'dev.walkcache.checkout' ||
+  if (options.goal.trim().toLowerCase() !== 'checkout' || options.appId !== 'dev.deja.checkout' ||
       options.platform !== 'android') {
     throw new Error('Only the validated Android checkout selector repair is supported')
   }
   const root = await realpath(resolve(options.workspaceRoot))
   const attemptId = options.attemptId ?? `repair-${Date.now()}-${process.pid}`
   validateAttemptId(attemptId)
-  const attemptDirectory = resolve(root, '.walkcache/patches', attemptId)
+  const attemptDirectory = resolve(root, '.deja/patches', attemptId)
   if (!inside(root, attemptDirectory)) throw new Error('Repair attempt directory escapes workspace')
   await mkdir(attemptDirectory, { recursive: true })
   const deadline = new RepairDeadline(options.timeoutMs)

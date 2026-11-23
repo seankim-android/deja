@@ -13,13 +13,13 @@ import {
 
 const fakeOpenClaw = resolve(import.meta.dir, 'fixtures/fake-openclaw.cjs')
 const environmentKeys = [
-  'WALKCACHE_FAKE_OPENCLAW_CAPTURE',
-  'WALKCACHE_FAKE_OPENCLAW_MCP_CALLS',
-  'WALKCACHE_FAKE_OPENCLAW_MODE',
-  'WALKCACHE_FAKE_OPENCLAW_NO_TURNS',
-  'WALKCACHE_FAKE_OPENCLAW_SKIP_MCP_LOG',
-  'WALKCACHE_FAKE_OPENCLAW_TURNS',
-  'WALKCACHE_FAKE_OPENCLAW_FENCED',
+  'DEJA_FAKE_OPENCLAW_CAPTURE',
+  'DEJA_FAKE_OPENCLAW_MCP_CALLS',
+  'DEJA_FAKE_OPENCLAW_MODE',
+  'DEJA_FAKE_OPENCLAW_NO_TURNS',
+  'DEJA_FAKE_OPENCLAW_SKIP_MCP_LOG',
+  'DEJA_FAKE_OPENCLAW_TURNS',
+  'DEJA_FAKE_OPENCLAW_FENCED',
 ] as const
 const originalEnvironment = Object.fromEntries(environmentKeys.map(key => [key, process.env[key]]))
 
@@ -32,19 +32,19 @@ afterEach(() => {
 })
 
 async function fixture(goal = 'checkout') {
-  const temporary = await mkdtemp(join(tmpdir(), 'walkcache-openclaw-'))
+  const temporary = await mkdtemp(join(tmpdir(), 'deja-openclaw-'))
   const workspaceRoot = join(temporary, 'workspace')
   const buildPath = 'app/build/app-debug.apk'
   await mkdir(join(workspaceRoot, 'app/build'), { recursive: true })
   await writeFile(join(workspaceRoot, buildPath), 'fixture apk')
   const configuration = {
     workspaceRoot,
-    appId: 'dev.walkcache.checkout',
+    appId: 'dev.deja.checkout',
     platform: 'android' as const,
     buildPath,
     device: 'emulator-5554',
     fixtureCredentials: [
-      { label: 'Fixture email', value: 'qa@walkcache.dev' },
+      { label: 'Fixture email', value: 'qa@deja.dev' },
       { label: 'Fixture password', value: 'testing123' },
     ],
     openClawModel: 'cerebras/moonshotai-kimi-k3.1-pro-trial',
@@ -56,12 +56,12 @@ async function fixture(goal = 'checkout') {
     goal,
     configuration,
     buildFingerprint: 'a'.repeat(64),
-    attemptDirectory: join(workspaceRoot, '.walkcache/attempts/explore-test'),
+    attemptDirectory: join(workspaceRoot, '.deja/attempts/explore-test'),
     openClawExecutable: fakeOpenClaw,
     maestroMcpProxy: join(workspaceRoot, 'unused-proxy.ts'),
     maestroMcpEnvironment: {
-      WALKCACHE_MAESTRO: '/fixture/maestro',
-      WALKCACHE_DEVICE: configuration.device,
+      DEJA_MAESTRO: '/fixture/maestro',
+      DEJA_DEVICE: configuration.device,
     },
   }
   return { temporary, workspaceRoot, options }
@@ -84,9 +84,9 @@ describe('self-contained OpenClaw cold exploration', () => {
   test('pins an MCP-only explorer and persists only after independent verification', async () => {
     const { temporary, workspaceRoot, options } = await fixture()
     const capturePath = join(temporary, 'invocation.json')
-    process.env.WALKCACHE_FAKE_OPENCLAW_CAPTURE = capturePath
-    process.env.WALKCACHE_FAKE_OPENCLAW_MCP_CALLS = '2'
-    process.env.WALKCACHE_FAKE_OPENCLAW_TURNS = '3'
+    process.env.DEJA_FAKE_OPENCLAW_CAPTURE = capturePath
+    process.env.DEJA_FAKE_OPENCLAW_MCP_CALLS = '2'
+    process.env.DEJA_FAKE_OPENCLAW_TURNS = '3'
     const phases: string[] = []
     let observedMetrics: ExplorationMetrics | null = null
     const hooks: ColdExploreHooks = {
@@ -98,12 +98,12 @@ describe('self-contained OpenClaw cold exploration', () => {
       persistVerified: async (_candidate, _verified, metrics) => {
         phases.push('persist')
         observedMetrics = metrics
-        await mkdir(join(workspaceRoot, '.walkcache/flows/checkout'), { recursive: true })
-        await writeFile(join(workspaceRoot, '.walkcache/flows/checkout/android.yaml'), 'verified flow\n')
+        await mkdir(join(workspaceRoot, '.deja/flows/checkout'), { recursive: true })
+        await writeFile(join(workspaceRoot, '.deja/flows/checkout/android.yaml'), 'verified flow\n')
         return {
-          flowPath: '.walkcache/flows/checkout/android.yaml',
+          flowPath: '.deja/flows/checkout/android.yaml',
           flowSha256: 'b'.repeat(64),
-          storedMetadataPath: '.walkcache/memory/walks.json',
+          storedMetadataPath: '.deja/memory/walks.json',
         }
       },
     }
@@ -135,7 +135,7 @@ describe('self-contained OpenClaw cold exploration', () => {
       expect(captured.config.agents.defaults.contextInjection).toBe('never')
       expect(captured.config.mcp.servers.maestro.toolFilter.include).not.toContain('run_on_cloud')
       expect(captured.config.mcp.servers.maestro.cwd).toBe(join(options.attemptDirectory, 'workspace'))
-      expect(captured.config.mcp.servers.maestro.env.WALKCACHE_MCP_LOG).toBe(
+      expect(captured.config.mcp.servers.maestro.env.DEJA_MCP_LOG).toBe(
         join(options.attemptDirectory, 'mcp-activity.jsonl'),
       )
       expect(JSON.stringify(captured.config)).not.toContain('testing123')
@@ -146,12 +146,12 @@ describe('self-contained OpenClaw cold exploration', () => {
 
   test('a rejected candidate cannot create or replace known-good memory', async () => {
     const { temporary, workspaceRoot, options } = await fixture()
-    process.env.WALKCACHE_FAKE_OPENCLAW_MODE = 'invalid'
-    process.env.WALKCACHE_FAKE_OPENCLAW_NO_TURNS = '1'
-    const flowPath = join(workspaceRoot, '.walkcache/flows/checkout/android.yaml')
-    const memoryPath = join(workspaceRoot, '.walkcache/memory/walks.json')
-    await mkdir(join(workspaceRoot, '.walkcache/flows/checkout'), { recursive: true })
-    await mkdir(join(workspaceRoot, '.walkcache/memory'), { recursive: true })
+    process.env.DEJA_FAKE_OPENCLAW_MODE = 'invalid'
+    process.env.DEJA_FAKE_OPENCLAW_NO_TURNS = '1'
+    const flowPath = join(workspaceRoot, '.deja/flows/checkout/android.yaml')
+    const memoryPath = join(workspaceRoot, '.deja/memory/walks.json')
+    await mkdir(join(workspaceRoot, '.deja/flows/checkout'), { recursive: true })
+    await mkdir(join(workspaceRoot, '.deja/memory'), { recursive: true })
     await writeFile(flowPath, 'last known good flow\n')
     await writeFile(memoryPath, '{"schemaVersion":1,"walks":["known-good"]}\n')
     let persistCalled = false
@@ -172,7 +172,7 @@ describe('self-contained OpenClaw cold exploration', () => {
       expect(report.mcpCalls).toBe(0)
       expect(report.verification?.passed).toBe(false)
       expect(persistCalled).toBe(false)
-      expect(report.candidatePath).toContain('.walkcache/attempts/')
+      expect(report.candidatePath).toContain('.deja/attempts/')
       expect(await readFile(flowPath, 'utf8')).toBe('last known good flow\n')
       expect(await readFile(memoryPath, 'utf8')).toBe('{"schemaVersion":1,"walks":["known-good"]}\n')
       expect(await readFile(join(options.attemptDirectory, 'candidate.yaml'), 'utf8')).toContain('WC-9999')
@@ -183,25 +183,25 @@ describe('self-contained OpenClaw cold exploration', () => {
 
   test('extracts fenced YAML and enforces the app plus a fresh clearState launch', async () => {
     const { temporary, options } = await fixture()
-    process.env.WALKCACHE_FAKE_OPENCLAW_FENCED = '1'
+    process.env.DEJA_FAKE_OPENCLAW_FENCED = '1'
     try {
       const fenced = await runColdExploration(options, {
         clearAppState: async () => {},
         verifyCandidate: async () => verification(true),
         persistVerified: async () => ({
-          flowPath: '.walkcache/flows/checkout/android.yaml',
+          flowPath: '.deja/flows/checkout/android.yaml',
           flowSha256: 'b'.repeat(64),
         }),
       })
       expect(fenced.passed).toBe(true)
-      expect(extractCandidateYaml('```yaml\nappId: dev.walkcache.checkout\n```')).toBe(
-        'appId: dev.walkcache.checkout\n',
+      expect(extractCandidateYaml('```yaml\nappId: dev.deja.checkout\n```')).toBe(
+        'appId: dev.deja.checkout\n',
       )
-      expect(() => validateCandidate('appId: dev.walkcache.checkout\n- assertVisible: Hello\n', options.configuration.appId))
+      expect(() => validateCandidate('appId: dev.deja.checkout\n- assertVisible: Hello\n', options.configuration.appId))
         .toThrow('clearState: true')
       expect(() => validateCandidate('appId: other.app\n- launchApp:\n    clearState: true\n- assertVisible: Hello\n', options.configuration.appId))
         .toThrow('appId')
-      expect(() => validateCandidate('appId: dev.walkcache.checkout\n- launchApp:\n    clearState: true\n- assertVisible: Hello\n- runFlow: reference.yaml\n', options.configuration.appId))
+      expect(() => validateCandidate('appId: dev.deja.checkout\n- launchApp:\n    clearState: true\n- assertVisible: Hello\n- runFlow: reference.yaml\n', options.configuration.appId))
         .toThrow('external flows')
     } finally {
       await cleanup(temporary)
@@ -210,8 +210,8 @@ describe('self-contained OpenClaw cold exploration', () => {
 
   test('leaves model and MCP metrics unknown when instrumentation is absent', async () => {
     const { temporary, options } = await fixture()
-    process.env.WALKCACHE_FAKE_OPENCLAW_NO_TURNS = '1'
-    process.env.WALKCACHE_FAKE_OPENCLAW_SKIP_MCP_LOG = '1'
+    process.env.DEJA_FAKE_OPENCLAW_NO_TURNS = '1'
+    process.env.DEJA_FAKE_OPENCLAW_SKIP_MCP_LOG = '1'
     try {
       const report = await runColdExploration(options, {
         clearAppState: async () => {},

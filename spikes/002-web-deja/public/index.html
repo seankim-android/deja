@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Déjà Web Shop</title>
+    <link rel="stylesheet" href="/styles.css" />
+    <script src="/app.js" defer></script>
+  </head>
+  <body>
+    <main>
+      <section id="screen_login" aria-labelledby="login-title">
+        <p class="eyebrow">DETERMINISTIC FIXTURE</p>
+        <h1 id="login-title">Déjà Web Shop</h1>
+        <p>One small journey. A real Chromium browser.</p>
+        <label for="username">Fixture email</label>
+        <input id="username" name="username" autocomplete="off" />
+        <label for="password">Fixture password</label>
+        <input id="password" name="password" type="password" autocomplete="off" />
+        <button id="login_button" type="button">Sign in</button>
+        <p id="login_error" role="alert" hidden>Use the supplied fixture credentials.</p>
+      </section>
+
+      <section id="screen_catalog" aria-labelledby="catalog-title" hidden>
+        <p class="eyebrow">CATALOG</p>
+        <h1 id="catalog-title">Choose your pack</h1>
+        <article id="product_mochi">
+          <h2>Mochi sticker pack</h2>
+          <p>$5.00 · 6 stickers</p>
+          <button id="add_to_cart" type="button">Add to cart</button>
+        </article>
+      </section>
+
+      <section id="screen_cart" aria-labelledby="cart-title" hidden>
+        <p class="eyebrow">CART</p>
+        <h1 id="cart-title">Ready when you are</h1>
+        <p id="cart_item">1 × Mochi sticker pack</p>
+        <p id="cart_total">Total: $5.00</p>
+        <button id="checkout_button" type="button">Checkout</button>
+      </section>
+
+      <section id="order_confirmation" aria-labelledby="confirmation-title" hidden>
+        <p class="eyebrow">CONFIRMATION</p>
+        <h1 id="confirmation-title">Order confirmed</h1>
+        <p id="order_number">Order WC-1001 · Mochi sticker pack</p>
+      </section>
+    </main>
+  </body>
+</html>

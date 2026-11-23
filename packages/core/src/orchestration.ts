@@ -27,7 +27,7 @@ type RunDetails = Pick<RunResult,
   'yamlPath' | 'yamlSha256' | 'failure' | 'artifacts' | 'diffs' | 'errors'
 > & Partial<RunResult>
 
-export type WalkCacheDependencies = {
+export type DejaDependencies = {
   store: WalkStore
   runner: WalkRunner
   reporter: RunReporter
@@ -41,10 +41,10 @@ export type WalkCacheDependencies = {
   artifactId?: (prefix: 'run' | 'remember') => string
 }
 
-export class WalkCache {
-  private readonly dependencies: WalkCacheDependencies
+export class Deja {
+  private readonly dependencies: DejaDependencies
 
-  constructor(dependencies: WalkCacheDependencies) {
+  constructor(dependencies: DejaDependencies) {
     this.dependencies = dependencies
   }
 
@@ -158,7 +158,7 @@ export class WalkCache {
     }
     const execution = await this.dependencies.runner.run({
       flowPath: lookup.flowPath,
-      artifactDirectory: `.walkcache/reports/${this.artifactId('run')}`,
+      artifactDirectory: `.deja/reports/${this.artifactId('run')}`,
     })
     const hitStart = {
       ...start, cacheStatus: 'hit' as const, execution, semantic: semanticReport,
@@ -221,7 +221,7 @@ export class WalkCache {
     const start = this.base(identity, 'remember', 'not-checked')
     const execution = await this.dependencies.runner.run({
       flowPath: candidatePath,
-      artifactDirectory: `.walkcache/attempts/${this.artifactId('remember')}`,
+      artifactDirectory: `.deja/attempts/${this.artifactId('remember')}`,
     })
     if (!execution.passed) {
       return this.finish(start, {

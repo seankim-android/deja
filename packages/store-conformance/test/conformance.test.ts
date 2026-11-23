@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { JsonRunReporter } from '../../../apps/cli/src/reporter.ts'
 import { createRedactor } from '../../../apps/cli/src/redaction.ts'
-import { WalkCache } from '../../core/src/index.ts'
+import { Deja } from '../../core/src/index.ts'
 import { MaestroWalkRunner } from '../../maestro/src/index.ts'
 import {
   contractIdentity,
@@ -30,7 +30,7 @@ function runOrchestrationContract(implementation: WalkStoreContractImplementatio
         await mkdir(join(workspaceRoot, 'flows'), { recursive: true })
         await writeFile(
           join(workspaceRoot, 'flows/candidate.yaml'),
-          'appId: dev.walkcache.checkout\n- assertVisible: Order confirmed\n',
+          'appId: dev.deja.checkout\n- assertVisible: Order confirmed\n',
         )
         const identity = contractIdentity()
         const persisted = await store.persistVerifiedCandidate({
@@ -48,7 +48,7 @@ function runOrchestrationContract(implementation: WalkStoreContractImplementatio
         const reporter = new JsonRunReporter(workspaceRoot, createRedactor(workspaceRoot, []))
         let explorerConstructions = 0
         let repairerConstructions = 0
-        const cache = new WalkCache({
+        const cache = new Deja({
           store,
           runner,
           reporter,
@@ -77,7 +77,7 @@ function runOrchestrationContract(implementation: WalkStoreContractImplementatio
         expect(history.at(-1)?.passed).toBe(true)
         expect(history.at(-1)?.flowSha256).toBe(persisted.flowSha256)
         const report = JSON.parse(
-          await readFile(join(workspaceRoot, '.walkcache/reports/latest.json'), 'utf8'),
+          await readFile(join(workspaceRoot, '.deja/reports/latest.json'), 'utf8'),
         )
         expect(report.modelCalls).toBe(0)
         expect(report.execution.exitCode).toBe(0)

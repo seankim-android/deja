@@ -13,7 +13,7 @@ const warmYamlPath = 'demo/live-evidence/android/warm-saved-checkout.yaml'
 const coldMemoryPath = 'demo/live-evidence/android/cold-stored-memory.json'
 const coldReportPath = 'demo/live-evidence/android/cold-run-report.json'
 const warmReportPath = 'demo/live-evidence/android/warm-run-report.json'
-const graphPath = 'spikes/001-android-walkcache/evidence/walk017-route-graph.json'
+const graphPath = 'spikes/001-android-deja/evidence/walk017-route-graph.json'
 
 function sha256(contents: string | Buffer) {
   return createHash('sha256').update(contents).digest('hex')

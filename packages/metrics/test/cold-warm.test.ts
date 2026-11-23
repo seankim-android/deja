@@ -27,10 +27,10 @@ function sample(mode: SampleMode, sampleId: string, overrides: {
     endedAt: '2026-11-22T00:01:00.000Z',
     commandWallDurationMs: overrides.wall ?? (cold ? 100_000 : 30_000),
     commandExitCode: overrides.passed === false ? 1 : 0,
-    command: cold ? ['bun', 'walkcache.ts', 'explore', 'checkout'] : ['bun', 'walkcache.ts', 'run', 'checkout'],
+    command: cold ? ['bun', 'deja.ts', 'explore', 'checkout'] : ['bun', 'deja.ts', 'run', 'checkout'],
     conditions: {
       goal: 'checkout',
-      appId: 'dev.walkcache.checkout',
+      appId: 'dev.deja.checkout',
       platform: 'android',
       device: 'emulator-5554',
       deviceState: 'device',
@@ -58,7 +58,7 @@ function sample(mode: SampleMode, sampleId: string, overrides: {
       ? { source: 'openclaw-result', sourceSha256: 'instrumentation-hash', ...(modelCalls !== null ? { assistantTurns: modelCalls } : {}) }
       : { source: 'direct-cache-hit-contract' },
     flow: {
-      path: '.walkcache/flows/checkout/android.yaml',
+      path: '.deja/flows/checkout/android.yaml',
       sha256: 'flow-hash',
       assertVisibleCount: 9,
       finalProductOutcomeAssertion: overrides.finalAssertion ?? true,

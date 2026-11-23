@@ -24,7 +24,7 @@ function metric(label: string) {
   return screen.getByText(label).parentElement?.textContent ?? ''
 }
 
-describe('WalkCache local viewer fixtures', () => {
+describe('Déjà local viewer fixtures', () => {
   test('cold discovery shows exploration metrics without suggesting a warm hit', async () => {
     window.history.replaceState(null, '', '/?fixture=cold')
     render(<App />)
@@ -85,9 +85,9 @@ describe('viewer availability and safety', () => {
 
   test('malformed, missing, and in-progress reports never become successful states', async () => {
     const reports = [
-      { path: '.walkcache/reports/malformed.json', state: 'malformed', report: null, message: 'Bad JSON', modifiedAt: null },
-      { path: '.walkcache/reports/missing.json', state: 'missing', report: null, message: 'Missing', modifiedAt: null },
-      { path: '.walkcache/reports/current.json', state: 'in-progress', report: null, message: 'Still running', modifiedAt: null },
+      { path: '.deja/reports/malformed.json', state: 'malformed', report: null, message: 'Bad JSON', modifiedAt: null },
+      { path: '.deja/reports/missing.json', state: 'missing', report: null, message: 'Missing', modifiedAt: null },
+      { path: '.deja/reports/current.json', state: 'in-progress', report: null, message: 'Still running', modifiedAt: null },
     ]
     mockFetch(async () => new Response(JSON.stringify({ state: 'ready', reports, message: null }), {
       status: 200, headers: { 'Content-Type': 'application/json' },
@@ -105,11 +105,11 @@ describe('viewer availability and safety', () => {
   })
 
   test('client path checks restrict arbitrary files, traversal, and credential-like paths', () => {
-    expect(isViewableClientPath('.walkcache/flows/checkout/run.yaml')).toBe(true)
+    expect(isViewableClientPath('.deja/flows/checkout/run.yaml')).toBe(true)
     expect(isViewableClientPath('/etc/passwd')).toBe(false)
-    expect(isViewableClientPath('.walkcache/../outside.yaml')).toBe(false)
-    expect(isViewableClientPath('.walkcache/secrets/run.yaml')).toBe(false)
-    expect(isViewableClientPath('.walkcache/reports/raw.log')).toBe(false)
+    expect(isViewableClientPath('.deja/../outside.yaml')).toBe(false)
+    expect(isViewableClientPath('.deja/secrets/run.yaml')).toBe(false)
+    expect(isViewableClientPath('.deja/reports/raw.log')).toBe(false)
   })
 
   test('an unavailable viewer API leaves the headless fallback intact', async () => {

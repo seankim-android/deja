@@ -16,7 +16,7 @@ type FixtureCase = {
 }
 
 const selectorStep = 'Tap on id: checkout_button'
-const navigationStep = 'Launch app "dev.walkcache.checkout" with clear state'
+const navigationStep = 'Launch app "dev.deja.checkout" with clear state'
 const productStep = 'Assert that "Order #WC-9999" is visible'
 const execution = [{ kind: 'execution' } as const]
 

@@ -3,7 +3,7 @@ import { lstat, readFile, realpath, rename, rm, writeFile } from 'node:fs/promis
 import { extname, isAbsolute, relative, resolve, sep } from 'node:path'
 
 export const CHECKOUT_COMPONENT_PATH =
-  'app/src/main/java/dev/walkcache/checkout/MainActivity.java'
+  'app/src/main/java/dev/deja/checkout/MainActivity.java'
 export const CHECKOUT_IDS_PATH = 'app/src/main/res/values/ids.xml'
 export const CHECKOUT_AFFECTED_FILES = [CHECKOUT_COMPONENT_PATH, CHECKOUT_IDS_PATH] as const
 
@@ -217,7 +217,7 @@ async function writeValidatedSource(
   const { workspaceRoot, roots } = await validatePolicy(plan.policy)
   const canonical = await canonicalRepairFile(plan.policy, workspaceRoot, roots, file.path)
   if (canonical !== file.absolutePath) throw new Error(`Repair source moved during the attempt: ${file.path}`)
-  const temporary = `${canonical}.${process.pid}.walkcache-repair.tmp`
+  const temporary = `${canonical}.${process.pid}.deja-repair.tmp`
   try {
     await writeFile(temporary, contents, { flag: 'wx' })
     const temporaryMetadata = await lstat(temporary)

@@ -20,7 +20,7 @@ let failed = false
 
 const visibleByScreen = {
   login: {
-    screen_login: 'WalkCache Shop',
+    screen_login: 'Déjà Shop',
     username_input: null,
     password_input: null,
     login_button: 'Sign in',
@@ -121,7 +121,7 @@ function executeAssert(lines) {
 function executeTap(lines) {
   const id = property(lines.slice(1), 'id') ?? scalar(lines[0].slice('tapOn:'.length))
   const message = `Tap on id: ${id}`
-  if (process.env.WALKCACHE_COMPOSITION_FAIL === 'checkout-missing' && id === 'checkout_button') {
+  if (process.env.DEJA_COMPOSITION_FAIL === 'checkout-missing' && id === 'checkout_button') {
     return fail(message, 'Element not found: Id matching regex: checkout_button')
   }
   if (state.screen === 'login' && (id === 'username_input' || id === 'password_input')) {
@@ -156,7 +156,7 @@ function executeTap(lines) {
 function executeFlow(path, depth) {
   if (depth > 1) return fail('Run nested flow', 'Nested runFlow depth exceeds fixture bound')
   const contents = readFileSync(path, 'utf8')
-  if (!contents.startsWith('appId: dev.walkcache.checkout\n')) {
+  if (!contents.startsWith('appId: dev.deja.checkout\n')) {
     return fail('Read fixture app identity', 'Unexpected appId')
   }
   for (const lines of blocks(contents)) {
@@ -170,14 +170,14 @@ function executeFlow(path, depth) {
     if (command === 'launchApp:') {
       const clearState = property(lines.slice(1), 'clearState')
       if (clearState !== 'true' || depth > 1) {
-        return fail('Launch app "dev.walkcache.checkout" with clear state', 'App launch failed: clean launch required once')
+        return fail('Launch app "dev.deja.checkout" with clear state', 'App launch failed: clean launch required once')
       }
       state.screen = 'login'
       state.focused = null
       state.usernameEntered = false
       state.passwordEntered = false
       state.clearStateLaunches += 1
-      pass('Launch app "dev.walkcache.checkout" with clear state')
+      pass('Launch app "dev.deja.checkout" with clear state')
       observation({ kind: 'launch', clearState: true })
     } else if (command === 'assertVisible:' || command.startsWith('assertVisible:')) {
       executeAssert(lines)

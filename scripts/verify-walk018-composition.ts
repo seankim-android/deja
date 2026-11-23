@@ -5,7 +5,7 @@ import {
 } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
-import { WalkCache, type RunReporter, type WalkIdentity } from '../packages/core/src/index.ts'
+import { Deja, type RunReporter, type WalkIdentity } from '../packages/core/src/index.ts'
 import {
   MaestroWalkRunner,
   type MaestroExecutionAdapter,
@@ -22,7 +22,7 @@ import {
 } from '../packages/store-local/src/index.ts'
 
 const repo = resolve(import.meta.dir, '..')
-const evidenceRoot = 'spikes/001-android-walkcache/evidence/walk018'
+const evidenceRoot = 'spikes/001-android-deja/evidence/walk018'
 const fixture = resolve(repo, 'packages/maestro/test/fixtures/composition-maestro.cjs')
 const sourceDirectory = 'demo/live-evidence/android'
 const acceptedBuild = '6aec5fea876938db14007ba3dbcb91f698832fe855886abd9dea1e7b28861759'
@@ -99,17 +99,17 @@ async function snapshot(workspaceRoot: string, segmentFlowPath: string, previous
 
 const silentReporter: RunReporter = {
   report: async () => ({
-    reportPath: '.walkcache/reports/fixture-report.json',
-    latestPath: '.walkcache/reports/latest.json',
+    reportPath: '.deja/reports/fixture-report.json',
+    latestPath: '.deja/reports/latest.json',
   }),
 }
 
 export async function runWalk018Verification() {
   const temporary = await mkdtemp(join(tmpdir(), 'walk018-composition-'))
   const workspaceRoot = join(temporary, 'workspace')
-  const priorEnvironment = process.env.WALKCACHE_COMPOSITION_FAIL
+  const priorEnvironment = process.env.DEJA_COMPOSITION_FAIL
   try {
-    await mkdir(join(workspaceRoot, '.walkcache/attempts'), { recursive: true })
+    await mkdir(join(workspaceRoot, '.deja/attempts'), { recursive: true })
     const contract: SubflowContract = JSON.parse(await read(`${evidenceRoot}/login-contract.json`))
     // The contract provenance and deterministic deriver bind this one known segment path.
     const loginSourceDirectory = resolve(repo, `${evidenceRoot}/segments/login-v1`)
@@ -118,7 +118,7 @@ export async function runWalk018Verification() {
       throw new Error('Expected exactly one curated login segment')
     }
     const loginSource = `${evidenceRoot}/segments/login-v1/${loginNames[0]}`
-    const loginCandidate = '.walkcache/attempts/login-segment.yaml'
+    const loginCandidate = '.deja/attempts/login-segment.yaml'
     await writeFile(resolve(workspaceRoot, loginCandidate), await read(loginSource))
 
     const previousSource = JSON.parse(await read(`${sourceDirectory}/cold-stored-memory.json`))
@@ -176,7 +176,7 @@ export async function runWalk018Verification() {
     }
 
     let explorerConstructions = 0
-    const cache = new WalkCache({
+    const cache = new Deja({
       store: walks, runner, reporter: silentReporter,
       artifactId: () => `exact-replay-${++artifactSequence}`,
       createExplorer: () => {
@@ -190,9 +190,9 @@ export async function runWalk018Verification() {
     const afterSuccess = await snapshot(workspaceRoot, login.segment.flowPath, previousFlowPath)
     const lastKnownGoodMemory = await readFile(resolve(workspaceRoot, LOCAL_MEMORY_PATH))
 
-    process.env.WALKCACHE_COMPOSITION_FAIL = 'checkout-missing'
+    process.env.DEJA_COMPOSITION_FAIL = 'checkout-missing'
     const failed = await composer.compose(identity, 'login-v1', continuation)
-    delete process.env.WALKCACHE_COMPOSITION_FAIL
+    delete process.env.DEJA_COMPOSITION_FAIL
     if (failed.status !== 'rejected' || !failed.execution || failed.persisted !== null) {
       throw new Error('Failure fixture did not reject composition before persistence')
     }
@@ -227,7 +227,7 @@ export async function runWalk018Verification() {
       throw new Error('Wrong final text changed login bytes or last-known-good goal memory')
     }
 
-    const lateLaunchCandidate = '.walkcache/attempts/login-second-clear-launch.yaml'
+    const lateLaunchCandidate = '.deja/attempts/login-second-clear-launch.yaml'
     await writeFile(resolve(workspaceRoot, lateLaunchCandidate), `${await read(loginSource)}- launchApp:\n    clearState: true\n`)
     // Keep all static counts valid so rejection must come from observations, not the old count gate.
     const lateLaunch = await composer.verifyAndSaveSegment(
@@ -519,8 +519,8 @@ export async function runWalk018Verification() {
       },
     }
   } finally {
-    if (priorEnvironment === undefined) delete process.env.WALKCACHE_COMPOSITION_FAIL
-    else process.env.WALKCACHE_COMPOSITION_FAIL = priorEnvironment
+    if (priorEnvironment === undefined) delete process.env.DEJA_COMPOSITION_FAIL
+    else process.env.DEJA_COMPOSITION_FAIL = priorEnvironment
     await rm(temporary, { recursive: true, force: true })
   }
 }

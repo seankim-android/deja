@@ -7,7 +7,7 @@ type Next = (error?: unknown) => void
 function middleware(workspaceRoot: string) {
   const handler = viewerHandler(workspaceRoot)
   return (request: IncomingMessage, response: ServerResponse, next: Next) => {
-    if (!(request.url ?? '').startsWith('/api/walkcache/')) {
+    if (!(request.url ?? '').startsWith('/api/deja/')) {
       next()
       return
     }
@@ -21,9 +21,9 @@ function middleware(workspaceRoot: string) {
 }
 
 /** Vite is the optional viewer host only. No CLI or lifecycle module depends on this plugin. */
-export function walkCacheViewer(workspaceRoot = process.cwd()): Plugin {
+export function dejaViewer(workspaceRoot = process.cwd()): Plugin {
   return {
-    name: 'walkcache-local-run-viewer',
+    name: 'deja-local-run-viewer',
     configureServer(server) {
       server.middlewares.use(middleware(workspaceRoot))
     },

@@ -5,11 +5,11 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
-const cli = resolve(import.meta.dir, '../walkcache.ts')
+const cli = resolve(import.meta.dir, '../deja.ts')
 const fakeMaestro = resolve(import.meta.dir, '../../../packages/maestro/test/fixtures/fake-maestro.cjs')
 const fakeOpenClaw = resolve(import.meta.dir, '../../../packages/agent-openclaw/test/fixtures/fake-openclaw.cjs')
 async function workspace() {
-  const temporary = await mkdtemp(join(tmpdir(), 'walkcache-cli-'))
+  const temporary = await mkdtemp(join(tmpdir(), 'deja-cli-'))
   const root = join(temporary, 'workspace')
   await mkdir(join(root, 'app/build'), { recursive: true })
   await mkdir(join(root, 'flows'), { recursive: true })
@@ -21,16 +21,16 @@ async function workspace() {
 printf '%s\\n' "$*" >> "${join(root, 'adb-calls.log')}"
 exit 0
 `, { mode: 0o755 })
-  await writeFile(join(root, 'flows/candidate.yaml'), `appId: dev.walkcache.checkout
+  await writeFile(join(root, 'flows/candidate.yaml'), `appId: dev.deja.checkout
 ---
 - launchApp:
     clearState: true
-- assertVisible: WalkCache Shop
+- assertVisible: Déjà Shop
 - assertVisible: Order confirmed
 `)
-  await writeFile(join(root, 'walkcache.config.json'), `${JSON.stringify({
+  await writeFile(join(root, 'deja.config.json'), `${JSON.stringify({
     workspaceRoot: '.',
-    appId: 'dev.walkcache.checkout',
+    appId: 'dev.deja.checkout',
     platform: 'android',
     buildPath: 'app/build/app.apk',
     device: 'fixture-device',
@@ -50,15 +50,15 @@ async function execute(root: string, args: string[], modes: {
   explorer?: 'invalid'
   capture?: string
 } = {}) {
-  const cliArguments = args.includes('--config') ? args : [...args, '--config', 'walkcache.config.json']
+  const cliArguments = args.includes('--config') ? args : [...args, '--config', 'deja.config.json']
   const child = spawn(process.execPath, [cli, ...cliArguments], {
     cwd: root,
     env: {
       ...process.env,
       ANDROID_HOME: join(root, 'fixture-sdk'),
-      WALKCACHE_FAKE_MAESTRO_MODE: modes.maestro ?? '',
-      WALKCACHE_FAKE_OPENCLAW_MODE: modes.explorer ?? '',
-      ...(modes.capture ? { WALKCACHE_FAKE_OPENCLAW_CAPTURE: modes.capture } : {}),
+      DEJA_FAKE_MAESTRO_MODE: modes.maestro ?? '',
+      DEJA_FAKE_OPENCLAW_MODE: modes.explorer ?? '',
+      ...(modes.capture ? { DEJA_FAKE_OPENCLAW_CAPTURE: modes.capture } : {}),
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   })
@@ -74,7 +74,7 @@ async function execute(root: string, args: string[], modes: {
   })
   let report: Record<string, unknown> | null = null
   try {
-    report = JSON.parse(await readFile(join(root, '.walkcache/reports/latest.json'), 'utf8'))
+    report = JSON.parse(await readFile(join(root, '.deja/reports/latest.json'), 'utf8'))
   } catch {
     // Usage/help/config failures intentionally have no run report.
   }
@@ -87,7 +87,7 @@ async function cleanup(temporary: string) {
 const recursiveOptions = { recursive: true, force: true }
 
 async function configureSemantic(root: string, semantic: Record<string, unknown>) {
-  const configPath = join(root, 'walkcache.config.json')
+  const configPath = join(root, 'deja.config.json')
   const config = JSON.parse(await readFile(configPath, 'utf8'))
   config.semantic = semantic
   await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`)
@@ -109,8 +109,8 @@ describe('production headless CLI', () => {
       expect(cold.stdout).toContain('Duration:')
       expect(cold.stdout).toContain('Assertions: 2')
       expect(cold.stdout).toContain('Repair count: 0')
-      expect(cold.stdout).toContain('Report: .walkcache/reports/run-')
-      expect(cold.stdout).toContain('YAML: .walkcache/flows/checkout/')
+      expect(cold.stdout).toContain('Report: .deja/reports/run-')
+      expect(cold.stdout).toContain('YAML: .deja/flows/checkout/')
       expect(existsSync(capture)).toBe(true)
       expect((await readFile(join(context.root, 'adb-calls.log'), 'utf8')).split('\n').filter(Boolean)).toHaveLength(2)
       expect(JSON.stringify(cold.report)).not.toContain(context.root)
@@ -131,19 +131,19 @@ describe('production headless CLI', () => {
       const listJson = JSON.parse(listed.stdout)
       expect(listJson.walks).toHaveLength(1)
       expect(listJson.walks[0]).toMatchObject({ goalKey: 'checkout', origin: 'explore' })
-      const inspected = await execute(context.root, ['inspect', '.walkcache/reports/latest.json'])
+      const inspected = await execute(context.root, ['inspect', '.deja/reports/latest.json'])
       expect(inspected.exitCode).toBe(0)
       expect(inspected.stdout).toContain('Outcome: passed')
       expect(inspected.stdout).toContain('Cache status: hit')
       expect(inspected.stdout).toContain('Artifacts:')
 
-      // The persisted YAML remains independently executable without WalkCache or a model client.
+      // The persisted YAML remains independently executable without Déjà or a model client.
       const flowPath = String(warm.report!.yamlPath)
       const standalone = spawn(fakeMaestro, [
         '--no-ansi', '--device', 'fixture-device', 'test', join(context.root, flowPath),
       ], {
         cwd: context.root,
-        env: { ...process.env, WALKCACHE_OPENCLAW: join(context.root, 'must-not-exist') },
+        env: { ...process.env, DEJA_OPENCLAW: join(context.root, 'must-not-exist') },
         stdio: 'ignore',
       })
       expect(await new Promise<number | null>(resolveExit => standalone.once('close', resolveExit))).toBe(0)
@@ -175,11 +175,11 @@ describe('production headless CLI', () => {
       expect(regression.stdout).toContain('repair was not attempted')
       expect(regression.stdout).toContain('Source diffs: none')
       expect(existsSync(forbiddenModel)).toBe(false)
-      const memory = JSON.parse(await readFile(join(context.root, '.walkcache/memory/walks.json'), 'utf8'))
+      const memory = JSON.parse(await readFile(join(context.root, '.deja/memory/walks.json'), 'utf8'))
       expect(memory.walks[0].lastValidation.passed).toBe(false)
       expect(memory.walks[0].validationHistory.map((entry: { passed: boolean }) => entry.passed)).toEqual([true, false])
 
-      const inspected = await execute(context.root, ['inspect', '.walkcache/reports/latest.json'])
+      const inspected = await execute(context.root, ['inspect', '.deja/reports/latest.json'])
       expect(inspected.exitCode).toBe(1)
       expect(inspected.stdout).toContain('Outcome: product-regression')
       expect(inspected.stdout).not.toContain('testing123')
@@ -232,7 +232,7 @@ describe('production headless CLI', () => {
       })
       expect(semantic.exitCode).toBe(0)
       const report = JSON.parse(await readFile(
-        join(context.root, '.walkcache/reports/latest.json'), 'utf8',
+        join(context.root, '.deja/reports/latest.json'), 'utf8',
       ))
       expect(report).toMatchObject({
         command: 'run', cacheStatus: 'hit', outcome: 'passed', modelCalls: 0,
@@ -252,14 +252,14 @@ describe('production headless CLI', () => {
       expect(existsSync(forbiddenModel)).toBe(false)
 
       const memory = JSON.parse(await readFile(
-        join(context.root, '.walkcache/memory/walks.json'), 'utf8',
+        join(context.root, '.deja/memory/walks.json'), 'utf8',
       ))
       expect(memory.walks).toHaveLength(1)
       expect(memory.walks[0].goalKey).toBe('complete checkout')
       expect(memory.walks[0].validationHistory.map((entry: { passed: boolean }) => entry.passed))
         .toEqual([true, true, true])
 
-      const inspected = await execute(context.root, ['inspect', '.walkcache/reports/latest.json'])
+      const inspected = await execute(context.root, ['inspect', '.deja/reports/latest.json'])
       expect(inspected.exitCode).toBe(0)
       expect(inspected.stdout).toContain('Selected walk: complete checkout')
       expect(inspected.stdout).toContain('Goal similarity: 1.000000')
@@ -317,7 +317,7 @@ describe('production headless CLI', () => {
   test('Maestro executable launch failure is a documented runner failure with exit 1', async () => {
     const context = await workspace()
     try {
-      const configPath = join(context.root, 'walkcache.config.json')
+      const configPath = join(context.root, 'deja.config.json')
       const config = JSON.parse(await readFile(configPath, 'utf8'))
       config.maestro.executable = join(context.root, 'missing', 'maestro')
       await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`)
@@ -342,7 +342,7 @@ describe('production headless CLI', () => {
     try {
       const help = await execute(context.root, ['--help', '--config', 'does-not-exist.json'])
       expect(help.exitCode).toBe(0)
-      expect(help.stdout).toContain('walkcache explore <goal>')
+      expect(help.stdout).toContain('deja explore <goal>')
       expect(help.stdout).toContain('Exit codes:')
       expect(help.stdout).toContain('including executable launch')
       expect(help.report).toBeNull()
@@ -357,10 +357,10 @@ describe('production headless CLI', () => {
       expect(missingReport.exitCode).toBe(2)
       const badConfig = await execute(context.root, ['list', '--config', 'missing-config.json'])
       expect(badConfig.exitCode).toBe(2)
-      expect(badConfig.stderr).toContain('Cannot read WalkCache config')
+      expect(badConfig.stderr).toContain('Cannot read Déjà config')
 
-      await mkdir(join(context.root, '.walkcache/memory'), { recursive: true })
-      await writeFile(join(context.root, '.walkcache/memory/walks.json'), '{not json\n')
+      await mkdir(join(context.root, '.deja/memory'), { recursive: true })
+      await writeFile(join(context.root, '.deja/memory/walks.json'), '{not json\n')
       const corrupt = await execute(context.root, ['list'])
       expect(corrupt.exitCode).toBe(4)
       expect(corrupt.stderr).toContain('Invalid walk memory')

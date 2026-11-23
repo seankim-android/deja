@@ -1,0 +1,33 @@
+# Reference baseline only. The cold-exploration PoC must generate its own flow.
+appId: dev.deja.checkout
+name: Checkout reference
+tags:
+  - android
+  - poc
+---
+- launchApp:
+    clearState: true
+- assertVisible:
+    id: screen_login
+- tapOn:
+    id: username_input
+- inputText: qa@deja.dev
+- tapOn:
+    id: password_input
+- inputText: testing123
+- hideKeyboard
+- tapOn:
+    id: login_button
+- assertVisible:
+    id: screen_catalog
+- tapOn:
+    id: add_to_cart
+- assertVisible:
+    id: screen_cart
+# Checkout deliberately has no stable resource ID in the first iteration.
+- tapOn: Checkout
+- assertVisible:
+    id: order_confirmation
+- assertVisible: "Order #WC-1001.*"
+- takeScreenshot: order-confirmed
+
