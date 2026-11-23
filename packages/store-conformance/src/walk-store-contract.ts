@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { existsSync } from 'node:fs'
-import { mkdir, mkdtemp, readFile, readdir, rename, rm, symlink, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, realpath, readFile, readdir, rename, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { basename, join, resolve } from 'node:path'
 import type { WalkIdentity, WalkStore } from '@deja-qa/core'
@@ -50,7 +50,7 @@ async function temporaryFiles(root: string): Promise<string[]> {
 }
 
 async function fixture() {
-  const temporary = await mkdtemp(join(tmpdir(), 'deja-store-contract-'))
+  const temporary = await realpath(await mkdtemp(join(tmpdir(), 'deja-store-contract-')))
   const workspaceRoot = join(temporary, 'workspace')
   await mkdir(join(workspaceRoot, '.deja/attempts'), { recursive: true })
   const candidatePath = '.deja/attempts/candidate.yaml'

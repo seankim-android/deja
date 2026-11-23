@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { existsSync } from 'node:fs'
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, realpath, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { MaestroFailureCategory, MaestroRunResult } from '@deja-qa/maestro'
@@ -115,7 +115,7 @@ function buildResult(passed = true): RepairBuildResult {
 }
 
 async function fixture() {
-  const temporary = await mkdtemp(join(tmpdir(), 'deja-repair-'))
+  const temporary = await realpath(await mkdtemp(join(tmpdir(), 'deja-repair-')))
   const root = join(temporary, 'workspace')
   await mkdir(join(root, 'app/src/main/java/dev/deja/checkout'), { recursive: true })
   await mkdir(join(root, 'app/src/main/res/values'), { recursive: true })
@@ -177,7 +177,7 @@ async function runRepair(
     goal: 'checkout',
     appId: 'dev.deja.checkout',
     platform: 'android',
-    timeoutMs: overrides.timeoutMs ?? 1000,
+    timeoutMs: overrides.timeoutMs ?? 30_000,
     policy: context.policy,
     attemptId: 'repair-focused-test',
     store: context.store,

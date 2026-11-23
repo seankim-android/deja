@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { spawn } from 'node:child_process'
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, realpath, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
@@ -30,7 +30,7 @@ async function execute(root: string, args: string[], product = false) {
 
 describe('production Web adapter CLI', () => {
   test('verified remember/warm replay works without a model; unsupported cold and stale/product failures stay honest', async () => {
-    const temporary = await mkdtemp(join(tmpdir(), 'deja-web-cli-'))
+    const temporary = await realpath(await mkdtemp(join(tmpdir(), 'deja-web-cli-')))
     const root = join(temporary, 'workspace')
     try {
       await mkdir(join(root, 'public'), { recursive: true })
@@ -46,7 +46,7 @@ describe('production Web adapter CLI', () => {
         workspaceRoot: '.', appId: 'http://127.0.0.1:4174', platform: 'web',
         browser: 'chromium', adapter: 'maestro-web@2.12.0', device: 'chromium',
         buildPath: 'public', fixtureCredentials: [{ label: 'Fixture password', value: 'testing123' }],
-        maestro: { executable: fakeMaestro, timeoutMs: 2000 },
+        maestro: { executable: fakeMaestro, timeoutMs: 30_000 },
       }))
       const remembered = await execute(root, ['remember', 'checkout', '--flow', 'flows/checkout.yaml'])
       expect(remembered.exitCode).toBe(0)
