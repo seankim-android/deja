@@ -47,3 +47,5 @@ demo/film/device.mp4
 
 # Local agent tooling state
 .omc/
+dist-bin/
+.*.bun-build

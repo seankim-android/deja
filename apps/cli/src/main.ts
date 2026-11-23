@@ -43,6 +43,7 @@ import { createRedactor, redactJson } from './redaction.ts'
 import { JsonRunReporter, readRunReport } from './reporter.ts'
 import { renderDoctor, runDoctor, type DoctorProbe } from './doctor.ts'
 import { installEngineCommand, selectEngine } from './engine.ts'
+import { isCompiledBinary, versionLine } from './version.ts'
 
 export type CliIo = {
   stdout: (text: string) => void
@@ -56,6 +57,8 @@ export type CliDependencies = {
   env?: NodeJS.ProcessEnv
   /** Where iOS crash reports are written; defaults to ~/Library/Logs/DiagnosticReports. */
   crashReportDirectory?: string
+  /** Overrides compiled-binary detection, so a test can exercise the explore refusal. */
+  compiledBinary?: boolean
 }
 
 /** Adds the engine to every report, so the JSON report, the text output and the summary agree. */
@@ -97,6 +100,7 @@ type ParsedArguments = {
   json: boolean
   summary: boolean
   help: boolean
+  version: boolean
   verify: boolean
   rerunFailed: boolean
   acceptAssertionChange: boolean
@@ -112,6 +116,7 @@ function parseArguments(argv: string[]): ParsedArguments {
   let json = false
   let summary = false
   let help = false
+  let version = false
   let verify = false
   let rerunFailed = false
   let acceptAssertionChange = false
@@ -120,6 +125,7 @@ function parseArguments(argv: string[]): ParsedArguments {
     const argument = argv[index]
     if (argument === '--json') json = true
     else if (argument === '--summary') summary = true
+    else if (argument === '--version' || argument === '-v') version = true
     else if (argument === '--verify') verify = true
     else if (argument === '--rerun-failed') rerunFailed = true
     else if (argument === '--accept-assertion-change') acceptAssertionChange = true
@@ -150,6 +156,7 @@ function parseArguments(argv: string[]): ParsedArguments {
     json,
     summary,
     help,
+    version,
     verify,
     rerunFailed,
     acceptAssertionChange,
@@ -178,6 +185,7 @@ function createOrchestration(
   storeId: string | undefined,
   executable: string,
   crashReportDirectory: string | undefined,
+  compiledBinary: boolean,
 ) {
   const store = new LocalWalkStore({
     workspaceRoot: configuration.workspaceRoot,
@@ -236,6 +244,10 @@ function createOrchestration(
     } : {}),
     ...(configuration.staleBuild ? { staleBuild: configuration.staleBuild } : {}),
     explorer: ({ identity }) => {
+      // OpenClaw starts its MCP proxy with process.execPath, which in a compiled binary is deja, not Bun.
+      if (compiledBinary) {
+        throw new CliConfigurationError('explore needs the Bun runtime; use the npm packages. The standalone binary replays stored walks only.')
+      }
       if (configuration.explore.platform !== 'android') {
         return new UnsupportedPlatformExplorer(configuration.explore.platform)
       }
@@ -287,6 +299,10 @@ export async function runCli(argv: string[], io: CliIo = {
   }
   try {
     parsed = parseArguments(argv)
+    if (parsed.version) {
+      io.stdout(versionLine())
+      return 0
+    }
     if (parsed.help || parsed.command === '') {
       io.stdout(HELP)
       return parsed.command === '' && !parsed.help ? 2 : 0
@@ -384,6 +400,7 @@ export async function runCli(argv: string[], io: CliIo = {
     const { store, orchestration, adapterId } = createOrchestration(
       configuration, reporter, runsMaestro ? junitPath : undefined, parsed.store,
       selected?.resolved.executable ?? '', dependencies.crashReportDirectory,
+      dependencies.compiledBinary ?? isCompiledBinary(),
     )
     openedStore = store
     if (parsed.command === 'list') {

@@ -18,6 +18,7 @@ Usage:
   deja engine install [--json]
   deja doctor [--config <file>] [--json]
   deja help
+  deja --version
 
 Commands:
   explore   Force verified cold exploration and store only a passing candidate.
@@ -64,6 +65,7 @@ Options:
   --summary        Print one line: deja-summary v=1 outcome cache fingerprint engine model_calls
                    failure [attempts attempt1 attempt2 ...] goal (goal last, percent-encoded). The
                    attempt keys appear only when --rerun-failed reran. Last stdout line, or stderr with --json.
+  -v, --version    Print the version, git commit and contract version.
   -h, --help       Show help without loading configuration or constructing plugins.
 
 Semantic retrieval:
