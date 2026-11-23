@@ -107,8 +107,12 @@ try {
   try { doctorJson = JSON.parse(doctor.stdout) } catch { /* reported below */ }
   check('doctor --json prints a JSON report', Array.isArray(doctorJson.checks) && doctorJson.checks.length > 0, `${doctor.stdout}${doctor.stderr}`)
 
-  const cold = execute(['run', 'checkout', '--config', 'deja.config.json', '--summary'])
-  check('cold run passes and records a walk', cold.status === 0 && cold.stdout.includes('Cache status: miss'), `${cold.stdout}${cold.stderr}`)
+  // A compiled binary cannot explore (OpenClaw's MCP proxy needs Bun), so it must say so at once.
+  const explore = execute(['explore', 'checkout', '--config', 'deja.config.json'])
+  check('explore is refused with a clear message', explore.status === 2 && explore.stderr.includes('explore needs the Bun runtime'), `${explore.stdout}${explore.stderr}`)
+  // Store the walk by verifying a candidate flow, which runs Maestro but needs no explorer.
+  const remember = execute(['remember', 'checkout', '--flow', 'flows/candidate.yaml', '--config', 'deja.config.json'])
+  check('remember verifies a flow and stores the walk', remember.status === 0, `${remember.stdout}${remember.stderr}`)
   const warm = execute(['run', 'checkout', '--config', 'deja.config.json', '--summary'])
   console.log(warm.stdout.trim().split('\n').slice(-1)[0])
   check('warm run replays from memory with zero model calls',

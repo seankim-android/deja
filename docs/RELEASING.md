@@ -52,7 +52,8 @@ bun scripts/smoke-binary.ts dist-bin/deja-<version>-darwin-arm64
 
 The smoke check runs the binary with only `PATH=/usr/bin:/bin` and `HOME` set, so Bun is not on
 `PATH`. It uses a temporary `DEJA_HOME`, the fake Maestro and the fake OpenClaw fixtures. It checks
-`--version`, `--help`, `doctor --json`, a cold `run`, a warm `run` with zero model calls, and `list`.
+`--version`, `--help`, `doctor --json`, the refusal of `explore`, `remember` of a candidate flow, a warm
+`run` with zero model calls, and `list`.
 Delete `dist-bin/` when you are done: it holds about 190 MB.
 
 ## Pin a version and checksum (consumers)
