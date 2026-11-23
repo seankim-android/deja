@@ -207,7 +207,7 @@ Sizes: S is under a day, M is a few days, L is a week or more.
   - `@deja-qa/core` returns 404 on npm, and `deja-qa` and `dejaqa` are free as unscoped names.
   - `deja-qa.com`, `dejaqa.com`, `deja-qa.dev` and `dejaqa.dev` return 404 from registry RDAP (not
     registered). A registrar can still mark a name premium or reserved.
-  - Still to do: create the `deja-qa` org at npmjs.com/org/create, and buy the domain.
+  - The `deja-qa` npm org was created on 2026-11-22. Still to do: buy the domain.
   - Test data never uses the project domain. Fixture logins use the reserved `example.com`.
 - **Maestro version pinning.** All evidence is on Maestro 2.12.0, and Maestro Web is beta. The
   runner should read `maestro --version` and refuse or warn outside a tested range. The Action pins
@@ -227,7 +227,7 @@ Sizes: S is under a day, M is a few days, L is a week or more.
 
 ## Next 5 steps
 
-1. Claim the `@deja-qa` scope: create the `deja-qa` org at npmjs.com/org/create (the npm CLI cannot create orgs).
+1. Done: the `deja-qa` npm org exists (created 2026-11-22).
 2. Done: Bun workspaces, one `package.json` per package, and package imports.
 3. Remove the two forbidden edges (`repair` -> `store-local`, explorer -> concrete runner) and add a
    test that fails on forbidden imports.
