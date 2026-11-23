@@ -1,5 +1,7 @@
 # Contributing to Déjà
 
+**Pull requests from outside contributors are not accepted right now.** Please open a [GitHub issue](https://github.com/seankim-android/deja/issues) for bugs and ideas. The rest of this page applies once outside pull requests open.
+
 Thanks for helping. This page covers setup, the checks CI runs, what a good
 pull request looks like, and the Contributor License Agreement (CLA).
 
