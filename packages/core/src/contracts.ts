@@ -358,6 +358,8 @@ export type RunnerRequest = {
   flowPath: string
   artifactDirectory: string
   timeoutMs?: number
+  /** Flow variables passed to the runner (`maestro -e KEY=VALUE`). Result schema stays 1. */
+  env?: Record<string, string>
 }
 
 export type ExecutionResult = {
@@ -454,6 +456,17 @@ export type NewBuildReplayReport = {
   recordedForNewBuild: boolean
 }
 
+/** Optional additive run-report data: which Maestro executed the flows. Older reports omit it. */
+export type EngineReport = {
+  /** Strict x.y.z, or null when an override's version could not be read. */
+  version: string | null
+  /** "pinned" is Déjà's own managed install; "override" is DEJA_MAESTRO or maestro.executable. */
+  source: 'pinned' | 'override'
+  overrideVia?: 'config' | 'env'
+  /** False when the version is outside the tested range or unknown (only with an explicit allow). */
+  inRange: boolean
+}
+
 export type RunResult = {
   schemaVersion: typeof WALK_RESULT_SCHEMA_VERSION
   command: 'explore' | 'run' | 'remember'
@@ -481,6 +494,7 @@ export type RunResult = {
   exploration?: ExplorationResult
   repair?: RepairResult
   replayedOnNewBuild?: NewBuildReplayReport
+  engine?: EngineReport
 }
 
 export type ReportReceipt = {

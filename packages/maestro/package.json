@@ -40,7 +40,8 @@
     "prepublishOnly": "bun ../../scripts/publish-guard.ts"
   },
   "dependencies": {
-    "@deja-qa/core": "workspace:*"
+    "@deja-qa/core": "workspace:*",
+    "yaml": "^2.9.1"
   },
   "devDependencies": {
     "@deja-qa/store-local": "workspace:*"

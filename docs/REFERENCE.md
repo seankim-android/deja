@@ -51,6 +51,41 @@ Global options are `--config <file>` (default `./deja.config.json`), `--json`, a
 [JUnit and summary output](#junit-and-summary-output-for-ci-hosts). Goals may contain multiple words; quote them
 as one shell argument.
 
+### Engine
+
+Déjà owns the Maestro that runs your flows, so a host depends on Déjà only. Each Déjà release pins
+one Maestro version and the sha256 of its release zip (`MAESTRO_ENGINE_PIN` in
+`packages/maestro/src/engine.ts`): 2.12.0, zip sha256
+`a6044a84542f522f434c5dc3d609e60c7446d423f3ed1b2ae513f5c48663ec5e`. A new pin is a Déjà release with
+iOS evidence; nothing upgrades silently.
+
+```text
+$DEJA_HOME/maestro/<version>/maestro.zip            kept, so the checksum can be re-checked
+$DEJA_HOME/maestro/<version>/maestro/bin/maestro    the executable
+```
+
+`DEJA_HOME` defaults to `~/.local/share/deja`. Déjà never reads or writes `~/.maestro` or any other
+Maestro install, so other tools on the machine keep their own version, even while they run.
+
+- `deja engine install` downloads the pinned release from Maestro's GitHub releases to a temp
+  folder, checks the sha256 (a mismatch fails closed), rejects archive paths that could leave the
+  folder (zip-slip, links), extracts with the system `unzip`, and renames the folder into place. A
+  failure leaves no partial folder. A folder that already matches the pin is skipped with no
+  download. A folder that does not match is never replaced: install stops and names it.
+- `deja doctor [--json]` reports the engine (version, path, pinned or override), Java (17 or newer),
+  Xcode and the iOS simulator runtimes (read-only; it boots nothing), and whether each matches the
+  tested range. Exit 1 if the engine is missing or out of range, or Java is too old. Xcode and
+  runtime differences only warn.
+- Runs use the pinned engine. `maestro.executable`, then `DEJA_MAESTRO`, override it; the report
+  (`engine.source: "override"`, `engine.overrideVia`) and the text output name the override. A run
+  without an install is exit 2 with the fix.
+- Range: the tested range is `>=2.12.0 <2.13.0`. The pinned engine is not executed (its version is
+  the pin). An override is asked for `--version`; outside the range, or with no readable version, the
+  run is refused (exit 2) unless `maestro.allowUntested` is `true`, which warns and records
+  `engine.inRange: false`. An override that cannot start fails as a launch failure (exit 1).
+- Reports carry `engine: { version, source, overrideVia?, inRange }` (optional, additive). The
+  summary line carries `engine=<x.y.z|unknown>`.
+
 ### Configuration
 
 The checked-in [Android config](../spikes/001-android-deja/deja.config.json) and
@@ -65,7 +100,9 @@ workspaces.
 | `openClawModel`, `openClawBaseUrl`, `explorationTimeoutSeconds` | Android cold-exploration model/provider and bound. |
 | `verificationTimeoutMs`, `maestro.timeoutMs` | Independent verification and Maestro execution limits in milliseconds. |
 | `fixtureCredentials` | Explicit deterministic fixture values only; never real user credentials. Values are redacted from CLI output/reports. |
-| `maestro.executable`, `openClaw.executable`, `openClaw.mcpProxy` | Executable names and the workspace-local Android MCP proxy. |
+| Optional `maestro.executable` | Override of the pinned Maestro (see [Engine](#engine)). Omit it to use the pinned engine. |
+| Optional `maestro.allowUntested` | `true` runs an override outside the tested Maestro range with a warning instead of refusing. Default `false`. |
+| `openClaw.executable`, `openClaw.mcpProxy` | Executable name and the workspace-local Android MCP proxy. |
 | `repair.sourceRoots`, `repair.permittedFileTypes`, `repair.affectedFiles`, `repair.timeBudgetMs` | Closed Android repair allowlist and one shared deadline. No repair block is permitted for Web. |
 | Optional `junit` | Path for Maestro's JUnit report, relative to the config file. Same as `--junit`; the flag wins. Off when neither is set. |
 | Optional `semantic.provider`, `minimumSimilarity`, `minimumMargin` | WALK-016 opt-in local retrieval proof. `local-lexical-v1` is the only implementation; defaults are 0.90 similarity and 0.15 winner margin. Missing/unsupported providers report unavailable and use the ordinary miss lifecycle. |
@@ -75,8 +112,8 @@ workspaces.
 | Optional `manifest` | DEJA-36. A relative `.json` path inside `workspaceRoot`, for example `"deja.walks.json"`. Turns on consumer-owned flows: see [Consumer-owned flows](#consumer-owned-flows-and-the-walk-manifest). Not allowed with `repair`. |
 | Optional `flowsDir` | With `manifest` only. A relative folder inside `workspaceRoot`, outside `.deja/` (default `".maestro/flows/deja"`). Where cold exploration and `deja migrate` write a flow as your own file. |
 
-When a corresponding JSON executable/timeout field is omitted, `DEJA_MAESTRO`,
-`DEJA_OPENCLAW`, and `DEJA_TIMEOUT_MS` supply defaults. `ANDROID_HOME`/
+When a corresponding JSON executable/timeout field is omitted, `DEJA_OPENCLAW` and
+`DEJA_TIMEOUT_MS` supply defaults. `DEJA_MAESTRO` overrides the pinned engine (see [Engine](#engine)). `ANDROID_HOME`/
 `ANDROID_SDK_ROOT` and `JAVA_HOME` come from the environment and are not serialized into reports.
 The spike also recognizes its more specific repair override; the production config's documented
 budget is `repair.timeBudgetMs`.
@@ -141,8 +178,12 @@ refused (exit 2). The CLI also refuses to write it if it would hold a `fixtureCr
   selectors read what they set; and the sha256 of every `runScript` file. Adding `optional:
   true`, wrapping an assertion in a condition, `times: 0`, a loosened env value, another script
   result, or swapping two assertions all change it. Not in it: actions (`tapOn` and the like), so
-  an assertion moved before the action it checks is not seen; `label`; and `extendedWaitUntil`,
-  which is a wait, not a product assertion. Golden vectors are in
+  an assertion moved before the action it checks is not seen; and `label`. A bare word item such
+  as `- assertNoDefectsWithAi` counts like the mapping form. `extendedWaitUntil` is hashed with its
+  whole mapping (`visible`, `notVisible`, `timeout`) because it fails the run when its condition is
+  not met, but it does not count toward `minAssertions`. For `ownerRules`, an assertion counts as
+  always running only when nothing around it is conditional or `optional` (any value but an absent
+  or literal `false`, so `yes` and a `<<` merge count). Golden vectors are in
   `packages/core/test/flow-assertions.test.ts` and `packages/store-local/test/consumer-flow.test.ts`.
 - **Stateless CI.** A checkout with an empty `.deja/` has no validation history, so each run says
   `not-validated` until `--verify` runs. `--verify` also accepts a changed flow, so a CI job that
@@ -265,17 +306,18 @@ than `SUCCESS` as failing (as Blankaday's `maestro-main.sh` does) works with bot
 stays one JSON document):
 
 ```text
-deja-summary v=1 outcome=passed cache=hit fingerprint=3f9a1c20b7de model_calls=0 failure=none goal=checkout
+deja-summary v=1 outcome=passed cache=hit fingerprint=3f9a1c20b7de engine=2.12.0 model_calls=0 failure=none goal=checkout
 ```
 
 Grammar (one physical line, fields in this order, single spaces between them):
 
 ```text
 line        = "deja-summary v=1 outcome=" outcome " cache=" cache " fingerprint=" fingerprint
-              " model_calls=" calls " failure=" failure " goal=" goal
+              " engine=" engine " model_calls=" calls " failure=" failure " goal=" goal
 outcome     = 1*( %x61-7A / "-" )              ; a run outcome, or "error" when no result exists
 cache       = "hit" / "miss" / "not-checked" / "unknown"
 fingerprint = 12LOWHEX / "unknown"             ; first 12 hex characters of the build fingerprint
+engine      = 1*DIGIT "." 1*DIGIT "." 1*DIGIT / "unknown"   ; the Maestro that ran the flows
 calls       = 1*DIGIT / "unknown"
 failure     = 1*( %x61-7A / "_" )              ; selector, navigation, product_assertion, runner,
                                                ; timeout, unknown, unclassified, none, or error
@@ -291,11 +333,14 @@ text after `goal=` is the goal. Example:
 ```python
 import re, urllib.parse
 m = re.fullmatch(r"deja-summary v=1 outcome=([a-z-]+) cache=([a-z-]+) fingerprint=([0-9a-f]{12}|unknown) "
-                 r"model_calls=(\d+|unknown) failure=([a-z_]+) goal=([A-Za-z0-9._~%-]*)", line)
-outcome, goal = m[1], urllib.parse.unquote(m[6])
+                 r"engine=(\d+\.\d+\.\d+|unknown) model_calls=(\d+|unknown) failure=([a-z_]+) goal=([A-Za-z0-9._~%-]*)", line)
+outcome, goal = m[1], urllib.parse.unquote(m[7])
 ```
 
-`v=1` changes only if a field is renamed, removed, reordered or its charset changes. When a command
+`v=1` changes only if a field is renamed, removed or its charset changes. New keys may be added
+before `goal`, which stays last, so parse by key (or with the whole grammar) and ignore keys you do
+not know. `engine` was added this way. It is `unknown` for a run without an engine record, such as
+`inspect` of an older report, and it is always strict `x.y.z` or `unknown`, whatever a report holds. When a command
 fails with exit 2 or 4 after it was parsed, the line still prints, with `outcome=error`.
 
 ### Exit codes
@@ -303,8 +348,8 @@ fails with exit 2 or 4 after it was parsed, the line still prints, with `outcome
 | Code | Meaning |
 | --- | --- |
 | `0` | Successful `run`/`explore`/`remember`, `list`, `inspect` of a passing report, or help |
-| `1` | Product/unknown/runner failure (including a Maestro executable-launch failure), rejected candidate, or rejected/failed bounded repair |
-| `2` | Usage, configuration, report-inspection, or direct I/O error; also no command |
+| `1` | Product/unknown/runner failure (including a Maestro executable-launch failure), rejected candidate, rejected/failed bounded repair, or `deja doctor` not ready |
+| `2` | Usage, configuration, engine (not installed, checksum mismatch, untested version), report-inspection, or direct I/O error; also no command |
 | `3` | Cold exploration was rejected or failed to produce a verified reusable walk |
 | `4` | Invalid/corrupt local memory; quarantine it and recover through verified cold exploration |
 | `6` | Manifest mode: `flow-changed`, `not-validated`, `needs-migration` or `assertions-changed`. Nothing was replayed or written. Run with `--verify`, or review the change and run `remember` |

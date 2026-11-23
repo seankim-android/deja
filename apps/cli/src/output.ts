@@ -15,6 +15,8 @@ Usage:
   deja list [--config <file>] [--json]
   deja migrate [--dry-run] [--store <id>] [--config <file>] [--json]
   deja inspect <report> [--config <file>] [--json] [--summary]
+  deja engine install [--json]
+  deja doctor [--config <file>] [--json]
   deja help
 
 Commands:
@@ -28,6 +30,13 @@ Commands:
             files plus manifest entries. Writes new files and the manifest; never commits.
   list      List local walks without constructing an explorer or runner invocation.
   inspect   Summarize a saved run result, artifact paths, failures, and source diffs.
+  engine install
+            Download Déjà's pinned Maestro into $DEJA_HOME/maestro/<version> (default
+            ~/.local/share/deja), check its sha256 and extract it atomically. A valid install is
+            skipped. It never touches ~/.maestro or any other Maestro.
+  doctor    Report the engine (version, path, pinned or override), Java, Xcode and simulator
+            runtimes, and whether they match the tested range. Exit 1 if the engine is missing or
+            out of range, or Java is too old.
 
 Options:
   --config <file>  Combined fixture/plugin configuration (default: ./deja.config.json).
@@ -46,7 +55,7 @@ Options:
   --store <id>     Use a separate store for this run, for example one per device or simulator.
                    Run one deja per device in parallel, each with its own id. A second writer on
                    one store is refused (exit 5). Flows are shared; history is not.
-  --summary        Print one line: deja-summary v=1 outcome cache fingerprint model_calls
+  --summary        Print one line: deja-summary v=1 outcome cache fingerprint engine model_calls
                    failure goal (goal last, percent-encoded). Last stdout line, or stderr with --json.
   -h, --help       Show help without loading configuration or constructing plugins.
 
@@ -64,11 +73,17 @@ Manifest (config "manifest": "deja.walks.json", relative to workspaceRoot):
   "flowsDir" (default .maestro/flows/deja) plus a manifest entry, and never overwrites a file.
   Repair is not available with a manifest yet.
 
+Engine:
+  Runs use the pinned Maestro in $DEJA_HOME. DEJA_MAESTRO or "maestro.executable" overrides it
+  and the report names the override. An override outside the tested range is refused (exit 2)
+  unless {"maestro":{"allowUntested":true}} is set.
+
 Exit codes:
   0  Successful run/explore/remember, list, inspect, or help.
   1  Product/unknown/runner failure (including executable launch), rejected candidate,
      or rejected/failed bounded repair.
-  2  Usage, configuration, report-inspection, or direct I/O error.
+  2  Usage, configuration, engine (missing, checksum, untested version), report-inspection, or
+     direct I/O error.
   3  Cold exploration did not produce a verified reusable walk.
   4  Invalid/corrupt local memory; quarantine it and use cold exploration to recover.
   5  Store locked: another run is writing the same store. Use a different --store <id>.
@@ -78,6 +93,14 @@ Exit codes:
 YAML verification and replay always invoke standalone Maestro flows. No YAML depends on
 Déjà or an LLM after it has been written.
 `
+
+function renderEngine(engine: NonNullable<RunResult['engine']>) {
+  const version = engine.version ? `Maestro ${engine.version}` : 'Maestro (version unreadable)'
+  const origin = engine.source === 'pinned'
+    ? 'pinned'
+    : `override via ${engine.overrideVia === 'config' ? 'maestro.executable' : 'DEJA_MAESTRO'}`
+  return `Engine: ${version} (${origin}${engine.inRange ? '' : ', outside the tested range'})`
+}
 
 export function renderResult(
   input: RunResult,
@@ -92,6 +115,7 @@ export function renderResult(
     `Passed: ${result.passed ? 'yes' : 'no'}`,
     `Cache status: ${result.cacheStatus}${result.cacheMissReason ? ` (${result.cacheMissReason})` : ''}`,
     `Model calls: ${result.modelCalls ?? 'unknown'} (${result.modelCallBasis})`,
+    ...(result.engine ? [renderEngine(result.engine)] : []),
     `Duration: ${result.durationMs} ms`,
     `Assertions: ${result.assertions ?? 'unknown'}`,
     `Repair count: ${result.repairCount}`,
@@ -200,10 +224,11 @@ export function encodeSummaryGoal(goal: string) {
  * One stable, parseable line per run, for CI host reports. Grammar (single physical line):
  *
  *   line        = "deja-summary v=1 outcome=" outcome " cache=" cache " fingerprint=" fingerprint
- *                 " model_calls=" calls " failure=" failure " goal=" goal
+ *                 " engine=" engine " model_calls=" calls " failure=" failure " goal=" goal
  *   outcome     = 1*( "a-z" / "-" )                    ; a run outcome, or "error"
  *   cache       = "hit" / "miss" / "not-checked" / "unknown"
  *   fingerprint = 12 lower-case hex / "unknown"
+ *   engine      = 1*DIGIT "." 1*DIGIT "." 1*DIGIT / "unknown"  ; the Maestro that ran the flows
  *   calls       = 1*DIGIT / "unknown"
  *   failure     = 1*( "a-z" / "_" )                    ; category, "unclassified", "none" or "error"
  *   goal        = *( [A-Za-z0-9._~-] / "%" 2HEXDIG )   ; percent-encoded UTF-8, always last
@@ -212,10 +237,16 @@ export function encodeSummaryGoal(goal: string) {
  * any raw control or separator character, so a goal cannot add or change a field or a line.
  * `result` is null when no run result exists (usage, config, or memory errors).
  */
+/** Strict x.y.z or "unknown": a hand-edited report cannot put anything else on the line. */
+function summaryEngine(result: RunResult) {
+  const version = result.engine?.version
+  return typeof version === 'string' && /^\d{1,6}\.\d{1,6}\.\d{1,6}$/.test(version) ? version : 'unknown'
+}
+
 export function renderSummary(result: RunResult | null, goalText: string, redact: Redactor) {
   const goal = encodeSummaryGoal(redact(result?.goalKey ?? goalText))
   if (!result) {
-    return `deja-summary v=1 outcome=error cache=unknown fingerprint=unknown model_calls=unknown failure=error goal=${goal}`
+    return `deja-summary v=1 outcome=error cache=unknown fingerprint=unknown engine=unknown model_calls=unknown failure=error goal=${goal}`
   }
   const fingerprint = /^[0-9a-f]{12,}$/.test(result.identity.buildFingerprint)
     ? result.identity.buildFingerprint.slice(0, 12)
@@ -226,6 +257,7 @@ export function renderSummary(result: RunResult | null, goalText: string, redact
     `outcome=${result.outcome}`,
     `cache=${result.cacheStatus}`,
     `fingerprint=${fingerprint}`,
+    `engine=${summaryEngine(result)}`,
     `model_calls=${result.modelCalls ?? 'unknown'}`,
     `failure=${failure}`,
     `goal=${goal}`,

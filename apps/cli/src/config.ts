@@ -40,7 +40,10 @@ export type ProductionConfiguration = {
   explore: ExploreConfiguration | WebExploreConfiguration | IosExploreConfiguration
   workspaceRoot: string
   maestro: {
-    executable: string
+    /** An override from the config file. Unset means DEJA_MAESTRO, then the pinned engine. */
+    executable?: string
+    /** Run with a warning, not a refusal, when the override is outside the tested range. */
+    allowUntested: boolean
     timeoutMs: number
   }
   openClaw?: {
@@ -211,6 +214,9 @@ export async function loadProductionConfiguration(configPath: string): Promise<P
   const maestro = typeof raw.maestro === 'object' && raw.maestro !== null
     ? raw.maestro as Record<string, unknown>
     : {}
+  if (maestro.allowUntested !== undefined && typeof maestro.allowUntested !== 'boolean') {
+    throw new CliConfigurationError('maestro.allowUntested must be a boolean')
+  }
   const openClaw = typeof raw.openClaw === 'object' && raw.openClaw !== null
     ? raw.openClaw as Record<string, unknown>
     : {}
@@ -325,11 +331,10 @@ export async function loadProductionConfiguration(configPath: string): Promise<P
     explore,
     workspaceRoot: root,
     maestro: {
-      executable: text(
-        maestro.executable,
-        process.env.DEJA_MAESTRO ?? 'maestro',
-        'maestro.executable',
-      ),
+      ...(maestro.executable !== undefined
+        ? { executable: text(maestro.executable, '', 'maestro.executable') }
+        : {}),
+      allowUntested: maestro.allowUntested === true,
       timeoutMs: positiveInteger(
         maestro.timeoutMs,
         Number(process.env.DEJA_TIMEOUT_MS ?? 120_000),

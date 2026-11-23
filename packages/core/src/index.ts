@@ -2,6 +2,7 @@ export * from './contracts.ts'
 export * from './semantic.ts'
 export * from './route-graph.ts'
 export * from './subflow.ts'
+export * from './exploration.ts'
 export {
   Deja,
   type DejaDependencies,

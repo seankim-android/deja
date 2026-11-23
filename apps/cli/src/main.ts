@@ -1,8 +1,10 @@
+import { readFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import {
   createDeja,
   InvalidWalkManifestError,
   UnsupportedPlatformExplorer,
+  type EngineReport,
   type RunReporter,
   type RunResult,
 } from '@deja-qa/core'
@@ -16,7 +18,9 @@ import {
   StoreLockUnavailableError,
 } from '@deja-qa/store-local'
 import {
+  dejaHome,
   MaestroWalkRunner,
+  type InstallEngineOptions,
   androidMaestroAdapter,
   iosMaestroAdapter,
   webMaestroAdapter,
@@ -37,10 +41,48 @@ import { prepareJunit, JunitReporter, writeErroredJunit } from './junit.ts'
 import { HELP, renderMigration, renderResult, renderSummary, renderWalks } from './output.ts'
 import { createRedactor, redactJson } from './redaction.ts'
 import { JsonRunReporter, readRunReport } from './reporter.ts'
+import { renderDoctor, runDoctor, type DoctorProbe } from './doctor.ts'
+import { installEngineCommand, selectEngine } from './engine.ts'
 
 export type CliIo = {
   stdout: (text: string) => void
   stderr: (text: string) => void
+}
+
+/** Test seams: a fake download for `engine install`, a fake probe for `doctor`, and the environment. */
+export type CliDependencies = {
+  engineInstall?: InstallEngineOptions
+  doctorProbe?: DoctorProbe
+  env?: NodeJS.ProcessEnv
+}
+
+/** Adds the engine to every report, so the JSON report, the text output and the summary agree. */
+class EngineRunReporter implements RunReporter {
+  private readonly inner: RunReporter
+  private readonly engine: EngineReport
+  constructor(inner: RunReporter, engine: EngineReport) {
+    this.inner = inner
+    this.engine = engine
+  }
+  report(result: RunResult) {
+    // The JUnit reporter adds its artifact to this same object, so do not copy it.
+    result.engine = this.engine
+    return this.inner.report(result)
+  }
+}
+
+async function configuredOverride(configPath: string) {
+  try {
+    const raw = JSON.parse(await readFile(configPath, 'utf8')) as { maestro?: { executable?: unknown; allowUntested?: unknown } }
+    return {
+      ...(typeof raw.maestro?.executable === 'string' && raw.maestro.executable.trim()
+        ? { configExecutable: raw.maestro.executable.trim() }
+        : {}),
+      allowUntested: raw.maestro?.allowUntested === true,
+    }
+  } catch {
+    return { allowUntested: false }
+  }
 }
 
 type ParsedArguments = {
@@ -127,6 +169,7 @@ function createOrchestration(
   reporter: RunReporter,
   junitPath: string | undefined,
   storeId: string | undefined,
+  executable: string,
 ) {
   const store = new LocalWalkStore({
     workspaceRoot: configuration.workspaceRoot,
@@ -154,7 +197,7 @@ function createOrchestration(
     : androidMaestroAdapter({ device: configuration.explore.device })
   const runner = new MaestroWalkRunner({
     workspaceRoot: configuration.workspaceRoot,
-    executable: configuration.maestro.executable,
+    executable,
     device: executionAdapter.device,
     adapter: executionAdapter,
     timeoutMs: configuration.maestro.timeoutMs,
@@ -219,7 +262,8 @@ function createOrchestration(
 export async function runCli(argv: string[], io: CliIo = {
   stdout: text => process.stdout.write(text),
   stderr: text => process.stderr.write(text),
-}): Promise<number> {
+}, dependencies: CliDependencies = {}): Promise<number> {
+  const env = dependencies.env ?? process.env
   let redact = createRedactor(process.cwd(), [])
   let parsed: ParsedArguments | undefined
   let junitPath: string | undefined
@@ -237,8 +281,37 @@ export async function runCli(argv: string[], io: CliIo = {
       io.stdout(HELP)
       return parsed.command === '' && !parsed.help ? 2 : 0
     }
-    if (!['explore', 'run', 'remember', 'list', 'inspect', 'migrate'].includes(parsed.command)) {
+    if (!['explore', 'run', 'remember', 'list', 'inspect', 'migrate', 'engine', 'doctor'].includes(parsed.command)) {
       throw new CliConfigurationError(`Unknown command: ${parsed.command}`)
+    }
+    if (parsed.command === 'engine') {
+      if (parsed.positionals.length !== 1 || parsed.positionals[0] !== 'install') {
+        throw new CliConfigurationError('engine requires the subcommand: install')
+      }
+      if (parsed.junit || parsed.flow || parsed.summary) {
+        throw new CliConfigurationError('engine install accepts only --json')
+      }
+      const result = await installEngineCommand({
+        home: dejaHome(env),
+        ...dependencies.engineInstall,
+      })
+      io.stdout(parsed.json
+        ? `${JSON.stringify({ engine: result }, null, 2)}\n`
+        : `Maestro ${result.version} ${result.status === 'skipped' ? 'is already installed and its checksum is valid' : 'installed'}: ${result.executable}\n`)
+      return 0
+    }
+    if (parsed.command === 'doctor') {
+      if (parsed.junit || parsed.flow || parsed.summary || parsed.positionals.length > 0) {
+        throw new CliConfigurationError('doctor accepts only --config and --json')
+      }
+      const override = await configuredOverride(parsed.configPath)
+      const report = await runDoctor({
+        env,
+        ...override,
+        ...(dependencies.doctorProbe ? { probe: dependencies.doctorProbe } : {}),
+      })
+      io.stdout(parsed.json ? `${JSON.stringify(report, null, 2)}\n` : renderDoctor(report))
+      return report.ok ? 0 : 1
     }
     if (parsed.command !== 'remember' && parsed.flow) {
       throw new CliConfigurationError('--flow is valid only with remember')
@@ -287,11 +360,17 @@ export async function runCli(argv: string[], io: CliIo = {
 
     const jsonReporter = new JsonRunReporter(configuration.workspaceRoot, redact)
     if (runsMaestro) junitPath ??= configuration.junitPath
-    const reporter = junitPath
+    // Pick the engine before anything runs: a missing or untested Maestro is a configuration error.
+    const selected = runsMaestro ? await selectEngine(configuration, { env }) : undefined
+    if (selected?.warning) io.stderr(`${redact(selected.warning)}\n`)
+    const engine = selected?.report
+    const baseReporter = junitPath
       ? new JunitReporter(jsonReporter, junitPath, configuration.workspaceRoot, redact)
       : jsonReporter
+    const reporter = engine ? new EngineRunReporter(baseReporter, engine) : baseReporter
     const { store, orchestration, adapterId } = createOrchestration(
       configuration, reporter, runsMaestro ? junitPath : undefined, parsed.store,
+      selected?.resolved.executable ?? '',
     )
     openedStore = store
     if (parsed.command === 'list') {
@@ -321,13 +400,14 @@ export async function runCli(argv: string[], io: CliIo = {
     const goalText = goal(parsed.positionals)
     // A file left by an earlier run must never be read as this run's result.
     if (junitPath) await prepareJunit(junitPath)
-    const result = parsed.command === 'explore'
+    const ran = parsed.command === 'explore'
       ? await orchestration.explore(goalText)
       : parsed.command === 'remember'
         ? await orchestration.remember(goalText, parsed.flow!, {
           ...(parsed.acceptAssertionChange ? { acceptAssertionChange: true } : {}),
         })
         : await orchestration.run(goalText, { ...(parsed.verify ? { verify: true } : {}) })
+    const result: RunResult = engine ? { ...ran, engine } : ran
     io.stdout(parsed.json
       ? `${JSON.stringify(redactJson({ ...result, report: jsonReporter.receipt }, redact), null, 2)}\n`
       : renderResult(result, jsonReporter.receipt, redact))

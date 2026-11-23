@@ -17,7 +17,6 @@
     }
   ],
   "maestro": {
-    "executable": "maestro",
     "timeoutMs": 180000
   }
 }

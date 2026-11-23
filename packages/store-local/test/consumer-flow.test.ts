@@ -89,6 +89,43 @@ describe('closure assertions (hash form version 1)', () => {
     expect(loosened).not.toBe(weak)
   })
 
+  test('round 2: a bare assertion is hashed and counted, so deleting it changes both', async () => {
+    const withBare = 'appId: a\n---\n- assertVisible: "One"\n- assertNoDefectsWithAi\n'
+    const without = 'appId: a\n---\n- assertVisible: "One"\n'
+    const count = async (text: string) => {
+      await writeFile(join(root, '.maestro/flows/main.yaml'), text)
+      const closure = await collectFlowClosure(root, join(root, '.maestro/flows/main.yaml'))
+      return { count: closureAssertions(closure).filter(item => item.command.startsWith('assert')).length, hash: assertionsSha256(closure) }
+    }
+    const before = await count(withBare)
+    const after = await count(without)
+    expect(before.count).toBe(2)
+    expect(after.count).toBe(1)
+    expect(after.hash).not.toBe(before.hash)
+  })
+
+  test('round 2: extendedWaitUntil is part of the hash', async () => {
+    const wait = (extra: string) => `appId: a\n---\n- extendedWaitUntil:\n    visible: "Done"\n${extra}`
+    const base = await hashOf({ '.maestro/flows/main.yaml': wait('    timeout: 5000\n') })
+    expect(await hashOf({ '.maestro/flows/main.yaml': wait('    timeout: 1\n') })).not.toBe(base)
+    expect(await hashOf({ '.maestro/flows/main.yaml': 'appId: a\n---\n- tapOn: x\n' })).not.toBe(base)
+  })
+
+  test('round 2: an optional runFlow, in any spelling, takes the assertions below it off the owner floor', async () => {
+    const reached = async (call: string) => {
+      await writeFile(join(root, '.maestro/subflows/sub.yaml'), '- assertVisible:\n    id: saved\n')
+      await writeFile(join(root, '.maestro/flows/main.yaml'), `appId: a\n---\n${call}`)
+      const closure = await collectFlowClosure(root, join(root, '.maestro/flows/main.yaml'))
+      return closureAssertions(closure).find(item => item.command === 'assertVisible')!.reachedAlways
+    }
+    expect(await reached('- runFlow: ../subflows/sub.yaml\n')).toBe(true)
+    expect(await reached('- runFlow:\n    file: ../subflows/sub.yaml\n    optional: false\n')).toBe(true)
+    expect(await reached('- runFlow:\n    file: ../subflows/sub.yaml\n    optional: true\n')).toBe(false)
+    expect(await reached('- runFlow:\n    file: ../subflows/sub.yaml\n    optional: yes\n')).toBe(false)
+    expect(await reached('- defaults: &opt\n    optional: true\n- runFlow:\n    <<: *opt\n    file: ../subflows/sub.yaml\n')).toBe(false)
+    expect(await reached('- runFlow:\n    <<: {optional: true}\n    file: ../subflows/sub.yaml\n')).toBe(false)
+  })
+
   test('review repro 2: an inline evalScript that feeds assertTrue', async () => {
     const flow = (source: string) => `appId: a\n---\n- evalScript: \${${source}}\n- assertTrue: \${output.ok}\n`
     expect(await hashOf({ '.maestro/flows/main.yaml': flow('output.ok = true') }))

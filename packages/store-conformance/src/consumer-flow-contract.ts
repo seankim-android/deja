@@ -541,6 +541,35 @@ export function runConsumerFlowContractTests(implementation: WalkStoreContractIm
       }
     })
 
+    test('a bare assertion counts toward minAssertions, and an optional runFlow does not satisfy a required id', async () => {
+      const ctx = await context()
+      try {
+        const store = ctx.open()
+        const body = (extra: string) => `appId: dev.deja.fixture\n---\n- assertVisible:\n    id: "screen.today"\n${extra}`
+        await ctx.write(MAIN, body('- assertNoDefectsWithAi\n'))
+        await ctx.persist(store)
+        const set = async (ownerRules: object) => {
+          const manifest = parseWalkManifest(await ctx.manifestText())
+          Object.assign(manifest.walks[0], { ownerRules })
+          await ctx.write(MANIFEST, `${JSON.stringify(manifest, null, 2)}\n`)
+        }
+        await set({ minAssertions: 2 })
+        await ctx.persist(store, { origin: 'verify' })
+        await ctx.write(MAIN, body(''))
+        await expect(ctx.persist(store, { origin: 'verify', assertionChange: 'accept' })).rejects.toBeInstanceOf(OwnerRuleError)
+        for (const optional of ['true', 'yes']) {
+          await set({ requiredAssertionIds: ['saved'] })
+          await ctx.write(SUB, '- assertVisible:\n    id: saved\n')
+          await ctx.write(MAIN, `appId: dev.deja.fixture\n---\n- runFlow:\n    file: ../subflows/type.yaml\n    optional: ${optional}\n`)
+          await expect(ctx.persist(store, { origin: 'remember', assertionChange: 'accept' })).rejects.toBeInstanceOf(OwnerRuleError)
+        }
+        await ctx.write(MAIN, 'appId: dev.deja.fixture\n---\n- runFlow: ../subflows/type.yaml\n')
+        await ctx.persist(store, { origin: 'remember', assertionChange: 'accept' })
+      } finally {
+        await ctx.cleanup()
+      }
+    })
+
     test('required assertion ids count only when they always run', async () => {
       const ctx = await context()
       try {
