@@ -219,6 +219,7 @@ function createOrchestration(
     timeoutMs: configuration.maestro.timeoutMs,
     appId: configuration.explore.appId,
     ...(crashReportDirectory ? { crashReportDirectory } : {}),
+    crashReportGraceMs: configuration.crashReportGraceMs,
     ...(junitPath ? { junitPath } : {}),
     ...(process.env.ANDROID_HOME || process.env.ANDROID_SDK_ROOT
       ? { androidSdkRoot: process.env.ANDROID_HOME ?? process.env.ANDROID_SDK_ROOT }

@@ -565,12 +565,20 @@ export class Deja {
   private async rerunOnce(
     request: RunnerRequest,
     recheck: () => Promise<LookupHit | LookupMiss>,
+    /**
+     * What the lookup said when the first attempt began. A `--verify` run starts from a
+     * `flow-changed` miss on purpose, so only a difference from this, not the miss itself, counts as
+     * a change between the attempts. Absent means a clean hit.
+     */
+    baseline?: LookupHit | LookupMiss,
   ): Promise<ExecutionResult | 'changed'> {
-    const changed = async () => {
-      const current = await recheck()
-      return current.status === 'miss' &&
-        (current.reason === 'flow-changed' || current.reason === 'missing-flow')
+    const signature = (result: LookupHit | LookupMiss | undefined) => {
+      if (!result || result.status === 'hit') return 'ok'
+      if (result.reason === 'flow-changed') return `flow-changed:${result.flowChange?.currentClosureSha256 ?? ''}`
+      return result.reason === 'missing-flow' ? 'missing-flow' : 'ok'
     }
+    const start = signature(baseline)
+    const changed = async () => signature(await recheck()) !== start
     if (await changed()) return 'changed'
     const second = await this.dependencies.runner.run({
       ...request, artifactDirectory: `${request.artifactDirectory}/rerun`,
@@ -614,7 +622,7 @@ export class Deja {
     const verifiable = miss.flowPath !== undefined &&
       ['flow-changed', 'not-validated', 'failed-validation', 'stale-build'].includes(miss.reason)
     if (options.verify && verifiable) {
-      return this.verifyFlow(identity, missStart, miss.flowPath!, options.rerunFailed === true)
+      return this.verifyFlow(identity, missStart, miss.flowPath!, miss, options.rerunFailed === true)
     }
     switch (miss.reason) {
       case 'flow-changed':
@@ -650,6 +658,7 @@ export class Deja {
     identity: WalkIdentity,
     missStart: RunStart,
     flowPath: string,
+    miss: LookupMiss,
     rerunFailed = false,
   ): Promise<RunResult> {
     const { store, runner } = this.dependencies
@@ -666,7 +675,7 @@ export class Deja {
       if (rerunFailed) {
         const again = await this.rerunOnce({
           flowPath: snapshot?.candidatePath ?? flowPath, artifactDirectory: attempt,
-        }, () => store.lookup(identity))
+        }, () => store.lookup(identity), miss)
         if (again === 'changed') return this.finish(verifyStart, this.changedBetweenAttempts(execution))
         rerun = rerunVerdict(execution, again)
         if (rerun.verdict === 'flaky') {

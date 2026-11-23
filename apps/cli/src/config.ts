@@ -46,6 +46,11 @@ export type ProductionConfiguration = {
     allowUntested: boolean
     timeoutMs: number
   }
+  /**
+   * iOS: how long a failed attempt waits for a late crash report. Default 10000; 0 turns it off.
+   * The wait is outside maestro.timeoutMs, so one attempt can take the timeout plus this.
+   */
+  crashReportGraceMs: number
   openClaw?: {
     executable: string
     mcpProxy: string
@@ -87,6 +92,14 @@ function positiveInteger(value: unknown, fallback: number, label: string) {
     throw new CliConfigurationError(`${label} must be a positive integer`)
   }
   return result
+}
+
+function crashReportGraceMs(value: unknown) {
+  if (value === undefined) return 10_000
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 0 || value > 120_000) {
+    throw new CliConfigurationError('crashReportGraceMs must be an integer from 0 to 120000')
+  }
+  return value
 }
 
 function unitInterval(value: unknown, fallback: number, label: string) {
@@ -352,6 +365,7 @@ export async function loadProductionConfiguration(configPath: string): Promise<P
         'maestro.timeoutMs',
       ),
     },
+    crashReportGraceMs: crashReportGraceMs(raw.crashReportGraceMs),
     ...(openClawConfiguration ? { openClaw: openClawConfiguration } : {}),
     ...(semantic ? { semantic } : {}),
     ...(repair ? { repair } : {}),

@@ -303,12 +303,20 @@ timeout or a runner error still wins over it. Two signals count:
 
 Limits of the labels, which stay advisory:
 
-- A crash report can land a few seconds after the process dies, so after a failed iOS attempt Déjà
-  waits up to 10 s for it (`crashReportGraceMs`) before the next attempt starts. A report is
-  attributed to the attempt whose window it falls in. A failed assertion never waits.
+- A crash report can land a few seconds after the process dies, so after a failed iOS attempt that
+  Déjà labels `selector`, `navigation` or `unknown` it waits up to 10 s for the report before the
+  next attempt starts. The wait applies to every such failed iOS run, with or without
+  `--rerun-failed`, and costs the full 10 s when there is no crash. A timeout, a runner error and a
+  failed assertion never wait. Set the config field `crashReportGraceMs` (integer, default `10000`,
+  `0` turns the wait off, maximum `120000`). The wait is outside `maestro.timeoutMs` and nothing
+  can abort it, so one attempt can take the timeout plus the grace period. A report is attributed
+  to the attempt whose window it falls in.
+- A crash followed by a failed assertion can still be labeled `product_assertion`: the report is
+  still being written when Maestro prints the assertion, and no wait happens. The first-launch
+  fixture run must check which step fails after the crash.
 - The `.ips` match is by app ID and time only. Parallel runs of the same app ID on one Mac (several
   simulators, several worktrees) can give a run a false `app_crash` from another run's crash. A
-  report does not name the simulator, so this cannot be checked. Symlinks are skipped.
+  report does not name the simulator, so this cannot be checked. Symlinks are skipped (the file is opened with `O_NOFOLLOW`) and so are files over 8 MB.
 - The 2.12.0 sources show no prefix or format on those lines that a flow cannot produce (not seen in live output). A flow whose own
   output (for example `echo`) is exactly one of those lines can spoof the label. The cost is a wrong
   advisory label, never a repair.

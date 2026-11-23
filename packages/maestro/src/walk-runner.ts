@@ -115,8 +115,13 @@ export class MaestroWalkRunner implements WalkRunner {
   private async crashReportSignal(result: MaestroRunResult) {
     if (result.passed || this.options.adapter?.platform !== 'ios' || !this.options.appId) return null
     if (detectCrashInOutput(result.output)) return null
-    // A failed assertion is a product answer, not a symptom a crash could hide behind, so it never waits.
-    const grace = /^Assertion is false:/m.test(result.output) ? 0 : this.options.crashReportGraceMs ?? 10_000
+    // A timeout or a runner error is labeled before any crash signal is read, and a failed assertion
+    // is a product answer, so neither waits. Selector, navigation and unknown failures do: a crash
+    // behind them changes the label and keeps the run away from repair.
+    const labeledFirst = result.timedOut || result.errors.some(error => error.kind !== 'execution')
+    const grace = labeledFirst || /^Assertion is false:/m.test(result.output)
+      ? 0
+      : this.options.crashReportGraceMs ?? 10_000
     const poll = this.options.crashReportPollMs ?? 500
     const search = {
       directory: this.options.crashReportDirectory ?? defaultCrashReportDirectory(),

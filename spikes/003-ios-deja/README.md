@@ -109,6 +109,10 @@ xcrun simctl spawn <walkcache_ios-UDID> defaults delete NSGlobalDomain DEJA_FIXT
 rm -f /tmp/deja-fixture-crash-marker
 ```
 
+When you run this, record which step fails after the crash. If it is an `assertVisible`, the run
+may be labeled `product_assertion` instead of `app_crash`, because Déjà does not wait for the crash
+report after a failed assertion. That is a known limit; note the result in the ticket.
+
 Status: the mode is built and the Déjà side is covered by tests with fakes. It has **not** been run
 on a simulator yet (the dedicated simulator was in use), so there is no recorded evidence.
 

@@ -200,6 +200,17 @@ describe('crash report hostile input and attribution', () => {
     }
   })
 
+  test('a report over 8 MB is skipped', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'deja-ips-huge-'))
+    try {
+      await writeFile(join(dir, 'Huge.ips'), `${header}\n${'x'.repeat(9 * 1024 * 1024)}`)
+      const now = Date.now()
+      expect(await findCrashReport({ directory: dir, appId, sinceMs: now - 60_000, untilMs: now + 60_000 })).toBeNull()
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
   test('a report between two attempts belongs to the earlier one, not the next', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'deja-ips-attr-'))
     try {
@@ -220,6 +231,30 @@ describe('crash report hostile input and attribution', () => {
 })
 
 describe('MaestroWalkRunner crash report written after the attempt ends', () => {
+  test('a timeout or a runner error never waits for a report', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'deja-ips-nowait-'))
+    try {
+      const runner = new MaestroWalkRunner({
+        workspaceRoot: dir, executable: '/unused', device: 'sim', timeoutMs: 1000,
+        adapter: iosMaestroAdapter({ device: 'sim' }), appId: 'dev.deja.ios.checkout',
+        crashReportDirectory: join(dir, 'empty'), crashReportGraceMs: 5000, crashReportPollMs: 25,
+      })
+      for (const [timedOut, kind] of [[true, 'timeout'], [false, 'launch']] as const) {
+        const begun = Date.now()
+        const adapted = await runner.adapt({
+          platform: 'ios', device: 'sim', flowPath: join(dir, 'flow.yaml'),
+          startedAt: new Date(begun - 1000).toISOString(), endedAt: new Date(begun).toISOString(),
+          durationMs: 1000, monotonicDurationMs: 1000, exitCode: 1, signal: null, timedOut,
+          passed: false, stdout: '', stderr: '', output: 'Tap on id: a... FAILED\n', errors: [{ kind, message: 'x' }],
+        })
+        expect(Date.now() - begun).toBeLessThan(1500)
+        expect(adapted.failure?.category).toBe(timedOut ? 'timeout' : 'runner')
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
   test('a report that lands a moment after a failed attempt gives app_crash, not selector', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'deja-ips-late-'))
     const reports = join(dir, 'reports')

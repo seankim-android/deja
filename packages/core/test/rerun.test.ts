@@ -241,4 +241,42 @@ describe('opt-in rerun of a failed replay (DEJA-7)', () => {
     expect(store.persists).toBe(0)
     expect(store.validations).toEqual([])
   })
+
+  test('--verify --rerun-failed with the manifest already in flow-changed still reruns, and persists nothing', async () => {
+    const changed: LookupMiss = {
+      status: 'miss', reason: 'flow-changed', flowPath: '/consumer/flow.yaml',
+      flowChange: { manifestClosureSha256: 'a'.repeat(64), currentClosureSha256: 'b'.repeat(64) },
+    }
+    const make = (results: ExecutionResult[], lookups: (LookupHit | LookupMiss)[]) => {
+      const store = new Store() as Store & { manifestPath?: string }
+      store.manifestPath = 'deja.walks.json'
+      store.lookupResults = lookups
+      let calls = 0
+      const deja = new Deja({
+        store, reporter: new Reporter(), artifactId: prefix => `${prefix}-test`,
+        runner: { run: async () => results[Math.min(calls++, results.length - 1)] },
+        createExplorer: () => { throw new Error('no explorer') },
+      })
+      return { store, deja, calls: () => calls }
+    }
+    const flaky = make([run(false, 'selector'), run(true)], [changed])
+    const first = await flaky.deja.run(identity, { verify: true, rerunFailed: true })
+    expect(first).toMatchObject({ outcome: 'flaky', passed: false })
+    expect(flaky.calls()).toBe(2)
+    expect(flaky.store.persists).toBe(0)
+    expect(flaky.store.validations).toEqual([])
+
+    const steady = make([run(false, 'unknown'), run(false, 'unknown')], [changed])
+    const second = await steady.deja.run(identity, { verify: true, rerunFailed: true })
+    expect(second).toMatchObject({ outcome: 'failed', passed: false })
+    expect(second.attempts).toHaveLength(2)
+    expect(steady.calls()).toBe(2)
+
+    // A change between the attempts (another closure hash) is still reported and the rerun is dropped.
+    const moved: LookupMiss = { ...changed, flowChange: { ...changed.flowChange!, currentClosureSha256: 'c'.repeat(64) } }
+    const during = make([run(false, 'unknown'), run(true)], [changed, changed, moved])
+    const third = await during.deja.run(identity, { verify: true, rerunFailed: true })
+    expect(third.outcome).toBe('flow-changed')
+    expect(third.attempts).toBeUndefined()
+  })
 })

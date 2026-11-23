@@ -1,3 +1,4 @@
+import { constants } from 'node:fs'
 import { open, lstat, readdir } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
@@ -54,7 +55,7 @@ export type FindCrashReportOptions = {
 // Maestro's IPSParser reads these keys. The header and the first part of the body are enough.
 const HEADER_BYTES = 32 * 1024
 /** Real reports run to hundreds of KB; anything far beyond is not a crash report. */
-const MAX_REPORT_BYTES = 64 * 1024 * 1024
+const MAX_REPORT_BYTES = 8 * 1024 * 1024
 const PROCESS_NAME = /^[A-Za-z0-9 ._+-]{1,64}$/
 
 function escapeRegex(text: string) {
@@ -62,7 +63,8 @@ function escapeRegex(text: string) {
 }
 
 async function readHead(path: string) {
-  const handle = await open(path, 'r')
+  // O_NOFOLLOW closes the window between lstat and open: a link swapped in is refused.
+  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW)
   try {
     const buffer = Buffer.alloc(HEADER_BYTES)
     const { bytesRead } = await handle.read(buffer, 0, HEADER_BYTES, 0)

@@ -161,6 +161,23 @@ describe('deja run --rerun-failed', () => {
     }
   })
 
+  test('crashReportGraceMs is a config knob: 0 is valid, a negative or fractional value is refused', async () => {
+    const { temporary, root } = await workspace()
+    try {
+      const config = JSON.parse(await readFile(join(root, 'deja.config.json'), 'utf8'))
+      for (const value of [-1, 1.5, '10']) {
+        await writeFile(join(root, 'deja.config.json'), JSON.stringify({ ...config, crashReportGraceMs: value }))
+        const refused = await execute(root, ['list'])
+        expect(refused.exitCode).toBe(2)
+        expect(refused.stderr).toContain('crashReportGraceMs must be an integer from 0 to 120000')
+      }
+      await writeFile(join(root, 'deja.config.json'), JSON.stringify({ ...config, crashReportGraceMs: 0 }))
+      expect((await execute(root, ['list'])).exitCode).toBe(0)
+    } finally {
+      await rm(temporary, { recursive: true, force: true })
+    }
+  })
+
   test('a new crash report for the app ID, written during the run, labels it app_crash (in-process seam)', async () => {
     const { temporary, root } = await workspace()
     const reports = join(temporary, 'DiagnosticReports')
