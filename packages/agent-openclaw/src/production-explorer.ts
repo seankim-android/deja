@@ -12,6 +12,7 @@ import type {
 } from '@deja-qa/core'
 import {
   countFlowAssertions,
+  maestroChildEnv,
   type MaestroWalkRunner,
 } from '@deja-qa/maestro'
 import {
@@ -81,6 +82,8 @@ function mcpEnvironment(configuration: ExploreConfiguration, executable: string)
     DEJA_DEVICE: configuration.device,
     MAESTRO_CLI_NO_ANALYTICS: '1',
     MAESTRO_CLI_ANALYSIS_NOTIFICATION_DISABLED: 'true',
+    // The proxy starts Maestro with this environment, so Maestro gets its own runtime home.
+    JAVA_TOOL_OPTIONS: maestroChildEnv(executable).JAVA_TOOL_OPTIONS ?? '',
   }
   const prefixes: string[] = []
   const androidSdkRoot = process.env.ANDROID_HOME ?? process.env.ANDROID_SDK_ROOT

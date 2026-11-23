@@ -4,6 +4,8 @@ import {
   dejaHome,
   engineDirectory,
   resolveMaestroEngine,
+  maestroChildEnv,
+  withoutJvmNotices,
   MAESTRO_ENGINE_PIN,
 } from '@deja-qa/maestro'
 import { TESTED_RANGE_TEXT } from './engine.ts'
@@ -13,15 +15,15 @@ export type DoctorCheck = { name: string; status: DoctorStatus; detail: string }
 export type DoctorReport = { ok: boolean; checks: DoctorCheck[] }
 
 /** Runs a read-only command and returns stdout and stderr together. Never throws. */
-export type DoctorProbe = (command: string, args: string[]) => Promise<{ ok: boolean; output: string }>
+export type DoctorProbe = (command: string, args: string[], env?: NodeJS.ProcessEnv) => Promise<{ ok: boolean; output: string }>
 
 export const TESTED_JAVA_MIN = 17
 export const TESTED_XCODE_MAJOR = 27
 export const TESTED_IOS_MAJOR = 27
 
-export const defaultProbe: DoctorProbe = (command, args) => new Promise(resolveProbe => {
+export const defaultProbe: DoctorProbe = (command, args, env) => new Promise(resolveProbe => {
   let output = ''
-  const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'] })
+  const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'], ...(env ? { env } : {}) })
   const timer = setTimeout(() => child.kill('SIGKILL'), 20_000)
   child.stdout.setEncoding('utf8')
   child.stderr.setEncoding('utf8')
@@ -48,7 +50,8 @@ async function engineCheck(options: DoctorOptions, probe: DoctorProbe): Promise<
       ...(options.configExecutable ? { configExecutable: options.configExecutable } : {}),
       env,
       home,
-      probeVersion: async executable => (await probe(executable, ['--version'])).output,
+      probeVersion: async executable =>
+        withoutJvmNotices((await probe(executable, ['--version'], maestroChildEnv(executable, { env, home }))).output),
     })
     const version = engine.version ? `Maestro ${engine.version}` : 'Maestro (version unreadable)'
     const origin = engine.source === 'pinned'

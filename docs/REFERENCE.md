@@ -69,6 +69,41 @@ $DEJA_HOME/maestro/<version>/maestro/bin/maestro    the executable
 `DEJA_HOME` defaults to `~/.local/share/deja`. Déjà never reads or writes `~/.maestro` or any other
 Maestro install, so other tools on the machine keep their own version, even while they run.
 
+#### Runtime home
+
+Maestro keeps its state under the JVM `user.home`: `.maestro/sessions` (a heartbeat file shared by
+every Maestro process, which also prunes it), `.maestro/deps` (unpacked `applesimutils` and
+`simulator-server`), `.maestro/analytics.json`, `.maestro/tests`, `.maestro/promotion-state.json`,
+`.maestro/analyze-notification.json`, `Library/Logs/maestro`, `.android` (adb keys) and, for Cloud,
+`.mobiledev/authtoken`. `XDG_STATE_HOME` moves only part of it (not `sessions` or `deps`), so Déjà
+sets `user.home` instead.
+
+Every Maestro process Déjà starts (`maestro test`, `maestro hierarchy`, `maestro mcp`, the
+`--version` probe, `deja doctor`, and the Maestro MCP proxy environment of the OpenClaw explorer)
+runs with `JAVA_TOOL_OPTIONS=-Duser.home=<runtime home>`, built by `maestroChildEnv` in
+`packages/maestro/src/runtime-home.ts`:
+
+```text
+$DEJA_HOME/runtime/<version>/     the pinned engine (for example runtime/2.12.0)
+$DEJA_HOME/runtime/override/      any override engine (maestro.executable or DEJA_MAESTRO)
+```
+
+- An existing `JAVA_TOOL_OPTIONS` is kept and ours is appended last. A path with spaces is quoted.
+- `HOME` is not changed, so `xcrun`, `simctl`, Xcode and the user's simulators work as before. The
+  device is chosen the same way.
+- An override engine is isolated too: Déjà never writes to `~/.maestro`, whichever Maestro runs. All
+  overrides share `runtime/override`.
+- `<runtime home>/Library/Logs/DiagnosticReports` is a link to the real folder, so Maestro's iOS
+  crash detection still finds reports. Déjà only reads through it.
+- Maestro's analytics and the analysis notice stay off (`MAESTRO_CLI_NO_ANALYTICS=1`,
+  `MAESTRO_CLI_ANALYSIS_NOTIFICATION_DISABLED=true`).
+- The first run in a new runtime home unpacks `deps` and creates the adb key, so it is a few seconds
+  slower (about 7 s measured on an iPhone 17 simulator: 26 s, then 19 s for `maestro hierarchy`).
+  The iOS driver is not cached under home: Maestro bundles it and installs it on the simulator.
+- A Maestro login (`maestro login`) and Cloud token in the real home are not visible to Déjà's
+  Maestro. Déjà runs local flows only.
+- Delete `$DEJA_HOME/runtime/<version>` at any time. It only holds Maestro's own state and logs.
+
 - `deja engine install` downloads the pinned release from Maestro's GitHub releases to a temp
   folder, checks the sha256 (a mismatch fails closed), rejects archive paths that could leave the
   folder (zip-slip, links), extracts with the system `unzip`, and renames the folder into place. A
