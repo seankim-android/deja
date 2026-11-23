@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { lstatSync, realpathSync, statSync } from 'node:fs'
 import { mkdir, readFile, realpath, rename, stat, writeFile } from 'node:fs/promises'
 import { dirname, isAbsolute, relative, resolve, sep } from 'node:path'
@@ -413,7 +413,10 @@ export class LocalWalkStore implements WalkStore {
     if (!inside(root, canonicalParent)) {
       throw new InvalidWalkMemoryError(`atomic write destination escapes workspace: ${path}`)
     }
-    const temporary = `${path}.${process.pid}.tmp`
+    // A unique name per call: stores in one process share a pid and may write the same
+    // content-addressed flow at once. rename replaces the destination atomically, so a reader sees a
+    // whole file, and two identical writes leave one identical file.
+    const temporary = `${path}.${process.pid}-${randomUUID()}.tmp`
     await writeFile(temporary, contents)
     // If this rename is interrupted, only the *.tmp file remains. Lookup reads exact metadata and
     // content-addressed final flow names, never temporary files or unreferenced flows.
@@ -637,7 +640,16 @@ export {
 } from '@deja-qa/core'
 
 export { FlowClosureError } from './flow-closure.ts'
-export { InvalidStoreIdError, StoreLockedError, WriterLock, storeMetadataPath, type LockHolder } from './writer-lock.ts'
+export {
+  InvalidStoreIdError,
+  StoreLockContentionError,
+  StoreLockUnavailableError,
+  StoreLockedError,
+  WriterLock,
+  storeMetadataPath,
+  type LockHolder,
+  type LockTestHooks,
+} from './writer-lock.ts'
 export {
   checkStoredSubflows,
   collectFlowClosure,
