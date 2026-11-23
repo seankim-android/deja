@@ -9,6 +9,7 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
-    "@deja-qa/core": "workspace:*"
+    "@deja-qa/core": "workspace:*",
+    "@deja-qa/store-local": "workspace:*"
   }
 }

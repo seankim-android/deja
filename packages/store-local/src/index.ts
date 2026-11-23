@@ -16,6 +16,12 @@ import {
   type WalkStore,
   type WalkValidation,
 } from '@deja-qa/core'
+import {
+  checkStoredSubflows,
+  collectFlowClosure,
+  planStoredClosure,
+  readStoredFlowFiles,
+} from './flow-closure.ts'
 
 export {
   type ExplorationDetails,
@@ -25,6 +31,7 @@ export {
   type PersistVerifiedOptions,
   type PersistVerifiedRepairOptions,
   type RepairProvenance,
+  type StoredFlowFile,
   type StoredWalk,
   type WalkIdentity,
   type WalkValidation,
@@ -237,6 +244,8 @@ function validateWalk(value: unknown, legacy = false): StoredWalk {
     throw new InvalidWalkMemoryError('walk repairHistory must be a non-empty array when present')
   }
   const repairHistory = value.repairHistory?.map(readRepairProvenance)
+  const subflowFiles = value.subflowFiles === undefined ? undefined : readStoredFlowFiles(value.subflowFiles)
+  if (subflowFiles === null) throw new InvalidWalkMemoryError('walk subflowFiles is invalid')
   return {
     goal: value.goal,
     goalKey: value.goalKey,
@@ -248,6 +257,7 @@ function validateWalk(value: unknown, legacy = false): StoredWalk {
     ...(value.browser !== undefined ? { browser: value.browser as string } : {}),
     flowPath: value.flowPath,
     flowSha256: value.flowSha256,
+    ...(subflowFiles ? { subflowFiles } : {}),
     lastValidation,
     validationHistory: history,
     ...(value.origin ? { origin: value.origin } : {}),
@@ -401,11 +411,13 @@ export class LocalWalkStore implements WalkStore {
       throw new InvalidWalkMemoryError('the previous successful repair base changed before replacement')
     }
     if (repair) readRepairProvenance(repair.repair)
-    const candidateBytes = await readFile(candidate)
-    const flowSha256 = sha256(candidateBytes)
-    const platformSlug = flowSlug(normalizeGoal(identity.platform))
-    const flowPath = `.deja/flows/${flowSlug(identity.goalKey)}/${platformSlug}-${flowSha256}.yaml`
-    await this.atomicWrite(resolve(root, flowPath), candidateBytes)
+    const plan = planStoredClosure(
+      await collectFlowClosure(root, candidate),
+      flowSlug(identity.goalKey),
+      flowSlug(normalizeGoal(identity.platform)),
+    )
+    const { flowPath, flowSha256 } = plan
+    for (const write of plan.writes) await this.atomicWrite(resolve(root, write.path), write.bytes)
 
     const validation = { passed: true as const, at: options.validation.at }
     const historyEntry = { ...validation, flowSha256 }
@@ -414,6 +426,7 @@ export class LocalWalkStore implements WalkStore {
       ...identity,
       flowPath,
       flowSha256,
+      ...(plan.subflowFiles ? { subflowFiles: plan.subflowFiles } : {}),
       lastValidation: validation,
       validationHistory: previous ? [...previous.validationHistory, historyEntry] : [historyEntry],
       origin: repair ? 'repair' : options.origin,
@@ -471,6 +484,9 @@ export class LocalWalkStore implements WalkStore {
     if (sha256(await readFile(flowPath)) !== walk.flowSha256) {
       throw new InvalidWalkMemoryError(`stored flow checksum does not match ${walk.flowPath}`)
     }
+    const subflows = await checkStoredSubflows(await this.canonicalRoot(), walk.subflowFiles)
+    if (subflows.status === 'missing') return { status: 'miss', reason: 'missing-flow' }
+    if (subflows.status === 'invalid') throw new InvalidWalkMemoryError(subflows.message)
     return { status: 'hit', walk, flowPath }
   }
 
@@ -494,6 +510,9 @@ export class LocalWalkStore implements WalkStore {
     if (sha256(await readFile(flowPath)) !== walk.flowSha256) {
       throw new InvalidWalkMemoryError(`stored flow checksum does not match ${walk.flowPath}`)
     }
+    const subflows = await checkStoredSubflows(await this.canonicalRoot(), walk.subflowFiles)
+    if (subflows.status === 'missing') return { status: 'miss', reason: 'missing-flow' }
+    if (subflows.status === 'invalid') throw new InvalidWalkMemoryError(subflows.message)
     return { status: 'hit', walk, flowPath }
   }
 
@@ -547,3 +566,11 @@ export {
   type VerifiedSubflowLookup,
   type VerifiedSubflowStore,
 } from '@deja-qa/core'
+
+export { FlowClosureError } from './flow-closure.ts'
+export {
+  checkStoredSubflows,
+  collectFlowClosure,
+  planStoredClosure,
+  readStoredFlowFiles,
+} from './flow-closure.ts'

@@ -17,6 +17,12 @@ import {
   type WalkStore,
   type WalkValidation,
 } from '@deja-qa/core'
+import {
+  checkStoredSubflows,
+  collectFlowClosure,
+  planStoredClosure,
+  readStoredFlowFiles,
+} from '@deja-qa/store-local'
 
 export {
   type ExplorationDetails,
@@ -26,6 +32,7 @@ export {
   type PersistVerifiedOptions,
   type PersistVerifiedRepairOptions,
   type RepairProvenance,
+  type StoredFlowFile,
   type StoredWalk,
   type WalkIdentity,
   type WalkValidation,
@@ -275,6 +282,13 @@ export class SQLiteWalkStore implements WalkStore {
           previous_flow_sha256 TEXT NOT NULL,
           PRIMARY KEY (walk_id, position)
         );
+        CREATE TABLE IF NOT EXISTS walk_files (
+          walk_id INTEGER NOT NULL REFERENCES walks(id) ON DELETE CASCADE,
+          position INTEGER NOT NULL,
+          path TEXT NOT NULL,
+          sha256 TEXT NOT NULL,
+          PRIMARY KEY (walk_id, position)
+        );
         PRAGMA user_version = ${SQLITE_MEMORY_SCHEMA_VERSION};
       `)
       return this.database
@@ -363,6 +377,15 @@ export class SQLiteWalkStore implements WalkStore {
       previousBuildFingerprint: repair.previous_build_fingerprint,
       previousFlowSha256: repair.previous_flow_sha256,
     })) : undefined
+    // Databases written before subflow storage have no walk_files table: no subflows.
+    const hasFiles = database.query(
+      "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'walk_files'",
+    ).get() !== null
+    const fileRows = hasFiles ? database.query(
+      'SELECT path, sha256 FROM walk_files WHERE walk_id = ? ORDER BY position',
+    ).all(row.id) as Record<string, unknown>[] : []
+    const subflowFiles = fileRows.length > 0 ? readStoredFlowFiles(fileRows) : undefined
+    if (subflowFiles === null) throw new InvalidWalkMemoryError('walk subflowFiles is invalid')
     const walk: StoredWalk = {
       goal: row.goal,
       goalKey: row.goal_key,
@@ -374,6 +397,7 @@ export class SQLiteWalkStore implements WalkStore {
       ...(row.browser !== null ? { browser: row.browser as string } : {}),
       flowPath: row.flow_path,
       flowSha256: row.flow_sha256,
+      ...(subflowFiles ? { subflowFiles } : {}),
       lastValidation,
       validationHistory,
       ...(row.origin !== null ? { origin: row.origin as StoredWalk['origin'] } : {}),
@@ -431,6 +455,11 @@ export class SQLiteWalkStore implements WalkStore {
       database.query(
         'INSERT INTO validation_history (walk_id, position, passed, at, flow_sha256) VALUES (?, ?, ?, ?, ?)',
       ).run(result.id, position, validation.passed ? 1 : 0, validation.at, validation.flowSha256)
+    }
+    for (const [position, file] of (walk.subflowFiles ?? []).entries()) {
+      database.query(
+        'INSERT INTO walk_files (walk_id, position, path, sha256) VALUES (?, ?, ?, ?)',
+      ).run(result.id, position, file.path, file.sha256)
     }
     for (const [position, repair] of (walk.repairHistory ?? []).entries()) {
       database.query(
@@ -519,11 +548,13 @@ export class SQLiteWalkStore implements WalkStore {
       throw new InvalidWalkMemoryError('the previous successful repair base changed before replacement')
     }
     if (repair) readRepairProvenance(repair.repair)
-    const candidateBytes = await readFile(candidate)
-    const flowSha256 = sha256(candidateBytes)
-    const platformSlug = flowSlug(normalizeGoalContract(identity.platform).key)
-    const flowPath = `.deja/flows/${flowSlug(identity.goalKey)}/${platformSlug}-${flowSha256}.yaml`
-    await this.atomicWriteFlow(resolve(root, flowPath), candidateBytes)
+    const plan = planStoredClosure(
+      await collectFlowClosure(root, candidate),
+      flowSlug(identity.goalKey),
+      flowSlug(normalizeGoalContract(identity.platform).key),
+    )
+    const { flowPath, flowSha256 } = plan
+    for (const write of plan.writes) await this.atomicWriteFlow(resolve(root, write.path), write.bytes)
 
     const validation = { passed: true as const, at: options.validation.at }
     const historyEntry = { ...validation, flowSha256 }
@@ -532,6 +563,7 @@ export class SQLiteWalkStore implements WalkStore {
       ...identity,
       flowPath,
       flowSha256,
+      ...(plan.subflowFiles ? { subflowFiles: plan.subflowFiles } : {}),
       lastValidation: validation,
       validationHistory: previous ? [...previous.validationHistory, historyEntry] : [historyEntry],
       origin: repair ? 'repair' : options.origin,
@@ -594,6 +626,9 @@ export class SQLiteWalkStore implements WalkStore {
     if (sha256(await readFile(flowPath)) !== walk.flowSha256) {
       throw new InvalidWalkMemoryError(`stored flow checksum does not match ${walk.flowPath}`)
     }
+    const subflows = await checkStoredSubflows(await this.canonicalRoot(), walk.subflowFiles)
+    if (subflows.status === 'missing') return { status: 'miss', reason: 'missing-flow' }
+    if (subflows.status === 'invalid') throw new InvalidWalkMemoryError(subflows.message)
     return { status: 'hit', walk, flowPath }
   }
 
@@ -614,6 +649,9 @@ export class SQLiteWalkStore implements WalkStore {
     if (sha256(await readFile(flowPath)) !== walk.flowSha256) {
       throw new InvalidWalkMemoryError(`stored flow checksum does not match ${walk.flowPath}`)
     }
+    const subflows = await checkStoredSubflows(await this.canonicalRoot(), walk.subflowFiles)
+    if (subflows.status === 'missing') return { status: 'miss', reason: 'missing-flow' }
+    if (subflows.status === 'invalid') throw new InvalidWalkMemoryError(subflows.message)
     return { status: 'hit', walk, flowPath }
   }
 

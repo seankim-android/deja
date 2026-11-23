@@ -47,10 +47,18 @@ export type ExplorationDetails = {
   modelCallBasis: string
 }
 
+/** A file the stored flow runs (a subflow or script), kept under `.deja/flows` with its checksum. */
+export type StoredFlowFile = {
+  path: string
+  sha256: string
+}
+
 export type StoredWalk = WalkIdentity & {
   goalKey: string
   flowPath: string
   flowSha256: string
+  /** Files the flow runs, absent for a flow with no `runFlow` or `runScript`. */
+  subflowFiles?: StoredFlowFile[]
   lastValidation: WalkValidation
   validationHistory: StoredValidation[]
   origin?: 'remember' | 'explore' | 'repair'

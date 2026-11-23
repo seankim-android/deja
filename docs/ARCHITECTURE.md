@@ -90,6 +90,15 @@ never become hits. Malformed JSON, unsupported schemas, invalid/duplicate identi
 mismatches, or path escapes raise `InvalidWalkMemoryError`; entries are not silently discarded to
 manufacture a hit.
 
+A flow that runs other files (`runFlow`, `runScript`, in any document or nested block) is stored with
+all of them (DEJA-2). At remember time both stores read the references with Bun's YAML parser, copy the
+whole closure into `.deja/flows/<goal>/<platform>-<closure sha>/` keeping the relative layout, and
+record each extra file as `subflowFiles` (`path`, `sha256`). Absolute paths, variables, cycles, and
+references outside the workspace (by path or through a symlink) reject the flow. A changed subflow
+is a different closure folder. Lookup checks every stored file: a changed one is refused like a
+changed main flow, and a missing one is `missing-flow`. A flow that runs nothing keeps the one-file
+layout. The memory schema stays 2; `subflowFiles` is optional (SQLite: the `walk_files` table).
+
 `lookupPreviousSuccessful` is diagnostic-only. It can locate the earlier successful build/flow for
 bounded repair but is not a warm hit and does not authorize persistence by itself.
 
