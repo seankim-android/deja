@@ -32,7 +32,7 @@
       "name": "@deja-qa/cli",
       "version": "0.1.0",
       "bin": {
-        "deja": "./deja.ts",
+        "deja": "./dist/deja.js",
       },
       "dependencies": {
         "@deja-qa/core": "workspace:*",

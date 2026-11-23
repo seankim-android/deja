@@ -1,0 +1,14 @@
+{
+  "files": [],
+  "references": [
+    { "path": "./packages/core/tsconfig.build.json" },
+    { "path": "./packages/semantic-local/tsconfig.build.json" },
+    { "path": "./packages/maestro/tsconfig.build.json" },
+    { "path": "./packages/agent-openclaw/tsconfig.build.json" },
+    { "path": "./packages/store-local/tsconfig.build.json" },
+    { "path": "./packages/store-sqlite/tsconfig.build.json" },
+    { "path": "./packages/store-conformance/tsconfig.build.json" },
+    { "path": "./packages/repair/tsconfig.build.json" },
+    { "path": "./apps/cli/tsconfig.build.json" }
+  ]
+}

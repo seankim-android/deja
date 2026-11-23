@@ -1,4 +1,4 @@
-<h1 align="center">Déjà</h1>
+<h1 align="center"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/brand/deja-logo-dark.svg"><img alt="Déjà" src="docs/brand/deja-logo.svg" width="280"></picture></h1>
 
 <p align="center">
 Explore an app once with an AI model. Replay the test later with no model at all.<br>
@@ -144,6 +144,12 @@ We do not claim a speedup. See [docs/REFERENCE.md](docs/REFERENCE.md) for the fu
 
 The full plan is in [docs/SDK_PLAN.md](docs/SDK_PLAN.md).
 
+## Contributing
+
+Outside contributions will require accepting the [CLA](CLA.md) (draft; see [CONTRIBUTING.md](CONTRIBUTING.md)).
+
 ## License
 
 [Apache-2.0](LICENSE)
+
+The Déjà name is covered by the [trademark policy](TRADEMARKS.md) (draft).
