@@ -108,6 +108,10 @@ describe('deja mcp', () => {
     const { root } = await workspace({ mcp: { explore: true } })
     const client = await connect(root)
     expect((await client.listTools()).tools.map(tool => tool.name)).toContain('deja_explore')
+    // iOS has no cold explorer: the call goes through the configured explorer and spends no model call.
+    const explored = await call(client, 'deja_explore', { goal: 'something new' })
+    expect(explored.payload).toMatchObject({ schemaVersion: 1, command: 'explore', outcome: 'exploration-rejected', modelCalls: 0 })
+    expect(explored.payload.errors.join(' ')).toContain('Cold iOS exploration is not supported')
   })
 
   test('mcp config is validated', async () => {
@@ -252,6 +256,7 @@ describe('deja mcp', () => {
       ['.maestro/flows/escape.yaml', /symlinks included/],
       ['linked-dir/outside.yaml', /symlinks included/],
       ['.deja/flows/stored.yaml', /under \.deja/],
+      ['.DEJA/flows/stored.yaml', /\.deja|does not exist/],
       ['.deja/../.deja/flows/stored.yaml', /under \.deja/],
       ['.maestro/flows/into-deja.yaml', /into \.deja/],
       ['.maestro/flows/missing.yaml', /does not exist/],
@@ -305,7 +310,12 @@ describe('deja mcp', () => {
     expect((await call(client, 'deja_remember', { goal: 'today', flow: '.maestro/flows/today.yaml' })).payload.outcome).toBe('remembered')
 
     const first = call(client, 'deja_run', { goal: 'today' })
-    await Bun.sleep(400)
+    // Wait until the first run has reached Maestro, so it holds the lock.
+    for (let wait = 0; wait < 100; wait += 1) {
+      const log = await readFile(join(temporary, 'maestro-runs.log'), 'utf8').catch(() => '')
+      if (log.trim().split('\n').length >= 2) break
+      await Bun.sleep(50)
+    }
     const second = await call(client, 'deja_run', { goal: 'today' })
     expect(second.isError).toBe(true)
     expect(second.payload.error.code).toBe('STORE_LOCKED')
@@ -340,16 +350,21 @@ describe('deja mcp', () => {
       ...JSON.parse(await readFile(join(root, 'deja.config.json'), 'utf8')), maestro: { executable: slow, timeoutMs: 30_000 },
     }))
     const client = await connect(root)
+    // A saved walk, so an unaborted run would reach Maestro. That is one logged run.
+    expect((await call(client, 'deja_remember', { goal: 'today', flow: '.maestro/flows/today.yaml' })).payload.outcome).toBe('remembered')
+    const runs = async () => (await readFile(join(temporary, 'maestro-runs.log'), 'utf8')).trim().split('\n').length
+    expect(await runs()).toBe(1)
     const controller = new AbortController()
     // The version probe takes a second, so the abort lands before the runner is reached.
     const pending = client.callTool({ name: 'deja_run', arguments: { goal: 'today' } }, undefined, { signal: controller.signal })
     await Bun.sleep(300)
     controller.abort()
     await expect(pending).rejects.toBeDefined()
-    await Bun.sleep(1500)
-    await expect(readFile(join(temporary, 'maestro-runs.log'), 'utf8')).rejects.toBeDefined()
-    // The lock was released, so the next call is not refused.
-    expect((await call(client, 'deja_run', { goal: 'today' })).payload.error?.code).not.toBe('STORE_LOCKED')
+    await Bun.sleep(2000)
+    expect(await runs()).toBe(1)
+    // The lock was released, so the next call is not refused, and it does run Maestro.
+    expect((await call(client, 'deja_run', { goal: 'today' })).payload).toMatchObject({ outcome: 'passed' })
+    expect(await runs()).toBe(2)
   })
 })
 
@@ -370,7 +385,10 @@ describe('deja mcp command line', () => {
       const result = await client.callTool({ name: 'deja_remember', arguments: { goal: 'today', flow: '.maestro/flows/today.yaml' } })
       expect(result.structuredContent).toMatchObject({ outcome: 'remembered', passed: true })
     } finally {
+      const started = performance.now()
       await client.close()
+      // The server exits on its own when stdin closes; the SDK waits 2 seconds before it sends SIGTERM.
+      expect(performance.now() - started).toBeLessThan(1500)
     }
   })
 

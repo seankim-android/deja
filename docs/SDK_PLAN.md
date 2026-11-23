@@ -194,7 +194,7 @@ are not negotiable in the engine, not the policy: product assertion failures are
   It must run on a runner that has an emulator or simulator; the Action does not provide devices.
 - **MCP server.** `deja mcp` in `@deja-qa/cli` (DEJA-9) exposing `deja_run`, `deja_remember`, `deja_list` and
   `deja_inspect` (underscores, since the Claude API rejects dots). It is part of the CLI, not a separate
-  `@deja-qa/mcp` package, to avoid a cycle with the CLI's config and runner assembly. `deja_explore` stays off unless the host enables it, since it spends model calls.
+  `@deja-qa/mcp` package, to reuse the CLI's config and runner assembly without widening its exports (a separate package stays possible). `deja_explore` stays off unless the host enables it, since it spends model calls.
   `@modelcontextprotocol/sdk` is already a root dependency.
 
 ## Phased roadmap

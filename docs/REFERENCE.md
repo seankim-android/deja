@@ -355,9 +355,10 @@ fails with exit 2 or 4 after it was parsed, the line still prints, with `outcome
 
 `deja mcp [--config <file>] [--store <id>]` (DEJA-9) is a stdio MCP server, so a coding agent in a
 worktree can run the loop: edit the app, build, call `deja_run`, read a structured result. It is
-part of the CLI (`@deja-qa/cli`), not a separate package: it needs the CLI's config, engine,
-runner and report redaction, and a package that depended on the CLI would be circular. Stdout carries
-the protocol and nothing else; warnings go to stderr. It exits when the host closes stdin.
+part of the CLI (`@deja-qa/cli`) rather than a separate `@deja-qa/mcp` package. It reuses the CLI's
+config loader, engine pick, store and runner assembly and report redaction, and a subcommand avoids
+widening the CLI's public exports. A separate package with its own `deja-mcp` bin stays possible.
+Stdout carries the protocol and nothing else; warnings go to stderr. It exits when the host closes stdin.
 
 The device, app ID, workspace and store come from the host's config and flags. No tool can name
 another workspace, device or store. Tool names use underscores because the Claude API rejects dots.
@@ -394,32 +395,30 @@ Errors that stop a tool (a locked store, a bad path, bad configuration) come bac
 `{ "error": { "code", "message" } }`. A failing replay is not an error: it is a result with its failure
 label and failing step. A bad argument is a JSON-RPC invalid-params error.
 
-Claude Code, in the project's `.mcp.json`:
+Claude Code, in the project's `.mcp.json`, from a source checkout (the packages are not on npm yet):
 
 ```json
 {
   "mcpServers": {
     "deja": {
-      "command": "bunx",
-      "args": ["@deja-qa/cli", "mcp", "--config", "deja.config.json"]
+      "command": "bun",
+      "args": ["/path/to/deja/apps/cli/deja.ts", "mcp", "--config", "/path/to/project/deja.config.json"]
     }
   }
 }
 ```
 
-Use `bun /path/to/deja/apps/cli/deja.ts mcp --config deja.config.json` as the command from a source
-checkout, or `deja mcp --config deja.config.json` with the standalone binary installed. Codex, in
-`~/.codex/config.toml`:
+Codex, in `~/.codex/config.toml`:
 
 ```toml
 [mcp_servers.deja]
-command = "bunx"
-args = ["@deja-qa/cli", "mcp", "--config", "deja.config.json"]
+command = "bun"
+args = ["/path/to/deja/apps/cli/deja.ts", "mcp", "--config", "/path/to/project/deja.config.json"]
 ```
 
-The agent then sees `mcp__deja__deja_run` and its siblings. The server starts with the client's working
-directory, so give an absolute `--config` path when the client does not start in the project.
-Exploration needs the Bun runtime, so the standalone binary serves replay only.
+After the packages are published, use `bunx @deja-qa/cli mcp --config deja.config.json` instead. The
+agent then sees `mcp__deja__deja_run` and its siblings. The server starts in the client's working
+directory, so give an absolute `--config` path unless the client starts in the project.
 
 ### Exit codes
 
