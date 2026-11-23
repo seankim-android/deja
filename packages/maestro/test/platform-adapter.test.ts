@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -50,7 +50,7 @@ describe('Maestro execution platform adapters', () => {
   })
 
   test('iOS app fingerprint covers bundle paths and contents', async () => {
-    const temporary = await mkdtemp(join(tmpdir(), 'deja-ios-build-'))
+    const temporary = await realpath(await mkdtemp(join(tmpdir(), 'deja-ios-build-')))
     try {
       const app = join(temporary, 'Fixture.app')
       await mkdir(join(app, '_CodeSignature'), { recursive: true })
@@ -69,7 +69,7 @@ describe('Maestro execution platform adapters', () => {
   })
 
   test('Web build fingerprint covers paths and every deterministic static file', async () => {
-    const temporary = await mkdtemp(join(tmpdir(), 'deja-web-build-'))
+    const temporary = await realpath(await mkdtemp(join(tmpdir(), 'deja-web-build-')))
     try {
       await mkdir(join(temporary, 'public', 'assets'), { recursive: true })
       await writeFile(join(temporary, 'public', 'index.html'), '<main>one</main>')

@@ -1,0 +1,186 @@
+import { describe, expect, test } from 'bun:test'
+import { spawn } from 'node:child_process'
+import { existsSync } from 'node:fs'
+import { mkdir, mkdtemp, realpath, readFile, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { delimiter, join, resolve } from 'node:path'
+import { runMaestro, type RunMaestroOptions } from '../src/index.ts'
+
+const fakeMaestro = resolve(import.meta.dir, 'fixtures/fake-maestro.cjs')
+
+async function fixture(flowName = 'success.yaml') {
+  const temporary = await realpath(await mkdtemp(join(tmpdir(), 'deja-maestro-')))
+  const workspaceRoot = join(temporary, 'workspace')
+  const flowDirectory = join(workspaceRoot, 'flows')
+  await mkdir(flowDirectory, { recursive: true })
+  const flowPath = join('flows', flowName)
+  await writeFile(join(workspaceRoot, flowPath), '# test fixture\n')
+  const options: RunMaestroOptions = {
+    executable: fakeMaestro,
+    device: 'test-device',
+    platform: 'android',
+    workspaceRoot,
+    flowPath,
+    timeoutMs: 2_000,
+  }
+  return { temporary, workspaceRoot, flowPath, options }
+}
+
+async function cleanup(temporary: string) {
+  await rm(temporary, { recursive: true, force: true })
+}
+
+function delay(milliseconds: number) {
+  return new Promise(resolveDelay => setTimeout(resolveDelay, milliseconds))
+}
+
+describe('verified Maestro runner', () => {
+  test('preserves output, timing, configuration, exit status, and artifacts on success', async () => {
+    const { temporary, workspaceRoot, options } = await fixture()
+    const androidSdkRoot = join(workspaceRoot, 'android-sdk')
+    const javaHome = join(workspaceRoot, 'java')
+    const secret = 'not-for-reports-secret-value'
+    process.env.DEJA_TEST_SECRET = secret
+    try {
+      const result = await runMaestro({
+        ...options,
+        androidSdkRoot,
+        javaHome,
+        artifacts: { directory: '.deja/test-run' },
+      })
+
+      expect(result.passed).toBe(true)
+      expect(result.exitCode).toBe(0)
+      expect(result.signal).toBeNull()
+      expect(result.timedOut).toBe(false)
+      expect(result.errors).toEqual([])
+      expect(result.stdout).toContain('fake stdout')
+      expect(result.stderr).toBe('fake stderr\n')
+      expect(result.output).toBe(`${result.stdout}${result.stderr}`)
+      expect(Date.parse(result.endedAt)).toBeGreaterThanOrEqual(Date.parse(result.startedAt))
+      expect(result.durationMs).toBeGreaterThanOrEqual(0)
+      expect(result.monotonicDurationMs).toBeGreaterThanOrEqual(0)
+
+      const observed = JSON.parse(result.stdout.split('\n')[0])
+      expect(observed.argv).toEqual([
+        '--no-ansi', '--device', 'test-device', 'test', resolve(workspaceRoot, options.flowPath),
+      ])
+      expect(observed.androidHome).toBe(androidSdkRoot)
+      expect(observed.javaHome).toBe(javaHome)
+      expect(observed.path.startsWith(
+        `${join(androidSdkRoot, 'platform-tools')}${delimiter}${join(javaHome, 'bin')}`,
+      )).toBe(true)
+
+      const artifacts = result.artifacts!
+      expect(await readFile(artifacts.stdoutPath, 'utf8')).toBe(result.stdout)
+      expect(await readFile(artifacts.stderrPath, 'utf8')).toBe(result.stderr)
+      expect(await readFile(artifacts.outputPath, 'utf8')).toBe(result.output)
+      expect(JSON.stringify(result)).not.toContain(secret)
+      expect(await readFile(artifacts.outputPath, 'utf8')).not.toContain(secret)
+    } finally {
+      delete process.env.DEJA_TEST_SECRET
+      await cleanup(temporary)
+    }
+  })
+
+  test('returns a structured execution error and preserves a nonzero exit code', async () => {
+    const { temporary, options } = await fixture('nonzero.yaml')
+    try {
+      const result = await runMaestro(options)
+      expect(result.passed).toBe(false)
+      expect(result.exitCode).toBe(7)
+      expect(result.stdout).toContain('fake stdout')
+      expect(result.stderr).toContain('fake stderr')
+      expect(result.errors).toHaveLength(1)
+      expect(result.errors[0]).toMatchObject({ kind: 'execution', code: 'MAESTRO_EXIT' })
+    } finally {
+      await cleanup(temporary)
+    }
+  })
+
+  test('enforces the timeout and terminates only the spawned process tree', async () => {
+    if (process.platform === 'win32') return
+    const { temporary, workspaceRoot, options } = await fixture('timeout.yaml')
+    const bystanderMarker = join(temporary, 'bystander-finished.txt')
+    const bystander = spawn(process.execPath, [fakeMaestro, 'bystander', bystanderMarker], {
+      detached: true,
+      stdio: 'ignore',
+    })
+    try {
+      const result = await runMaestro({ ...options, timeoutMs: 100 })
+      expect(result.passed).toBe(false)
+      expect(result.timedOut).toBe(true)
+      expect(result.exitCode).toBeNull()
+      expect(result.errors.map(error => error.kind)).toContain('timeout')
+      expect(result.monotonicDurationMs).toBeGreaterThanOrEqual(100)
+      expect(result.monotonicDurationMs).toBeLessThan(1_500)
+
+      await delay(1_100)
+      expect(existsSync(join(workspaceRoot, 'flows', 'timed-out-process-survived.txt'))).toBe(false)
+      expect(existsSync(join(workspaceRoot, 'flows', 'parent-survived.txt'))).toBe(false)
+      expect(existsSync(bystanderMarker)).toBe(true)
+    } finally {
+      if (bystander.pid) {
+        try {
+          process.kill(-bystander.pid, 'SIGKILL')
+        } catch {
+          // The bystander may already have exited during cleanup.
+        }
+      }
+      await cleanup(temporary)
+    }
+  })
+
+  test('returns a structured launch error for a missing executable', async () => {
+    const { temporary, workspaceRoot, options } = await fixture()
+    try {
+      const result = await runMaestro({
+        ...options,
+        executable: join(workspaceRoot, 'missing-maestro'),
+      })
+      expect(result.passed).toBe(false)
+      expect(result.exitCode).toBeNull()
+      expect(result.stdout).toBe('')
+      expect(result.stderr).toBe('')
+      expect(result.errors).toHaveLength(1)
+      expect(result.errors[0]).toMatchObject({ kind: 'launch', code: 'ENOENT' })
+    } finally {
+      await cleanup(temporary)
+    }
+  })
+
+  test('rejects a flow path that escapes the workspace before launching', async () => {
+    const { temporary, options } = await fixture()
+    try {
+      await writeFile(join(temporary, 'outside.yaml'), '# outside workspace\n')
+      const result = await runMaestro({ ...options, flowPath: '../outside.yaml' })
+      expect(result.passed).toBe(false)
+      expect(result.exitCode).toBeNull()
+      expect(result.stdout).toBe('')
+      expect(result.errors).toHaveLength(1)
+      expect(result.errors[0].kind).toBe('flow-path')
+      expect(result.errors[0].message).toContain('inside the workspace')
+    } finally {
+      await cleanup(temporary)
+    }
+  })
+
+  test('returns a structured artifact error without discarding process output', async () => {
+    const { temporary, workspaceRoot, options } = await fixture()
+    try {
+      await writeFile(join(workspaceRoot, 'artifact-file'), 'not a directory')
+      const result = await runMaestro({
+        ...options,
+        artifacts: { directory: 'artifact-file/run' },
+      })
+      expect(result.exitCode).toBe(0)
+      expect(result.passed).toBe(false)
+      expect(result.stdout).toContain('fake stdout')
+      expect(result.output).toContain('fake stderr')
+      expect(result.artifacts).toBeUndefined()
+      expect(result.errors.map(error => error.kind)).toContain('output-artifact')
+    } finally {
+      await cleanup(temporary)
+    }
+  })
+})

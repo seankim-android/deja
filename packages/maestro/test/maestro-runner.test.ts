@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, realpath, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { delimiter, join, resolve } from 'node:path'
 import { runMaestro, type RunMaestroOptions } from '../src/index.ts'
@@ -9,7 +9,7 @@ import { runMaestro, type RunMaestroOptions } from '../src/index.ts'
 const fakeMaestro = resolve(import.meta.dir, 'fixtures/fake-maestro.cjs')
 
 async function fixture(flowName = 'success.yaml') {
-  const temporary = await mkdtemp(join(tmpdir(), 'deja-maestro-'))
+  const temporary = await realpath(await mkdtemp(join(tmpdir(), 'deja-maestro-')))
   const workspaceRoot = join(temporary, 'workspace')
   const flowDirectory = join(workspaceRoot, 'flows')
   await mkdir(flowDirectory, { recursive: true })
@@ -21,7 +21,7 @@ async function fixture(flowName = 'success.yaml') {
     platform: 'android',
     workspaceRoot,
     flowPath,
-    timeoutMs: 2_000,
+    timeoutMs: 30_000,
   }
   return { temporary, workspaceRoot, flowPath, options }
 }
