@@ -50,6 +50,7 @@ async function execute(root: string, args: string[], modes: {
   explorer?: 'invalid'
   capture?: string
   junitText?: string
+  env?: Record<string, string>
 } = {}) {
   const cliArguments = args.includes('--config') ? args : [...args, '--config', 'deja.config.json']
   const child = spawn(process.execPath, [cli, ...cliArguments], {
@@ -57,6 +58,11 @@ async function execute(root: string, args: string[], modes: {
     env: {
       ...process.env,
       ANDROID_HOME: join(root, 'fixture-sdk'),
+      // Never the real home or the caller's override: engine tests set these explicitly.
+      DEJA_HOME: join(root, '..', 'deja-home'),
+      DEJA_MAESTRO: '',
+      DEJA_FAKE_MAESTRO_VERSION: '',
+      ...modes.env,
       DEJA_FAKE_MAESTRO_MODE: modes.maestro ?? '',
       DEJA_FAKE_OPENCLAW_MODE: modes.explorer ?? '',
       DEJA_FAKE_JUNIT_TEXT: modes.junitText ?? '',
@@ -410,7 +416,7 @@ describe('production headless CLI', () => {
 
   describe('JUnit and summary output', () => {
     const summaryPattern =
-      /^deja-summary v=1 outcome=[a-z-]+ cache=[a-z-]+ fingerprint=(?:[0-9a-f]{12}|unknown) model_calls=(?:\d+|unknown) failure=[a-z_]+ goal=[A-Za-z0-9._~%-]*$/m
+      /^deja-summary v=1 outcome=[a-z-]+ cache=[a-z-]+ fingerprint=(?:[0-9a-f]{12}|unknown) engine=(?:\d+\.\d+\.\d+|unknown) model_calls=(?:\d+|unknown) failure=[a-z_]+ goal=[A-Za-z0-9._~%-]*$/m
 
     test('a passing run writes Maestro\'s own report, lists it as an artifact, and prints one summary line', async () => {
       const context = await workspace()
@@ -427,7 +433,7 @@ describe('production headless CLI', () => {
         expect(JSON.stringify(remembered.report!.artifacts)).toContain('"kind":"junit"')
         expect(remembered.stdout).toMatch(summaryPattern)
         expect(remembered.stdout.trimEnd().split('\n').at(-1)).toMatch(
-          /^deja-summary v=1 outcome=remembered cache=not-checked fingerprint=[0-9a-f]{12} model_calls=0 failure=none goal=checkout$/,
+          /^deja-summary v=1 outcome=remembered cache=not-checked fingerprint=[0-9a-f]{12} engine=2\.12\.0 model_calls=0 failure=none goal=checkout$/,
         )
 
         // The config field works too, and the flag is optional.
@@ -439,7 +445,7 @@ describe('production headless CLI', () => {
         expect(await readFile(join(context.root, 'reports/config.xml'), 'utf8')).toContain('status="SUCCESS"')
         expect(JSON.parse(warm.stdout).artifacts.map((a: { kind: string }) => a.kind)).toContain('junit')
         expect(warm.stderr.trim()).toMatch(
-          /^deja-summary v=1 outcome=passed cache=hit fingerprint=[0-9a-f]{12} model_calls=0 failure=none goal=checkout$/,
+          /^deja-summary v=1 outcome=passed cache=hit fingerprint=[0-9a-f]{12} engine=2\.12\.0 model_calls=0 failure=none goal=checkout$/,
         )
       } finally {
         await cleanup(context.temporary)
@@ -460,7 +466,7 @@ describe('production headless CLI', () => {
         expect(xml).toContain('fake maestro failure')
         expect(xml).not.toContain('deja-synthesized')
         expect(failed.stdout.trimEnd().split('\n').at(-1)).toMatch(
-          /^deja-summary v=1 outcome=product-regression cache=hit fingerprint=[0-9a-f]{12} model_calls=0 failure=product_assertion goal=checkout$/,
+          /^deja-summary v=1 outcome=product-regression cache=hit fingerprint=[0-9a-f]{12} engine=2\.12\.0 model_calls=0 failure=product_assertion goal=checkout$/,
         )
       } finally {
         await cleanup(context.temporary)
@@ -515,7 +521,7 @@ describe('production headless CLI', () => {
         expect(lines[0]).toMatch(summaryPattern)
         const fields = Object.fromEntries(lines[0].split(' ').slice(1).map(pair => pair.split('=')))
         expect(fields.outcome).toMatch(/^[a-z-]+$/)
-        expect(Object.keys(fields)).toEqual(['v', 'outcome', 'cache', 'fingerprint', 'model_calls', 'failure', 'goal'])
+        expect(Object.keys(fields)).toEqual(['v', 'outcome', 'cache', 'fingerprint', 'engine', 'model_calls', 'failure', 'goal'])
       } finally {
         await cleanup(context.temporary)
       }
@@ -541,7 +547,7 @@ describe('production headless CLI', () => {
         expect(xml).not.toContain(context.root)
         expect(JSON.stringify(refused.report!.artifacts)).toContain('"kind":"junit"')
         expect(refused.stdout.trimEnd().split('\n').at(-1)).toMatch(
-          /^deja-summary v=1 outcome=repair-rejected cache=miss fingerprint=[0-9a-f]{12} model_calls=0 failure=unclassified goal=checkout$/,
+          /^deja-summary v=1 outcome=repair-rejected cache=miss fingerprint=[0-9a-f]{12} engine=2\.12\.0 model_calls=0 failure=unclassified goal=checkout$/,
         )
 
         // Maestro cannot launch: no report from Maestro, so a failed one is written.
@@ -570,7 +576,7 @@ describe('production headless CLI', () => {
         expect(xml).toContain('status="ERROR"')
         expect(xml).toContain('Invalid walk memory')
         expect(corrupt.stdout.trim()).toBe(
-          'deja-summary v=1 outcome=error cache=unknown fingerprint=unknown model_calls=unknown failure=error goal=checkout',
+          'deja-summary v=1 outcome=error cache=unknown fingerprint=unknown engine=unknown model_calls=unknown failure=error goal=checkout',
         )
 
         const wrong = await execute(context.root, ['list', '--junit', junit])
@@ -580,5 +586,134 @@ describe('production headless CLI', () => {
         await cleanup(context.temporary)
       }
     })
+  })
+})
+
+describe('pinned engine', () => {
+  async function setMaestro(root: string, maestro: Record<string, unknown> | null) {
+    const configPath = join(root, 'deja.config.json')
+    const config = JSON.parse(await readFile(configPath, 'utf8'))
+    if (maestro) config.maestro = maestro
+    else delete config.maestro
+    await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`)
+  }
+
+  test('without an override and without an install, a run is a configuration error that names the fix', async () => {
+    const context = await workspace()
+    try {
+      await setMaestro(context.root, { timeoutMs: 30_000 })
+      const result = await execute(context.root, ['run', 'checkout', '--summary'])
+      expect(result.exitCode).toBe(2)
+      expect(result.stderr).toContain('deja engine install')
+      expect(result.stdout).toContain('deja-summary v=1 outcome=error')
+    } finally {
+      await cleanup(context.temporary)
+    }
+  })
+
+  test('an override in range runs and the report and summary name it', async () => {
+    const context = await workspace()
+    try {
+      const result = await execute(context.root, ['remember', 'checkout', '--flow', 'flows/candidate.yaml', '--summary'])
+      expect(result.exitCode).toBe(0)
+      expect(result.report).toMatchObject({ engine: { version: '2.12.0', source: 'override', overrideVia: 'config', inRange: true } })
+      expect(result.stdout).toContain('Engine: Maestro 2.12.0 (override via maestro.executable)')
+      expect(result.stdout).toContain(' engine=2.12.0 ')
+    } finally {
+      await cleanup(context.temporary)
+    }
+  })
+
+  test('DEJA_MAESTRO is an override too, and maestro.executable wins over it', async () => {
+    const context = await workspace()
+    try {
+      await setMaestro(context.root, { timeoutMs: 30_000 })
+      const viaEnv = await execute(context.root, ['remember', 'checkout', '--flow', 'flows/candidate.yaml'], {
+        env: { DEJA_MAESTRO: fakeMaestro },
+      })
+      expect(viaEnv.exitCode).toBe(0)
+      expect(viaEnv.stdout).toContain('override via DEJA_MAESTRO')
+      expect(viaEnv.report).toMatchObject({ engine: { source: 'override', overrideVia: 'env' } })
+    } finally {
+      await cleanup(context.temporary)
+    }
+  })
+
+  test('an override outside the tested range is refused (exit 2) and no Maestro flow runs', async () => {
+    const context = await workspace()
+    try {
+      const result = await execute(context.root, ['remember', 'checkout', '--flow', 'flows/candidate.yaml', '--summary'], {
+        env: { DEJA_FAKE_MAESTRO_VERSION: '2.11.0' },
+      })
+      expect(result.exitCode).toBe(2)
+      expect(result.stderr).toContain('Maestro 2.11.0, outside the tested range >=2.12.0 <2.13.0')
+      expect(result.stderr).toContain('allowUntested')
+      expect(result.report).toBeNull()
+      expect(result.stdout).toContain('deja-summary v=1 outcome=error')
+    } finally {
+      await cleanup(context.temporary)
+    }
+  })
+
+  test('maestro.allowUntested downgrades the refusal to a warning and the report says so', async () => {
+    const context = await workspace()
+    try {
+      await setMaestro(context.root, { executable: fakeMaestro, timeoutMs: 30_000, allowUntested: true })
+      const result = await execute(context.root, ['remember', 'checkout', '--flow', 'flows/candidate.yaml', '--summary'], {
+        env: { DEJA_FAKE_MAESTRO_VERSION: '2.11.0' },
+      })
+      expect(result.exitCode).toBe(0)
+      expect(result.stderr).toContain('Warning: maestro.executable points to Maestro 2.11.0')
+      expect(result.report).toMatchObject({ engine: { version: '2.11.0', source: 'override', inRange: false } })
+      expect(result.stdout).toContain('outside the tested range')
+      expect(result.stdout).toContain(' engine=2.11.0 ')
+    } finally {
+      await cleanup(context.temporary)
+    }
+  })
+
+  test('an override that prints no version is refused', async () => {
+    const context = await workspace()
+    try {
+      const result = await execute(context.root, ['remember', 'checkout', '--flow', 'flows/candidate.yaml'], {
+        env: { DEJA_FAKE_MAESTRO_VERSION: 'not a version' },
+      })
+      expect(result.exitCode).toBe(2)
+      expect(result.stderr).toContain('version could not be read')
+    } finally {
+      await cleanup(context.temporary)
+    }
+  })
+
+  test('engine install refuses to replace a folder that does not match the pin, and never downloads', async () => {
+    const context = await workspace()
+    try {
+      const folder = join(context.temporary, 'deja-home', 'maestro', '2.12.0')
+      await mkdir(folder, { recursive: true })
+      await writeFile(join(folder, 'keep.txt'), 'someone else\'s file')
+      const result = await execute(context.root, ['engine', 'install'])
+      expect(result.exitCode).toBe(2)
+      expect(result.stderr).toContain('will not replace it')
+      expect(await readFile(join(folder, 'keep.txt'), 'utf8')).toBe('someone else\'s file')
+    } finally {
+      await cleanup(context.temporary)
+    }
+  })
+
+  test('doctor reports the missing engine and exits 1; usage errors exit 2', async () => {
+    const context = await workspace()
+    try {
+      await setMaestro(context.root, { timeoutMs: 30_000 })
+      const doctor = await execute(context.root, ['doctor', '--json'])
+      expect(doctor.exitCode).toBe(1)
+      const parsed = JSON.parse(doctor.stdout) as { ok: boolean; checks: { name: string; status: string }[] }
+      expect(parsed.ok).toBe(false)
+      expect(parsed.checks.find(check => check.name === 'engine')?.status).toBe('fail')
+      const wrong = await execute(context.root, ['engine'])
+      expect(wrong.exitCode).toBe(2)
+      expect(wrong.stderr).toContain('engine requires the subcommand: install')
+    } finally {
+      await cleanup(context.temporary)
+    }
   })
 })

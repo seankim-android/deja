@@ -44,6 +44,33 @@ export {
   type MaestroTransport,
 } from './ios-exploration.ts'
 
+export {
+  MAESTRO_ENGINE_PIN,
+  MAESTRO_TESTED_RANGE,
+  MaestroEngineError,
+  assertSafeEntries,
+  checkMaestroRange,
+  dejaHome,
+  engineDirectory,
+  installMaestroEngine,
+  normalizeEngineVersion,
+  parseMaestroVersion,
+  pinnedExecutablePath,
+  probeMaestroVersion,
+  resolveMaestroEngine,
+  systemUnzip,
+  verifyInstalledEngine,
+  type EngineRangeStatus,
+  type EngineSource,
+  type FetchLike,
+  type InstallEngineOptions,
+  type InstallEngineResult,
+  type MaestroEnginePin,
+  type ResolveEngineOptions,
+  type ResolvedEngine,
+  type ZipExtractor,
+} from './engine.ts'
+
 export { escapeRegex, idSelector, tapSegment, waitVisibleSegment } from './selectors.ts'
 
 export {
