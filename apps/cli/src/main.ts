@@ -8,8 +8,9 @@ import {
 import { OpenClawWalkExplorer } from '@deja-qa/explorer-openclaw'
 import {
   InvalidWalkMemoryError,
-  LOCAL_MEMORY_PATH,
   LocalWalkStore,
+  StoreLockedError,
+  StoreLockUnavailableError,
 } from '@deja-qa/store-local'
 import {
   MaestroWalkRunner,
@@ -45,6 +46,7 @@ type ParsedArguments = {
   configPath: string
   flow?: string
   junit?: string
+  store?: string
   json: boolean
   summary: boolean
   help: boolean
@@ -55,6 +57,7 @@ function parseArguments(argv: string[]): ParsedArguments {
   let configPath: string | undefined
   let flow: string | undefined
   let junit: string | undefined
+  let store: string | undefined
   let json = false
   let summary = false
   let help = false
@@ -63,14 +66,15 @@ function parseArguments(argv: string[]): ParsedArguments {
     if (argument === '--json') json = true
     else if (argument === '--summary') summary = true
     else if (argument === '-h' || argument === '--help' || argument === 'help') help = true
-    else if (argument === '--config' || argument === '--flow' || argument === '--junit') {
+    else if (argument === '--config' || argument === '--flow' || argument === '--junit' || argument === '--store') {
       const value = argv[index + 1]
       if (!value || value.startsWith('--')) {
-        throw new CliConfigurationError(`${argument} requires a file path`)
+        throw new CliConfigurationError(`${argument} requires ${argument === '--store' ? 'a store id' : 'a file path'}`)
       }
       index += 1
       if (argument === '--config') configPath = value
       else if (argument === '--junit') junit = value
+      else if (argument === '--store') store = value
       else flow = value
     } else if (argument.startsWith('-')) {
       throw new CliConfigurationError(`Unknown option: ${argument}`)
@@ -83,6 +87,7 @@ function parseArguments(argv: string[]): ParsedArguments {
     configPath: configPath ?? defaultConfigPath(),
     ...(flow ? { flow } : {}),
     ...(junit ? { junit } : {}),
+    ...(store ? { store } : {}),
     json,
     summary,
     help,
@@ -105,8 +110,12 @@ function createOrchestration(
   configuration: ProductionConfiguration,
   reporter: RunReporter,
   junitPath: string | undefined,
+  storeId: string | undefined,
 ) {
-  const store = new LocalWalkStore({ workspaceRoot: configuration.workspaceRoot })
+  const store = new LocalWalkStore({
+    workspaceRoot: configuration.workspaceRoot,
+    ...(storeId ? { storeId } : {}),
+  })
   const executionAdapter = configuration.explore.platform === 'web'
     ? webMaestroAdapter({
       adapterId: configuration.explore.adapter,
@@ -169,7 +178,7 @@ function createOrchestration(
         apkPath: resolve(configuration.workspaceRoot, configuration.explore.buildPath),
         device: configuration.explore.device,
         store,
-        memoryPath: LOCAL_MEMORY_PATH,
+        memoryPath: store.relativeMemoryPath,
         runner,
         fingerprint: () => buildFingerprint(configuration, executionAdapter),
         ...(process.env.ANDROID_HOME || process.env.ANDROID_SDK_ROOT
@@ -189,6 +198,7 @@ export async function runCli(argv: string[], io: CliIo = {
   let redact = createRedactor(process.cwd(), [])
   let parsed: ParsedArguments | undefined
   let junitPath: string | undefined
+  let openedStore: LocalWalkStore | undefined
   // One summary line per run. It is the last stdout line, or stderr with --json so stdout stays JSON.
   const summarize = (result: RunResult | null, goalText: string) => {
     if (!parsed?.summary) return
@@ -244,8 +254,9 @@ export async function runCli(argv: string[], io: CliIo = {
       ? new JunitReporter(jsonReporter, junitPath, configuration.workspaceRoot, redact)
       : jsonReporter
     const { store, orchestration } = createOrchestration(
-      configuration, reporter, runsMaestro ? junitPath : undefined,
+      configuration, reporter, runsMaestro ? junitPath : undefined, parsed.store,
     )
+    openedStore = store
     if (parsed.command === 'list') {
       if (parsed.positionals.length > 0) throw new CliConfigurationError('list accepts no positional arguments')
       const walks = await store.list()
@@ -255,6 +266,8 @@ export async function runCli(argv: string[], io: CliIo = {
       return 0
     }
 
+    // Refuse a second writer now, not after a long run.
+    store.acquireWriter()
     if (parsed.command === 'remember' && !parsed.flow) {
       throw new CliConfigurationError('remember requires --flow <candidate.yaml>')
     }
@@ -282,10 +295,22 @@ export async function runCli(argv: string[], io: CliIo = {
       }
       summarize(null, goalText)
     }
+    if (error instanceof StoreLockUnavailableError) {
+      io.stderr('Store lock unavailable: this filesystem cannot hold the writer lock. Use a local disk for the workspace.\n')
+      return 5
+    }
+    if (error instanceof StoreLockedError) {
+      io.stderr(error.code === 'STORE_LOCK_CONTENTION'
+        ? 'Store lock contention: another run was taking over a stale lock. Run again.\n'
+        : 'Store locked: another run is writing this store. Pass a different --store <id> for each device.\n')
+      return 5
+    }
     if (error instanceof InvalidWalkMemoryError) {
       io.stderr('Memory recovery: preserve/quarantine the ignored .deja directory, then explore cold; never treat corrupt memory as a pass.\n')
       return 4
     }
     return 2
+  } finally {
+    openedStore?.close()
   }
 }

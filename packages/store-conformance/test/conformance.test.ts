@@ -12,11 +12,14 @@ import {
   localStoreContract,
   runWalkStoreContractTests,
   sqliteStoreContract,
+  runWriterLockContractTests,
   type WalkStoreContractImplementation,
 } from '../src/index.ts'
 
 runWalkStoreContractTests(localStoreContract)
 runWalkStoreContractTests(sqliteStoreContract)
+runWriterLockContractTests(localStoreContract)
+runWriterLockContractTests(sqliteStoreContract)
 
 const fakeMaestro = resolve(import.meta.dir, '../../maestro/test/fixtures/fake-maestro.cjs')
 

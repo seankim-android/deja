@@ -1,12 +1,13 @@
 // typescript 7.0.2
 // entry . (./src/index.ts)
-// exports: MetadataTamper, StoreFailureInjection, WalkStoreContractImplementation, contractIdentity, initialValidation, laterValidation, localStoreContract, runWalkStoreContractTests, sqliteStoreContract
+// exports: MetadataTamper, StoreFailureInjection, WalkStoreContractImplementation, contractIdentity, initialValidation, laterValidation, localStoreContract, runWalkStoreContractTests, runWriterLockContractTests, sqliteStoreContract
 export declare function contractIdentity(overrides?: Partial<WalkIdentity>): WalkIdentity;
 export declare const initialValidation = "2026-11-22T00:00:00.000Z";
 export declare const laterValidation = "2026-11-22T00:01:00.000Z";
 export declare const localStoreContract: WalkStoreContractImplementation;
 export type MetadataTamper = 'malformed' | 'unsupported-schema' | 'invalid-entry' | 'duplicate-identity';
 export declare function runWalkStoreContractTests(implementation: WalkStoreContractImplementation): void;
+export declare function runWriterLockContractTests(implementation: WalkStoreContractImplementation): void;
 export declare const sqliteStoreContract: WalkStoreContractImplementation;
 export type StoreFailureInjection = {
     failFlowRename?: boolean;
@@ -14,8 +15,9 @@ export type StoreFailureInjection = {
 };
 export type WalkStoreContractImplementation = {
     name: string;
-    metadataPath(workspaceRoot: string): string;
-    createStore(workspaceRoot: string, failures?: StoreFailureInjection): WalkStore;
+    kind: 'local' | 'sqlite';
+    metadataPath(workspaceRoot: string, storeId?: string): string;
+    createStore(workspaceRoot: string, failures?: StoreFailureInjection, storeId?: string): WalkStore;
     closeStore(store: WalkStore): void | Promise<void>;
     snapshotMetadata(workspaceRoot: string): Promise<Buffer>;
     tamperMetadata(workspaceRoot: string, kind: MetadataTamper): Promise<void>;

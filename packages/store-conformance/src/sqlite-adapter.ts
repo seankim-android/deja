@@ -5,6 +5,7 @@ import type { WalkStore } from '@deja-qa/core'
 import {
   SQLITE_MEMORY_PATH,
   SQLiteWalkStore,
+  storeMetadataPath,
 } from '@deja-qa/store-sqlite'
 import type {
   MetadataTamper,
@@ -12,13 +13,14 @@ import type {
   WalkStoreContractImplementation,
 } from './walk-store-contract.ts'
 
-function databasePath(workspaceRoot: string) {
-  return resolve(workspaceRoot, SQLITE_MEMORY_PATH)
+function databasePath(workspaceRoot: string, storeId?: string) {
+  return resolve(workspaceRoot, storeMetadataPath(SQLITE_MEMORY_PATH, storeId))
 }
 
-function createSQLiteStore(workspaceRoot: string, failures: StoreFailureInjection = {}) {
+function createSQLiteStore(workspaceRoot: string, failures: StoreFailureInjection = {}, storeId?: string) {
   return new SQLiteWalkStore({
     workspaceRoot,
+    ...(storeId ? { storeId } : {}),
     renameFile: async (from, to) => {
       if (failures.failFlowRename) throw new Error('simulated interruption before flow rename')
       await rename(from, to)
@@ -98,6 +100,7 @@ function downgradeSQLiteToSchema2(workspaceRoot: string) {
 
 export const sqliteStoreContract: WalkStoreContractImplementation = {
   name: 'SQLiteWalkStore (Bun SQLite + YAML)',
+  kind: 'sqlite',
   metadataPath: databasePath,
   createStore: createSQLiteStore,
   closeStore: (store: WalkStore) => (store as SQLiteWalkStore).close(),

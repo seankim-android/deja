@@ -63,7 +63,7 @@ export class Deja {
 
   private artifactId(prefix: 'run' | 'remember') {
     return this.dependencies.artifactId?.(prefix) ??
-      `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
+      `${prefix}-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`
   }
 
   private base(identity: WalkIdentity, command: RunResult['command'], cacheStatus: CacheStatus) {
