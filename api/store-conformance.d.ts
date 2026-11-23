@@ -1,6 +1,6 @@
 // typescript 7.0.2
 // entry . (./src/index.ts)
-// exports: ContractExpect, ContractHarness, ContractScene, ExpectResult, ExplorationDriverContractImplementation, Matchers, MetadataTamper, PortableStoreImplementation, StoreFailureInjection, WalkStoreContractImplementation, contractIdentity, initialValidation, laterValidation, localStoreContract, resolveHarness, runConsumerFlowContractTests, runExplorationDriverContractTests, runPortableWalkStoreContractTests, runSqliteDriverContractTests, runWalkStoreContractTests, runWriterLockContractTests, sqliteStoreContract
+// exports: ContractExpect, ContractHarness, ContractScene, ExpectResult, ExplorationDriverContractImplementation, Matchers, MetadataTamper, PortableStoreImplementation, StoreFailureInjection, WalkStoreContractImplementation, contractIdentity, initialValidation, laterValidation, localStoreContract, resolveHarness, runConsumerFlowContractTests, runExplorationDriverContractTests, runGateContractTests, runGateStoreContractTests, runPortableWalkStoreContractTests, runSqliteDriverContractTests, runWalkStoreContractTests, runWriterLockContractTests, sqliteStoreContract
 export type ContractExpect = {
     (actual: unknown, message?: string): ExpectResult;
     stringMatching(pattern: RegExp): unknown;
@@ -61,6 +61,8 @@ export type PortableStoreImplementation = {
 export declare function resolveHarness(harness?: ContractHarness): ContractHarness;
 export declare function runConsumerFlowContractTests(implementation: WalkStoreContractImplementation, harness?: ContractHarness): void;
 export declare function runExplorationDriverContractTests(implementation: ExplorationDriverContractImplementation, harness?: ContractHarness): void;
+export declare function runGateContractTests(implementation: PortableStoreImplementation, harness?: ContractHarness): void;
+export declare function runGateStoreContractTests(implementation: WalkStoreContractImplementation, harness?: ContractHarness): void;
 export declare function runPortableWalkStoreContractTests(implementation: PortableStoreImplementation, harness?: ContractHarness): void;
 export declare function runSqliteDriverContractTests(harness?: ContractHarness): void;
 export declare function runWalkStoreContractTests(implementation: WalkStoreContractImplementation, harness?: ContractHarness): void;

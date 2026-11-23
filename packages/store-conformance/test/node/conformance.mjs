@@ -3,6 +3,8 @@
 import {
   localStoreContract,
   runConsumerFlowContractTests,
+  runGateContractTests,
+  runGateStoreContractTests,
   runPortableWalkStoreContractTests,
   runSqliteDriverContractTests,
   runWalkStoreContractTests,
@@ -16,6 +18,8 @@ for (const implementation of [localStoreContract, sqliteStoreContract]) {
   runWalkStoreContractTests(implementation, nodeHarness)
   runConsumerFlowContractTests(implementation, nodeHarness)
   runWriterLockContractTests(implementation, nodeHarness)
+  runGateContractTests(implementation, nodeHarness)
+  runGateStoreContractTests(implementation, nodeHarness)
   runPortableWalkStoreContractTests({
     name: implementation.name,
     createStore: implementation.createStore,
@@ -24,3 +28,4 @@ for (const implementation of [localStoreContract, sqliteStoreContract]) {
 }
 runSqliteDriverContractTests(nodeHarness)
 runPortableWalkStoreContractTests(memoryStoreContract, nodeHarness)
+runGateContractTests(memoryStoreContract, nodeHarness)

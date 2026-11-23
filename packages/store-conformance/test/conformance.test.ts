@@ -11,6 +11,8 @@ import {
   initialValidation,
   localStoreContract,
   runConsumerFlowContractTests,
+  runGateContractTests,
+  runGateStoreContractTests,
   runPortableWalkStoreContractTests,
   runSqliteDriverContractTests,
   runWalkStoreContractTests,
@@ -28,6 +30,11 @@ runWriterLockContractTests(localStoreContract)
 runWriterLockContractTests(sqliteStoreContract)
 for (const implementation of [localStoreContract, sqliteStoreContract]) runPortableWalkStoreContractTests(implementation)
 runPortableWalkStoreContractTests(memoryStoreContract)
+for (const implementation of [localStoreContract, sqliteStoreContract]) {
+  runGateContractTests(implementation)
+  runGateStoreContractTests(implementation)
+}
+runGateContractTests(memoryStoreContract)
 runSqliteDriverContractTests()
 
 const fakeMaestro = resolve(import.meta.dir, '../../maestro/test/fixtures/fake-maestro.cjs')

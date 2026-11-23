@@ -41,6 +41,7 @@ bun run deja -- --help
 | `run <goal> [--rerun-failed]` | Compute exact identity and check memory first. A hit replays YAML; a normal miss explores; eligible Android stale-build memory enters one bounded repair; iOS with `staleBuild: "replay-last-verified"` replays the last verified YAML instead. A failed hit is recorded and is not reusable. |
 | `remember <goal> --flow <candidate.yaml>` | Independently execute reviewed YAML and persist only after a complete pass. A bad product assertion remains a failure. |
 | `migrate [--dry-run]` | With a manifest: move the old store's walks (memory schema 3) into your own files plus manifest entries. See [Consumer-owned flows](#consumer-owned-flows-and-the-walk-manifest). |
+| `gate --goals <file>` | Read-only release gate: did every listed goal pass on this exact build? See [Release gate](#release-gate). |
 | `list` | List valid local walks; does not invoke a runner, explorer, or model. |
 | `inspect <report>` | Print a saved, redacted report. Inspecting a failed result returns its original failure class. |
 | `mcp [--store <id>]` | Serve saved walks to a coding agent over MCP on stdio. See [MCP server](#mcp-server). |
@@ -426,6 +427,52 @@ not know. `engine` was added this way. It is `unknown` for a run without an engi
 `inspect` of an older report, and it is always strict `x.y.z` or `unknown`, whatever a report holds. When a command
 fails with exit 2 or 4 after it was parsed, the line still prints, with `outcome=error`.
 
+### Release gate
+
+`deja gate` answers one question for a host (for example a TestFlight upload step): did every goal on
+my list pass on **this exact build**? It only reads. It never runs Maestro, explores, repairs, calls a
+model, writes the store or takes the writer lock, so it can run while another `deja` is writing.
+
+```sh
+deja gate --goals goals.txt --build build/Dev.app --label "$(git rev-parse HEAD)" --evidence out/gate.json
+```
+
+| Option | Meaning |
+| --- | --- |
+| `--goals <file>` | Required. A plain list (one goal per line, `#` comments), a JSON array of goals, or the walk manifest itself (`deja.walks.json`, whose entries name the goals). A missing file or an empty list is exit 2. |
+| `--build <path>` | The build to fingerprint. Default: the config's `buildPath`. The fingerprint is a hash of the build files, so a simulator build and a store archive of one commit differ. |
+| `--label <text>` | Recorded in the evidence as given, for example a commit SHA. The gate never checks it. Control characters, line breaks and format characters (bidi controls, zero-width characters) are refused (exit 2), as they are in goals, so the text table cannot be forged or reordered. |
+| `--evidence <file>` | Evidence JSON path (default `.deja/gate/evidence.json`). A text table is written beside it (`.txt`). An older file is deleted first, so a stale pass is never read as this run's. Only a previous gate evidence file is ever replaced (`"kind": "deja-gate-evidence"`; the text file only when the JSON beside it is valid evidence and the text is exactly its table). Files are written through a random temporary name created with O_EXCL, so a planted symlink is never followed, and a file that changed between the check and the delete (a different inode, a symlink) is not deleted. What remains: a local user who can write that folder could still swap a file inside the microseconds between the final check and the unlink or rename. Any other existing file, a symlink, the goals file, the manifest, or a path in `.deja/` outside `.deja/gate/` is refused with exit 2 and nothing is deleted. |
+| `--store <id>` | Read this store, as for other commands. |
+
+There is no option to allow a failure or skip a goal. To check fewer goals, edit the goals file.
+
+Per goal, the latest validation on this fingerprint decides:
+
+| Outcome | Meaning |
+| --- | --- |
+| `passed` | The latest validation on this fingerprint is a pass. |
+| `failed` | The latest validation on this fingerprint is a failure. |
+| `flaky` | That failure came from a run that passed on a rerun or failed differently (`--rerun-failed`). See below. |
+| `not-run` | No validation on this fingerprint, even if older builds passed, or the goal is not in the store. |
+| `flow-changed` | Manifest mode: the flow or a file it runs no longer matches the manifest's closure sha, so an earlier pass does not speak for the file on disk. |
+| `invalid` | The stored walk or its flow file cannot be read or trusted (checksum mismatch, missing file). The gate could not decide this goal: exit 11, not 10. |
+
+"Latest" is the store's own `lastValidation` for the one walk on this fingerprint: the last one written. Timestamps are recorded but never compared, so equal timestamps and clock skew cannot reorder a pass and a failure. In manifest mode only the walk of the manifest's current closure counts.
+
+The gate exits 0 only when every goal is `passed`. A store that cannot be read, a corrupt walk and a
+build that cannot be fingerprinted never pass: exit 11 with `"verdict": "error"` in the evidence.
+
+`flaky`: a flaky run records its first failure as an ordinary failed validation and never records the
+rerun pass, so the store alone cannot tell it from `failed`. The gate reads `flaky` from the run
+report (outcome `flaky` whose first attempt ended at the failed validation's time, on this
+fingerprint). Without that report it reads `failed`. Both close the gate.
+
+The evidence JSON (`schemaVersion` 1) holds `verdict` (`passed`, `closed` or `error`), the build
+fingerprint, the host's `label`, and per goal: `outcome`, `validatedAt` (the run time), `flowSha256`,
+`closureSha256` (manifest mode), `detail` and `reportPath` (the run report that recorded the
+validation, when it is still in `.deja/reports`). It goes through the same redaction as run reports.
+
 ### MCP server
 
 `deja mcp [--config <file>] [--store <id>]` (DEJA-9) is a stdio MCP server, so a coding agent in a
@@ -514,6 +561,8 @@ directory, so give an absolute `--config` path unless the client starts in the p
 | `4` | Invalid/corrupt local memory; quarantine it and recover through verified cold exploration |
 | `7` | Flaky (`--rerun-failed`): the replay failed, then passed or failed differently on a rerun of the same YAML. Not a pass; the first failure is recorded |
 | `6` | Manifest mode: `flow-changed`, `not-validated`, `needs-migration` or `assertions-changed`. Nothing was replayed or written. Run with `--verify`, or review the change and run `remember` |
+| `10` | `gate`: the gate is closed. At least one goal is `failed`, `flaky`, `not-run` or `flow-changed` |
+| `11` | `gate`: it could not decide. The store, a stored walk or flow, or the build could not be read or trusted (`invalid`), or the evidence file could not be written |
 | `5` | The store is locked by another run (`STORE_LOCKED`), two runs collided taking over a stale lock (`STORE_LOCK_CONTENTION`), or the filesystem cannot hold the lock (`STORE_LOCK_UNAVAILABLE`). Use a different `--store <id>` per device; for contention, run again |
 
 ### One store per device

@@ -102,6 +102,8 @@ export type LookupMiss = {
   reason: CacheMissReason
   /** Set with `flow-changed`: the sha the manifest records and the sha of the files on disk now. */
   flowChange?: { manifestClosureSha256: string; currentClosureSha256: string }
+  /** Manifest mode, with `failed-validation`: the closure checksum the failed walk belongs to. */
+  closureSha256?: string
   /**
    * Manifest mode, when the consumer's file exists (`flow-changed`, `not-validated`,
    * `failed-validation`, `stale-build`): its path, so a caller can re-run it as a check (`verify`).

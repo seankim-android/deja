@@ -24,7 +24,8 @@ import { createRedactor, redactJson } from './redaction.ts'
 import { JsonRunReporter, readRunReport } from './reporter.ts'
 import { renderDoctor, runDoctor, type DoctorProbe } from './doctor.ts'
 import { installEngineCommand, selectEngine } from './engine.ts'
-import { createOrchestration, EngineRunReporter } from './orchestration.ts'
+import { runGate } from './gate.ts'
+import { createExecutionAdapter, createOrchestration, createStore, EngineRunReporter } from './orchestration.ts'
 import { isCompiledBinary, versionLine } from './version.ts'
 
 export type CliIo = {
@@ -64,6 +65,10 @@ type ParsedArguments = {
   flow?: string
   junit?: string
   store?: string
+  goals?: string
+  build?: string
+  label?: string
+  evidence?: string
   json: boolean
   summary: boolean
   help: boolean
@@ -80,6 +85,10 @@ function parseArguments(argv: string[]): ParsedArguments {
   let flow: string | undefined
   let junit: string | undefined
   let store: string | undefined
+  let goals: string | undefined
+  let build: string | undefined
+  let label: string | undefined
+  let evidence: string | undefined
   let json = false
   let summary = false
   let help = false
@@ -98,13 +107,17 @@ function parseArguments(argv: string[]): ParsedArguments {
     else if (argument === '--accept-assertion-change') acceptAssertionChange = true
     else if (argument === '--dry-run') dryRun = true
     else if (argument === '-h' || argument === '--help' || argument === 'help') help = true
-    else if (argument === '--config' || argument === '--flow' || argument === '--junit' || argument === '--store') {
+    else if (['--config', '--flow', '--junit', '--store', '--goals', '--build', '--label', '--evidence'].includes(argument)) {
       const value = argv[index + 1]
       if (!value || value.startsWith('--')) {
-        throw new CliConfigurationError(`${argument} requires ${argument === '--store' ? 'a store id' : 'a file path'}`)
+        throw new CliConfigurationError(`${argument} requires ${argument === '--store' ? 'a store id' : argument === '--label' ? 'a label' : 'a file path'}`)
       }
       index += 1
       if (argument === '--config') configPath = value
+      else if (argument === '--goals') goals = value
+      else if (argument === '--build') build = value
+      else if (argument === '--label') label = value
+      else if (argument === '--evidence') evidence = value
       else if (argument === '--junit') junit = value
       else if (argument === '--store') store = value
       else flow = value
@@ -120,6 +133,10 @@ function parseArguments(argv: string[]): ParsedArguments {
     ...(flow ? { flow } : {}),
     ...(junit ? { junit } : {}),
     ...(store ? { store } : {}),
+    ...(goals ? { goals } : {}),
+    ...(build ? { build } : {}),
+    ...(label ? { label } : {}),
+    ...(evidence ? { evidence } : {}),
     json,
     summary,
     help,
@@ -171,12 +188,13 @@ export async function runCli(argv: string[], io: CliIo = {
       io.stdout(HELP)
       return parsed.command === '' && !parsed.help ? 2 : 0
     }
-    if (!['explore', 'run', 'remember', 'list', 'inspect', 'migrate', 'engine', 'doctor', 'mcp'].includes(parsed.command)) {
+    if (!['explore', 'run', 'remember', 'list', 'inspect', 'migrate', 'gate', 'engine', 'doctor', 'mcp'].includes(parsed.command)) {
       throw new CliConfigurationError(`Unknown command: ${parsed.command}`)
     }
     if (parsed.command === 'mcp') {
       if (parsed.positionals.length > 0 || parsed.junit || parsed.flow || parsed.summary || parsed.json ||
-          parsed.verify || parsed.rerunFailed || parsed.acceptAssertionChange || parsed.dryRun) {
+          parsed.verify || parsed.rerunFailed || parsed.acceptAssertionChange || parsed.dryRun ||
+          parsed.goals || parsed.build || parsed.label || parsed.evidence) {
         throw new CliConfigurationError('mcp accepts only --config and --store')
       }
       const { runMcpServer } = await import('./mcp.ts')
@@ -221,6 +239,16 @@ export async function runCli(argv: string[], io: CliIo = {
     if (parsed.verify && parsed.command !== 'run') {
       throw new CliConfigurationError('--verify is valid only with run')
     }
+    if (parsed.command !== 'gate' && (parsed.goals || parsed.build || parsed.label || parsed.evidence)) {
+      throw new CliConfigurationError('--goals, --build, --label and --evidence are valid only with gate')
+    }
+    if (parsed.command === 'gate') {
+      if (!parsed.goals) throw new CliConfigurationError('gate requires --goals <file>')
+      if (parsed.positionals.length > 0) throw new CliConfigurationError('gate accepts no positional arguments')
+      if (parsed.verify || parsed.dryRun || parsed.acceptAssertionChange || parsed.summary) {
+        throw new CliConfigurationError('gate accepts only --goals, --build, --label, --evidence, --store, --config and --json')
+      }
+    }
     if (parsed.rerunFailed && parsed.command !== 'run') {
       throw new CliConfigurationError('--rerun-failed is valid only with run')
     }
@@ -261,6 +289,24 @@ export async function runCli(argv: string[], io: CliIo = {
         : renderResult(report, null, redact))
       summarize(report, report.goalKey)
       return resultExitCode(report)
+    }
+
+    if (parsed.command === 'gate') {
+      // Read-only: no engine, no runner, no writer lock. The store is only listed and looked up.
+      return await runGate({
+        configuration,
+        store: createStore(configuration, parsed.store),
+        adapter: createExecutionAdapter(configuration),
+        options: {
+          goalsPath: parsed.goals!,
+          ...(parsed.build ? { buildPath: parsed.build } : {}),
+          ...(parsed.label ? { label: parsed.label } : {}),
+          ...(parsed.evidence ? { evidencePath: parsed.evidence } : {}),
+        },
+        redact,
+        json: parsed.json,
+        io,
+      })
     }
 
     const jsonReporter = new JsonRunReporter(configuration.workspaceRoot, redact)

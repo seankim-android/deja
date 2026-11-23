@@ -63,18 +63,8 @@ export class ReplayOnlyExplorer implements WalkExplorer {
   }
 }
 
-export function createOrchestration(
-  configuration: ProductionConfiguration,
-  reporter: RunReporter,
-  junitPath: string | undefined,
-  storeId: string | undefined,
-  executable: string,
-  crashReportDirectory: string | undefined,
-  compiledBinary: boolean,
-  /** `deja mcp` turns repair off and, for replay tools, exploration too. The CLI leaves both on. */
-  capabilities: OrchestrationCapabilities = { repair: true, explore: true },
-) {
-  const store = new LocalWalkStore({
+export function createStore(configuration: ProductionConfiguration, storeId: string | undefined) {
+  return new LocalWalkStore({
     workspaceRoot: configuration.workspaceRoot,
     ...(storeId ? { storeId } : {}),
     ...(configuration.manifest ? {
@@ -86,7 +76,10 @@ export function createOrchestration(
       },
     } : {}),
   })
-  const executionAdapter = configuration.explore.platform === 'web'
+}
+
+export function createExecutionAdapter(configuration: ProductionConfiguration) {
+  return configuration.explore.platform === 'web'
     ? webMaestroAdapter({
       adapterId: configuration.explore.adapter,
       headless: configuration.explore.headless,
@@ -98,6 +91,21 @@ export function createOrchestration(
         adapterId: configuration.explore.adapter,
       })
     : androidMaestroAdapter({ device: configuration.explore.device })
+}
+
+export function createOrchestration(
+  configuration: ProductionConfiguration,
+  reporter: RunReporter,
+  junitPath: string | undefined,
+  storeId: string | undefined,
+  executable: string,
+  crashReportDirectory: string | undefined,
+  compiledBinary: boolean,
+  /** `deja mcp` turns repair off and, for replay tools, exploration too. The CLI leaves both on. */
+  capabilities: OrchestrationCapabilities = { repair: true, explore: true },
+) {
+  const store = createStore(configuration, storeId)
+  const executionAdapter = createExecutionAdapter(configuration)
   const runner = new MaestroWalkRunner({
     workspaceRoot: configuration.workspaceRoot,
     executable,
