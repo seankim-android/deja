@@ -18,27 +18,27 @@ They work in a terminal, in CI and in a code editor, usually next to an Android 
 
 ## Product Purpose
 
-Déjà is an open-source SDK and CLI. An AI model explores an app once and writes a Maestro test. Déjà verifies that test by running it again on its own, and saves it only if every check passes. Later runs replay the saved test with zero model calls. A changed selector gets one small, scoped repair; a real product bug still fails.
+Déjà is an open-source SDK and CLI. A test comes from an AI model exploring the app once, or from YAML you already have, which needs no model or OpenClaw. Déjà verifies that test by running it again on its own, and saves it only if every check passes. Later runs replay the saved test with zero model calls. A changed selector gets one small, scoped repair; a real product bug still fails.
 
-Success means a team owns plain Maestro YAML tests that keep working across builds, with no model cost after the first run.
+Success means a team owns plain test files that keep working across builds, with no model cost after the first run.
 
 ## Positioning
 
-Learn once with a model, then replay with no model. Verification gates every saved test. Déjà also reads existing Maestro configuration and flows and interoperates with them, so teams can adopt it without rewriting what they already have.
+Déjà is a memory layer for app testing. It learns a flow once, then remembers and replays it, and teams use one tool for all of that. The test runner underneath (Maestro today) is an implementation detail. Product copy names neither it nor OpenClaw; only install steps and reference docs do. The host still installs Maestro until Déjà ships its own pinned copy (DEJA-24).
+
+Learn once with a model, then replay with no model. Verification gates every saved test. Déjà can verify and save test YAML a team already has (`remember --flow`), including the subflows it calls. Planned: read existing runner configuration and work alongside it, so teams adopt Déjà without rewriting anything.
 
 ## Operating Context
 
-- CLI (`deja`), Bun workspaces and npm packages under the `@deja-qa` scope.
-- Maestro 2.x on Android, iOS and Chromium web.
-- Cold exploration runs through the OpenClaw harness. The default model is Kimi K3.1 Pro on Cerebras, and any OpenAI-compatible model can be configured.
+- CLI (`deja`) and Bun workspace packages under the `@deja-qa` scope (not yet published to npm).
+- Maestro 2.12. Exploration and repair work on the Android emulator only; iOS and Chromium support replay only, and a new iOS build doesn't replay yet.
+- Optional cold exploration runs through the OpenClaw harness. Remember, replay and repair work without OpenClaw or any model. The default model is Kimi K3.1 Pro on Cerebras, and any OpenAI-compatible model can be configured.
 - An optional local run viewer (`viewer/`).
-- The backlog lives in the Linear team DEJA.
 
 ## Capabilities and Constraints
 
-- The public packages are Apache-2.0 and form the free tier. A paid hosted tier is planned in a separate private repo; its features are undecided (DEJA-28).
+- The packages are Apache-2.0. The maintainer may later offer paid features under other terms.
 - Replay never needs a model or a provider key.
-- Undecided: the license for future releases and the business entity (DEJA-29).
 
 ## Brand Commitments
 
@@ -60,6 +60,6 @@ Learn once with a model, then replay with no model. Verification gates every sav
 
 1. Verify before trusting: nothing is saved unless it passes on its own.
 2. Zero-model replay is the default path; the model is there for learning, not running.
-3. Users own plain Maestro YAML, and Déjà interoperates with existing setups instead of replacing them.
+3. Users own plain test files, and Déjà interoperates with existing setups instead of replacing them.
 4. Be honest about limits. Unmeasured claims are labeled unknown.
 5. Small, scoped repairs never hide a real product bug.
