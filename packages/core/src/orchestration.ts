@@ -1,4 +1,5 @@
 import {
+  ExpectedClosureMismatchError,
   ExpectedFlowChecksumMismatchError,
   normalizeGoal,
   WALK_RESULT_SCHEMA_VERSION,
@@ -245,9 +246,13 @@ export class Deja {
       previousFlowSha256: walk.flowSha256,
       previousValidatedAt: walk.lastValidation.at,
     }
+    // Replay a private copy of the stored flow and everything it runs, so the files that pass are the
+    // files that get stored for this build.
+    const reportDirectory = `.deja/reports/${this.artifactId('run')}`
+    const snapshot = await store.snapshotCandidate?.(previous.flowPath, `${reportDirectory}/replay`)
     const execution = await this.dependencies.runner.run({
-      flowPath: previous.flowPath,
-      artifactDirectory: `.deja/reports/${this.artifactId('run')}`,
+      flowPath: snapshot?.candidatePath ?? previous.flowPath,
+      artifactDirectory: reportDirectory,
     })
     const replayStart = { ...missStart, execution }
     const modelCallBasis = 'stale build replayed the last verified YAML; explorer, repairer, and model factories were not invoked'
@@ -286,15 +291,17 @@ export class Deja {
     try {
       persisted = await store.persistVerifiedCandidate({
         identity,
-        candidatePath: current.flowPath,
+        candidatePath: snapshot?.candidatePath ?? current.flowPath,
         validation: { passed: true, at: execution.endedAt },
         origin: 'replayed-on-new-build',
         // The store refuses before writing anything if the bytes are no longer the replayed ones.
         expectedFlowSha256: walk.flowSha256,
+        ...(snapshot ? { expectedClosureSha256: snapshot.closureSha256 } : {}),
         ...(walk.exploration ? { exploration: walk.exploration } : {}),
       })
     } catch (error) {
-      if (!(error instanceof ExpectedFlowChecksumMismatchError)) throw error
+      if (!(error instanceof ExpectedFlowChecksumMismatchError) &&
+          !(error instanceof ExpectedClosureMismatchError)) throw error
       return this.finish(replayStart, {
         outcome: 'failed', passed: false, modelCalls: 0, modelCallBasis,
         assertions: execution.assertions, repairCount: 0,
@@ -327,9 +334,12 @@ export class Deja {
 
   async remember(identity: WalkIdentity, candidatePath: string): Promise<RunResult> {
     const start = this.base(identity, 'remember', 'not-checked')
+    const attempt = `.deja/attempts/${this.artifactId('remember')}`
+    // Verify a private copy of the flow and everything it runs, then store exactly those bytes.
+    const snapshot = await this.dependencies.store.snapshotCandidate?.(candidatePath, `${attempt}/candidate`)
     const execution = await this.dependencies.runner.run({
-      flowPath: candidatePath,
-      artifactDirectory: `.deja/attempts/${this.artifactId('remember')}`,
+      flowPath: snapshot?.candidatePath ?? candidatePath,
+      artifactDirectory: attempt,
     })
     if (!execution.passed) {
       return this.finish(start, {
@@ -342,7 +352,9 @@ export class Deja {
       })
     }
     const persisted = await this.dependencies.store.persistVerifiedCandidate({
-      identity, candidatePath, validation: { passed: true, at: execution.endedAt }, origin: 'remember',
+      identity, candidatePath: snapshot?.candidatePath ?? candidatePath,
+      validation: { passed: true, at: execution.endedAt }, origin: 'remember',
+      ...(snapshot ? { expectedClosureSha256: snapshot.closureSha256 } : {}),
     })
     return this.finish(start, {
       outcome: 'remembered', passed: true, modelCalls: 0,

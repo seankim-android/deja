@@ -4,6 +4,7 @@ import { resolve } from 'node:path'
 import {
   Deja,
   normalizeGoal,
+  ExpectedClosureMismatchError,
   ExpectedFlowChecksumMismatchError,
   type ExecutionResult,
   type ExplorationResult,
@@ -671,6 +672,35 @@ describe('vendor-independent orchestration', () => {
       })
       expect(context.store.validations).toEqual([])
       expect(context.counts()).toEqual({ runnerCalls: 1, ...untouched })
+    })
+
+    test('a subflow changed during a replay on a new build is never stored as verified', async () => {
+      const context = fixture(stale, [execution(true)], undefined, undefined, replayOptions)
+      context.store.previousResult = async () => previousHit
+      const store = context.store as typeof context.store & {
+        snapshotCandidate?: (candidatePath: string, directory: string) => Promise<{ candidatePath: string, closureSha256: string }>
+      }
+      let snapshotOf = ''
+      store.snapshotCandidate = async (candidatePath, directory) => {
+        snapshotOf = candidatePath
+        return { candidatePath: `${directory}/flows/main.yaml`, closureSha256: 'c'.repeat(64) }
+      }
+      let options: PersistVerifiedOptions | undefined
+      context.store.persistVerifiedCandidate = async persistOptions => {
+        options = persistOptions
+        // The store re-collects the closure and finds a subflow no longer matches the replayed one.
+        throw new ExpectedClosureMismatchError(persistOptions.expectedClosureSha256 ?? '', 'd'.repeat(64))
+      }
+      const result = await context.cache.run(newBuild)
+      expect(snapshotOf).toBe(previousHit.flowPath)
+      expect(options?.candidatePath).toMatch(/\/flows\/main\.yaml$/)
+      expect(options?.expectedClosureSha256).toBe('c'.repeat(64))
+      expect(options?.expectedFlowSha256).toBe(storedWalk.flowSha256)
+      expect(result).toMatchObject({
+        outcome: 'failed', passed: false, modelCalls: 0,
+        replayedOnNewBuild: { recordedForNewBuild: false },
+      })
+      expect(context.store.validations).toEqual([])
     })
 
     test('the policy is refused on a non-iOS identity', async () => {

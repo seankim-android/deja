@@ -39,6 +39,7 @@ test('upgrades valid WALK-003 schema-one metadata without inventing validation s
     memory.walks[0].flowPath = oldPath
     delete memory.walks[0].flowSchemaVersion
     delete memory.walks[0].validationHistory
+    delete memory.walks[0].subflowFiles
     await writeFile(join(workspaceRoot, LOCAL_MEMORY_PATH), `${JSON.stringify(memory, null, 2)}\n`)
     expect((await store.lookup(identity())).status).toBe('hit')
     await store.recordValidation(identity(), {
