@@ -1,13 +1,13 @@
 # SQLite walk store
 
 `SQLiteWalkStore` is a second, entirely local implementation of the vendor-neutral `WalkStore`
-contract. It uses Bun's built-in `bun:sqlite` driver for real relational metadata and ordinary files
+contract. It uses the runtime's built-in SQLite driver (`bun:sqlite` on Bun, `node:sqlite` on Node 22.13 or later) for real relational metadata and ordinary files
 for independently runnable Maestro YAML. It has no hosted service, account, native npm dependency,
 or OpenClaw/model requirement.
 
 ## Setup
 
-Use Bun 1.4 or later from the repository root:
+Use Bun 1.4 or later, or Node 22.13 or later (`node:sqlite` needs a flag before 22.13.0). From the repository root:
 
 ```sh
 bun install --frozen-lockfile

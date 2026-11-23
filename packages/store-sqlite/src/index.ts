@@ -1,8 +1,8 @@
-import { Database } from 'bun:sqlite'
 import { createHash, randomUUID } from 'node:crypto'
 import { lstatSync, mkdirSync, realpathSync, statSync } from 'node:fs'
 import { mkdir, readFile, realpath, rename, stat, writeFile } from 'node:fs/promises'
 import { dirname, isAbsolute, relative, resolve, sep } from 'node:path'
+import { openSqlite, type SqliteConnection } from './driver.ts'
 import {
   ExpectedClosureMismatchError,
   ExpectedFlowChecksumMismatchError,
@@ -59,6 +59,16 @@ export {
   storeMetadataPath,
 } from '@deja-qa/store-local'
 
+export {
+  openSqlite,
+  sqliteRuntime,
+  type SqliteConnection,
+  type SqliteOpenOptions,
+  type SqliteRow,
+  type SqliteRuntime,
+  type SqliteStatement,
+  type SqliteValue,
+} from './driver.ts'
 export const SQLITE_MEMORY_SCHEMA_VERSION = 3
 /** Written only when a walk replays the consumer's own file (manifest mode). */
 export const SQLITE_MEMORY_CONSUMER_SCHEMA_VERSION = 4
@@ -254,7 +264,7 @@ export class SQLiteWalkStore implements WalkStore {
   private writerLock: WriterLock | null = null
   private readonly renameFile: (temporaryPath: string, destinationPath: string) => Promise<void>
   private readonly replaceMetadata: Commit
-  private database: Database | null = null
+  private database: SqliteConnection | null = null
   /** The manifest's workspace-relative path, when this store replays the consumer's own files. */
   readonly manifestPath: string | undefined
   /** The folder where explore output is written, when this store can take it. */
@@ -301,7 +311,7 @@ export class SQLiteWalkStore implements WalkStore {
   private openExisting(path: string) {
     if (this.database) return this.database
     try {
-      this.database = new Database(path, { readonly: true, readwrite: false, create: false })
+      this.database = openSqlite(path, { readonly: true })
       this.database.exec('PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 1000;')
       return this.database
     } catch (error) {
@@ -318,7 +328,7 @@ export class SQLiteWalkStore implements WalkStore {
     }
     try {
       mkdirSync(dirname(metadata.path), { recursive: true })
-      this.database = new Database(metadata.path, { create: true, readwrite: true })
+      this.database = openSqlite(metadata.path)
       const prior = (this.database.query('PRAGMA user_version').get() as { user_version: number }).user_version
       this.database.exec(`
         PRAGMA foreign_keys = ON;
@@ -392,7 +402,7 @@ export class SQLiteWalkStore implements WalkStore {
   private loadMemory(): StoredWalk[] {
     const metadata = canonicalMetadataTarget(this.workspaceRoot, this.memoryPath)
     if (!metadata.exists) return []
-    let database: Database
+    let database: SqliteConnection
     try {
       database = this.openExisting(metadata.path)
       const schema = database.query('PRAGMA user_version').get() as { user_version: number }
@@ -408,7 +418,7 @@ export class SQLiteWalkStore implements WalkStore {
     }
   }
 
-  private readWalk(database: Database, row: WalkRow, schemaVersion: number): StoredWalk {
+  private readWalk(database: SqliteConnection, row: WalkRow, schemaVersion: number): StoredWalk {
     if (!nonEmptyString(row.goal) || row.goal_key !== normalizeGoalContract(row.goal).key ||
         !nonEmptyString(row.app_id) || !nonEmptyString(row.platform) ||
         !nonEmptyString(row.flow_schema_version) || !fingerprint(row.build_fingerprint) ||
@@ -554,7 +564,7 @@ export class SQLiteWalkStore implements WalkStore {
     }
   }
 
-  private insertWalk(database: Database, walk: StoredWalk) {
+  private insertWalk(database: SqliteConnection, walk: StoredWalk) {
     const result = database.query(`
       INSERT INTO walks (
         goal, goal_key, app_id, platform, flow_schema_version, build_fingerprint,

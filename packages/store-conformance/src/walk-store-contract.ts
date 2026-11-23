@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test'
+import { resolveHarness, type ContractHarness } from './harness.ts'
 import { createHash } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { mkdir, mkdtemp, realpath, readFile, readdir, rename, rm, symlink, writeFile } from 'node:fs/promises'
@@ -74,7 +74,8 @@ async function fixture() {
   return { temporary, workspaceRoot, candidatePath }
 }
 
-export function runWalkStoreContractTests(implementation: WalkStoreContractImplementation) {
+export function runWalkStoreContractTests(implementation: WalkStoreContractImplementation, harness?: ContractHarness) {
+  const { describe, test, expect } = resolveHarness(harness)
   async function context(failures?: StoreFailureInjection) {
     const value = await fixture()
     const stores: WalkStore[] = []

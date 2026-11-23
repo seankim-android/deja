@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test'
+import { resolveHarness, type ContractHarness } from './harness.ts'
 import { existsSync } from 'node:fs'
 import { mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -71,7 +71,8 @@ function identity(overrides: Partial<WalkIdentity> = {}): WalkIdentity {
  * The manifest-mode contract: the consumer's own files run in place, the manifest names them, and a
  * store keeps history only. Every case runs on a temporary workspace built here at run time.
  */
-export function runConsumerFlowContractTests(implementation: WalkStoreContractImplementation) {
+export function runConsumerFlowContractTests(implementation: WalkStoreContractImplementation, harness?: ContractHarness) {
+  const { describe, test, expect } = resolveHarness(harness)
   async function context() {
     const temporary = await realpath(await mkdtemp(join(tmpdir(), 'deja-consumer-contract-')))
     const workspaceRoot = join(temporary, 'repo')

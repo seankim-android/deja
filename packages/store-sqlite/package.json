@@ -1,7 +1,7 @@
 {
   "name": "@deja-qa/store-sqlite",
   "version": "0.1.0",
-  "description": "SQLite WalkStore (Bun SQLite today)",
+  "description": "SQLite WalkStore (bun:sqlite on Bun, node:sqlite on Node)",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
@@ -30,7 +30,7 @@
     "LICENSE"
   ],
   "engines": {
-    "node": ">=20",
+    "node": ">=22.13",
     "bun": ">=1.4.0"
   },
   "publishConfig": {

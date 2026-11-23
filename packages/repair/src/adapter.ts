@@ -1,3 +1,4 @@
+import { readFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import type {
   RepairRequest,
@@ -72,7 +73,7 @@ export class BoundedSelectorRepairer implements SelectorRepairer {
 
     let diff = ''
     if (report.proposedPatchPath) {
-      diff = await Bun.file(resolve(root, report.proposedPatchPath)).text()
+      diff = await readFile(resolve(root, report.proposedPatchPath), 'utf8')
     }
     const artifacts: RunArtifact[] = [
       { kind: 'attempt', path: report.attemptDirectory },

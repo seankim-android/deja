@@ -1,11 +1,13 @@
-import { Database } from 'bun:sqlite'
 import { readFile, rename } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import type { WalkStore } from '@deja-qa/core'
 import {
+  openSqlite,
   SQLITE_MEMORY_PATH,
   SQLiteWalkStore,
+  sqliteRuntime,
   storeMetadataPath,
+  type SqliteConnection,
 } from '@deja-qa/store-sqlite'
 import type {
   MetadataTamper,
@@ -37,8 +39,8 @@ function createSQLiteStore(
   })
 }
 
-function editDatabase(workspaceRoot: string, edit: (database: Database) => void) {
-  const database = new Database(databasePath(workspaceRoot))
+function editDatabase(workspaceRoot: string, edit: (database: SqliteConnection) => void) {
+  const database = openSqlite(databasePath(workspaceRoot))
   try {
     database.exec('PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 1000; BEGIN IMMEDIATE;')
     try {
@@ -53,7 +55,7 @@ function editDatabase(workspaceRoot: string, edit: (database: Database) => void)
   }
 }
 
-function cloneFirstWalk(database: Database, invalid = false) {
+function cloneFirstWalk(database: SqliteConnection, invalid = false) {
   const original = database.query(
     'SELECT id, goal_key, flow_sha256 FROM walks ORDER BY id LIMIT 1',
   ).get() as { id: number; goal_key: string; flow_sha256: string }
@@ -105,7 +107,7 @@ function downgradeSQLiteToSchema2(workspaceRoot: string) {
 }
 
 export const sqliteStoreContract: WalkStoreContractImplementation = {
-  name: 'SQLiteWalkStore (Bun SQLite + YAML)',
+  name: `SQLiteWalkStore (${sqliteRuntime === 'bun' ? 'Bun' : 'Node'} SQLite + YAML)`,
   kind: 'sqlite',
   metadataPath: databasePath,
   createStore: createSQLiteStore,

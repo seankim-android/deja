@@ -39,3 +39,32 @@ jobs:
         run: bun scripts/validate-release-artifacts.ts
       - name: Confirm tested revision
         run: git rev-parse HEAD
+
+  node-conformance:
+    name: Node ${{ matrix.node }} / store conformance
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        # 22.13.0 is the oldest Node with node:sqlite and no flag. 24 is the current LTS.
+        node: ["22.13.0", "24"]
+    steps:
+      - name: Checkout exact commit
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.4
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - name: Install locked dependencies
+        run: bun install --frozen-lockfile
+      - name: Show runtimes
+        run: node --version && bun --version
+      - name: Store conformance on Node (built output)
+        run: bun run test:node
