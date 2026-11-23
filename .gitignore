@@ -44,3 +44,6 @@ demo/film/bg.png
 demo/film/mask.png
 demo/film/cap*.png
 demo/film/device.mp4
+
+# Local agent tooling state
+.omc/
