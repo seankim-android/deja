@@ -282,5 +282,76 @@ describe('createDeja', () => {
       await expect(deja.run('checkout', { signal: controller.signal })).rejects.toThrow('stop')
       expect(requests).toHaveLength(2)
     })
+
+    test('an aborted signal stops cold explore and a run miss before the explorer is built', async () => {
+      const controller = new AbortController()
+      controller.abort(new Error('stop'))
+      const constructed: string[] = []
+      const deja = createDeja(options(new FakeStore(), {
+        explorer: () => {
+          constructed.push('explorer')
+          return { explore: async () => exploration('x') }
+        },
+      }))
+      await expect(deja.explore('checkout', { signal: controller.signal })).rejects.toThrow('stop')
+      await expect(deja.run('checkout', { signal: controller.signal })).rejects.toThrow('stop')
+      await expect(deja.remember('checkout', 'flow.yaml', { signal: controller.signal })).rejects.toThrow('stop')
+      expect(constructed).toEqual([])
+    })
+
+    test('a signal aborted after lookup stops a run miss before the explorer factory', async () => {
+      const controller = new AbortController()
+      class AbortingStore extends FakeStore {
+        override async lookup(identity: WalkIdentity) {
+          controller.abort(new Error('stop'))
+          return super.lookup(identity)
+        }
+      }
+      let built = false
+      const deja = createDeja(options(new AbortingStore(), {
+        explorer: () => {
+          built = true
+          return { explore: async () => exploration('x') }
+        },
+      }))
+      await expect(deja.run('checkout', { signal: controller.signal })).rejects.toThrow('stop')
+      expect(built).toBe(false)
+    })
+
+    test('a signal aborted before repair stops it before the repairer factory', async () => {
+      const controller = new AbortController()
+      class AbortingStore extends FakeStore {
+        override async lookup(identity: WalkIdentity) {
+          controller.abort(new Error('stop'))
+          return super.lookup(identity)
+        }
+      }
+      const store = new AbortingStore()
+      store.staleWithPrevious = true
+      let built = false
+      const deja = createDeja(options(store, {
+        adapter: iosAdapter,
+        repairer: () => {
+          built = true
+          return { repair: async () => { throw new Error('not used') } }
+        },
+      }))
+      await expect(deja.run('checkout', { signal: controller.signal })).rejects.toThrow('stop')
+      expect(built).toBe(false)
+    })
+
+    test('the factories receive the call signal and timeout in their context', async () => {
+      const controller = new AbortController()
+      const seen: { signal?: AbortSignal; timeoutMs?: number }[] = []
+      const deja = createDeja(options(new FakeStore(), {
+        explorer: ({ identity, signal, timeoutMs }) => {
+          seen.push({ ...(signal ? { signal } : {}), ...(timeoutMs !== undefined ? { timeoutMs } : {}) })
+          return { explore: async () => exploration(storedFor(identity).flowPath) }
+        },
+      }))
+      await deja.explore('checkout', { signal: controller.signal, timeoutMs: 99 })
+      await deja.explore('checkout')
+      expect(seen).toEqual([{ signal: controller.signal, timeoutMs: 99 }, {}])
+    })
   })
 })

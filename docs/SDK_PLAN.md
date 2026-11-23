@@ -53,7 +53,10 @@ Today `createDeja` takes `workspaceRoot`, `app`, `adapter`, `store`, `runner`, l
 `artifactId`. It returns `{ identity, run, explore, remember }`, each taking the goal text. The
 `adapter` type, `DejaAdapter`, is defined in core (`id`, `platform`, `buildFingerprint`,
 `cacheIdentity`), and the `@deja-qa/maestro` adapters satisfy it structurally, so core imports
-nothing from them. There is no provider-key option: keys stay in the explorer plugin's own
+nothing from them. `run`, `explore` and `remember` take optional `{ signal, timeoutMs }`. An aborted `signal` rejects at
+the start of the call and before each explorer, repairer or runner call, but work already started
+(a running flow, explorer or repair) can still finish and persist. Explorers and repairers get
+`signal` and `timeoutMs` only through the factory context. There is no provider-key option: keys stay in the explorer plugin's own
 credential chain.
 
 The usage example above still names `sqliteStore`, `maestroRunner` and `androidAdapter`, which are

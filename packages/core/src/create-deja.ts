@@ -32,8 +32,16 @@ export interface DejaAdapter {
   }
 }
 
-/** Passed to the lazy explorer and repairer factories. */
-export type DejaFactoryContext = { identity: WalkIdentity }
+/**
+ * Passed to the lazy explorer and repairer factories. This is the only way they receive the
+ * call's `signal` and `timeoutMs`: core does not pass them into `explore` or `repair`, so a
+ * plugin that wants to honor them must read them here.
+ */
+export type DejaFactoryContext = {
+  identity: WalkIdentity
+  signal?: AbortSignal
+  timeoutMs?: number
+}
 
 export type CreateDejaOptions = {
   workspaceRoot: string
@@ -62,11 +70,13 @@ export type CreateDejaOptions = {
 /** Per-call options. Both are optional and apply to the runner calls of that one call. */
 export type DejaCallOptions = {
   /**
-   * Checked before each runner call; an aborted signal rejects with `signal.reason`. A flow that
-   * is already running is not interrupted: use `timeoutMs` to bound it.
+   * Checked at the start of the call, before each explorer or repairer factory call and before
+   * each runner call; an aborted signal rejects with `signal.reason`. Work that has already
+   * started is not interrupted: a running flow, explorer or repair can still finish and persist
+   * its result. Use `timeoutMs` to bound a flow.
    */
   signal?: AbortSignal
-  /** Passed to the runner as `RunnerRequest.timeoutMs`, where the runner supports it. */
+  /** Passed to the runner as `RunnerRequest.timeoutMs`, and to the factories in the context. */
   timeoutMs?: number
 }
 
@@ -100,6 +110,11 @@ export function createDeja(options: CreateDejaOptions): DejaClient {
   const orchestrator = (walkIdentity: WalkIdentity, callOptions: DejaCallOptions = {}) => {
     const { explorer, repairer } = options
     const { signal, timeoutMs } = callOptions
+    const context: DejaFactoryContext = {
+      identity: walkIdentity,
+      ...(signal ? { signal } : {}),
+      ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+    }
     const runner: WalkRunner = signal === undefined && timeoutMs === undefined
       ? options.runner
       : {
@@ -115,8 +130,16 @@ export function createDeja(options: CreateDejaOptions): DejaClient {
       store: options.store,
       runner,
       reporter: options.reporter ?? noopReporter,
-      createExplorer: () => explorer({ identity: walkIdentity }),
-      ...(repairer ? { createRepairer: () => repairer({ identity: walkIdentity }) } : {}),
+      createExplorer: () => {
+        signal?.throwIfAborted()
+        return explorer(context)
+      },
+      ...(repairer ? {
+        createRepairer: () => {
+          signal?.throwIfAborted()
+          return repairer(context)
+        },
+      } : {}),
       ...(options.semantic ? { semantic: options.semantic } : {}),
       ...(options.staleBuild ? { staleBuild: options.staleBuild } : {}),
       ...(options.now ? { now: options.now } : {}),
@@ -126,14 +149,17 @@ export function createDeja(options: CreateDejaOptions): DejaClient {
   return {
     identity,
     run: async (goal, callOptions) => {
+      callOptions?.signal?.throwIfAborted()
       const value = await identity(goal)
       return orchestrator(value, callOptions).run(value)
     },
     explore: async (goal, callOptions) => {
+      callOptions?.signal?.throwIfAborted()
       const value = await identity(goal)
       return orchestrator(value, callOptions).explore(value)
     },
     remember: async (goal, candidatePath, callOptions) => {
+      callOptions?.signal?.throwIfAborted()
       const value = await identity(goal)
       return orchestrator(value, callOptions).remember(value, candidatePath)
     },

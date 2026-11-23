@@ -92,6 +92,8 @@ export type DejaDependencies = {
 };
 export type DejaFactoryContext = {
     identity: WalkIdentity;
+    signal?: AbortSignal;
+    timeoutMs?: number;
 };
 export type EvidenceArtifact = {
     path: string;
