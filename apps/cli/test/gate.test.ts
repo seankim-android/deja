@@ -1,12 +1,12 @@
 import { describe, expect, test } from 'bun:test'
-import { mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from 'node:fs/promises'
+import { lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { spawn } from 'node:child_process'
 import { join, resolve } from 'node:path'
 import { iosMaestroAdapter } from '@deja-qa/maestro'
 import { LocalWalkStore } from '@deja-qa/store-local'
 import { runCli } from '../src/main.ts'
-import { atomicWrite, parseGoals, renderGateTable, type GateEvidence } from '../src/gate.ts'
+import { atomicWrite, parseGoals, removeChecked, renderGateTable, type GateEvidence } from '../src/gate.ts'
 
 const FLOW = 'appId: dev.deja.fixture\n---\n- launchApp\n- assertVisible:\n    id: "screen.today"\n'
 const T1 = '2026-11-22T00:00:00.000Z'
@@ -366,6 +366,71 @@ describe('deja gate --evidence safety (B1)', () => {
     } finally { await rm(ws.temporary, { recursive: true, force: true }) }
   })
 
+  test('a symlink planted at the temporary name is never followed (F1)', async () => {
+    const ws = await opened()
+    try {
+      await writeFile(join(ws.root, 'victim.txt'), 'keep me\n')
+      await mkdir(join(ws.root, 'o'))
+      // The old predictable name, for any pid, and the exact name a write is about to use.
+      for (const pid of [process.pid, process.pid + 1, 1, 2, 3]) {
+        await symlink(join(ws.root, 'victim.txt'), join(ws.root, `o/e.json.${pid}.tmp`))
+      }
+      expect((await ws.gate('--goals', join(ws.root, 'goals.txt'), '--evidence', join(ws.root, 'o/e.json'))).exit).toBe(0)
+      expect(await readFile(join(ws.root, 'victim.txt'), 'utf8')).toBe('keep me\n')
+
+      await symlink(join(ws.root, 'victim.txt'), join(ws.root, `o/f.json.${process.pid}.fixed.tmp`))
+      await expect(atomicWrite(join(ws.root, 'o/f.json'), 'evidence', 'fixed')).rejects.toThrow()
+      expect(await readFile(join(ws.root, 'victim.txt'), 'utf8')).toBe('keep me\n')
+      // The planted link is left as it was; nothing was written to the destination.
+      expect((await lstat(join(ws.root, `o/f.json.${process.pid}.fixed.tmp`))).isSymbolicLink()).toBe(true)
+      await expect(readFile(join(ws.root, 'o/f.json'), 'utf8')).rejects.toThrow()
+    } finally { await rm(ws.temporary, { recursive: true, force: true }) }
+  })
+
+  test('an old .txt is replaced only when it is the exact table of the evidence beside it (F3)', async () => {
+    const ws = await opened()
+    try {
+      const target = join(ws.root, 'out/gate.json')
+      expect((await ws.gate('--goals', join(ws.root, 'goals.txt'), '--evidence', target)).exit).toBe(0)
+      const table = await readFile(join(ws.root, 'out/gate.txt'), 'utf8')
+      // Starts like a table, has a Build line and the header row, but is not the table.
+      await writeFile(join(ws.root, 'out/gate.txt'), `${table}my notes\n`)
+      await refused(ws, target)
+      expect(await readFile(join(ws.root, 'out/gate.txt'), 'utf8')).toBe(`${table}my notes\n`)
+      // A table with no evidence JSON beside it is not replaced either.
+      await rm(join(ws.root, 'out/gate.json'))
+      await writeFile(join(ws.root, 'out/gate.txt'), table)
+      await refused(ws, target)
+      expect(await readFile(join(ws.root, 'out/gate.txt'), 'utf8')).toBe(table)
+    } finally { await rm(ws.temporary, { recursive: true, force: true }) }
+  })
+
+  test('a file swapped in after the check is not deleted (F2)', async () => {
+    const ws = await workspace()
+    try {
+      const path = join(ws.root, 'swap.json')
+      await writeFile(path, 'checked\n')
+      const info = await lstat(path)
+      const checked = { canonical: await realpath(path), identity: { dev: info.dev, ino: info.ino } }
+      await rm(path)
+      await writeFile(path, 'a different file\n')
+      await expect(removeChecked(path, checked)).rejects.toThrow(/changed while the gate was running/)
+      expect(await readFile(path, 'utf8')).toBe('a different file\n')
+      // A file that appeared where none was checked is refused too, a symlink swapped in is not followed.
+      await rm(path)
+      await symlink(join(ws.root, 'goals.txt'), path)
+      await expect(removeChecked(path, checked)).rejects.toThrow()
+      await expect(removeChecked(path, { canonical: path, identity: null })).rejects.toThrow()
+      // The same file is removed, and an absent one is fine.
+      await rm(path)
+      await writeFile(path, 'same\n')
+      const same = await lstat(path)
+      await removeChecked(path, { canonical: await realpath(path), identity: { dev: same.dev, ino: same.ino } })
+      await removeChecked(path, { canonical: path, identity: null })
+      await expect(readFile(path, 'utf8')).rejects.toThrow()
+    } finally { await rm(ws.temporary, { recursive: true, force: true }) }
+  })
+
   test('a failed rename leaves no temporary file', async () => {
     const ws = await workspace()
     try {
@@ -384,7 +449,7 @@ describe('deja gate text evidence cannot be forged (B2)', () => {
     try {
       await ws.remember('Today')
       await ws.goals('Today\n')
-      for (const label of [hostile, 'a\rb', 'a\u0085b', 'a\u2028b', 'a\u2029b', 'a\u007fb', 'a\tb']) {
+      for (const label of [hostile, 'a\u202eb', 'a\u200bb', 'a\u2066b', 'a\ufeffb', 'a\rb', 'a\u0085b', 'a\u2028b', 'a\u2029b', 'a\u007fb', 'a\tb']) {
         const result = await ws.gate('--goals', join(ws.root, 'goals.txt'), '--label', label)
         expect(result.exit).toBe(2)
         expect(result.stdout).not.toContain('Release gate: OPEN')
@@ -393,6 +458,8 @@ describe('deja gate text evidence cannot be forged (B2)', () => {
       const goal = await ws.gate('--goals', join(ws.root, 'goals.json'))
       expect(goal.exit).toBe(2)
       expect(goal.stderr).toContain('control character')
+      await writeFile(join(ws.root, 'goals.json'), JSON.stringify(['Today\u202e']))
+      expect((await ws.gate('--goals', join(ws.root, 'goals.json'))).exit).toBe(2)
       await writeFile(join(ws.root, 'goals.json'), JSON.stringify(['Today\u001b[2J']))
       expect((await ws.gate('--goals', join(ws.root, 'goals.json'))).exit).toBe(2)
     } finally { await rm(ws.temporary, { recursive: true, force: true }) }
@@ -404,13 +471,14 @@ describe('deja gate text evidence cannot be forged (B2)', () => {
       checkedAt: 't', buildFingerprint: 'a'.repeat(64), label: hostile, build: 'b',
       identity: { appId: 'a', platform: 'ios', adapter: null, browser: null }, manifest: null,
       goals: [{
-        goal: hostile, goalKey: 'g', outcome: 'failed', validatedAt: null, flowSha256: null, closureSha256: null,
+        goal: hostile, goalKey: 'g', outcome: 'failed', validatedAt: hostile, flowSha256: `${hostile}\u202e`, closureSha256: null,
         detail: hostile, reportPath: null,
       }],
       error: hostile,
     }
     const table = renderGateTable(evidence, text => text)
     const codes = [...table].map(character => character.charCodeAt(0))
+    expect(table).not.toContain('\u202e')
     expect(codes.filter(code => code < 32 && code !== 10 || (code >= 0x7f && code <= 0x9f) || code === 0x2028 || code === 0x2029)).toEqual([])
     expect(table.split('\n').filter(line => line.startsWith('Release gate: '))).toEqual(['Release gate: CLOSED (0 of 1 goals passed)'])
   })

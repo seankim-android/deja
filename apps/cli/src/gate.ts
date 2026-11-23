@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import { lstat, mkdir, readdir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { basename, dirname, join, relative, resolve, sep } from 'node:path'
 import {
@@ -54,17 +55,20 @@ export type GateEvidence = {
 const MAX_REPORT_BYTES = 2_000_000
 const EVIDENCE_KIND = 'deja-gate-evidence'
 const TABLE_HEADER = 'Release gate: '
-/** C0, DEL, C1, and the Unicode line and paragraph separators. */
+/** C0, DEL, C1, the Unicode line and paragraph separators, and format characters (bidi, zero-width). */
 function isControl(character: string) {
-  const code = character.charCodeAt(0)
-  return code < 0x20 || (code >= 0x7f && code <= 0x9f) || code === 0x2028 || code === 0x2029
+  const code = character.codePointAt(0)!
+  // Cf covers bidi controls (U+202A to U+202E, U+2066 to U+2069) and zero-width characters.
+  return code < 0x20 || (code >= 0x7f && code <= 0x9f) || code === 0x2028 || code === 0x2029 || /^\p{Cf}$/u.test(character)
 }
 const hasControl = (value: string) => [...value].some(isControl)
 
 /** Shown, never trusted: control characters become visible escapes, so a value cannot add a line or an escape code. */
 function plain(value: string) {
   return [...value].map(character => isControl(character)
-    ? `\\u${character.charCodeAt(0).toString(16).padStart(4, '0')}`
+    ? (character.codePointAt(0)! > 0xffff
+      ? `\\u{${character.codePointAt(0)!.toString(16)}}`
+      : `\\u${character.codePointAt(0)!.toString(16).padStart(4, '0')}`)
     : character).join('')
 }
 
@@ -152,7 +156,7 @@ export function renderGateTable(evidence: GateEvidence, redact: Redactor) {
   lines.push(`${'GOAL'.padEnd(width)}  ${'OUTCOME'.padEnd(12)}  ${'VALIDATED'.padEnd(24)}  FLOW SHA256`)
   for (const goal of evidence.goals) {
     lines.push(
-      `${plain(goal.goal).padEnd(width)}  ${goal.outcome.padEnd(12)}  ${(goal.validatedAt ?? '-').padEnd(24)}  ${goal.flowSha256 ?? '-'}`,
+      `${plain(goal.goal).padEnd(width)}  ${goal.outcome.padEnd(12)}  ${plain(goal.validatedAt ?? '-').padEnd(24)}  ${plain(goal.flowSha256 ?? '-')}`,
     )
     if (goal.detail && goal.outcome !== 'passed') lines.push(`  ${plain(goal.detail)}`)
     if (goal.reportPath) lines.push(`  report: ${plain(goal.reportPath)}`)
@@ -160,16 +164,49 @@ export function renderGateTable(evidence: GateEvidence, redact: Redactor) {
   return redact(`${lines.join('\n')}\n`)
 }
 
-export async function atomicWrite(path: string, contents: string) {
+/**
+ * Write through a temporary file in the same folder, then rename it into place. The temporary name
+ * is random and created with O_EXCL (`wx`), which fails on any existing path, a planted symlink
+ * included, so the write can never follow a link to another file. A rename replaces a symlink at
+ * the destination, never writes through it.
+ */
+export async function atomicWrite(path: string, contents: string, suffix: string = randomUUID()) {
   await mkdir(dirname(path), { recursive: true })
-  const temporary = `${path}.${process.pid}.tmp`
+  const temporary = `${path}.${process.pid}.${suffix}.tmp`
   try {
-    await writeFile(temporary, contents)
+    await writeFile(temporary, contents, { flag: 'wx' })
     await rename(temporary, path)
   } catch (error) {
-    await rm(temporary, { force: true })
+    // Only a file this call created: a failed `wx` means the name was not ours, so leave it.
+    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') await rm(temporary, { force: true })
     throw error
   }
+}
+
+type CheckedFile = { canonical: string; identity: { dev: number; ino: number } | null }
+
+/**
+ * Delete a file `evidencePaths` approved, only if it is still the same file: not a symlink, same
+ * device and inode, same resolved location, or still absent. A swap after the check is refused.
+ * Remaining window: between this check and the unlink itself (microseconds), a local adversary who
+ * can write the folder could still swap the file. The rename into place has the same window.
+ */
+export async function removeChecked(path: string, checked: CheckedFile) {
+  const refuse = (): never => {
+    throw new CliConfigurationError(`--evidence ${path} changed while the gate was running; refused. Nothing was deleted.`)
+  }
+  let now = null
+  try { now = await lstat(path) } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+  }
+  if (!now) {
+    if (checked.identity) refuse()
+    return
+  }
+  if (!checked.identity || now.isSymbolicLink() || !now.isFile() ||
+      now.dev !== checked.identity.dev || now.ino !== checked.identity.ino ||
+      await canonicalPath(path) !== checked.canonical) refuse()
+  await rm(path, { force: true })
 }
 
 /** The nearest existing ancestor resolved through symlinks, plus the rest of the path. */
@@ -199,6 +236,7 @@ async function evidencePaths(
   evidencePath: string | undefined,
   goalsFile: string,
   manifestPath: string | undefined,
+  redact: Redactor,
 ) {
   const requested = evidencePath
     ? resolve(process.cwd(), evidencePath)
@@ -215,6 +253,8 @@ async function evidencePaths(
   const refuse = (target: string, reason: string): never => {
     throw new CliConfigurationError(`--evidence ${relative(process.cwd(), target) || target} is refused: ${reason}. Nothing was changed.`)
   }
+  const checked = new Map<string, CheckedFile>()
+  let previous: GateEvidence | null = null
   for (const [target, isText] of [[json, false], [text, true]] as const) {
     let existing = null
     try { existing = await lstat(target) } catch (error) {
@@ -226,13 +266,21 @@ async function evidencePaths(
     if (`${canonical}${sep}`.startsWith(deja) && !canonical.startsWith(gateDirectory)) {
       refuse(target, 'it is inside .deja/ but not .deja/gate/')
     }
-    if (!existing) continue
+    checked.set(target, {
+      canonical, identity: existing ? { dev: existing.dev, ino: existing.ino } : null,
+    })
+    if (!existing) {
+      continue
+    }
     if (!existing.isFile()) refuse(target, 'it is not a regular file')
     if (existing.nlink > 1) refuse(target, 'it has more than one hard link')
     if (existing.size > MAX_REPORT_BYTES) refuse(target, 'it is not a gate evidence file')
     const contents = await readFile(target, 'utf8')
     if (isText) {
-      if (!contents.startsWith(TABLE_HEADER)) refuse(target, 'it is not a gate evidence table')
+      // Replaced only when the JSON beside it is valid gate evidence and this is exactly its table.
+      if (!previous || contents !== renderGateTable(previous, redact)) {
+        refuse(target, 'it is not the table of the gate evidence beside it')
+      }
       continue
     }
     let parsed: Partial<GateEvidence> | null = null
@@ -240,8 +288,9 @@ async function evidencePaths(
     if (parsed?.kind !== EVIDENCE_KIND || parsed.command !== 'gate' || parsed.schemaVersion !== 1) {
       refuse(target, 'it is not a gate evidence file')
     }
+    previous = parsed as GateEvidence
   }
-  return { json, text }
+  return { json, text, checked }
 }
 
 export type GateIo = { stdout: (text: string) => void; stderr: (text: string) => void }
@@ -266,11 +315,11 @@ export async function runGate(input: {
   if (options.label !== undefined && hasControl(options.label)) {
     throw new CliConfigurationError('--label cannot contain control characters or line breaks')
   }
-  const paths = await evidencePaths(configuration, options.evidencePath, goalsFile, store.manifestPath)
+  const paths = await evidencePaths(configuration, options.evidencePath, goalsFile, store.manifestPath, redact)
   // A file left by an earlier run must never be read as this run's evidence. Only an old gate
   // evidence file gets here (evidencePaths checked).
-  await rm(paths.json, { force: true })
-  await rm(paths.text, { force: true })
+  await removeChecked(paths.json, paths.checked.get(paths.json)!)
+  await removeChecked(paths.text, paths.checked.get(paths.text)!)
 
   let goalsText: string
   try { goalsText = await readFile(goalsFile, 'utf8') } catch (error) {

@@ -120,7 +120,7 @@ Exit codes:
   11 gate: could not decide. The store, a stored walk or flow, or the build could not be read or
      trusted (invalid), or the evidence could not be written.
      Gate usage errors (no --goals, unreadable or empty goals file, a --label with control
-     characters, an --evidence path that is not an old gate evidence file) exit 2.
+     characters or bidi marks, an --evidence path that is not an old gate evidence file) exit 2.
      0 means every goal passed.
 
 YAML verification and replay always invoke standalone Maestro flows. No YAML depends on
