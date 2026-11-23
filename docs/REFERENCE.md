@@ -199,8 +199,11 @@ refused (exit 2). The CLI also refuses to write it if it would hold a `fixtureCr
   as before. The verified flow is written as a **new** file under `flowsDir` (`<goal>.yaml`, or a
   `<goal>/` folder with its layout kept when it runs subflows), and a manifest entry is added.
   Nothing is ever overwritten: a different file at that path stops the save, a flow that holds a
-  `fixtureCredentials` value is never written into your tree, and a goal the
-  manifest already lists is not explored. Without a `flowsDir` (library hosts), explore gives
+  `fixtureCredentials` value is never written into your tree (the check reads the raw text in its
+  plain, JSON-escaped, single-quoted, URL and base64 spellings, and every decoded YAML string, so
+  quotes, escapes, block scalars and flow style do not hide it; a value under 3 characters cannot be
+  checked, so config refuses it), and a goal the manifest already lists is not explored. If the save
+  fails after the files were written, they are removed again. Without a `flowsDir` (library hosts), explore gives
   `exploration-rejected` before any model call.
 - **Repair is not available with a manifest yet** (config `repair` is refused). A repair that
   proposes a diff or a draft PR against your flow is DEJA-6.
@@ -209,11 +212,14 @@ refused (exit 2). The CLI also refuses to write it if it would hold a `fixtureCr
   that closure once into `flowsDir` (`<goal>/…` with its layout kept, or `<goal>.yaml`), adds the
   manifest entry with fresh hashes, and rewrites the store as memory schema 4 with the history of
   the bytes that moved. Order: files, manifest, backup, store. The old store file stays beside the
-  new one as `walks.json.schema3.bak` (`walks.sqlite.schema3.bak`), the first backup wins, and
-  `.deja/flows` is left alone. Safe to run again: files and entries already there are not touched,
-  and a crash before the store is rewritten is finished by the next run. A walk it cannot move
+  new one as `walks.json.schema3.bak` (`walks.sqlite.schema3.bak`), copied under a temporary name and
+  linked into place, so the first backup wins and a crash cannot leave a short one. `.deja/flows`
+  is left alone. If a step fails, the files and manifest bytes this run wrote are put back, so a
+  failed run leaves your tree as it was. Safe to run again: files and entries already there are
+  not touched. Two goals whose names map to one file (`Log in`, `Log-in`) cannot both move: the
+  first does, the other is left with the reason `slug-collision`, in a dry run too. A walk it cannot move
   (never passed, copy missing or changed, subflows never stored, no adapter name, a different file
-  at the destination, a different manifest entry, a fixture credential value in the flow) stays in the store and is listed with the reason;
+  at the destination, a different manifest entry, a fixture credential value in the flow, a goal the manifest reader would refuse, a name collision) stays in the store and is listed with the reason;
   until then its goal gives `needs-migration` (exit 6). The adapter of a walk from before adapters
   were recorded (the Android adapter) comes from the config. Review the new files, then commit.
 - Library: build the store with `manifest: { path }` and pass the same `manifestPath` to

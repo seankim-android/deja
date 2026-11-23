@@ -734,8 +734,15 @@ export class SQLiteWalkStore implements WalkStore {
       const memory = this.loadMemory()
       this.validateUniqueIdentities(memory)
       const plan = await consumer.plan(memory, identity, options)
-      this.replaceMetadata([...plan.remaining, plan.walk])
-      const changed = await plan.commit()
+      let changed: boolean
+      try {
+        this.replaceMetadata([...plan.remaining, plan.walk])
+        changed = await plan.commit()
+      } catch (error) {
+        // New files with no entry and no history would only block a retry: take them back.
+        await consumer.removeWritten(plan.filesWritten)
+        throw error
+      }
       return {
         walk: plan.walk,
         flowPath: plan.flowPath,

@@ -1,4 +1,5 @@
-import { copyFile, constants, readFile, realpath } from 'node:fs/promises'
+import { createHash as hasher, randomUUID } from 'node:crypto'
+import { copyFile, link, readFile, realpath, unlink } from 'node:fs/promises'
 import { relative, resolve, sep } from 'node:path'
 import { createHash } from 'node:crypto'
 import {
@@ -59,6 +60,7 @@ export async function runMigration(context: MigrationContext): Promise<Migration
     groups.set(key, [...(groups.get(key) ?? []), walk])
   }
 
+  const claimed = new Set<string>()
   const migrated: MigratedWalk[] = []
   const skipped: SkippedWalk[] = []
   const converted: { walk: StoredWalk; plan: MaterializePlan; entry: ManifestWalk; replaced: StoredWalk[]; existing: ManifestWalk | undefined }[] = []
@@ -114,6 +116,13 @@ export async function runMigration(context: MigrationContext): Promise<Migration
       }
       throw error
     }
+    // What the plan read must be what the old store verified, file for file.
+    const storedHashes = [chosen.flowSha256, ...(chosen.subflowFiles ?? []).map(file => file.sha256)].sort()
+    const plannedHashes = plan.files.map(file => file.sha256).sort()
+    if (storedHashes.length !== plannedHashes.length || storedHashes.some((hash, index) => hash !== plannedHashes[index])) {
+      skip('copy-changed', 'the stored files changed while the migration was planned')
+      continue
+    }
     if (plan.secrets.length > 0) {
       skip('holds-fixture-value', 'the stored flow holds a fixture credential value, so it is not copied into your tree; remove the value, then remember it again')
       continue
@@ -140,6 +149,14 @@ export async function runMigration(context: MigrationContext): Promise<Migration
       skip('manifest-differs', `the manifest already lists "${goal}" with a different flow, closure or assertions; review it first`)
       continue
     }
+    // Two goals can slug to one name ("Log in", "Log-in"). The first keeps it, in a dry run too.
+    const destinations = [plan.flow, ...plan.files.map(file => file.path)]
+    const taken = destinations.find(path => claimed.has(path))
+    if (taken) {
+      skip('slug-collision', `${taken} is already taken by another goal in this run; remember one of them under a different goal name`)
+      continue
+    }
+    for (const path of destinations) claimed.add(path)
     // History of the walk that moves: only entries made with the bytes that moved.
     const history = chosen.validationHistory.filter(item => item.flowSha256 === chosen.flowSha256)
     const { subflowFiles: _files, legacyClosure: _legacy, ...rest } = chosen
@@ -173,32 +190,52 @@ export async function runMigration(context: MigrationContext): Promise<Migration
   }
   let backupPath: string | null = null
   if (!dryRun && converted.length > 0) {
-    for (const item of converted) await consumer.writeMaterialized(item.plan)
-    if (manifestChanged) {
-      const current = await consumer.load()
-      for (const item of converted) {
-        const now = current.walks.find(entry => manifestWalkKey(entry) === manifestWalkKey(item.entry))
-        if (JSON.stringify(now ?? null) !== JSON.stringify(item.existing ?? null)) throw new ManifestChangedError()
-      }
-      const keys = new Set(converted.map(item => manifestWalkKey(item.entry)))
-      await consumer.writeManifest({
-        ...current,
-        walks: [...current.walks.filter(entry => !keys.has(manifestWalkKey(entry))), ...converted.map(item => item.entry)],
-      })
-    }
-    // The old store stays beside the new one. The first backup wins, so a re-run never replaces it.
-    const backup = `${context.memoryFile}.schema3.bak`
+    // If a later step fails, take back what this run wrote (new files, the manifest bytes). The old
+    // store is untouched until its last step, so a failed run leaves the tree as it found it.
+    const manifestBefore = await consumer.manifestText()
+    const written: string[] = []
     try {
-      await copyFile(context.memoryFile, backup, constants.COPYFILE_EXCL)
+      for (const item of converted) written.push(...await consumer.writeMaterialized(item.plan))
+      if (manifestChanged) {
+        const current = await consumer.load()
+        for (const item of converted) {
+          const now = current.walks.find(entry => manifestWalkKey(entry) === manifestWalkKey(item.entry))
+          if (JSON.stringify(now ?? null) !== JSON.stringify(item.existing ?? null)) throw new ManifestChangedError()
+        }
+        const keys = new Set(converted.map(item => manifestWalkKey(item.entry)))
+        await consumer.writeManifest({
+          ...current,
+          walks: [...current.walks.filter(entry => !keys.has(manifestWalkKey(entry))), ...converted.map(item => item.entry)],
+        })
+      }
+      // The old store stays beside the new one. The first backup wins, so a re-run never replaces it.
+      // It is copied under a temporary name and linked into place, so a crash cannot leave a short file
+      // under the final name for a later run to trust.
+      const backup = `${context.memoryFile}.schema3.bak`
+      const temporary = `${backup}.${process.pid}-${randomUUID()}.tmp`
+      try {
+        await copyFile(context.memoryFile, temporary)
+        const copy = hasher('sha256').update(await readFile(temporary)).digest('hex')
+        if (copy !== hasher('sha256').update(await readFile(context.memoryFile)).digest('hex')) {
+          throw new Error('The backup copy of the old store does not match it')
+        }
+        await link(temporary, backup)
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+      } finally {
+        await unlink(temporary).catch(() => {})
+      }
+      backupPath = posix(relative(root, backup))
+      const replaced = new Set(converted.flatMap(item => item.replaced))
+      await context.writeWalks([
+        ...walks.filter(walk => !replaced.has(walk)),
+        ...converted.map(item => item.walk),
+      ])
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+      await consumer.removeWritten(written)
+      await consumer.restoreManifestText(manifestBefore).catch(() => {})
+      throw error
     }
-    backupPath = posix(relative(root, backup))
-    const replaced = new Set(converted.flatMap(item => item.replaced))
-    await context.writeWalks([
-      ...walks.filter(walk => !replaced.has(walk)),
-      ...converted.map(item => item.walk),
-    ])
   }
   return {
     dryRun, manifestPath: consumer.manifestPath, manifestChanged, migrated, skipped, backupPath,

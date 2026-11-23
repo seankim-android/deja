@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { existsSync } from 'node:fs'
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -18,6 +18,22 @@ import { ConsumerFlowError } from '@deja-qa/store-local'
 import { initialValidation, laterValidation, type WalkStoreContractImplementation } from './walk-store-contract.ts'
 
 const MANIFEST = 'deja.walks.json'
+
+/** Every file under `root` with its size and modification time, except the folders named in `skip`. */
+async function tree(root: string, skip: string[] = []): Promise<Record<string, string>> {
+  const found: Record<string, string> = {}
+  const visit = async (folder: string) => {
+    for (const entry of await readdir(folder, { withFileTypes: true })) {
+      const path = join(folder, entry.name)
+      const relative = path.slice(root.length + 1)
+      if (skip.some(item => relative === item || relative.startsWith(`${item}/`))) continue
+      if (entry.isDirectory()) { found[`${relative}/`] = ''; await visit(path) }
+      else { const info = await stat(path); found[relative] = `${info.size}:${info.mtimeMs}` }
+    }
+  }
+  await visit(root)
+  return found
+}
 const MAIN = '.maestro/flows/today.yaml'
 const SUB = '.maestro/subflows/type.yaml'
 const MAIN_YAML = [
@@ -766,6 +782,68 @@ export function runConsumerFlowContractTests(implementation: WalkStoreContractIm
       }
     })
 
+    test('a fixture value is found however the YAML writes it', async () => {
+      const ctx = await withFlows()
+      try {
+        const secret = 'p"ss\\w0rd'
+        const spellings: Record<string, string> = {
+          plain: `- inputText: ${secret}`,
+          'double quoted': '- inputText: "p\\"ss\\\\w0rd"',
+          'single quoted': `- inputText: '${secret}'`,
+          'block scalar': `- inputText: |-\n    ${secret}`,
+          'flow style': `- inputText: [a, '${secret}']`,
+          'unicode escape': '- inputText: "p\\u0022ss\\\\w0rd"',
+          'a comment': `# type ${secret}\n- tapOn: x`,
+        }
+        for (const [name, line] of Object.entries(spellings)) {
+          await ctx.legacy(`s${Object.keys(spellings).indexOf(name)}`, [])
+          await ctx.write('.maestro/flows/secret.yaml', `appId: dev.deja.fixture\n---\n${line}\n`)
+          const store = ctx.openFlows(undefined, undefined, [secret])
+          await mkdir(join(ctx.workspaceRoot, '.deja/attempts/x'), { recursive: true })
+          await ctx.write('.deja/attempts/x/c.yaml', `appId: dev.deja.fixture\n---\n${line}\n`)
+          await expect(ctx.persist(store, {
+            identity: identity({ goal: 'Login' }), candidatePath: '.deja/attempts/x/c.yaml', origin: 'explore',
+          }), `explore, ${name}`).rejects.toThrow(/fixture credential value/)
+          expect(existsSync(join(ctx.workspaceRoot, FLOWS)), `explore wrote files, ${name}`).toBe(false)
+          await implementation.closeStore(store)
+        }
+        // The same through migrate.
+        for (const [name, line] of Object.entries(spellings)) {
+          await rm(join(ctx.workspaceRoot, '.deja'), { recursive: true, force: true })
+          await ctx.write('.maestro/flows/secret.yaml', `appId: dev.deja.fixture\n---\n${line}\n`)
+          await ctx.legacy(undefined, [{ goal: 'Login', path: '.maestro/flows/secret.yaml' }])
+          const store = ctx.openFlows(undefined, undefined, [secret])
+          const report = await store.migrateToManifest!({})
+          expect(report.skipped.map(item => item.reason), `migrate, ${name}`).toEqual(['holds-fixture-value'])
+          expect(existsSync(join(ctx.workspaceRoot, FLOWS)), `migrate wrote files, ${name}`).toBe(false)
+          await implementation.closeStore(store)
+        }
+        // A value that is not in the file is fine, and a manifest that holds the value in escaped form is refused.
+        await mkdir(join(ctx.workspaceRoot, '.deja/attempts/x'), { recursive: true })
+        await ctx.write('.deja/attempts/x/ok.yaml', 'appId: dev.deja.fixture\n---\n- inputText: harmless\n')
+        const clean = ctx.openFlows('clean', undefined, [secret])
+        await ctx.persist(clean, { identity: identity({ goal: 'Fine' }), candidatePath: '.deja/attempts/x/ok.yaml', origin: 'explore' })
+        await expect(ctx.persist(clean, {
+          identity: identity({ goal: `say ${secret}` }), candidatePath: MAIN, origin: 'remember',
+        })).rejects.toBeInstanceOf(InvalidWalkManifestError)
+      } finally {
+        await ctx.cleanup()
+      }
+    })
+
+    test('a fixture value too short to scan for is refused when the store is built', async () => {
+      const ctx = await withFlows()
+      try {
+        for (const value of ['', 'ab']) {
+          expect(() => implementation.createStore(ctx.workspaceRoot, undefined, 'short', {
+            path: MANIFEST, flowsDir: FLOWS, forbiddenValues: [value],
+          })).toThrow(/shorter than 3 characters/)
+        }
+      } finally {
+        await ctx.cleanup()
+      }
+    })
+
     test('migrate does not copy a flow that holds a fixture value, and a goal named by one stops the run', async () => {
       const ctx = await withFlows()
       try {
@@ -815,7 +893,7 @@ export function runConsumerFlowContractTests(implementation: WalkStoreContractIm
           { goal: 'Smoke', path: SMOKE, at: laterValidation },
         ])
         const store = ctx.openFlows('dev')
-        const metadataBefore = await implementation.snapshotMetadata(ctx.workspaceRoot).catch(() => null)
+        const treeBefore = await tree(ctx.workspaceRoot)
 
         const dry = await store.migrateToManifest!({ dryRun: true })
         expect(dry).toMatchObject({ dryRun: true, manifestChanged: true, backupPath: null, skipped: [] })
@@ -824,6 +902,8 @@ export function runConsumerFlowContractTests(implementation: WalkStoreContractIm
         ])
         expect(existsSync(join(ctx.workspaceRoot, FLOWS))).toBe(false)
         expect(existsSync(join(ctx.workspaceRoot, MANIFEST))).toBe(false)
+        // A dry run leaves the whole tree as it was: every path, size and modification time.
+        expect(await tree(ctx.workspaceRoot)).toEqual(treeBefore)
         expect(await store.lookup(identity())).toEqual({ status: 'miss', reason: 'needs-migration' })
 
         const report = await store.migrateToManifest!({})
@@ -855,35 +935,79 @@ export function runConsumerFlowContractTests(implementation: WalkStoreContractIm
         // The old copies are not read any more: removing them changes nothing.
         await rm(join(ctx.workspaceRoot, '.deja/flows'), { recursive: true, force: true })
         expect((await store.lookup(identity({ goal: 'Today' }))).status).toBe('hit')
-        void metadataBefore
       } finally {
         await ctx.cleanup()
       }
     })
 
-    test('migrate is safe to run again, and finishes after a crash before the store was rewritten', async () => {
+    test('a migrate that fails at the last step takes back its files and manifest, and the next run completes', async () => {
       const ctx = await withFlows()
       try {
         await ctx.legacy(undefined, [{ goal: 'Today', path: MAIN }])
         const crashing = ctx.openFlows(undefined, { failMetadataReplacement: true })
+        const before = await tree(ctx.workspaceRoot, ['.deja/memory', '.deja/manifest.lock'])
         await expect(crashing.migrateToManifest!({})).rejects.toThrow()
-        // Files and manifest are in place; the store is still schema 3.
-        expect(existsSync(join(ctx.workspaceRoot, `${FLOWS}/today/flows/today.yaml`))).toBe(true)
-        const manifestAfterCrash = await ctx.manifestText()
-        expect(await crashing.lookup(identity())).toMatchObject({ status: 'miss', reason: 'not-validated' })
+        // Nothing is left behind: no new files, no folder, no manifest, no temporary file.
+        expect(existsSync(join(ctx.workspaceRoot, FLOWS))).toBe(false)
+        expect(existsSync(join(ctx.workspaceRoot, MANIFEST))).toBe(false)
+        expect(Object.keys(await tree(ctx.workspaceRoot, ['.deja/memory', '.deja/manifest.lock'])).filter(path => path.endsWith('.tmp'))).toEqual([])
+        expect(Object.keys(await tree(ctx.workspaceRoot, ['.deja/memory', '.deja/manifest.lock'])))
+          .toEqual(Object.keys(before))
+        expect(await crashing.lookup(identity())).toEqual({ status: 'miss', reason: 'needs-migration' })
         await implementation.closeStore(crashing)
 
         const store = ctx.openFlows()
         const report = await store.migrateToManifest!({})
         expect(report.migrated).toHaveLength(1)
-        expect(report.migrated[0].filesWritten).toEqual([])
-        expect(report.migrated[0].filesUnchanged.length).toBe(2)
-        expect(report.manifestChanged).toBe(false)
-        expect(await ctx.manifestText()).toBe(manifestAfterCrash)
+        expect(report.migrated[0].filesWritten.length).toBe(2)
         expect((await store.lookup(identity())).status).toBe('hit')
 
         const again = await store.migrateToManifest!({})
         expect(again).toMatchObject({ migrated: [], skipped: [], manifestChanged: false, backupPath: null })
+      } finally {
+        await ctx.cleanup()
+      }
+    })
+
+    test('a migrate resumes over files that are already there with the same bytes', async () => {
+      const ctx = await withFlows()
+      try {
+        await ctx.legacy('dev', [{ goal: 'Today', path: MAIN }])
+        await mkdir(join(ctx.workspaceRoot, FLOWS, 'today/flows'), { recursive: true })
+        await mkdir(join(ctx.workspaceRoot, FLOWS, 'today/subflows'), { recursive: true })
+        await ctx.write(`${FLOWS}/today/flows/today.yaml`, MAIN_YAML)
+        await ctx.write(`${FLOWS}/today/subflows/type.yaml`, SUB_YAML)
+        const report = await ctx.openFlows('dev').migrateToManifest!({})
+        expect(report.migrated[0]).toMatchObject({ filesWritten: [] })
+        expect(report.migrated[0].filesUnchanged).toHaveLength(2)
+        // A failure now must not remove files this run did not write.
+        expect(existsSync(join(ctx.workspaceRoot, FLOWS, 'today/flows/today.yaml'))).toBe(true)
+      } finally {
+        await ctx.cleanup()
+      }
+    })
+
+    test('two goals that slug to one name: the first moves, the second is a slug-collision, in a dry run too', async () => {
+      const ctx = await withFlows()
+      try {
+        await ctx.write('.maestro/flows/other.yaml', 'appId: dev.deja.fixture\n---\n- assertVisible:\n    id: "other"\n')
+        await ctx.legacy('dev', [
+          { goal: 'Log in', path: SMOKE, at: initialValidation },
+          { goal: 'Log-in', path: '.maestro/flows/other.yaml', at: laterValidation },
+        ])
+        const store = ctx.openFlows('dev')
+        for (const dryRun of [true, false]) {
+          const report = await store.migrateToManifest!({ dryRun })
+          expect(report.migrated).toHaveLength(1)
+          expect(report.skipped).toHaveLength(1)
+          expect(report.skipped[0].reason).toBe('slug-collision')
+          expect(report.migrated[0].flow).toBe(`${FLOWS}/log-in.yaml`)
+          expect(report.skipped[0].goal).not.toBe(report.migrated[0].goal)
+        }
+        // The real run did not abort: the first goal is in, and the second stays in the old store.
+        expect(parseWalkManifest(await ctx.manifestText()).walks).toHaveLength(1)
+        expect(existsSync(join(ctx.workspaceRoot, FLOWS, 'log-in.yaml'))).toBe(true)
+        expect((await store.list()).filter(walk => walk.closureSha256 === undefined)).toHaveLength(1)
       } finally {
         await ctx.cleanup()
       }

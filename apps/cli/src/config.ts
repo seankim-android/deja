@@ -7,7 +7,7 @@ import {
   type MaestroExecutionAdapter,
 } from '@deja-qa/maestro'
 import type { CheckoutRepairPolicy } from '@deja-qa/repair'
-import { checkFlowsDir, checkManifestPath } from '@deja-qa/store-local'
+import { checkFlowsDir, checkManifestPath, MIN_FORBIDDEN_VALUE_LENGTH } from '@deja-qa/store-local'
 
 export class CliConfigurationError extends Error {
   constructor(message: string, options?: ErrorOptions) {
@@ -279,6 +279,17 @@ export async function loadProductionConfiguration(configPath: string): Promise<P
     if (raw.repair !== undefined) {
       throw new CliConfigurationError('repair is not supported with a manifest yet (DEJA-6)')
     }
+  }
+
+  if (manifest !== undefined) {
+    // With a manifest every written file is scanned for these values, so one too short to scan for is refused.
+    explore.fixtureCredentials.forEach((credential, index) => {
+      if (credential.value.length < MIN_FORBIDDEN_VALUE_LENGTH) {
+        throw new CliConfigurationError(
+          `fixtureCredentials[${index}].value is shorter than ${MIN_FORBIDDEN_VALUE_LENGTH} characters, so files Déjà writes into your tree cannot be checked for it. Use a longer fixture value.`,
+        )
+      }
+    })
   }
 
   let flowsDir: string | undefined

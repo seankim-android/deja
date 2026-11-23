@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { link, lstat, mkdir, readFile, realpath, rename, stat, unlink, writeFile } from 'node:fs/promises'
+import { link, lstat, mkdir, readFile, realpath, rename, rmdir, stat, unlink, writeFile } from 'node:fs/promises'
 import { dirname, isAbsolute, posix as posixPath, relative, resolve, sep } from 'node:path'
 import {
   AssertionHashChangedError,
@@ -28,6 +28,7 @@ import {
   type WalkManifest,
 } from '@deja-qa/core'
 import { closureSha256Of, collectFlowClosure, FlowClosureError, MissingFlowFileError, type FlowClosure } from './flow-closure.ts'
+import { ForbiddenValueTooShortError, holdsForbiddenValue, jsonHoldsForbiddenValue, MIN_FORBIDDEN_VALUE_LENGTH } from './secret-scan.ts'
 import { StoreLockedError, WriterLock } from './writer-lock.ts'
 
 /** The verified flow is not the consumer's own file, so manifest mode cannot keep it. */
@@ -234,7 +235,9 @@ export class ConsumerFlows {
     this.manifestPath = checkManifestPath(options.manifestPath)
     this.flowsDir = options.flowsDir === undefined ? undefined : checkFlowsDir(options.flowsDir)
     this.workspaceRoot = resolve(options.workspaceRoot)
-    this.forbiddenValues = (options.forbiddenValues ?? []).filter(value => value.length >= 3)
+    this.forbiddenValues = options.forbiddenValues ?? []
+    // A value too short to scan for is refused, not skipped: skipping would let it through.
+    if (this.forbiddenValues.some(value => value.length < MIN_FORBIDDEN_VALUE_LENGTH)) throw new ForbiddenValueTooShortError()
   }
 
   private canonicalRoot() {
@@ -581,8 +584,7 @@ export class ConsumerFlows {
   }
 
   private holdsForbiddenValue(bytes: Buffer) {
-    const text = bytes.toString('utf8')
-    return this.forbiddenValues.some(value => text.includes(value))
+    return holdsForbiddenValue(bytes.toString('utf8'), this.forbiddenValues)
   }
 
   /** Write the files that are not there yet. Each is created exclusively: nothing is overwritten. */
@@ -628,10 +630,8 @@ export class ConsumerFlows {
   /** Throws if the manifest's bytes would hold a fixture value. Never names the value. */
   checkManifest(manifest: WalkManifest) {
     const text = serializeWalkManifest(manifest)
-    for (const value of this.forbiddenValues) {
-      if (text.includes(value)) {
-        throw new InvalidWalkManifestError('the manifest would hold a fixture credential value; nothing was written')
-      }
+    if (jsonHoldsForbiddenValue(text, this.forbiddenValues)) {
+      throw new InvalidWalkManifestError('the manifest would hold a fixture credential value; nothing was written')
     }
     // Whatever is written must read back. A goal or app id that the reader refuses (a path, say)
     // would leave a manifest that fails every later run, so it is refused here, before any write.
@@ -645,6 +645,47 @@ export class ConsumerFlows {
       )
     }
     return text
+  }
+
+  /** Remove files this run wrote, and any folder it leaves empty under the flows folder. Best effort. */
+  async removeWritten(paths: string[]) {
+    const root = await this.canonicalRoot()
+    for (const path of paths) {
+      await unlink(resolve(root, path)).catch(() => {})
+      let folder = dirname(resolve(root, path))
+      while (this.flowsDir && (folder === resolve(root, this.flowsDir) || inside(resolve(root, this.flowsDir), folder))) {
+        try { await rmdir(folder) } catch { break }
+        folder = dirname(folder)
+      }
+    }
+  }
+
+  /** The manifest's exact bytes, or null when there is no file. For `restoreManifestText`. */
+  async manifestText(): Promise<string | null> {
+    const { target } = await this.manifestFile()
+    try {
+      return await readFile(target, 'utf8')
+    } catch (error) {
+      if (errorCode(error) === 'ENOENT') return null
+      throw error
+    }
+  }
+
+  /** Put back what `manifestText` returned: the same bytes, or no file at all. Call under `withLock`. */
+  async restoreManifestText(text: string | null) {
+    const { target } = await this.manifestFile()
+    if (text === null) {
+      await unlink(target).catch(() => {})
+      return
+    }
+    const temporary = `${target}.${process.pid}-${randomUUID()}.tmp`
+    try {
+      await writeFile(temporary, text)
+      await rename(temporary, target)
+    } catch (error) {
+      await unlink(temporary).catch(() => {})
+      throw error
+    }
   }
 
   /** Write the manifest atomically, as Déjà's fixed bytes. Call under `withLock`. */

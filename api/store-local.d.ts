@@ -1,6 +1,6 @@
 // typescript 7.0.2
 // entry . (./src/index.ts)
-// exports: ConsumerFlowError, ConsumerFlows, ConsumerFlowsOptions, ConsumerPlan, FlowClosureError, InvalidStoreIdError, InvalidSubflowMemoryError, InvalidWalkMemoryError, LOCAL_MEMORY_CONSUMER_SCHEMA_VERSION, LOCAL_MEMORY_PATH, LOCAL_MEMORY_SCHEMA_VERSION, LocalVerifiedSubflowStore, LocalVerifiedSubflowStoreOptions, LocalWalkStore, LocalWalkStoreOptions, LockHolder, LockTestHooks, MAESTRO_FLOW_SCHEMA_VERSION, ManifestChangedError, ManifestLockedError, MaterializePlan, MigrationContext, MissingFlowFileError, StoreLockContentionError, StoreLockUnavailableError, StoreLockedError, VERIFIED_SUBFLOW_INDEX_PATH, WalkMemory, WriterLock, assertionsSha256, checkFlowsDir, checkManifestPath, checkStoredSubflows, closureAssertions, collectFlowClosure, normalizeGoal, planStoredClosure, readConsumerWalkFields, readStoredFlowFiles, runMigration, snapshotFlowClosure, storeMetadataPath
+// exports: ConsumerFlowError, ConsumerFlows, ConsumerFlowsOptions, ConsumerPlan, FlowClosureError, ForbiddenValueTooShortError, InvalidStoreIdError, InvalidSubflowMemoryError, InvalidWalkMemoryError, LOCAL_MEMORY_CONSUMER_SCHEMA_VERSION, LOCAL_MEMORY_PATH, LOCAL_MEMORY_SCHEMA_VERSION, LocalVerifiedSubflowStore, LocalVerifiedSubflowStoreOptions, LocalWalkStore, LocalWalkStoreOptions, LockHolder, LockTestHooks, MAESTRO_FLOW_SCHEMA_VERSION, MIN_FORBIDDEN_VALUE_LENGTH, ManifestChangedError, ManifestLockedError, MaterializePlan, MigrationContext, MissingFlowFileError, StoreLockContentionError, StoreLockUnavailableError, StoreLockedError, VERIFIED_SUBFLOW_INDEX_PATH, WalkMemory, WriterLock, assertionsSha256, checkFlowsDir, checkManifestPath, checkStoredSubflows, closureAssertions, collectFlowClosure, normalizeGoal, planStoredClosure, readConsumerWalkFields, readStoredFlowFiles, runMigration, snapshotFlowClosure, storeMetadataPath
 export declare function assertionsSha256(closure: FlowClosure): string;
 export declare function checkFlowsDir(path: string): string;
 export declare function checkManifestPath(path: string): string;
@@ -31,6 +31,9 @@ export declare class ConsumerFlows {
     private holdsForbiddenValue;
     writeMaterialized(plan: MaterializePlan): Promise<string[]>;
     checkManifest(manifest: WalkManifest): string;
+    removeWritten(paths: string[]): Promise<void>;
+    manifestText(): Promise<string | null>;
+    restoreManifestText(text: string | null): Promise<void>;
     writeManifest(manifest: WalkManifest): Promise<void>;
 }
 export type ConsumerFlowsOptions = {
@@ -49,6 +52,9 @@ export type ConsumerPlan = {
 };
 export declare class FlowClosureError extends Error {
     constructor(message: string, options?: ErrorOptions);
+}
+export declare class ForbiddenValueTooShortError extends Error {
+    constructor();
 }
 export declare class InvalidStoreIdError extends Error {
     constructor(id: string);
@@ -163,6 +169,7 @@ export type MigrationContext = {
     memoryFile: string;
     writeWalks(walks: StoredWalk[]): Promise<void> | void;
 };
+export declare const MIN_FORBIDDEN_VALUE_LENGTH = 3;
 export declare class MissingFlowFileError extends FlowClosureError {
     constructor(path: string);
 }

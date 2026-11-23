@@ -582,10 +582,17 @@ export class LocalWalkStore implements WalkStore {
       // Validate all existing entries first: corrupt memory is never silently replaced.
       const memory = await this.loadMemory()
       const plan = await consumer.plan(memory.walks, identity, options)
-      await this.writeMemory({
-        schemaVersion: LOCAL_MEMORY_CONSUMER_SCHEMA_VERSION, walks: [...plan.remaining, plan.walk],
-      })
-      const changed = await plan.commit()
+      let changed: boolean
+      try {
+        await this.writeMemory({
+          schemaVersion: LOCAL_MEMORY_CONSUMER_SCHEMA_VERSION, walks: [...plan.remaining, plan.walk],
+        })
+        changed = await plan.commit()
+      } catch (error) {
+        // New files with no entry and no history would only block a retry: take them back.
+        await consumer.removeWritten(plan.filesWritten)
+        throw error
+      }
       return {
         walk: plan.walk,
         flowPath: plan.flowPath,
@@ -785,3 +792,4 @@ export {
 export { MissingFlowFileError } from './flow-closure.ts'
 export { runMigration, type MigrationContext } from './migration.ts'
 export { checkFlowsDir, type MaterializePlan } from './consumer-flow.ts'
+export { ForbiddenValueTooShortError, MIN_FORBIDDEN_VALUE_LENGTH } from './secret-scan.ts'

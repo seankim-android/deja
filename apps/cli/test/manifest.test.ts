@@ -193,6 +193,14 @@ describe('manifest mode on the CLI', () => {
         await rm(bad.temporary, { recursive: true, force: true })
       }
     }
+    const shortValue = await workspace({ fixtureCredentials: [{ label: 'Pin', value: 'ab' }] })
+    try {
+      const result = await execute(shortValue.root, ['list'])
+      expect(result.exitCode).toBe(2)
+      expect(result.stderr).toContain('shorter than 3 characters')
+    } finally {
+      await rm(shortValue.temporary, { recursive: true, force: true })
+    }
     const orphan = await workspace({ manifest: undefined, flowsDir: '.maestro/x' })
     try {
       expect((await execute(orphan.root, ['list'])).stderr).toContain('flowsDir needs a manifest')
