@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test'
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, realpath, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import {
@@ -32,7 +32,7 @@ afterEach(() => {
 })
 
 async function fixture(goal = 'checkout') {
-  const temporary = await mkdtemp(join(tmpdir(), 'deja-openclaw-'))
+  const temporary = await realpath(await mkdtemp(join(tmpdir(), 'deja-openclaw-')))
   const workspaceRoot = join(temporary, 'workspace')
   const buildPath = 'app/build/app-debug.apk'
   await mkdir(join(workspaceRoot, 'app/build'), { recursive: true })

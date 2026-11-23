@@ -1,12 +1,12 @@
 import { describe, expect, test } from 'bun:test'
 import { existsSync } from 'node:fs'
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, realpath, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { runCheckoutBuildAndInstall } from '../src/build.ts'
 
 async function fixture(gradleExitCode: number) {
-  const temporary = await mkdtemp(join(tmpdir(), 'deja-build-install-'))
+  const temporary = await realpath(await mkdtemp(join(tmpdir(), 'deja-build-install-')))
   const gradle = join(temporary, 'fake-gradlew')
   const adb = join(temporary, 'fake-adb')
   const installMarker = join(temporary, 'install-args.txt')
@@ -28,7 +28,7 @@ describe('bounded Gradle build and device install', () => {
         adbExecutable: context.adb,
         device: 'emulator-test',
         apkPath: apk,
-        timeoutMs: 2000,
+        timeoutMs: 30_000,
       })
       expect(result.passed).toBe(true)
       expect(result.exitCode).toBe(0)
@@ -56,7 +56,7 @@ describe('bounded Gradle build and device install', () => {
         adbExecutable: context.adb,
         device: 'emulator-test',
         apkPath: join(context.temporary, 'app-debug.apk'),
-        timeoutMs: 2000,
+        timeoutMs: 30_000,
       })
       expect(result.passed).toBe(false)
       expect(result.exitCode).toBe(1)

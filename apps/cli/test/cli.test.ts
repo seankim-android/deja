@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, realpath, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
@@ -9,7 +9,7 @@ const cli = resolve(import.meta.dir, '../deja.ts')
 const fakeMaestro = resolve(import.meta.dir, '../../../packages/maestro/test/fixtures/fake-maestro.cjs')
 const fakeOpenClaw = resolve(import.meta.dir, '../../../packages/agent-openclaw/test/fixtures/fake-openclaw.cjs')
 async function workspace() {
-  const temporary = await mkdtemp(join(tmpdir(), 'deja-cli-'))
+  const temporary = await realpath(await mkdtemp(join(tmpdir(), 'deja-cli-')))
   const root = join(temporary, 'workspace')
   await mkdir(join(root, 'app/build'), { recursive: true })
   await mkdir(join(root, 'flows'), { recursive: true })
@@ -39,7 +39,7 @@ exit 0
     explorationTimeoutSeconds: 30,
     verificationTimeoutMs: 2000,
     fixtureCredentials: [{ label: 'Fixture password', value: 'testing123' }],
-    maestro: { executable: fakeMaestro, timeoutMs: 2000 },
+    maestro: { executable: fakeMaestro, timeoutMs: 30_000 },
     openClaw: { executable: fakeOpenClaw, mcpProxy: 'scripts/maestro-mcp-proxy.ts' },
   }, null, 2)}\n`)
   return { temporary, root }

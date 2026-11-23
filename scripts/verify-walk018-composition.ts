@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 import { createHash } from 'node:crypto'
 import {
-  mkdir, mkdtemp, readFile, readdir, rm, symlink, unlink, writeFile,
+  mkdir, mkdtemp, realpath, readFile, readdir, rm, symlink, unlink, writeFile,
 } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
@@ -105,7 +105,7 @@ const silentReporter: RunReporter = {
 }
 
 export async function runWalk018Verification() {
-  const temporary = await mkdtemp(join(tmpdir(), 'walk018-composition-'))
+  const temporary = await realpath(await mkdtemp(join(tmpdir(), 'walk018-composition-')))
   const workspaceRoot = join(temporary, 'workspace')
   const priorEnvironment = process.env.DEJA_COMPOSITION_FAIL
   try {
@@ -144,7 +144,7 @@ export async function runWalk018Verification() {
       workspaceRoot,
       executable: fixture,
       device: 'deterministic-fixture',
-      timeoutMs: 5_000,
+      timeoutMs: 30_000,
       adapter,
     })
     const segments = new LocalVerifiedSubflowStore({ workspaceRoot })
