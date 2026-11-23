@@ -53,7 +53,8 @@ export type StoredWalk = WalkIdentity & {
   flowSha256: string
   lastValidation: WalkValidation
   validationHistory: StoredValidation[]
-  origin?: 'remember' | 'explore' | 'repair'
+  /** `replayed-on-new-build` (WALK-021): an earlier build's verified YAML, replayed once on this build. */
+  origin?: 'remember' | 'explore' | 'repair' | 'replayed-on-new-build'
   exploration?: ExplorationDetails
   repairHistory?: RepairProvenance[]
 }
@@ -77,8 +78,21 @@ export type PersistVerifiedOptions = {
   identity: WalkIdentity
   candidatePath: string
   validation: WalkValidation
-  origin: 'remember' | 'explore'
+  origin: 'remember' | 'explore' | 'replayed-on-new-build'
   exploration?: ExplorationDetails
+  /**
+   * When set, the store hashes the candidate bytes it is about to write and refuses, before writing
+   * anything, if they differ. Callers that replayed a candidate pass the sha256 of what actually ran.
+   */
+  expectedFlowSha256?: string
+}
+
+/** Thrown before any write when the candidate bytes differ from `expectedFlowSha256`. */
+export class ExpectedFlowChecksumMismatchError extends Error {
+  constructor(expected: string, actual: string) {
+    super(`Verified candidate bytes (${actual}) differ from the expected checksum (${expected}); nothing was stored`)
+    this.name = 'ExpectedFlowChecksumMismatchError'
+  }
 }
 
 export type PersistVerifiedRepairOptions = Omit<PersistVerifiedOptions, 'origin' | 'exploration'> & {

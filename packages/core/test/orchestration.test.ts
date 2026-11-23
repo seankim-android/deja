@@ -4,6 +4,7 @@ import { resolve } from 'node:path'
 import {
   Deja,
   normalizeGoal,
+  ExpectedFlowChecksumMismatchError,
   type ExecutionResult,
   type ExplorationResult,
   type FailureCategory,
@@ -26,7 +27,7 @@ import {
 const identity: WalkIdentity = {
   goal: 'Checkout',
   appId: 'fixture.app',
-  platform: 'fixture-platform',
+  platform: 'ios',
   flowSchemaVersion: 'flow/v1',
   buildFingerprint: 'a'.repeat(64),
 }
@@ -540,7 +541,8 @@ describe('vendor-independent orchestration', () => {
       expect(context.modelConstructions()).toBe(0)
       expect(context.store.persistOptions).toEqual([{
         identity: newBuild, candidatePath: '/fixture/stored.yaml',
-        validation: { passed: true, at: timestamp }, origin: 'remember',
+        validation: { passed: true, at: timestamp }, origin: 'replayed-on-new-build',
+        expectedFlowSha256: storedWalk.flowSha256,
       }])
       // recordValidation needs an exact hit; the new build has none, so the pass is stored instead.
       expect(context.store.validations).toHaveLength(0)
@@ -650,21 +652,33 @@ describe('vendor-independent orchestration', () => {
       expect(context.store.persistCalls).toBe(0)
     })
 
-    test('bytes that change between the checksum check and the write are marked failed', async () => {
+    test('bytes that change between the checksum check and the write are refused before any write', async () => {
       const context = fixture(stale, [execution(true)], undefined, undefined, replayOptions)
       context.store.previousResult = async () => previousHit
-      const original = context.store.persistVerifiedCandidate.bind(context.store)
-      context.store.persistVerifiedCandidate = async options => ({
-        ...(await original(options)), flowSha256: 'd'.repeat(64),
-      })
+      let expected: string | undefined
+      let origin: string | undefined
+      context.store.persistVerifiedCandidate = async options => {
+        expected = options.expectedFlowSha256
+        origin = options.origin
+        throw new ExpectedFlowChecksumMismatchError(options.expectedFlowSha256 ?? '', 'd'.repeat(64))
+      }
       const result = await context.cache.run(newBuild)
+      expect(expected).toBe(storedWalk.flowSha256)
+      expect(origin).toBe('replayed-on-new-build')
       expect(result).toMatchObject({
         outcome: 'failed', passed: false, modelCalls: 0,
         replayedOnNewBuild: { recordedForNewBuild: false },
       })
-      expect(context.store.validationIdentities).toEqual([newBuild])
-      expect(context.store.validations).toEqual([{ passed: false, at: timestamp }])
+      expect(context.store.validations).toEqual([])
       expect(context.counts()).toEqual({ runnerCalls: 1, ...untouched })
+    })
+
+    test('the policy is refused on a non-iOS identity', async () => {
+      const context = fixture(stale, undefined, undefined, undefined, replayOptions)
+      const result = await context.cache.run({ ...newBuild, platform: 'android' })
+      expect(result.outcome).toBe('repair-rejected')
+      expect(context.store.previousLookups).toBe(0)
+      expect(context.counts().runnerCalls).toBe(0)
     })
   })
 })

@@ -1,8 +1,10 @@
 import {
+  ExpectedFlowChecksumMismatchError,
   normalizeGoal,
   WALK_RESULT_SCHEMA_VERSION,
   type CacheStatus,
   type ExplorationResult,
+  type PersistedWalk,
   type RepairResult,
   type RunResult,
   type RunReporter,
@@ -230,6 +232,7 @@ export class Deja {
     identity: WalkIdentity,
     missStart: RunStart,
   ): Promise<RunResult | null> {
+    if (identity.platform !== 'ios') return null
     const { store } = this.dependencies
     // The store re-hashes the stored YAML against its recorded checksum here and throws on any
     // mismatch, exactly as an exact hit does. No other await sits between this and the replay.
@@ -279,23 +282,25 @@ export class Deja {
         replayedOnNewBuild: { ...replay, recordedForNewBuild: false },
       })
     }
-    const persisted = await store.persistVerifiedCandidate({
-      identity,
-      candidatePath: current.flowPath,
-      validation: { passed: true, at: execution.endedAt },
-      origin: 'remember',
-      ...(walk.exploration ? { exploration: walk.exploration } : {}),
-    })
-    if (persisted.flowSha256 !== walk.flowSha256) {
-      // Bytes changed between the checksum check and the write. Mark the new entry failed so the
-      // next lookup is a failed-validation miss, never an exact hit on bytes that never ran.
-      await store.recordValidation(identity, { passed: false, at: execution.endedAt })
+    let persisted: PersistedWalk
+    try {
+      persisted = await store.persistVerifiedCandidate({
+        identity,
+        candidatePath: current.flowPath,
+        validation: { passed: true, at: execution.endedAt },
+        origin: 'replayed-on-new-build',
+        // The store refuses before writing anything if the bytes are no longer the replayed ones.
+        expectedFlowSha256: walk.flowSha256,
+        ...(walk.exploration ? { exploration: walk.exploration } : {}),
+      })
+    } catch (error) {
+      if (!(error instanceof ExpectedFlowChecksumMismatchError)) throw error
       return this.finish(replayStart, {
         outcome: 'failed', passed: false, modelCalls: 0, modelCallBasis,
         assertions: execution.assertions, repairCount: 0,
-        yamlPath: persisted.flowPath, yamlSha256: persisted.flowSha256,
+        yamlPath: walk.flowPath, yamlSha256: walk.flowSha256,
         failure: null, artifacts: execution.artifacts, diffs: [],
-        errors: ['Stored YAML checksum differs from the replayed walk; it was marked failed for this build'],
+        errors: ['The stored YAML changed after the replay; nothing was stored for this build and the previous build\'s walk is unchanged'],
         replayedOnNewBuild: { ...replay, recordedForNewBuild: false },
       })
     }
