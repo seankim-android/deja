@@ -28,15 +28,15 @@ const rows = await Promise.all(runs.map(async run => {
 }))
 
 const width = 820
-const top = 64
-const rowHeight = 40
+const top = 100
+const rowHeight = 46
 const barHeight = 16
 const panels = [
   { title: 'Model calls', x: 236, width: 180, max: 15, ticks: [0, 5, 10, 15], value: (r: typeof rows[0]) => r.modelCalls, format: (v: number) => String(v) },
   { title: 'Duration (s)', x: 490, width: 230, max: 100, ticks: [0, 25, 50, 75, 100], value: (r: typeof rows[0]) => r.seconds, format: (v: number) => `${v.toFixed(1)} s` },
 ]
 const plotBottom = top + rows.length * rowHeight
-const height = plotBottom + 52
+const height = plotBottom + 64
 
 function bar(x: number, y: number, w: number, h: number) {
   // Square at the baseline, 4px rounded data end.
@@ -59,7 +59,7 @@ parts.push(`<style>
   }
 </style>`)
 parts.push(`<text class="ink" x="0" y="22" font-size="16" font-weight="600">Replay and repair make 0 model calls</text>`)
-parts.push(`<text class="muted" x="0" y="42" font-size="12">Saved run reports in demo/live-evidence. Different run types, so durations are not a speedup claim.</text>`)
+parts.push(`<text class="muted" x="0" y="46" font-size="12">Saved run reports in demo/live-evidence. Different run types, so durations are not a speedup claim.</text>`)
 
 rows.forEach((row, i) => {
   const y = top + i * rowHeight + rowHeight / 2
@@ -68,12 +68,12 @@ rows.forEach((row, i) => {
 
 for (const panel of panels) {
   const scale = (v: number) => (v / panel.max) * panel.width
-  parts.push(`<text class="muted" x="${panel.x}" y="${top - 8}" font-size="12" font-weight="600">${panel.title}</text>`)
+  parts.push(`<text class="muted" x="${panel.x}" y="${top - 14}" font-size="12" font-weight="600">${panel.title}</text>`)
   for (const tick of panel.ticks) {
     const x = panel.x + scale(tick)
     if (tick === 0) parts.push(`<line class="axis" x1="${x}" x2="${x}" y1="${top}" y2="${plotBottom}" stroke-width="1"/>`)
     else parts.push(`<line class="grid" x1="${x}" x2="${x}" y1="${plotBottom}" y2="${plotBottom + 4}" stroke-width="1"/>`)
-    parts.push(`<text class="muted" x="${x}" y="${plotBottom + 16}" font-size="11" text-anchor="middle">${tick}</text>`)
+    parts.push(`<text class="muted" x="${x}" y="${plotBottom + 18}" font-size="11" text-anchor="middle">${tick}</text>`)
   }
   rows.forEach((row, i) => {
     const value = panel.value(row)
