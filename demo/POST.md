@@ -6,7 +6,7 @@
 My AI testing agent learned our checkout in 13 model calls. Now it replays it with 0.
 
 Project Name: Déjà (formerly WalkCache)
-Team Members: @YOUR_X_HANDLE (X), u/kssc0112 (Reddit)
+Team Members: @kssc0112 (X), u/MenuSecret3697 (Reddit)
 Project Description: Kimi K3.1 Pro on Cerebras explores an Android app once through OpenClaw and writes a Maestro test. Déjà runs that test again by itself and saves it only if all 14 checks pass. Every later run replays the saved test with no model. A real bug still fails the test.
 GitHub Repository: https://github.com/seankim-android/deja
 Demo Video: (attached)
@@ -58,7 +58,7 @@ What it doesn't do yet: cold exploration and repair are Android only. Chromium a
 
 Every number in the video comes from a run report in the repo: https://github.com/seankim-android/deja
 
-Team: u/kssc0112
+Team: u/MenuSecret3697
 
 I'd like to know which flow you would cache first: sign-in, checkout or onboarding?
 
