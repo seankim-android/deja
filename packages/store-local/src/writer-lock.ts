@@ -75,6 +75,17 @@ function errorCode(error: unknown) {
 }
 
 /**
+ * Field 22 (start ticks since boot) of a /proc/<pid>/stat line. The command name (field 2) sits in
+ * parentheses and may hold spaces and parentheses, so the fields start after the LAST ")".
+ */
+export function parseProcStartTicks(stat: string): string | null {
+  const end = stat.lastIndexOf(')')
+  if (end < 0) return null
+  const ticks = stat.slice(end + 2).split(' ')[22 - 3]
+  return ticks && /^\d+$/.test(ticks) ? ticks : null
+}
+
+/**
  * Start time of a process, or null when it cannot be read. Linux reads ticks since boot from
  * /proc/<pid>/stat field 22: `ps lstart` there is derived from the boot time, which moves when the
  * clock steps. Elsewhere `ps lstart` is stable. BusyBox `ps` has no `lstart`: null, so a reused pid
@@ -83,10 +94,7 @@ function errorCode(error: unknown) {
 function processStart(pid: number): string | null {
   if (process.platform === 'linux') {
     try {
-      const stat = readFileSync(`/proc/${pid}/stat`, 'utf8')
-      // The command name sits in parentheses and may contain spaces; fields 3.. follow the last ")".
-      const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ')
-      const ticks = fields[22 - 3]
+      const ticks = parseProcStartTicks(readFileSync(`/proc/${pid}/stat`, 'utf8'))
       if (ticks) return `proc:${ticks}`
     } catch { /* fall through to ps */ }
   }
@@ -125,9 +133,10 @@ function machineId(): string | null {
 }
 
 function sameMachine(holder: LockHolder) {
-  if (holder.host === hostname()) return true
+  // Machine ids are stable and unique; hostnames change with the network and can repeat (`localhost`).
   const mine = machineId()
-  return mine !== null && holder.machineId === mine
+  if (mine !== null && holder.machineId) return holder.machineId === mine
+  return holder.host === hostname()
 }
 
 /**
@@ -336,11 +345,12 @@ export class WriterLock {
     exitHookInstalled = true
     const releaseAll = () => { for (const lock of [...held]) lock.release() }
     process.on('exit', releaseAll)
-    // Ctrl-C and `kill` are how runs normally stop. Release, then let the signal take its usual
-    // course. A host that handles the signal itself keeps control: it should call close().
+    // Ctrl-C and `kill` are how runs normally stop. When ours is the only listener, release and let
+    // the signal take its usual course. When the host has a listener too (even one added after the
+    // first write), the host owns shutdown: do nothing here and let it call close().
     for (const signal of ['SIGINT', 'SIGTERM'] as const) {
-      if (process.listenerCount(signal) > 0) continue
       const handler = () => {
+        if (process.listenerCount(signal) > 1) return
         releaseAll()
         process.removeListener(signal, handler)
         process.kill(process.pid, signal)

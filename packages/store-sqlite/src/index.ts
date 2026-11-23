@@ -482,6 +482,7 @@ export class SQLiteWalkStore implements WalkStore {
   }
 
   private commitMetadata(walks: StoredWalk[]) {
+    this.acquireWriter() // Still the holder? A lost lock stops the write before it commits.
     this.validateUniqueIdentities(walks)
     const database = this.openWritable()
     database.exec('BEGIN IMMEDIATE')

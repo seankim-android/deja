@@ -206,7 +206,7 @@ fails with exit 2 or 4 after it was parsed, the line still prints, with `outcome
 | `2` | Usage, configuration, report-inspection, or direct I/O error; also no command |
 | `3` | Cold exploration was rejected or failed to produce a verified reusable walk |
 | `4` | Invalid/corrupt local memory; quarantine it and recover through verified cold exploration |
-| `5` | The store is locked by another run (`STORE_LOCKED`), or two runs collided taking over a stale lock (`STORE_LOCK_CONTENTION`). Use a different `--store <id>` per device; for contention, run again |
+| `5` | The store is locked by another run (`STORE_LOCKED`), two runs collided taking over a stale lock (`STORE_LOCK_CONTENTION`), or the filesystem cannot hold the lock (`STORE_LOCK_UNAVAILABLE`). Use a different `--store <id>` per device; for contention, run again |
 
 ### One store per device
 

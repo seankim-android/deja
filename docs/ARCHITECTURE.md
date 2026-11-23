@@ -300,11 +300,13 @@ Both stores take a writer lock on their first write (persist, repair, validation
 `close()`, process exit, SIGINT or SIGTERM (a host that handles those signals itself keeps control
 and should call `close()`). The lock is a file beside the metadata (`walks.json.lock`,
 `walks.sqlite.lock`) holding the holder's pid, start time, host, machine id and a token, created
-whole by a hard link. Every write re-reads the file and refuses to continue if the token is no
-longer its own. A second writer gets `StoreLockedError` (`code: 'STORE_LOCKED'`), and the CLI exits 5
+whole by a hard link. Every write re-reads the file when it starts and again right before it
+commits its metadata (the rename for `walks.json`, the transaction for SQLite), and stops if the
+token is no longer its own. That narrows a lost lock to the instant between the last check and the
+commit; it does not make the commit itself exclusive. A second writer gets `StoreLockedError` (`code: 'STORE_LOCKED'`), and the CLI exits 5
 before it runs anything. Reads (`lookup`, `list`, `deja list`) never take the lock.
 
-A lock is stale only when it is on this machine (same hostname, or same machine id) and its pid is
+A lock is stale only when it is on this machine (same machine id when both have one, otherwise the same hostname) and its pid is
 gone or now has a different start time. The start time is `/proc/<pid>/stat` field 22 on Linux and
 `ps -o lstart` elsewhere. Another machine, an unreadable file, or a start time that cannot be read
 (for example BusyBox `ps`, so a reused pid is not noticed) all mean held: delete the lock by hand.
@@ -316,9 +318,9 @@ was not the file that was judged (someone replaced it) it is linked back and the
 `StoreLockContentionError` (`STORE_LOCK_CONTENTION`, a subclass of `StoreLockedError`; run again).
 An unreadable `.break` older than 10 seconds is a crash leftover and is replaced. Residual risk: a
 check-then-rename window of microseconds between a taker's read and its rename. The holder's
-re-check on every write turns a lost lock into an error instead of two writers. The lock does not
+re-checks (above) turn a lost lock into an error for every write that has not yet committed. The lock does not
 cover a network filesystem shared between machines, or one without hard links
-(`StoreLockUnavailableError`).
+(`StoreLockUnavailableError`, also exit 5).
 
 To run several devices at once, give each its own store with `storeId` (`--store <id>` on the CLI;
 a simulator UDID works). History goes to `.deja/memory/stores/<id>/walks.{json,sqlite}` with its

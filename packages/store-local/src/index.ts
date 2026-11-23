@@ -424,6 +424,7 @@ export class LocalWalkStore implements WalkStore {
   }
 
   private async writeMemory(memory: WalkMemory) {
+    this.acquireWriter() // Still the holder? A lost lock stops the write before it commits.
     const metadata = canonicalMetadataTarget(this.workspaceRoot, this.memoryPath)
     // A walk from before schema 3 has no stored subflows: mark it so lookup misses instead of guessing.
     const walks = memory.walks.map(walk => walk.subflowFiles

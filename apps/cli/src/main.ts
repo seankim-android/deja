@@ -10,6 +10,7 @@ import {
   InvalidWalkMemoryError,
   LocalWalkStore,
   StoreLockedError,
+  StoreLockUnavailableError,
 } from '@deja-qa/store-local'
 import {
   MaestroWalkRunner,
@@ -293,6 +294,10 @@ export async function runCli(argv: string[], io: CliIo = {
         await writeErroredJunit(junitPath, goalText || parsed.command, redact(message)).catch(() => {})
       }
       summarize(null, goalText)
+    }
+    if (error instanceof StoreLockUnavailableError) {
+      io.stderr('Store lock unavailable: this filesystem cannot hold the writer lock. Use a local disk for the workspace.\n')
+      return 5
     }
     if (error instanceof StoreLockedError) {
       io.stderr(error.code === 'STORE_LOCK_CONTENTION'
