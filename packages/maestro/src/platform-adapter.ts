@@ -4,6 +4,13 @@ import { relative, resolve, sep } from 'node:path'
 
 export type MaestroPlatform = 'android' | 'web' | 'ios'
 
+/** Per-invocation options. `junitPath` asks Maestro itself to write its JUnit report there. */
+export type MaestroCommandOptions = { junitPath?: string }
+
+function junitArguments(options?: MaestroCommandOptions) {
+  return options?.junitPath ? ['--format=JUNIT', `--output=${options.junitPath}`] : []
+}
+
 export type AdapterIdentityInput = { buildFingerprint: string }
 export type AdapterCacheIdentity = AdapterIdentityInput & {
   adapter?: string
@@ -48,7 +55,7 @@ export interface MaestroExecutionAdapter {
   readonly device: string
   cacheIdentity(input: AdapterIdentityInput): AdapterCacheIdentity
   buildFingerprint(workspaceRoot: string, buildPath: string): Promise<string>
-  commandArguments(flowPath: string): string[]
+  commandArguments(flowPath: string, options?: MaestroCommandOptions): string[]
 }
 
 export type AndroidAdapterOptions = { device: string }
@@ -74,7 +81,9 @@ export function androidMaestroAdapter(options: AndroidAdapterOptions): MaestroEx
     // Omit new fields for Android so validated pre-WALK-010 cache entries remain reproducible.
     cacheIdentity: ({ buildFingerprint }) => ({ buildFingerprint }),
     buildFingerprint: fingerprintFile,
-    commandArguments: flowPath => ['--no-ansi', '--device', options.device, 'test', flowPath],
+    commandArguments: (flowPath, run) => [
+      '--no-ansi', '--device', options.device, 'test', ...junitArguments(run), flowPath,
+    ],
   }
 }
 
@@ -94,9 +103,10 @@ export function webMaestroAdapter(options: WebAdapterOptions = {}): MaestroExecu
     device,
     cacheIdentity: ({ buildFingerprint }) => ({ buildFingerprint, adapter: id, browser: 'chromium' }),
     buildFingerprint: (root, buildPath) => fingerprintTree(root, buildPath, 'Web'),
-    commandArguments: flowPath => [
+    commandArguments: (flowPath, run) => [
       '--no-ansi', '--platform', 'web', '--device', device,
-      'test', ...(headless ? ['--headless'] : []), '--screen-size', screenSize, flowPath,
+      'test', ...(headless ? ['--headless'] : []), '--screen-size', screenSize,
+      ...junitArguments(run), flowPath,
     ],
   }
 }
@@ -111,8 +121,9 @@ export function iosMaestroAdapter(options: IosAdapterOptions): MaestroExecutionA
     device: options.device,
     cacheIdentity: ({ buildFingerprint }) => ({ buildFingerprint, adapter: id }),
     buildFingerprint: (root, buildPath) => fingerprintTree(root, buildPath, 'iOS'),
-    commandArguments: flowPath => [
-      '--no-ansi', '--platform', 'ios', '--device', options.device, 'test', flowPath,
+    commandArguments: (flowPath, run) => [
+      '--no-ansi', '--platform', 'ios', '--device', options.device, 'test',
+      ...junitArguments(run), flowPath,
     ],
   }
 }
