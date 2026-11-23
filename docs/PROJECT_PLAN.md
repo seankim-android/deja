@@ -1,3 +1,6 @@
+> Historical build log from the Cerebras x Kimi hackathon (Nov 21 to 22, 2026).
+> The project was called WalkCache then.
+
 # WalkCache project plan
 
 **Status:** planned on November 21, 2026  

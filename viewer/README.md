@@ -1,4 +1,4 @@
-# WalkCache local run viewer
+# Déjà (formerly WalkCache) local run viewer
 
 An optional, read-only UI for local run reports. It never runs exploration, replay, repair, or a model.
 The headless CLI remains fully functional when this viewer is stopped.

@@ -1,3 +1,6 @@
+> Historical build log from the Cerebras x Kimi hackathon (Nov 21 to 22, 2026).
+> The project was called WalkCache then.
+
 # WalkCache ticket backlog
 
 These are repo-local tickets for **WalkCache Hackathon MVP**. They replace the blocked External Linear

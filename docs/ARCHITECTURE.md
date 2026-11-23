@@ -1,4 +1,4 @@
-# WalkCache architecture
+# Déjà (formerly WalkCache) architecture
 
 This document describes the implementation in this repository, not a proposed general framework.
 The CLI and local fixture adapters are the product surface; the preserved spikes and curated evidence
