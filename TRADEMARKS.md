@@ -10,14 +10,15 @@ The Déjà source code is licensed under the [Apache License 2.0](LICENSE). You 
 
 ## The names
 
-Sean Kim ("the owner") or a successor entity the owner designates uses these names as trademarks:
+Sean Kim ("the owner", the same person as the Maintainer in CLA.md) or a successor entity the owner designates uses these marks:
 
 - **Déjà**, as the name of this software
 - **deja-qa**, including the `@deja-qa` npm scope and the deja-qa.com domain
+- **The Déjà logo and mark**: the files in `docs/brand/` and `public/favicon.svg`
 
 The owner may use ™ with these names. No trademark registration is claimed.
 
-The earlier name WalkCache and the current placeholder favicon (`public/favicon.svg`) are not claimed as marks. A real logo is being designed separately, and this policy will be updated when it exists.
+The earlier name WalkCache and its old "WC" placeholder favicon are not claimed as marks.
 
 ## Things you can do without asking
 
@@ -56,7 +57,7 @@ An accurate statement such as "powered by Déjà" or "runs Déjà" is fine.
 
 ## Logo use
 
-Once a logo is published, do not use or alter it without permission, except to refer to the project in the nominative ways described above, such as a link back to the repository.
+Do not use or alter the logo without permission, except to refer to the project in the nominative ways described above, such as a link back to the repository.
 
 ## Asking for permission
 
