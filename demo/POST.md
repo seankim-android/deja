@@ -17,8 +17,9 @@ Other first lines (swap in for line 1):
 - B: "Paying a model to tap the same Sign In button every night felt wrong. So I made the agent remember."
 - C: "Kimi on Cerebras tests my app once. After that, the test runs with no model at all."
 
-### If you don't have X Premium (280-character limit), post this instead and put the template above in the first reply
+### No X Premium (280 characters each): post 1 with the video, then replies 2 and 3 under it
 
+1. Main post (264 characters, attach the video):
 ```
 My AI testing agent learned our checkout in 13 model calls. Now it replays it with 0.
 
@@ -28,14 +29,21 @@ github.com/seankim-android/deja
 #KimiOnCerebras @Cerebras @Kimi_Moonshot
 ```
 
-### First reply (post it right after, under your own post)
+2. First reply, the submission template (276 characters):
+```
+Project Name: Déjà
+Team Members: @kssc0112, u/MenuSecret3697
+Project Description: Kimi K3.1 Pro on Cerebras tests an Android app once through OpenClaw. Déjà saves the test after all 14 checks pass, then replays it with 0 model calls.
+GitHub Repository: github.com/seankim-android/deja
+```
 
+3. Second reply (263 characters):
 ```
 The part I care about most is what Déjà refuses to fix.
 
-We renamed a button ID. Déjà changed one selector, showed the diff and made no commit. Then we broke the order total on purpose. The test failed, and Déjà made 0 repair attempts.
+We renamed a button ID: Déjà changed one selector and showed the diff. We broke the order total on purpose: the test failed, with 0 repair attempts.
 
-Every number in the video comes from a saved run report in the repo.
+Every number in the video comes from a saved run report.
 ```
 
 ## Reddit, r/cerebras. Flair: "Kimi K3.1 Pro Hackathon". Attach the same video.
