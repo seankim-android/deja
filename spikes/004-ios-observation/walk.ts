@@ -2,6 +2,7 @@
  * DEJA-18 evidence walk. Drives the Blankaday Dev build step by step through one Maestro
  * transport, observes after each step, and records IDs, fingerprint and timing.
  *
+ *   (DEJA_WALK_PARTS=bench runs only the repeated observe/tap benchmark.)
  *   DEJA_MAESTRO=<maestro binary> DEJA_SIM_UDID=<simulator> \
  *     bun spikes/004-ios-observation/walk.ts <process|mcp> [repeats]
  *
@@ -99,7 +100,9 @@ async function resetStep(step: string, extra: Record<string, string | boolean>) 
   console.log(`${step} reset ${result.durationMs}ms ${result.passed ? 'ok' : 'FAIL'}`)
 }
 
+const benchOnly = process.env.DEJA_WALK_PARTS === 'bench'
 try {
+  if (!benchOnly) {
   // Part 1: smoke.yaml's route, observing each screen twice.
   await resetStep('reset:smoke', {})
   await act('wait:today', wait('screen.today'))
@@ -134,6 +137,7 @@ try {
   await act('swipe:close-sheet', { label: 'swipe', yaml: '- swipe:\n    start: 50%, 40%\n    end: 50%, 95%\n' })
   await observe('settings-after-share')
 
+  }
   // Part 4: cost microbenchmark. Repeated observe and repeated tab taps on the live app.
   await resetStep('reset:bench', {})
   await act('bench:wait', wait('screen.today'))
@@ -152,7 +156,7 @@ const withChrome = screens.map(screen => ({
 }))
 const out = {
   schema: 'deja-18-ios-walk/1',
-  transport: kind,
+  transport: benchOnly ? `${kind}-bench` : kind,
   maestro: process.env.DEJA_MAESTRO_LABEL ?? '(unlabelled)',
   device,
   repeats,
@@ -168,5 +172,5 @@ const out = {
 }
 const dir = join(import.meta.dir, 'evidence')
 mkdirSync(dir, { recursive: true })
-writeFileSync(join(dir, `walk-${kind}.json`), `${JSON.stringify(out, null, 2)}\n`)
-console.log(`wrote walk-${kind}.json`)
+writeFileSync(join(dir, `walk-${kind}${benchOnly ? '-bench' : ''}.json`), `${JSON.stringify(out, null, 2)}\n`)
+console.log(`wrote walk-${kind}${benchOnly ? '-bench' : ''}.json`)

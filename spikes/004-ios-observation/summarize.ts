@@ -16,7 +16,7 @@ type Walk = {
     truncated: boolean; elementCount: number
   }[]
 }
-const walks = (['process', 'mcp'] as const).filter(name => existsSync(join(dir, `walk-${name}.json`)))
+const walks = (['process', 'mcp', 'process-bench', 'mcp-bench'] as const).filter(name => existsSync(join(dir, `walk-${name}.json`)))
   .map(name => JSON.parse(readFileSync(join(dir, `walk-${name}.json`), 'utf8')) as Walk)
 
 const percentile = (values: number[], p: number) => {
@@ -76,7 +76,7 @@ const checks: [string, string, string][] = [
   ['Settings without vs with share sheet (`export.csv`)', 'settings-before-share', 'share-sheet#1'],
   ['Settings before vs after the share sheet', 'settings-before-share', 'settings-after-share'],
 ]
-for (const walk of walks) for (const [label, a, b] of checks) lines.push(`| ${walk.transport} | ${label} | ${same(walk, a, b)} |`)
+for (const walk of walks.filter(entry => !entry.transport.endsWith('-bench'))) for (const [label, a, b] of checks) lines.push(`| ${walk.transport} | ${label} | ${same(walk, a, b)} |`)
 
 lines.push('', '## Distinct screens', '',
   'Today, Feed and Journal must have different fingerprints.', '')
@@ -93,6 +93,26 @@ for (const walk of walks) {
     lines.push(`| ${screen.step} | ${screen.markersInDocumentOrder.join(', ') || '-'} | ${screen.stable ? 'yes' : screen.unstableReason} | ${screen.anchors.length} | ${screen.elementCount} | ${screen.keyboardVisible} | ${screen.systemUi ?? '-'} | ${screen.truncated} | \`${screen.fingerprint.slice(0, 12)}\` |`)
   }
   lines.push('', `Chrome IDs found across the walk's screens: ${walk.chromeIds.length ? walk.chromeIds.map(id => `\`${id}\``).join(', ') : 'none'}.`, '')
+}
+if (existsSync(join(dir, 'facts.json'))) {
+  const { facts, loadAverageAtEnd } = JSON.parse(readFileSync(join(dir, 'facts.json'), 'utf8')) as { facts: Record<string, any>; loadAverageAtEnd: number[] }
+  const sec = (ms: number) => (ms / 1000).toFixed(1)
+  const step = (r: any) => `${r.passed ? 'passed' : 'FAILED'} in ${sec(r.ms)} s (load ${r.load1.toFixed(0)})`
+  const anim = facts['1_waitForAnimationToEnd_on_today']
+  const probes = facts['3_selector_probes']
+  const dup = facts['3_duplicate_ids_on_today']
+  const kb = facts['6_keyboard_dismissal']
+  lines.push('', '## Extra iOS facts (process transport, Maestro 2.12.0)', '',
+    `Load average at the end of this run: ${loadAverageAtEnd.map(v => v.toFixed(0)).join(' / ')}.`, '',
+    '1. **Looping animations.** `waitForAnimationToEnd` on Today finished every time (3 of 3): ' +
+      `${anim.settle.map((r: any) => sec(r.ms)).join(', ')} s, against ${anim.baseline.map((r: any) => sec(r.ms)).join(', ')} s for a plain \`assertVisible\` (one process start each). ` +
+      'The two are within noise of each other, so the settle itself added no measurable time here and the Blankie idle animation did not block it. Through the process transport the process start hides any small difference; not measured on the MCP transport.', '',
+    '2. **Roles and traits.** Not given. Every hierarchy node has only `accessibilityText`, `title`, `value`, `text`, `hintText`, `resource-id`, `bounds`, `enabled`, `focused`, `selected`, `checked`. There is no element class, role or trait, and no "hittable" flag. `enabled`, `focused`, `selected` and `checked` are present. The driver derives `role` from ID shape only and marks anything it cannot tell as `other`.', '',
+    `3. **Duplicate IDs and selectors.** On fresh Today, ${dup.idsWithAnId} nodes had an ID and ${dup.distinctIds} IDs were distinct. Duplicated: ${Object.entries(dup.duplicated).map(([k, n]) => `\`${k}\` x${n}`).join(', ')}. ` +
+      `\`id:\` is a regular expression matched against the whole ID. \`screen.tod.y\` ${probes.dot_matches_any_char.passed ? 'matched' : 'did not match'} \`screen.today\` (the dot is a wildcard), \`scr.*\` ${probes.wildcard_pattern.passed ? 'matched' : 'did not match'}, the partial \`screen\` ${probes.partial_is_not_a_match.passed ? 'matched' : 'did not match'}, and the escaped form \`screen\\.today\` ${probes.escaped_dot_matches_literal.passed ? 'matched' : 'did not match'}. A generated selector must escape regex characters.`, '',
+    '4. **System alerts and permission sheets.** The share sheet appears in the hierarchy (`ActivityListView`, see the walks). A SpringBoard permission sheet is not measured: Blankaday in `uiTesting` mode shows none. The in-app alert check was not conclusive (`export.emptyOK` was not found, so that route probably did not reach the alert); not measured.', '',
+    `5. **Crash.** Not measured conclusively. SIGSEGV was sent to the app process in the dedicated simulator, but the hierarchy afterwards still held the app's IDs (${JSON.stringify(facts['5_crash'].hierarchyAfter)}), so either the process was restarted before the read or the signal did not end it. After the signal, a tap on \`tab.feed\` ${facts['5_crash'].tapAfter.passed ? 'passed' : 'FAILED'}. (In this run the assert ran after that tap, so its result says nothing; the order is fixed in \`facts.ts\` but not re-run.) Maestro printed no crash-specific message that the driver could read. DEJA-7 keeps the "explicit crash signal only" rule; no crash signal is available from Maestro output here.`, '',
+    '6. **Dismissing the keyboard.** ' + Object.entries(kb).map(([name, v]: [string, any]) => `\`${name}\`: step ${step(v.step)}, keyboard ${v.keyboardGoneAfter ? 'gone' : 'still up'} afterwards`).join('; ') + '. Only `pressKey: Enter` closed it on the Today answer field.', '')
 }
 writeFileSync(join(dir, 'RESULTS.md'), `${lines.join('\n')}\n`)
 console.log(lines.join('\n'))
