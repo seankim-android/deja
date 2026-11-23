@@ -65,6 +65,8 @@ Today, learning and repair work on Android only. Chromium and iOS can replay a s
 
 All numbers come from the saved run reports in `demo/live-evidence/`.
 
+<p align="center"><img src="docs/results-chart.svg" alt="Bar charts of model calls and duration per run: Android cold explore 13 calls, 97.9 s; Android warm replay 0 calls, 26.1 s; Android stale selector repair 0 calls, 66.9 s; Chromium warm replay 0 calls, 36.6 s" width="100%"/></p>
+
 | Run | Evidence file | Outcome | Model calls | Assertions | Duration |
 | --- | --- | --- | --- | --- | --- |
 | Android cold explore | `android/cold-run-report.json` | cold-recorded | 13 | 14 | 97.9 s |
