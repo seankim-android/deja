@@ -47,10 +47,26 @@ export type ExplorationDetails = {
   modelCallBasis: string
 }
 
+/** A file the stored flow runs (a subflow or script), kept under `.deja/flows` with its checksum. */
+export type StoredFlowFile = {
+  path: string
+  sha256: string
+}
+
 export type StoredWalk = WalkIdentity & {
   goalKey: string
   flowPath: string
   flowSha256: string
+  /**
+   * Files the flow runs (empty when it runs none). Always present from memory schema 3; absent only
+   * on walks read from schema 1 or 2, which stored the main flow alone.
+   */
+  subflowFiles?: StoredFlowFile[]
+  /**
+   * Set when a schema 1 or 2 walk was rewritten as schema 3. Its subflows were never stored, so a
+   * flow that runs files cannot replay and lookup returns the `legacy-closure-unknown` miss.
+   */
+  legacyClosure?: true
   lastValidation: WalkValidation
   validationHistory: StoredValidation[]
   /** `replayed-on-new-build` (WALK-021): an earlier build's verified YAML, replayed once on this build. */
@@ -67,7 +83,7 @@ export type LookupHit = {
 
 export type CacheMissReason = 'not-found' | 'wrong-app' | 'wrong-platform' |
   'wrong-flow-schema' | 'wrong-adapter' | 'wrong-browser' | 'stale-build' |
-  'missing-flow' | 'failed-validation'
+  'missing-flow' | 'failed-validation' | 'legacy-closure-unknown'
 
 export type LookupMiss = {
   status: 'miss'
@@ -81,8 +97,13 @@ export type PersistVerifiedOptions = {
   origin: 'remember' | 'explore' | 'replayed-on-new-build'
   exploration?: ExplorationDetails
   /**
-   * When set, the store hashes the candidate bytes it is about to write and refuses, before writing
-   * anything, if they differ. Callers that replayed a candidate pass the sha256 of what actually ran.
+   * Checksum of the closure a store's `snapshotCandidate` returned. When set, persistence refuses
+   * if the candidate and every file it runs no longer hash to it.
+   */
+  expectedClosureSha256?: string
+  /**
+   * When set, the store hashes the main flow it is about to write and refuses, before writing
+   * anything, if it differs. Callers that replayed a candidate pass the sha256 of what actually ran.
    */
   expectedFlowSha256?: string
 }
@@ -92,6 +113,14 @@ export class ExpectedFlowChecksumMismatchError extends Error {
   constructor(expected: string, actual: string) {
     super(`Verified candidate bytes (${actual}) differ from the expected checksum (${expected}); nothing was stored`)
     this.name = 'ExpectedFlowChecksumMismatchError'
+  }
+}
+
+/** Thrown before any write when the flow or a file it runs differs from `expectedClosureSha256`. */
+export class ExpectedClosureMismatchError extends Error {
+  constructor(expected: string, actual: string) {
+    super(`The candidate or a file it runs changed after it was verified (${actual}, expected ${expected}); nothing was stored`)
+    this.name = 'ExpectedClosureMismatchError'
   }
 }
 
@@ -111,9 +140,21 @@ export type PersistedWalk = {
   atomicWrite: true
 }
 
+export type CandidateSnapshot = {
+  /** Workspace-relative path of the copied main flow. */
+  candidatePath: string
+  closureSha256: string
+}
+
 export interface WalkStore {
   lookup(identity: WalkIdentity): Promise<LookupHit | LookupMiss>
   lookupPreviousSuccessful(identity: WalkIdentity): Promise<LookupHit | LookupMiss>
+  /**
+   * Copy a candidate and every file it runs into `directory`, so the bytes that get verified are
+   * the bytes that get stored. Returns the copy's main flow and its closure checksum, to pass back
+   * as `expectedClosureSha256`. Stores without it are verified in place.
+   */
+  snapshotCandidate?(candidatePath: string, directory: string): Promise<CandidateSnapshot>
   persistVerifiedCandidate(options: PersistVerifiedOptions): Promise<PersistedWalk>
   persistVerifiedRepair(options: PersistVerifiedRepairOptions): Promise<PersistedWalk>
   recordValidation(identity: WalkIdentity, validation: WalkValidation): Promise<StoredWalk>
