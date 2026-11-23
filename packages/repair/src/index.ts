@@ -50,6 +50,11 @@ export type BoundedCheckoutRepairOptions = {
   appId: string
   platform: 'android'
   timeoutMs: number
+  /**
+   * The clock the overall time budget runs on. Tests inject a manual one so the budget expires when
+   * the test says so, never on real time. Defaults to `performance.now` and `setTimeout`.
+   */
+  clock?: RepairClock
   policy: CheckoutRepairPolicy
   attemptId?: string
   /** The walk store the repaired flow is persisted through. */
@@ -128,11 +133,29 @@ class BoundedRepairTimeoutError extends Error {
   }
 }
 
-class RepairDeadline {
-  private readonly started = performance.now()
-  private readonly budgetMs: number
+export type RepairClock = {
+  /** Monotonic milliseconds. */
+  now: () => number
+  /** Calls `run` after `delayMs`; the returned function cancels it. */
+  schedule: (run: () => void, delayMs: number) => () => void
+}
 
-  constructor(budgetMs: number) {
+const realClock: RepairClock = {
+  now: () => performance.now(),
+  schedule: (run, delayMs) => {
+    const timer = setTimeout(run, delayMs)
+    return () => clearTimeout(timer)
+  },
+}
+
+class RepairDeadline {
+  private readonly started: number
+  private readonly budgetMs: number
+  private readonly clock: RepairClock
+
+  constructor(budgetMs: number, clock: RepairClock) {
+    this.clock = clock
+    this.started = clock.now()
     if (!Number.isInteger(budgetMs) || budgetMs <= 0) {
       throw new TypeError('A single positive integer repair time budget is required')
     }
@@ -140,7 +163,7 @@ class RepairDeadline {
   }
 
   elapsed() {
-    return Math.round(performance.now() - this.started)
+    return Math.round(this.clock.now() - this.started)
   }
 
   remaining() {
@@ -150,9 +173,9 @@ class RepairDeadline {
   async within<T>(phase: string, operation: (remainingMs: number) => Promise<T>): Promise<T> {
     const remainingMs = this.remaining()
     if (remainingMs <= 0) throw new BoundedRepairTimeoutError(phase)
-    let timer: NodeJS.Timeout | undefined
+    let cancel: (() => void) | undefined
     const timeout = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => reject(new BoundedRepairTimeoutError(phase)), remainingMs)
+      cancel = this.clock.schedule(() => reject(new BoundedRepairTimeoutError(phase)), remainingMs)
     })
     try {
       const result = await Promise.race([
@@ -162,7 +185,7 @@ class RepairDeadline {
       if (this.remaining() <= 0) throw new BoundedRepairTimeoutError(phase)
       return result
     } finally {
-      if (timer) clearTimeout(timer)
+      cancel?.()
     }
   }
 }
@@ -281,7 +304,7 @@ async function executeBoundedCheckoutRepair(
   const attemptDirectory = resolve(root, '.deja/patches', attemptId)
   if (!inside(root, attemptDirectory)) throw new Error('Repair attempt directory escapes workspace')
   await mkdir(attemptDirectory, { recursive: true })
-  const deadline = new RepairDeadline(options.timeoutMs)
+  const deadline = new RepairDeadline(options.timeoutMs, options.clock ?? realClock)
   const started = new Date()
   const monotonicStart = performance.now()
   const store = options.store

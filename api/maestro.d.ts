@@ -271,6 +271,7 @@ export type McpMaestroTransportOptions = {
     executable: string;
     device: string;
     timeoutMs?: number;
+    schedule?: (run: () => void, delayMs: number) => () => void;
 };
 export declare function normalizeEngineVersion(text: string | null | undefined): string | null;
 export declare function parseMaestroHierarchy(raw: unknown): RawElement[];

@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test'
+import { existsSync } from 'node:fs'
 import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -236,6 +237,39 @@ async function fakeExecutable(directory: string, source: string) {
   return path
 }
 
+/** Request timeouts that fire only when the test says so, never on real time. */
+function manualSchedule() {
+  const live = new Set<() => void>()
+  return {
+    schedule: (run: () => void) => {
+      live.add(run)
+      return () => { live.delete(run) }
+    },
+    /** Fires the one armed timeout. More or fewer than one armed means the test lost track. */
+    fireOnly() {
+      expect(live.size).toBe(1)
+      const [run] = [...live]
+      live.delete(run)
+      run()
+    },
+  }
+}
+
+/** Waits for a condition a child process signals (a file it writes), with no fixed delay. */
+async function until(condition: () => boolean | Promise<boolean>, what: string) {
+  for (let i = 0; i < 3000; i++) {
+    if (await condition()) return
+    await Bun.sleep(10)
+  }
+  throw new Error(`never happened: ${what}`)
+}
+
+/** The error a promise rejects with, as a value. Fails if it resolves. */
+const settled = (promise: Promise<unknown>) =>
+  promise.then(() => { throw new Error('expected a rejection') }, (error: Error) => error)
+
+const isAlive = (pid: number) => { try { process.kill(pid, 0); return true } catch { return false } }
+
 describe('ProcessMaestroTransport', () => {
   test('hierarchy parses JSON after log lines; runFlow passes env as -e and cleans up', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'deja-transport-'))
@@ -365,18 +399,27 @@ for await (const chunk of process.stdin) {
   test('an initialize timeout kills the child and the next call starts a new one', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'deja-mcp-hang-'))
     try {
-      const pidFile = join(directory, 'pid')
+      const pidFile = join(directory, 'pids')
       const executable = await fakeExecutable(directory, `
-await Bun.write(${JSON.stringify(pidFile)}, String(process.pid))
+import { appendFileSync } from 'node:fs'
+appendFileSync(${JSON.stringify(pidFile)}, process.pid + '\\n')
 await Bun.sleep(60000)
 `)
-      const transport = new McpMaestroTransport({ executable, device: 'u', timeoutMs: 1500 })
-      await expect(transport.hierarchy()).rejects.toThrow('timed out')
-      for (let i = 0; i < 50 && !(await Bun.file(pidFile).exists()); i++) await Bun.sleep(100)
-      const pid = Number(await readFile(pidFile, 'utf8'))
-      await Bun.sleep(300)
-      expect(() => process.kill(pid, 0)).toThrow()
-      await expect(transport.hierarchy()).rejects.toThrow('timed out')
+      const clock = manualSchedule()
+      const transport = new McpMaestroTransport({ executable, device: 'u', timeoutMs: 1500, schedule: clock.schedule })
+      const pids: number[] = []
+      for (const round of [1, 2]) {
+        // Not `expect(...).rejects`: Bun waits on that at once, and this call settles only after the timer fires.
+        const call = settled(transport.hierarchy())
+        // The child is up and never answers `initialize`. Only then does the timeout fire.
+        await until(async () => existsSync(pidFile) && (await readFile(pidFile, 'utf8')).trim().split('\n').length === round, `child ${round} started`)
+        pids.push(Number((await readFile(pidFile, 'utf8')).trim().split('\n')[round - 1]))
+        clock.fireOnly()
+        expect((await call).message).toContain('timed out')
+        // The timed-out child is killed, and the second round proves a new one was started.
+        await until(() => !isAlive(pids[round - 1]), `child ${round} killed`)
+      }
+      expect(pids[1]).not.toBe(pids[0])
       await transport.close()
     } finally {
       await rm(directory, { recursive: true, force: true })
@@ -387,10 +430,14 @@ await Bun.sleep(60000)
     const directory = await mkdtemp(join(tmpdir(), 'deja-mcp-stale-'))
     try {
       const counter = join(directory, 'spawns')
+      const received = join(directory, 'received')
+      const pidFile = join(directory, 'pid')
+      const release = join(directory, 'release')
       const executable = await fakeExecutable(directory, `
-import { appendFileSync } from 'node:fs'
+import { appendFileSync, existsSync, writeFileSync } from 'node:fs'
 appendFileSync(${JSON.stringify(counter)}, 'x')
 const first = (await Bun.file(${JSON.stringify(counter)}).text()).length === 1
+if (first) writeFileSync(${JSON.stringify(pidFile)}, String(process.pid))
 const reply = (id, result) => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id, result }) + '\\n')
 let buffer = ''
 for await (const chunk of process.stdin) {
@@ -398,15 +445,32 @@ for await (const chunk of process.stdin) {
   for (let end = buffer.indexOf('\\n'); end >= 0; end = buffer.indexOf('\\n')) {
     const message = JSON.parse(buffer.slice(0, end)); buffer = buffer.slice(end + 1)
     if (message.method === 'initialize') reply(message.id, { protocolVersion: '2024-11-05' })
-    if (message.method === 'tools/call' && !first) reply(message.id, { content: [{ type: 'text', text: 'Flow COMPLETED' }] })
-    // The first child never answers a tool call, so the first call times out.
+    if (message.method === 'tools/call') {
+      // The first child never answers a tool call, so the first call times out.
+      if (first) { writeFileSync(${JSON.stringify(received)}, '1'); continue }
+      // The second child answers only after the test has seen the first child die.
+      while (!existsSync(${JSON.stringify(release)})) await Bun.sleep(10)
+      reply(message.id, { content: [{ type: 'text', text: 'Flow COMPLETED' }] })
+    }
   }
 }
 `)
-      const transport = new McpMaestroTransport({ executable, device: 'u', timeoutMs: 700 })
-      await expect(transport.runFlow('appId: a\n---\n- tapOn: x\n')).rejects.toThrow('timed out')
-      // The second call starts at once, before the killed child's close event is handled.
-      expect((await transport.runFlow('appId: a\n---\n- tapOn: x\n')).passed).toBe(true)
+      const clock = manualSchedule()
+      const transport = new McpMaestroTransport({ executable, device: 'u', timeoutMs: 700, schedule: clock.schedule })
+      const firstCall = settled(transport.runFlow('appId: a\n---\n- tapOn: x\n'))
+      // The first child holds the tool call and stays silent. Only then does the timeout fire.
+      await until(() => existsSync(received), 'first child received the tool call')
+      clock.fireOnly()
+      expect((await firstCall).message).toContain('timed out')
+      // The second call starts at once, so the killed child's close event lands while it is pending.
+      const second = transport.runFlow('appId: a\n---\n- tapOn: x\n')
+      const oldPid = Number(await readFile(pidFile, 'utf8'))
+      await until(() => !isAlive(oldPid), 'first child died')
+      // Let the old child's close event reach the transport before the new child may answer. This
+      // only widens the window in which a stale event could hurt, so it cannot hide a failure.
+      await Bun.sleep(50)
+      await writeFile(release, '1')
+      expect((await second).passed).toBe(true)
       expect((await readFile(counter, 'utf8')).length).toBe(2)
       await transport.close()
     } finally {

@@ -156,6 +156,29 @@ async function sourceSnapshot(root: string) {
   return Promise.all(CHECKOUT_AFFECTED_FILES.map(path => readFile(join(root, path))))
 }
 
+/** A clock that only moves when `advance` is called, and fires the timers that come due. */
+function manualClock() {
+  let time = 0
+  const timers = new Set<{ at: number; run: () => void }>()
+  return {
+    now: () => time,
+    schedule: (run: () => void, delayMs: number) => {
+      const timer = { at: time + delayMs, run }
+      timers.add(timer)
+      return () => { timers.delete(timer) }
+    },
+    advance(ms: number) {
+      time += ms
+      for (const timer of [...timers]) {
+        if (timer.at > time) continue
+        timers.delete(timer)
+        timer.run()
+      }
+    },
+  }
+}
+type ManualClock = ReturnType<typeof manualClock>
+
 async function runRepair(
   context: Awaited<ReturnType<typeof fixture>>,
   firstResult: MaestroRunResult,
@@ -165,6 +188,7 @@ async function runRepair(
     sameBuildAfterRepair?: boolean
     failingBuild?: boolean
     hangingBuild?: boolean
+    clock?: ManualClock
   } = {},
 ) {
   let fingerprint = diagnosisBuild
@@ -178,6 +202,7 @@ async function runRepair(
     appId: 'dev.deja.checkout',
     platform: 'android',
     timeoutMs: overrides.timeoutMs ?? 30_000,
+    ...(overrides.clock ? { clock: overrides.clock } : {}),
     policy: context.policy,
     attemptId: 'repair-focused-test',
     store: context.store,
@@ -190,9 +215,14 @@ async function runRepair(
       verificationCalls += 1
       return overrides.verificationResult ?? runnerResult('passed')
     },
-    build: async _remainingMs => {
+    build: async remainingMs => {
       buildCalls += 1
-      if (overrides.hangingBuild) return new Promise<RepairBuildResult>(() => {})
+      if (overrides.hangingBuild) {
+        // The build never answers. The whole budget passes with it, on the manual clock, so the
+        // deadline fires now and not after a real wait that machine load could stretch.
+        overrides.clock?.advance(remainingMs)
+        return new Promise<RepairBuildResult>(() => {})
+      }
       if (!overrides.sameBuildAfterRepair) fingerprint = repairedBuild
       return buildResult(!overrides.failingBuild)
     },
@@ -359,7 +389,7 @@ describe('bounded checkout selector repair', () => {
       const result = await runRepair(
         context,
         runnerResult('selector'),
-        { timeoutMs: 40, hangingBuild: true },
+        { timeoutMs: 40, hangingBuild: true, clock: manualClock() },
       )
       expect(result.report.status).toBe('failed')
       expect(result.report.error).toContain('time budget expired during bounded rebuild')

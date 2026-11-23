@@ -128,7 +128,7 @@ describe('production iOS adapter CLI', () => {
         workspaceRoot: '.', appId: 'dev.deja.ios.checkout', platform: 'ios',
         adapter: 'maestro-ios@2.12.0', device: 'DFC4D233-498B-4B33-B713-E59B239FA86A',
         buildPath: 'Fixture.app', fixtureCredentials: [],
-        maestro: { executable: fakeMaestro, timeoutMs: 2000 },
+        maestro: { executable: fakeMaestro, timeoutMs: 30_000 },
         ...(staleBuild === undefined ? {} : { staleBuild }),
       }))
       return { temporary, root }
