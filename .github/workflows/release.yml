@@ -1,0 +1,67 @@
+name: Release
+
+# Cut only when Sean asks (docs/RELEASING.md). Never runs on pull requests or pushes to main.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to build, for example v0.1.0
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  binaries:
+    name: Build, smoke-check and draft the release
+    runs-on: macos-14 # Apple silicon (arm64)
+    timeout-minutes: 30
+    permissions:
+      contents: write # create the draft release and upload its assets; no other job has write access
+    env:
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+    steps:
+      - name: Check out the tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+          fetch-depth: 0 # full history, to check the tag is on main
+          persist-credentials: false
+      - name: Check the tagged commit is on main
+        run: |
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor HEAD FETCH_HEAD; then
+            echo "$RELEASE_TAG is not an ancestor of origin/main" >&2
+            exit 1
+          fi
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.5
+      - name: Install locked dependencies
+        run: bun install --frozen-lockfile
+      - name: Check the tag matches the CLI version
+        run: |
+          version="$(bun -e 'console.log(require("./apps/cli/package.json").version)')"
+          if [ "$RELEASE_TAG" != "v$version" ]; then
+            echo "Tag $RELEASE_TAG does not match apps/cli/package.json version $version" >&2
+            exit 1
+          fi
+      - name: Build binaries
+        run: bun scripts/build-binary.ts
+      - name: Smoke-check the macOS binary without Bun
+        run: bun scripts/smoke-binary.ts "dist-bin/deja-${RELEASE_TAG#v}-darwin-arm64" --expect-version "${RELEASE_TAG#v}"
+      - name: Validate tracked artifacts and unchanged checkout
+        run: bun scripts/validate-release-artifacts.ts
+      - name: Create the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$RELEASE_TAG" \
+            --draft --verify-tag \
+            --title "deja ${RELEASE_TAG#v}" \
+            --notes "Standalone deja binaries. Verify with SHA256SUMS. See docs/RELEASING.md." \
+            dist-bin/deja-* dist-bin/SHA256SUMS

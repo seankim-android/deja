@@ -4,6 +4,7 @@ import { existsSync } from 'node:fs'
 import { mkdir, mkdtemp, realpath, readFile, rm, writeFile } from 'node:fs/promises'
 import { hostname, tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
+import { runCli } from '../src/main.ts'
 
 const cli = resolve(import.meta.dir, '../deja.ts')
 const fakeMaestro = resolve(import.meta.dir, '../../../packages/maestro/test/fixtures/fake-maestro.cjs')
@@ -375,6 +376,37 @@ describe('production headless CLI', () => {
         outcome: 'rejected', passed: false, failure: { category: 'runner', repairEligible: false },
         execution: { exitCode: null },
       })
+    } finally {
+      await cleanup(context.temporary)
+    }
+  })
+
+  test('--version prints the version, "dev" outside a release build, and the contract version', async () => {
+    const context = await workspace()
+    try {
+      const result = await execute(context.root, ['--version'])
+      expect(result.exitCode).toBe(0)
+      expect(result.stdout).toMatch(/^deja \d+\.\d+\.\d+ \(commit dev, contract \d+\)\n$/)
+    } finally {
+      await cleanup(context.temporary)
+    }
+  })
+
+  test('explore in a compiled binary stops at once with a clear error instead of an OpenClaw connection failure', async () => {
+    const context = await workspace()
+    try {
+      const stdout: string[] = []
+      const stderr: string[] = []
+      const exitCode = await runCli(['explore', 'checkout', '--config', join(context.root, 'deja.config.json')], {
+        stdout: text => stdout.push(text),
+        stderr: text => stderr.push(text),
+      }, {
+        compiledBinary: true,
+        env: { ...process.env, DEJA_HOME: join(context.temporary, 'deja-home'), DEJA_MAESTRO: '' },
+      })
+      expect(exitCode).toBe(2)
+      expect(stderr.join('')).toContain('explore needs the Bun runtime; use the npm packages')
+      expect(stdout.join('')).not.toContain('Cache status')
     } finally {
       await cleanup(context.temporary)
     }
