@@ -2,8 +2,7 @@
 
 <p align="center">
 Explore an app once with an AI model. Replay the test later with no model at all.<br>
-Déjà turns one verified run into a Maestro test that you own.<br>
-The CLI command is still <code>walkcache</code>.
+Déjà (formerly WalkCache) turns one verified run into a Maestro test that you own.
 </p>
 
 <p align="center">
@@ -60,7 +59,7 @@ This Android path needs no model credentials. It assumes a running API 34 emulat
 git clone https://github.com/seankim-android/deja.git
 cd deja
 bun install
-cd spikes/001-android-walkcache
+cd spikes/001-android-deja
 . ./scripts/env.sh
 
 adb devices
@@ -69,14 +68,14 @@ adb -s emulator-5554 install -r -g app/build/outputs/apk/debug/app-debug.apk
 sh scripts/fixture-mode.sh stable
 
 # Verify reviewed YAML, then save it.
-bun ../../apps/cli/walkcache.ts remember checkout \
-  --flow evidence/repaired-checkout.yaml --config walkcache.config.json
+bun ../../apps/cli/deja.ts remember checkout \
+  --flow flows/repaired-checkout.yaml --config deja.config.json
 
 # Replay it. Expect: Cache status: hit, Model calls: 0.
-bun ../../apps/cli/walkcache.ts run checkout --config walkcache.config.json
+bun ../../apps/cli/deja.ts run checkout --config deja.config.json
 ```
 
-For cold exploration, set up OpenClaw with a Cerebras credential. Then run `explore checkout`. If you already have a `.walkcache` folder, move it aside first. More steps are in [docs/REFERENCE.md](docs/REFERENCE.md).
+For cold exploration, set up OpenClaw with a Cerebras credential. Then run `explore checkout`. If you already have a `.deja` folder, move it aside first. More steps are in [docs/REFERENCE.md](docs/REFERENCE.md).
 
 ## CLI
 
