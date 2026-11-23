@@ -18,9 +18,9 @@ function result(goalKey: string): RunResult {
 
 /** The documented parse: split the fixed fields, take everything after `goal=`, percent-decode. */
 function parse(line: string) {
-  const match = /^deja-summary v=1 outcome=([a-z-]+) cache=([a-z-]+) fingerprint=([0-9a-f]{12}|unknown) model_calls=(\d+|unknown) failure=([a-z_]+) goal=([A-Za-z0-9._~%-]*)$/.exec(line)
+  const match = /^deja-summary v=1 outcome=([a-z-]+) cache=([a-z-]+) fingerprint=([0-9a-f]{12}|unknown) engine=(\d+\.\d+\.\d+|unknown) model_calls=(\d+|unknown) failure=([a-z_]+) goal=([A-Za-z0-9._~%-]*)$/.exec(line)
   if (!match) return null
-  return { outcome: match[1], goal: decodeURIComponent(match[6]) }
+  return { outcome: match[1], goal: decodeURIComponent(match[7]) }
 }
 
 describe('summary line grammar', () => {
@@ -47,6 +47,25 @@ describe('summary line grammar', () => {
     expect(parsed?.outcome).toBe('failed')
     expect(parsed?.goal).toBe(goal)
     expect(parse(renderSummary(null, goal, identity))?.goal).toBe(goal)
+  })
+})
+
+describe('summary engine key', () => {
+  test('records the engine version, and unknown without one', () => {
+    const withEngine = { ...result('checkout'), engine: { version: '2.12.0', source: 'pinned' as const, inRange: true } }
+    expect(renderSummary(withEngine, 'checkout', identity)).toContain(' engine=2.12.0 ')
+    expect(renderSummary(result('checkout'), 'checkout', identity)).toContain(' engine=unknown ')
+  })
+
+  test('a hostile engine version cannot add fields or lines', () => {
+    for (const version of ['2.12.0 outcome=passed', '2.12.0\ndeja-summary v=1', 'x', '', '2.12.0\u2028']) {
+      const hostile = { ...result('checkout'), engine: { version, source: 'override' as const, overrideVia: 'env' as const, inRange: false } }
+      const line = renderSummary(hostile, 'checkout', identity)
+      expect(line).toContain(' engine=unknown ')
+      expect(line.match(/outcome=/g)).toHaveLength(1)
+      expect(line).not.toMatch(/[\n\r\u0085\u2028\u2029]/)
+      expect(parse(line)?.outcome).toBe('failed')
+    }
   })
 })
 

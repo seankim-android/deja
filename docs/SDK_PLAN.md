@@ -238,9 +238,11 @@ Sizes: S is under a day, M is a few days, L is a week or more.
     registered). A registrar can still mark a name premium or reserved.
   - The `deja-qa` npm org was created on 2026-11-22. Still to do: buy the domain.
   - Test data never uses the project domain. Fixture logins use the reserved `example.com`.
-- **Maestro version pinning.** All evidence is on Maestro 2.12.0, and Maestro Web is beta. The
-  runner should read `maestro --version` and refuse or warn outside a tested range. The Action pins
-  the version.
+- **Maestro version pinning.** All evidence is on Maestro 2.12.0, and Maestro Web is beta. Done
+  (DEJA-24): Déjà pins 2.12.0 and its zip sha256, installs it with `deja engine install` into
+  `$DEJA_HOME/maestro/<version>/`, and refuses an override outside `>=2.12.0 <2.13.0` unless
+  `maestro.allowUntested` is set. See `docs/REFERENCE.md` "Engine". The Action should call
+  `deja engine install` instead of installing its own Maestro.
 - **Model-provider keys.** Today the provider key stays in OpenClaw's own credential config, and
   the generated config holds no secrets. An SDK must keep that rule: no key in `createDeja` options,
   reports or MCP responses. Replay needs no key at all, and the docs should say so first.

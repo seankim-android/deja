@@ -18,9 +18,10 @@ bun ../../apps/cli/deja.ts inspect .deja/reports/latest.json \
 
 The combined [`deja.config.json`](../../spikes/001-android-deja/deja.config.json)
 explicitly names workspace, app/build/device, fixture-only credentials, provider/model, bounded
-timeouts, executable names, MCP proxy, and the WALK-007 two-file repair policy. `maestro` and
-`openclaw` resolve through the sourced fixture `PATH`; `DEJA_MAESTRO`,
-`DEJA_OPENCLAW`, and `DEJA_TIMEOUT_MS` can override defaults when the corresponding
+timeouts, executable names, MCP proxy, and the WALK-007 two-file repair policy. Maestro is Déjà's pinned
+engine (`deja engine install`, `deja doctor`; `DEJA_MAESTRO` or `maestro.executable` overrides it,
+see `docs/REFERENCE.md` "Engine"). `openclaw` resolves through the sourced fixture `PATH`;
+`DEJA_OPENCLAW` and `DEJA_TIMEOUT_MS` can override defaults when the corresponding
 JSON fields are omitted. Android SDK/Java locations come only from the environment and are not
 serialized into reports.
 
