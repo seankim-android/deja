@@ -34,6 +34,8 @@ export type IosExploreConfiguration = Omit<ExploreConfiguration,
 
 export type ProductionConfiguration = {
   configPath: string
+  /** Absolute path for Maestro's JUnit report (config `junit`, relative to the config file). */
+  junitPath?: string
   explore: ExploreConfiguration | WebExploreConfiguration | IosExploreConfiguration
   workspaceRoot: string
   maestro: {
@@ -282,6 +284,9 @@ export async function loadProductionConfiguration(configPath: string): Promise<P
 
   return {
     configPath: absolute,
+    ...(raw.junit !== undefined
+      ? { junitPath: resolve(dirname(absolute), text(raw.junit, '', 'junit')) }
+      : {}),
     explore,
     workspaceRoot: root,
     maestro: {

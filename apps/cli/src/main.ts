@@ -1,5 +1,10 @@
 import { resolve } from 'node:path'
-import { createDeja, UnsupportedPlatformExplorer, type RunResult } from '@deja-qa/core'
+import {
+  createDeja,
+  UnsupportedPlatformExplorer,
+  type RunReporter,
+  type RunResult,
+} from '@deja-qa/core'
 import { OpenClawWalkExplorer } from '@deja-qa/explorer-openclaw'
 import {
   InvalidWalkMemoryError,
@@ -24,7 +29,8 @@ import {
   loadProductionConfiguration,
   type ProductionConfiguration,
 } from './config.ts'
-import { HELP, renderResult, renderWalks } from './output.ts'
+import { prepareJunit, JunitReporter, writeErroredJunit } from './junit.ts'
+import { HELP, renderResult, renderSummary, renderWalks } from './output.ts'
 import { createRedactor, redactJson } from './redaction.ts'
 import { JsonRunReporter, readRunReport } from './reporter.ts'
 
@@ -38,7 +44,9 @@ type ParsedArguments = {
   positionals: string[]
   configPath: string
   flow?: string
+  junit?: string
   json: boolean
+  summary: boolean
   help: boolean
 }
 
@@ -46,19 +54,23 @@ function parseArguments(argv: string[]): ParsedArguments {
   const positionals: string[] = []
   let configPath: string | undefined
   let flow: string | undefined
+  let junit: string | undefined
   let json = false
+  let summary = false
   let help = false
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index]
     if (argument === '--json') json = true
+    else if (argument === '--summary') summary = true
     else if (argument === '-h' || argument === '--help' || argument === 'help') help = true
-    else if (argument === '--config' || argument === '--flow') {
+    else if (argument === '--config' || argument === '--flow' || argument === '--junit') {
       const value = argv[index + 1]
       if (!value || value.startsWith('--')) {
         throw new CliConfigurationError(`${argument} requires a file path`)
       }
       index += 1
       if (argument === '--config') configPath = value
+      else if (argument === '--junit') junit = value
       else flow = value
     } else if (argument.startsWith('-')) {
       throw new CliConfigurationError(`Unknown option: ${argument}`)
@@ -70,7 +82,9 @@ function parseArguments(argv: string[]): ParsedArguments {
     positionals,
     configPath: configPath ?? defaultConfigPath(),
     ...(flow ? { flow } : {}),
+    ...(junit ? { junit } : {}),
     json,
+    summary,
     help,
   }
 }
@@ -89,7 +103,8 @@ function resultExitCode(result: RunResult) {
 
 function createOrchestration(
   configuration: ProductionConfiguration,
-  reporter: JsonRunReporter,
+  reporter: RunReporter,
+  junitPath: string | undefined,
 ) {
   const store = new LocalWalkStore({ workspaceRoot: configuration.workspaceRoot })
   const executionAdapter = configuration.explore.platform === 'web'
@@ -110,6 +125,7 @@ function createOrchestration(
     device: executionAdapter.device,
     adapter: executionAdapter,
     timeoutMs: configuration.maestro.timeoutMs,
+    ...(junitPath ? { junitPath } : {}),
     ...(process.env.ANDROID_HOME || process.env.ANDROID_SDK_ROOT
       ? { androidSdkRoot: process.env.ANDROID_HOME ?? process.env.ANDROID_SDK_ROOT }
       : {}),
@@ -171,8 +187,17 @@ export async function runCli(argv: string[], io: CliIo = {
   stderr: text => process.stderr.write(text),
 }): Promise<number> {
   let redact = createRedactor(process.cwd(), [])
+  let parsed: ParsedArguments | undefined
+  let junitPath: string | undefined
+  // One summary line per run. It is the last stdout line, or stderr with --json so stdout stays JSON.
+  const summarize = (result: RunResult | null, goalText: string) => {
+    if (!parsed?.summary) return
+    const line = `${renderSummary(result, goalText, redact)}\n`
+    if (parsed.json) io.stderr(line)
+    else io.stdout(line)
+  }
   try {
-    const parsed = parseArguments(argv)
+    parsed = parseArguments(argv)
     if (parsed.help || parsed.command === '') {
       io.stdout(HELP)
       return parsed.command === '' && !parsed.help ? 2 : 0
@@ -183,6 +208,14 @@ export async function runCli(argv: string[], io: CliIo = {
     if (parsed.command !== 'remember' && parsed.flow) {
       throw new CliConfigurationError('--flow is valid only with remember')
     }
+    const runsMaestro = ['explore', 'run', 'remember'].includes(parsed.command)
+    if (parsed.junit && !runsMaestro) {
+      throw new CliConfigurationError('--junit is valid only with explore, run, or remember')
+    }
+    if (parsed.summary && parsed.command === 'list') {
+      throw new CliConfigurationError('--summary is valid only with explore, run, remember, or inspect')
+    }
+    if (parsed.junit) junitPath = resolve(process.cwd(), parsed.junit)
     const configuration = await loadProductionConfiguration(parsed.configPath)
     redact = createRedactor(
       configuration.workspaceRoot,
@@ -201,11 +234,18 @@ export async function runCli(argv: string[], io: CliIo = {
       io.stdout(parsed.json
         ? `${JSON.stringify(redactJson(report, redact), null, 2)}\n`
         : renderResult(report, null, redact))
+      summarize(report, report.goalKey)
       return resultExitCode(report)
     }
 
-    const reporter = new JsonRunReporter(configuration.workspaceRoot, redact)
-    const { store, orchestration } = createOrchestration(configuration, reporter)
+    const jsonReporter = new JsonRunReporter(configuration.workspaceRoot, redact)
+    if (runsMaestro) junitPath ??= configuration.junitPath
+    const reporter = junitPath
+      ? new JunitReporter(jsonReporter, junitPath, configuration.workspaceRoot, redact)
+      : jsonReporter
+    const { store, orchestration } = createOrchestration(
+      configuration, reporter, runsMaestro ? junitPath : undefined,
+    )
     if (parsed.command === 'list') {
       if (parsed.positionals.length > 0) throw new CliConfigurationError('list accepts no positional arguments')
       const walks = await store.list()
@@ -219,18 +259,29 @@ export async function runCli(argv: string[], io: CliIo = {
       throw new CliConfigurationError('remember requires --flow <candidate.yaml>')
     }
     const goalText = goal(parsed.positionals)
+    // A file left by an earlier run must never be read as this run's result.
+    if (junitPath) await prepareJunit(junitPath)
     const result = parsed.command === 'explore'
       ? await orchestration.explore(goalText)
       : parsed.command === 'remember'
         ? await orchestration.remember(goalText, parsed.flow!)
         : await orchestration.run(goalText)
     io.stdout(parsed.json
-      ? `${JSON.stringify(redactJson({ ...result, report: reporter.receipt }, redact), null, 2)}\n`
-      : renderResult(result, reporter.receipt, redact))
+      ? `${JSON.stringify(redactJson({ ...result, report: jsonReporter.receipt }, redact), null, 2)}\n`
+      : renderResult(result, jsonReporter.receipt, redact))
+    summarize(result, result.goalKey)
     return resultExitCode(result)
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     io.stderr(`${redact(message)}\nRun "deja --help" for usage and exit codes.\n`)
+    const goalText = parsed?.positionals.join(' ').trim().toLowerCase().replace(/\s+/g, ' ') ?? ''
+    if (parsed && ['explore', 'run', 'remember'].includes(parsed.command)) {
+      // A host that reads the JUnit file must see an error, never a missing file or an old report.
+      if (junitPath) {
+        await writeErroredJunit(junitPath, goalText || parsed.command, redact(message)).catch(() => {})
+      }
+      summarize(null, goalText)
+    }
     if (error instanceof InvalidWalkMemoryError) {
       io.stderr('Memory recovery: preserve/quarantine the ignored .deja directory, then explore cold; never treat corrupt memory as a pass.\n')
       return 4
