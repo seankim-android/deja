@@ -159,8 +159,10 @@ reset. No ticket here targets it.
    differently under different launch arguments.
 3. **The verified unit is a path from a root.** A root is a clean launch with a profile. A
    transition is trusted only because a whole path through it passed.
-4. **A segment is a short, verbatim Maestro command list**, content-addressed and context-free, so
-   its ID never changes when screens are observed later.
+4. **A segment is a short Maestro command list**, content-addressed and context-free, so its ID
+   never changes when screens are observed later. Imported owner commands are kept verbatim; only
+   the canonical form used for hashing (4.2.1) normalizes them, and selector escaping applies only
+   to selectors `stitch` generates.
 5. **Every step carries provenance** and a pointer to the snapshot it came from.
 6. **No secret values.** Parameters are stored by name and kind.
 7. **Memory is an index, not a cache hit.** Only a full verified flow in `WalkStore` makes `run` a hit.
@@ -637,10 +639,11 @@ Budgets are hard limits per run. Nothing carries over between runs.
 | Depth from root | 20 | prefix + 1 | n/a |
 | Wall time | 15 min | 3 min | 1 min |
 | Full verifications | 3 (4 with target auto-approval) | 1 (2 for an auto-merge) | 0 |
+| Target control runs (one step short, 8.3) | 1 per proposal | n/a | n/a |
 | Target proposals per goal | 2 per run, 5 per day | n/a | n/a |
 
 A target auto-approval needs two clean verification passes (8.2), so it costs 2 of the verification
-budget; the extra one covers a failed path try. These are placeholders until DEJA-18 measures step
+budget, and each proposal also spends one control run one step short of the goal (8.3); the extra one covers a failed path try. These are placeholders until DEJA-18 measures step
 cost. When the model budget runs out, the run
 continues with the scripted chooser. Stop early when the frontier is empty, a screen is revisited 5
 times with no new transition, the app crashes twice, only denied actions are left, or the goal
@@ -781,7 +784,8 @@ The assertion must also pass in the verified save (8.2 step 7).
 A model's own confidence is poorly calibrated, so it is the last check, behind the gates in 8.3,
 and never the only one.
 
-- `targetAutoApproveThreshold` has a floor of 0.8 and a maximum of 0.99. A value outside that range
+- `targetAutoApproveThreshold` has a floor of 0.8 and a maximum of 0.99 (placeholders, owner to
+  confirm once DEJA-19 has logged outcomes). A value outside that range
   fails at config load and leaves auto-approval off. It is never clamped silently. The owner picks
   it from the logged outcomes (below) and lowers it only with evidence.
 - One pending proposal per goal and build. A rejected assertion set (its hash) is remembered and is
@@ -975,7 +979,8 @@ factories after, so a warm hit builds no explorer, driver or chooser.
 
 ### 13.1 What DEJA-18 must measure before DEJA-19 starts
 
-DEJA-19 does not start until every row is "go". A "no-go" result changes the design as shown, and the
+All thresholds in this table are placeholders until DEJA-18 reports its measurements; DEJA-18 sets
+them from the evidence and records why. DEJA-19 does not start until every row is "go". A "no-go" result changes the design as shown, and the
 change is written into this document first. Measure on the iOS 27.2 iPhone 17 simulator, Maestro 2.12,
 on four Blankaday screens (2.1 Today, 3.2 Feed, 6.22 You, 6.7 Settings), keep the raw output, and
 use at least 30 steps where a rate is asked for.
@@ -1038,10 +1043,12 @@ use at least 30 steps where a rate is asked for.
 | 6 | DEJA-23 repair, gaps and review queue | Optional | Step repair, graph gap analysis, proposals, auto-merge threshold, unreviewed-target listing |
 
 DEJA-19 does not start until DEJA-18 meets every go threshold in 13.1. DEJA-19 and DEJA-20 keep
-their graph in memory for the run only. DEJA-21 makes it durable. Target auto-approval (8.2) and its
-gates (8.3) are built in DEJA-19; auto-merge of repairs, dedup and subflows is DEJA-23. The
-tickets still say "a person always approves a target" and "both first-class" in places. They follow
-this document, and need updating.
+their graph in memory for the run only. DEJA-21 makes it durable. The target gates (8.3) are built
+in DEJA-19, and until DEJA-23 every target that passes them still needs a person to approve it.
+Target auto-approval (8.2 step 7) needs `applyProposal`, `GoalTarget` persistence and the audit
+record, so it ships with DEJA-21 and DEJA-23, together with the `deja proposals --unreviewed`
+listing. Auto-merge of repairs, dedup and subflows is DEJA-23 too. Where the Linear issues differ
+from this document, this document wins, and the issue comments record the changes.
 
 ## 17. Decisions
 
