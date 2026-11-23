@@ -1,10 +1,10 @@
 import { createHash } from 'node:crypto'
 import { mkdir, readFile, realpath, stat, writeFile } from 'node:fs/promises'
 import { dirname, isAbsolute, relative, resolve, sep } from 'node:path'
-import { findFlowReferences, FlowReferenceError, type StoredFlowFile } from '@deja-qa/core'
+import { ClosureRefusedError, findFlowReferences, FlowFileCommandError, FlowReferenceError, type StoredFlowFile } from '@deja-qa/core'
 
 /** A flow's references cannot be stored safely, so the flow is not remembered. */
-export class FlowClosureError extends Error {
+export class FlowClosureError extends ClosureRefusedError {
   constructor(message: string, options?: ErrorOptions) {
     super(`Cannot store flow: ${message}`, options)
     this.name = 'FlowClosureError'
@@ -22,14 +22,23 @@ export class MissingFlowFileError extends FlowClosureError {
 const MAX_FILES = 64
 const MAX_DEPTH = 16
 const MAX_FILE_BYTES = 1024 * 1024
+/** `addMedia` files are images and short videos. They are hashed and copied as bytes. */
+const MAX_MEDIA_BYTES = 8 * 1024 * 1024
+/** All media of one closure together. Each replay copies the closure again. */
+const MAX_TOTAL_MEDIA_BYTES = 32 * 1024 * 1024
 
 export type ClosureFile = {
   /** Path from the closure root, with `/` separators. */
   path: string
   sha256: string
   bytes: Buffer
-  /** `script` is a JavaScript file run by `runScript`; the rest are Maestro flows. */
-  kind: 'flow' | 'script'
+  /**
+   * `script` is a JavaScript file run by `runScript`, `media` a binary file `addMedia` reads; the
+   * rest are Maestro flows.
+   */
+  kind: 'flow' | 'script' | 'media'
+  /** Where the file was read from: its workspace-relative path, with `/` separators. */
+  source: string
 }
 
 export type FlowClosure = {
@@ -69,6 +78,14 @@ function posix(path: string) {
   return path.split(sep).join('/')
 }
 
+/**
+ * Spellings that differ only in case or Unicode normalization (`é` as one code point or as `e` plus
+ * a combining accent) name one file on some disks (macOS) and two on others (Linux).
+ */
+function spellingKey(path: string) {
+  return path.normalize('NFC').toLowerCase()
+}
+
 function commonDirectory(directories: string[]) {
   let common = directories[0]
   for (const directory of directories.slice(1)) {
@@ -87,12 +104,13 @@ function commonDirectory(directories: string[]) {
  * Maestro does, and must stay inside the workspace by path and after symlinks resolve.
  */
 export async function collectFlowClosure(root: string, main: string): Promise<FlowClosure> {
-  const found = new Map<string, { bytes: Buffer; kind: 'flow' | 'script' }>()
+  const found = new Map<string, { bytes: Buffer; kind: ClosureFile['kind'] }>()
+  let mediaBytes = 0
   const allowedHidden = new Set(
     posix(relative(root, main)).split('/').slice(0, -1).filter(segment => segment.startsWith('.')),
   )
 
-  async function read(path: string) {
+  async function read(path: string, kind: ClosureFile['kind']) {
     let canonical: string
     try {
       canonical = await realpath(path)
@@ -111,30 +129,48 @@ export async function collectFlowClosure(root: string, main: string): Promise<Fl
       )
     }
     const info = await stat(canonical)
-    if (!info.isFile() || info.size > MAX_FILE_BYTES) {
-      throw new FlowClosureError(`referenced path is not a regular file under 1 MiB: ${posix(relative(root, path))}`)
+    const limit = kind === 'media' ? MAX_MEDIA_BYTES : MAX_FILE_BYTES
+    if (!info.isFile() || info.size > limit) {
+      throw new FlowClosureError(
+        `referenced path is not a regular file under ${limit / 1024 / 1024} MiB: ${posix(relative(root, path))}`,
+      )
     }
     return readFile(canonical)
   }
 
-  async function visit(path: string, kind: 'flow' | 'script', stack: string[]): Promise<void> {
+  async function visit(path: string, kind: ClosureFile['kind'], stack: string[]): Promise<void> {
     if (stack.includes(path)) {
       throw new FlowClosureError(`flows run each other in a cycle: ${posix(relative(root, path))}`)
     }
     if (stack.length >= MAX_DEPTH) throw new FlowClosureError(`flows are nested more than ${MAX_DEPTH} deep`)
-    if (found.has(path)) return
-    // Spellings that differ only in case name one file on a case-insensitive disk, but two on a
-    // case-sensitive one, where the stored copy would break. Ask for one spelling.
-    const sameName = [...found.keys()].find(other => other.toLowerCase() === path.toLowerCase())
+    const earlier = found.get(path)
+    if (earlier) {
+      // One file read as a flow and as media or a script would be hashed as one and followed as the
+      // other, so its own references could go unchecked.
+      if (earlier.kind !== kind) {
+        throw new FlowClosureError(`one file is used as a ${earlier.kind} and as a ${kind}: ${posix(relative(root, path))}`)
+      }
+      return
+    }
+    // Spellings that differ only in case or Unicode normalization name one file on some disks, but
+    // two on others, where the stored copy would break. Ask for one spelling.
+    const sameName = [...found.keys()].find(other => spellingKey(other) === spellingKey(path))
     if (sameName) {
       throw new FlowClosureError(
-        `one file is spelled two ways, differing only in case: ${posix(relative(root, sameName))} and ${posix(relative(root, path))}`,
+        `one file is spelled two ways, differing only in case or Unicode normalization: ${posix(relative(root, sameName))} and ${posix(relative(root, path))}`,
       )
     }
-    const bytes = await read(path)
+    const bytes = await read(path, kind)
     found.set(path, { bytes, kind })
+    if (kind === 'media') {
+      mediaBytes += bytes.length
+      if (mediaBytes > MAX_TOTAL_MEDIA_BYTES) {
+        throw new FlowClosureError(`media files add up to more than ${MAX_TOTAL_MEDIA_BYTES / 1024 / 1024} MiB`)
+      }
+    }
     if (found.size > MAX_FILES) throw new FlowClosureError(`flow runs more than ${MAX_FILES} files`)
-    if (kind === 'script') return
+    // A script is not YAML, and media is binary: neither is read for references.
+    if (kind !== 'flow') return
     let references
     try {
       references = findFlowReferences(bytes.toString('utf8'))
@@ -166,7 +202,9 @@ export async function collectFlowClosure(root: string, main: string): Promise<Fl
   await visit(main, 'flow', [])
   const base = commonDirectory([...found.keys()].map(path => dirname(path)))
   const files = [...found.entries()]
-    .map(([path, { bytes, kind }]) => ({ path: posix(relative(base, path)), sha256: sha256(bytes), bytes, kind }))
+    .map(([path, { bytes, kind }]) => ({
+      path: posix(relative(base, path)), sha256: sha256(bytes), bytes, kind, source: posix(relative(root, path)),
+    }))
     .sort((left, right) => (left.path < right.path ? -1 : left.path > right.path ? 1 : 0))
   return {
     main: posix(relative(base, main)),
@@ -299,6 +337,9 @@ export async function checkStoredSubflows(
     try {
       references = findFlowReferences((await readFile(absolute)).toString('utf8'))
     } catch (error) {
+      // A command this build now refuses (assertScreenshot, a malformed addMedia) was never stored by
+      // an older one, which ignored it. Treat the walk as stored before subflows were kept.
+      if (error instanceof FlowFileCommandError) return { status: 'legacy' }
       if (error instanceof FlowReferenceError) {
         return { status: 'invalid', message: `stored flow ${path} cannot be read for references: ${error.message}` }
       }
@@ -307,6 +348,9 @@ export async function checkStoredSubflows(
     for (const reference of references) {
       const target = posix(relative(root, resolve(dirname(absolute), reference.path)))
       if (!listed.has(target)) {
+        // `addMedia` and `retry` files were not part of a closure before DEJA-32, so a walk stored
+        // then cannot list them. Treat it as stored before subflows were kept: remember it again.
+        if (reference.command === 'addMedia' || reference.command === 'retry') return { status: 'legacy' }
         return {
           status: 'invalid',
           message: `stored flow ${path} runs ${reference.path}, which the walk metadata does not list`,
@@ -321,6 +365,8 @@ export type CandidateClosureSnapshot = {
   /** Path of the copied main flow, relative to `root`. */
   candidatePath: string
   closureSha256: string
+  /** Every file copied: its source path in the workspace and its checksum. */
+  files: { path: string; sha256: string }[]
 }
 
 /** Copy a candidate's whole closure under `directory` (inside `root`), keeping its layout. */
@@ -344,5 +390,6 @@ export async function snapshotFlowClosure(
   return {
     candidatePath: posix(relative(root, resolve(target, closure.main))),
     closureSha256: closure.sha256,
+    files: closure.files.map(file => ({ path: file.source, sha256: file.sha256 })),
   }
 }

@@ -106,6 +106,7 @@ workspaces.
 | Optional `maestro.allowUntested` | `true` runs an override outside the tested Maestro range with a warning instead of refusing. Default `false`. |
 | `openClaw.executable`, `openClaw.mcpProxy` | Executable name and the workspace-local Android MCP proxy. |
 | `repair.sourceRoots`, `repair.permittedFileTypes`, `repair.affectedFiles`, `repair.timeBudgetMs` | Closed Android repair allowlist and one shared deadline. No repair block is permitted for Web. |
+| Optional `crashReportGraceMs` | iOS only. Integer milliseconds, default `10000`, `0` turns it off, maximum `120000`. How long Déjà waits for a crash report after a failed attempt it labels `selector`, `navigation` or `unknown`, before the next attempt starts. See [Rerun a failed walk](#rerun-a-failed-walk-flaky-and-crash-results). |
 | Optional `junit` | Path for Maestro's JUnit report, relative to the config file. Same as `--junit`; the flag wins. Off when neither is set. |
 | Optional `semantic.provider`, `minimumSimilarity`, `minimumMargin` | WALK-016 opt-in local retrieval proof. `local-lexical-v1` is the only implementation; defaults are 0.90 similarity and 0.15 winner margin. Missing/unsupported providers report unavailable and use the ordinary miss lifecycle. |
 | Web-only `adapter`, `browser`, `headless`, `screenSize` | Exact execution/cache identity and Chromium launch settings. Only loopback `appId` URLs and `browser: chromium` are accepted. |
@@ -319,7 +320,9 @@ Limits of the labels, which stay advisory:
   fixture run must check which step fails after the crash.
 - The `.ips` match is by app ID and time only. Parallel runs of the same app ID on one Mac (several
   simulators, several worktrees) can give a run a false `app_crash` from another run's crash. A
-  report does not name the simulator, so this cannot be checked. Symlinks are skipped (the file is opened with `O_NOFOLLOW`) and so are files over 8 MB.
+  report does not name the simulator, so this cannot be checked.
+- Déjà skips a crash report that is a symlink. It opens the file with `O_NOFOLLOW`. It also skips
+  a report over 8 MB.
 - The 2.12.0 sources show no prefix or format on those lines that a flow cannot produce (not seen in live output). A flow whose own
   output (for example `echo`) is exactly one of those lines can spoof the label. The cost is a wrong
   advisory label, never a repair.
@@ -426,6 +429,40 @@ before `goal`, which stays last, so parse by key (or with the whole grammar) and
 not know. `engine` was added this way. It is `unknown` for a run without an engine record, such as
 `inspect` of an older report, and it is always strict `x.y.z` or `unknown`, whatever a report holds. When a command
 fails with exit 2 or 4 after it was parsed, the line still prints, with `outcome=error`.
+
+### Closure errors
+
+`closure-error` (exit `2`, summary `outcome=closure-error failure=unclassified`) means a flow's files could not
+be used safely, so nothing was recorded or written. The flow was not run, unless the result carries an
+`execution` (the error came after the run). Causes: a reference that is unsafe or
+missing (a variable, an absolute path, a hidden file, a path outside the workspace, a flow in a cycle,
+two spellings of one path, an `assertScreenshot`), a manifest or flow path that is refused, or stored
+files that no longer match what the walk recorded (a subflow swapped before a new-build replay runs).
+The message names the file. Before DEJA-32 the same problems were thrown out of `run`: exit `2`, and a
+summary with `outcome=error`. The exit code is the same; the summary now carries the outcome.
+A manifest that cannot be parsed still exits `2` with its own message and `outcome=error`. A stored
+file of a classic store that changed on disk is still corrupt memory (exit `4`).
+
+Files a flow reads are `runFlow` and `retry` files, `runScript` files and `addMedia` files (a list, or a
+`files` list). Media is hashed as bytes (limit 8 MiB; flows and scripts 1 MiB). `assertScreenshot`
+reads a reference image Déjà does not store, so it is refused. `takeScreenshot` and `startRecording`
+write their paths and are not part of the closure.
+
+Media files are hashed and copied as bytes, up to 8 MiB each and 32 MiB in total per closure; more is a
+closure error. The fixture-value scan of a media file matches the raw byte spellings of each value
+only. It cannot see text that is compressed or UTF-16, or text drawn in the pixels of an image, so
+keep credentials out of media. Fixture values apply in manifest mode, where Déjà writes explore output
+into your tree; a classic store has no fixture values to check.
+
+#### Behavior changes (DEJA-32)
+
+- `run` now returns a `closure-error` result where it used to throw `FlowClosureError` (and the
+  related closure and manifest errors). A host that caught the error around `run` must read the
+  outcome instead. `RunOutcome` has a new member, so an exhaustive `switch` needs a case for it.
+- `findFlowReferences` now throws `FlowFileCommandError` (a `FlowReferenceError`) for `assertScreenshot`,
+  a malformed `addMedia`, and `retry` with a bare value. `retry` takes a mapping, as in Maestro.
+- `FlowReference` has a new `command` field, and its `kind` can be `media`.
+- `CandidateSnapshot` has an optional `files` list.
 
 ### Release gate
 
@@ -556,7 +593,7 @@ directory, so give an absolute `--config` path unless the client starts in the p
 | --- | --- |
 | `0` | Successful `run`/`explore`/`remember`, `list`, `inspect` of a passing report, or help |
 | `1` | Product/unknown/runner failure (including a Maestro executable-launch failure), rejected candidate, rejected/failed bounded repair, or `deja doctor` not ready |
-| `2` | Usage, configuration, engine (not installed, checksum mismatch, untested version), report-inspection, or direct I/O error; also no command |
+| `2` | Usage, configuration, engine (not installed, checksum mismatch, untested version), report-inspection, or direct I/O error; also no command. Also `closure-error` (below) |
 | `3` | Cold exploration was rejected or failed to produce a verified reusable walk |
 | `4` | Invalid/corrupt local memory; quarantine it and recover through verified cold exploration |
 | `7` | Flaky (`--rerun-failed`): the replay failed, then passed or failed differently on a rerun of the same YAML. Not a pass; the first failure is recorded |

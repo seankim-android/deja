@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { FlowReferenceError, findFlowReferences } from '../src/flow-references.ts'
+import { FlowFileCommandError, FlowReferenceError, findFlowReferences } from '../src/flow-references.ts'
 
 describe('findFlowReferences', () => {
   test('finds string and file forms for runFlow and runScript', () => {
@@ -13,11 +13,48 @@ describe('findFlowReferences', () => {
       '    file: d.js',
       '',
     ].join('\n'))).toEqual([
-      { kind: 'flow', path: 'a.yaml' },
-      { kind: 'flow', path: '../b.yaml' },
-      { kind: 'script', path: 'c.js' },
-      { kind: 'script', path: 'd.js' },
+      { kind: 'flow', command: 'runFlow', path: 'a.yaml' },
+      { kind: 'flow', command: 'runFlow', path: '../b.yaml' },
+      { kind: 'script', command: 'runScript', path: 'c.js' },
+      { kind: 'script', command: 'runScript', path: 'd.js' },
     ])
+  })
+
+  test('finds addMedia files in each spelling, and a retry that names a file', () => {
+    expect(findFlowReferences([
+      '- addMedia:',
+      '    - one.png',
+      '    - two.png',
+      '    - ../clips/three.mp4',
+      '- addMedia:',
+      '    files: [four.jpg]',
+      '- retry:',
+      '    maxRetries: 2',
+      '    file: again.yaml',
+      '- retry:',
+      '    commands:',
+      '      - addMedia: [nested.gif]',
+      '',
+    ].join('\n'))).toEqual([
+      { kind: 'media', command: 'addMedia', path: 'one.png' },
+      { kind: 'media', command: 'addMedia', path: 'two.png' },
+      { kind: 'media', command: 'addMedia', path: '../clips/three.mp4' },
+      { kind: 'media', command: 'addMedia', path: 'four.jpg' },
+      { kind: 'flow', command: 'retry', path: 'again.yaml' },
+      { kind: 'media', command: 'addMedia', path: 'nested.gif' },
+    ])
+  })
+
+  test('refuses addMedia without paths, and a command that reads a file it cannot follow', () => {
+    expect(() => findFlowReferences('- addMedia:\n')).toThrow(FlowReferenceError)
+    expect(() => findFlowReferences('- addMedia: []\n')).toThrow(FlowReferenceError)
+    expect(() => findFlowReferences('- addMedia:\n    - 3\n')).toThrow(FlowReferenceError)
+    // Maestro 2.12 takes a list or a `files` list, not a bare path.
+    expect(() => findFlowReferences('- addMedia: one.png\n')).toThrow(FlowFileCommandError)
+    expect(() => findFlowReferences('- addMedia:\n    file: one.png\n')).toThrow(FlowFileCommandError)
+    expect(() => findFlowReferences('- retry: again.yaml\n')).toThrow(FlowFileCommandError)
+    expect(() => findFlowReferences('- assertScreenshot: home.png\n')).toThrow(/reference image/)
+    expect(() => findFlowReferences('- repeat:\n    commands:\n      - assertScreenshot: home\n')).toThrow(FlowReferenceError)
   })
 
   test('reads every document and hook, and looks inside repeat, retry and inline commands', () => {

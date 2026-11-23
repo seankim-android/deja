@@ -832,6 +832,35 @@ export function runConsumerFlowContractTests(implementation: WalkStoreContractIm
       }
     })
 
+    test('explore output with an image keeps its bytes, and a fixture value inside the image is refused', async () => {
+      const ctx = await withFlows()
+      try {
+        const secret = 'hunter2-fixture'
+        // Not UTF-8, and it holds the value: a YAML read of these bytes could neither parse nor see it.
+        const image = Buffer.concat([
+          Buffer.from([0x89, 0x50, 0x4e, 0x47, 0xff, 0xfe, 0x00, 0x81]), Buffer.from(secret), Buffer.from([0xc3, 0x28, 0x0a]),
+        ])
+        const clean = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0xff, 0xfe, 0x00, 0x81, 0xc3, 0x28, 0x0a])
+        await mkdir(join(ctx.workspaceRoot, '.deja/attempts/x'), { recursive: true })
+        await ctx.write('.deja/attempts/x/candidate.yaml', 'appId: dev.deja.fixture\n---\n- addMedia:\n    - pic.png\n')
+        await writeFile(join(ctx.workspaceRoot, '.deja/attempts/x/pic.png'), image)
+        const refusing = ctx.openFlows('refusing', undefined, [secret])
+        await expect(ctx.persist(refusing, {
+          identity: identity({ goal: 'Media' }), candidatePath: '.deja/attempts/x/candidate.yaml', origin: 'explore',
+        })).rejects.toThrow(/fixture credential value/)
+        expect(existsSync(join(ctx.workspaceRoot, FLOWS))).toBe(false)
+        await writeFile(join(ctx.workspaceRoot, '.deja/attempts/x/pic.png'), clean)
+        const persisted = await ctx.persist(refusing, {
+          identity: identity({ goal: 'Media' }), candidatePath: '.deja/attempts/x/candidate.yaml', origin: 'explore',
+        })
+        expect(persisted.flowPath).toBe(`${FLOWS}/media/candidate.yaml`)
+        expect(await readFile(join(ctx.workspaceRoot, FLOWS, 'media/pic.png'))).toEqual(clean)
+        expect((await refusing.lookup(identity({ goal: 'Media' }))).status).toBe('hit')
+      } finally {
+        await ctx.cleanup()
+      }
+    })
+
     test('a fixture value too short to scan for is refused when the store is built', async () => {
       const ctx = await withFlows()
       try {

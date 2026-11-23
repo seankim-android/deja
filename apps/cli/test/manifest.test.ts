@@ -111,6 +111,25 @@ describe('manifest mode on the CLI', () => {
     }
   })
 
+  test('a flow whose file cannot be used safely is a closure-error result: exit 2, nothing written, an exact summary line', async () => {
+    const { temporary, root, manifest } = await workspace()
+    try {
+      expect((await execute(root, ['remember', 'today', '--flow', '.maestro/flows/today.yaml'])).exitCode).toBe(0)
+      const written = await manifest()
+      await writeFile(join(root, '.maestro/subflows/type.yaml'), '- runFlow: ${NAME}.yaml\n')
+      const result = await execute(root, ['run', 'today', '--summary', '--junit', 'out/junit.xml'])
+      expect(result.exitCode).toBe(2)
+      expect(result.report).toMatchObject({ outcome: 'closure-error', passed: false, modelCalls: 0 })
+      expect(result.stdout).toContain('Error: Cannot store flow: reference uses a variable')
+      const summary = result.stdout.trimEnd().split('\n').at(-1)!
+      expect(summary).toMatch(/^deja-summary v=1 outcome=closure-error cache=not-checked fingerprint=[0-9a-f]{12} .* failure=unclassified goal=today$/)
+      expect(await readFile(join(root, 'out/junit.xml'), 'utf8')).toContain('closure-error')
+      expect(await manifest()).toBe(written)
+    } finally {
+      await rm(temporary, { recursive: true, force: true })
+    }
+  })
+
   test('flow-changed writes a failing JUnit report, and explore and unknown goals never run a model', async () => {
     const { temporary, root } = await workspace()
     try {

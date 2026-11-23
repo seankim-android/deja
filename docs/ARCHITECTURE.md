@@ -97,7 +97,24 @@ longer matches the snapshot's checksum (`expectedClosureSha256`). References are
 package. A flow that is not valid YAML, an absolute path, a variable, a NUL byte, a cycle, a hidden
 file or folder (`.env`, `.secrets/`, `.git/`, checked on the path and after symlinks; only the dotted folders the main flow itself sits under, like `.maestro`, are allowed), a key file (`*.pem`, `*.key`, `*.env`, ...), two spellings that differ only in case, and any
 reference outside the workspace (by path or through a symlink) reject the flow, and nothing is
-written. Other scripts are copied verbatim, so keep secrets out of them. The closure goes to
+written. The same holds for a refused reference such as `../.maestro/sub.yaml` from a flow in
+`flows/`: the hidden folder is allowed only when the main flow itself sits under it, so the flow must
+live under `.maestro/` to run files there. Other scripts are copied verbatim, so keep secrets out of
+them.
+
+The files a flow reads (Maestro 2.12's command model: `runFlow`, `retry`, `runScript`, `addMedia` and
+`assertScreenshot`) are `runFlow` and `retry` files, `runScript` files and `addMedia` files (a list of
+paths, or a mapping with a `files` list, as Maestro reads it). `takeScreenshot` and `startRecording` take
+output paths, which are written, not read, so they are not part of the closure. `addMedia` files are binary: they are hashed and copied as bytes, up to 8 MiB
+(1 MiB for flows and scripts), never parsed, and scanned as raw bytes for fixture credential values.
+Two paths that differ only in case or Unicode normalization (NFC and NFD spellings) are refused. A
+command that reads a file Déjà cannot store, `assertScreenshot` (a reference image), is refused, and so is
+one path used both as a flow and as media. A walk stored before this whose flow runs an `addMedia` or
+`retry` file, or uses `assertScreenshot`, is read like a walk from before subflows were kept
+(`legacy-closure-unknown`), not as corrupt memory. Those walks could not have passed before: the stored
+copy never held the file. A classic `run` of one is a miss, so it explores again until the flow is
+remembered again. With a manifest, such a flow's closure sha changes, so it is `flow-changed` until
+`--verify` or `remember`. The closure goes to
 `.deja/flows/<goal>/<platform>-<closure sha>/` with its relative layout, and each extra file is
 recorded in `subflowFiles` (`path`, `sha256`). A changed subflow is a different closure folder.
 Lookup checks every stored file: a changed one is refused like a changed main flow, a missing one
@@ -105,7 +122,16 @@ is `missing-flow`, and the references are read again from the stored flows, so m
 a file cannot hide it (a hard error, not a miss, for schema 3 data that changed on disk).
 The stale-build replay runs a snapshot of the stored closure and persists it with
 `expectedFlowSha256` and `expectedClosureSha256`; `ExpectedClosureMismatchError` is handled like
-`ExpectedFlowChecksumMismatchError` (a failed result, nothing written). A flow that runs nothing keeps the one-file layout and records `[]`.
+`ExpectedFlowChecksumMismatchError` (a failed result, nothing written). Before it runs the snapshot,
+core compares every file the snapshot copied (its source path and sha256, from `CandidateSnapshot.files`)
+with the walk's recorded main flow and `subflowFiles`, both ways. With a manifest it compares the
+snapshot's closure sha with the manifest's. A subflow swapped after the lookup, or one the walk never
+recorded, is a `closure-error` result (DEJA-32): nothing is run, recorded or written. The same outcome
+covers any `ClosureRefusedError` (`FlowClosureError`, `ConsumerFlowError`, `InvalidWalkManifestError`)
+from a snapshot, the first lookup, a lookup after the run, the persist step or a `--rerun-failed`
+recheck. A manifest that cannot be read on the first lookup stays a thrown configuration error. Exit
+code 2, as the thrown error gave before. A stored file that changed on disk still reads as corrupt
+memory (`InvalidWalkMemoryError`, exit 4) in classic mode. A flow that runs nothing keeps the one-file layout and records `[]`.
 Nested references resolve lexically (`dir-symlink/../x` collapses `..` before the OS would), and the
 files are hashed just before Maestro reads them, the same window the main flow has.
 

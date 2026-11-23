@@ -136,6 +136,18 @@ export type PersistVerifiedOptions = {
   expectedFlowSha256?: string
 }
 
+/**
+ * A flow's files cannot be gathered, read or hashed safely: an unsafe or missing reference, a bad
+ * manifest, a candidate outside the workspace. `Deja` turns it into a `closure-error` result with
+ * nothing written. Stores subclass it, so core never imports a store.
+ */
+export class ClosureRefusedError extends Error {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options)
+    this.name = 'ClosureRefusedError'
+  }
+}
+
 /** Thrown before any write when the candidate bytes differ from `expectedFlowSha256`. */
 export class ExpectedFlowChecksumMismatchError extends Error {
   constructor(expected: string, actual: string) {
@@ -206,6 +218,13 @@ export type CandidateSnapshot = {
   /** Workspace-relative path of the copied main flow. */
   candidatePath: string
   closureSha256: string
+  /**
+   * Every file the snapshot copied, the main flow included: its workspace-relative path in the
+   * source (`/` separators) and the sha256 of its bytes. Lets a caller compare the copy with what a
+   * walk recorded before running it. Absent from stores that do not report it; the check is then
+   * skipped.
+   */
+  files?: { path: string; sha256: string }[]
 }
 
 export type MigrateOptions = {
@@ -459,7 +478,13 @@ export type RunOutcome = 'passed' | 'remembered' | 'cold-recorded' | 'repaired' 
    * Opt-in rerun (DEJA-7): a failed replay passed on one rerun of the same bytes, or failed twice
    * with a different label or step. Never a pass; `attempts` holds both runs.
    */
-  'flaky'
+  'flaky' |
+  /**
+   * The flow's files could not be gathered or hashed safely (an unsafe or missing reference, a bad
+   * manifest), or the stored files no longer match what the walk recorded. Nothing was
+   * recorded or written, and the flow was not run unless the result carries an `execution`. Exit 2.
+   */
+  'closure-error'
 
 /** One replay of the same stored bytes. `RunResult.attempts` lists them, first attempt first. */
 export type RunAttempt = {

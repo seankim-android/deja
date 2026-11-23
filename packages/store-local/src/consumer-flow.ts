@@ -7,6 +7,7 @@ import {
   checkManifestFlowPath,
   emptyWalkManifest,
   ExpectedClosureMismatchError,
+  ClosureRefusedError,
   ExpectedFlowChecksumMismatchError,
   findFlowAssertions,
   FlowChangedError,
@@ -27,12 +28,12 @@ import {
   type WalkIdentity,
   type WalkManifest,
 } from '@deja-qa/core'
-import { closureSha256Of, collectFlowClosure, FlowClosureError, MissingFlowFileError, type FlowClosure } from './flow-closure.ts'
-import { ForbiddenValueTooShortError, holdsForbiddenValue, jsonHoldsForbiddenValue, MIN_FORBIDDEN_VALUE_LENGTH } from './secret-scan.ts'
+import { closureSha256Of, collectFlowClosure, type ClosureFile, FlowClosureError, MissingFlowFileError, type FlowClosure } from './flow-closure.ts'
+import { bytesHoldForbiddenValue, ForbiddenValueTooShortError, holdsForbiddenValue, jsonHoldsForbiddenValue, MIN_FORBIDDEN_VALUE_LENGTH } from './secret-scan.ts'
 import { StoreLockedError, WriterLock } from './writer-lock.ts'
 
 /** The verified flow is not the consumer's own file, so manifest mode cannot keep it. */
-export class ConsumerFlowError extends Error {
+export class ConsumerFlowError extends ClosureRefusedError {
   constructor(message: string, options?: ErrorOptions) {
     super(`Consumer flow: ${message}`, options)
     this.name = 'ConsumerFlowError'
@@ -560,7 +561,7 @@ export class ConsumerFlows {
     checkManifestFlowPath(main.path, 'flow')
     const files: MaterializePlan['files'] = []
     const conflicts: string[] = []
-    const secrets = placed.filter(item => this.holdsForbiddenValue(item.file.bytes)).map(item => item.path)
+    const secrets = placed.filter(item => this.holdsForbiddenValue(item.file)).map(item => item.path)
     for (const item of placed) {
       let exists = false
       try {
@@ -585,8 +586,10 @@ export class ConsumerFlows {
     }
   }
 
-  private holdsForbiddenValue(bytes: Buffer) {
-    return holdsForbiddenValue(bytes.toString('utf8'), this.forbiddenValues)
+  private holdsForbiddenValue(file: ClosureFile) {
+    return file.kind === 'media'
+      ? bytesHoldForbiddenValue(file.bytes, this.forbiddenValues)
+      : holdsForbiddenValue(file.bytes.toString('utf8'), this.forbiddenValues)
   }
 
   /** Write the files that are not there yet. Each is created exclusively: nothing is overwritten. */

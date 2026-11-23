@@ -1,4 +1,4 @@
-import { normalizeGoal } from './contracts.ts'
+import { ClosureRefusedError, normalizeGoal } from './contracts.ts'
 
 /** Version of the manifest file format. A reader refuses any other value. */
 export const WALK_MANIFEST_VERSION = 1
@@ -43,7 +43,7 @@ export type WalkManifest = {
 }
 
 /** The manifest is missing a field, malformed, unsafe, or of a version this build does not know. */
-export class InvalidWalkManifestError extends Error {
+export class InvalidWalkManifestError extends ClosureRefusedError {
   constructor(message: string, options?: ErrorOptions) {
     super(`Invalid walk manifest: ${message}`, options)
     this.name = 'InvalidWalkManifestError'
