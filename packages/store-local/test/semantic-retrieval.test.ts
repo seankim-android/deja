@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -30,7 +30,7 @@ function identity(overrides: Partial<WalkIdentity> = {}): WalkIdentity {
 }
 
 async function fixture() {
-  const root = await mkdtemp(join(tmpdir(), 'deja-semantic-store-'))
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'deja-semantic-store-')))
   await mkdir(join(root, 'candidates'), { recursive: true })
   const store = new LocalWalkStore({ workspaceRoot: root })
   const seed = async (goal: string, overrides: Partial<WalkIdentity> = {}) => {

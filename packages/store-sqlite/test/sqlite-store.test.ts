@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test'
 import { Database } from 'bun:sqlite'
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -22,7 +22,7 @@ function identity(overrides: Partial<WalkIdentity> = {}): WalkIdentity {
 }
 
 test('a real SQLite error rolls back the entire metadata replacement and retains the known-good walk', async () => {
-  const temporary = await mkdtemp(join(tmpdir(), 'deja-sqlite-rollback-'))
+  const temporary = await realpath(await mkdtemp(join(tmpdir(), 'deja-sqlite-rollback-')))
   const workspaceRoot = join(temporary, 'workspace')
   const store = new SQLiteWalkStore({ workspaceRoot })
   try {
