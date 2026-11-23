@@ -336,7 +336,9 @@ timeout or a runner error still wins over it. Two signals count:
    is not a signal. A crash-like message without a signal keeps its label.
 2. iOS only: a new `.ips` crash report in `~/Library/Logs/DiagnosticReports` (a seam for tests and
    hosts: `crashReportDirectory`), written during the failed run, whose header names the app ID
-   (`bundleID` or `CFBundleIdentifier`). Déjà reads a bounded head of the file to match the app ID
+   (`bundleID` or `CFBundleIdentifier`) and whose `procPath` is inside
+   `CoreSimulator/Devices/<UDID>/` for the run's own simulator UDID (the config's `device`,
+   compared case-insensitively). Déjà reads a bounded head of the file to match the app ID
    and keeps only its file name and process name (`failure.crash.reportFile`, `.process`). It never
    copies the contents, which can hold personal data.
 
@@ -353,9 +355,15 @@ Limits of the labels, which stay advisory:
 - A crash followed by a failed assertion can still be labeled `product_assertion`: the report is
   still being written when Maestro prints the assertion, and no wait happens. The first-launch
   fixture run must check which step fails after the crash.
-- The `.ips` match is by app ID and time only. Parallel runs of the same app ID on one Mac (several
-  simulators, several worktrees) can give a run a false `app_crash` from another run's crash. A
-  report does not name the simulator, so this cannot be checked.
+- The `.ips` match is by app ID, time and simulator. Every simulator on the Mac writes to the one
+  folder, so a report counts only when its `procPath` names the run's own UDID. A report with a
+  different UDID, with no UDID (for example a host process such as the Swift Testing helper), or
+  with `procPath` past the 32 KB head is ignored, and Déjà writes one line to stderr:
+  `deja: crash report ignored: other simulator (<file>)`, `... no simulator in report ...` or
+  `... run simulator unknown ...`. Parallel runs of the same app on other simulators no longer
+  give a false `app_crash`. If the run's device is not a simulator UDID (for example `booted`),
+  no `.ips` report is accepted at all: the label never comes from a report it cannot attribute,
+  and Maestro's own crash lines still count. Parallel runs on the same simulator are not separated.
 - Déjà skips a crash report that is a symlink. It opens the file with `O_NOFOLLOW`. It also skips
   a report over 8 MB.
 - The 2.12.0 sources show no prefix or format on those lines that a flow cannot produce (not seen in live output). A flow whose own

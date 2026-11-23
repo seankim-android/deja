@@ -188,7 +188,7 @@ describe('deja run --rerun-failed', () => {
       // The fake writes the report during its run, as the system would when the app dies.
       process.env.DEJA_FAKE_CRASH_REPORT = join(reports, 'DejaFixture-2026-11-23-010203.ips')
       process.env.DEJA_FAKE_CRASH_REPORT_BODY =
-        `{"app_name":"DejaFixture"}\n{"procName":"DejaFixture","bundleInfo":{"CFBundleIdentifier":"${appId}"},"private":"patient"}`
+        `{"app_name":"DejaFixture"}\n{"procName":"DejaFixture","procPath":"\\/Users\\/x\\/Library\\/Developer\\/CoreSimulator\\/Devices\\/dfc4d233-498b-4b33-b713-e59b239fa86a\\/data\\/App","bundleInfo":{"CFBundleIdentifier":"${appId}"},"private":"patient"}`
       process.env.DEJA_FAKE_MAESTRO_SCRIPT = 'quiet-crash,pass'
       process.env.DEJA_FAKE_MAESTRO_COUNTER = join(temporary, 'c')
       let out = ''

@@ -13,6 +13,12 @@ import {
 
 const execution = [{ kind: 'execution' } as const]
 const tapStep = 'Tap on id: checkout_button'
+// Made-up UDIDs. A real report carries `procPath` inside CoreSimulator/Devices/<UDID>/ with the
+// slashes escaped, which is what the fixtures copy.
+const MINE = '11111111-AAAA-4BBB-8CCC-222222222222'
+const OTHER = '33333333-DDDD-4EEE-8FFF-444444444444'
+const procPath = (udid: string) =>
+  `\\/Users\\/x\\/Library\\/Developer\\/CoreSimulator\\/Devices\\/${udid}\\/data\\/Containers\\/Bundle\\/Application\\/A\\/App.app\\/App`
 
 function classify(output: string, crashSignal?: Parameters<typeof classifyMaestroFailure>[0]['crashSignal']) {
   return classifyMaestroFailure({
@@ -100,7 +106,7 @@ describe('crash report finder', () => {
     await utimes(path, time, time)
   }
   const header = (bundle: string, proc = 'DejaFixture') =>
-    `{"app_name":"${proc}","bug_type":"309"}\n{"procName":"${proc}","bundleInfo":{"CFBundleIdentifier":"${bundle}"},"secret":"patient-name"}`
+    `{"app_name":"${proc}","bug_type":"309"}\n{"procName":"${proc}","procPath":"${procPath(MINE)}","bundleInfo":{"CFBundleIdentifier":"${bundle}"},"secret":"patient-name"}`
 
   beforeAll(async () => {
     directory = await mkdtemp(join(tmpdir(), 'deja-ips-'))
@@ -111,7 +117,7 @@ describe('crash report finder', () => {
 
   test('matches a new report for the app ID written during the run, and keeps only its name and process', async () => {
     await report('DejaFixture-2026-11-23-010203.ips', header(appId), '2026-11-23T01:02:03Z')
-    const found = await findCrashReport({ directory, appId, sinceMs: since, untilMs: until })
+    const found = await findCrashReport({ directory, appId, sinceMs: since, untilMs: until, deviceUdid: MINE })
     expect(found).toEqual({
       source: 'crash-report', reportFile: 'DejaFixture-2026-11-23-010203.ips', process: 'DejaFixture',
     })
@@ -129,7 +135,7 @@ describe('crash report finder', () => {
       await writeFile(join(other, 'Note.txt'), header(appId))
       await utimes(join(other, 'Note.txt'), new Date('2026-11-23T01:02:00Z'), new Date('2026-11-23T01:02:00Z'))
       await utimes(join(other, 'Other.ips'), new Date('2026-11-23T01:02:00Z'), new Date('2026-11-23T01:02:00Z'))
-      expect(await findCrashReport({ directory: other, appId, sinceMs: since, untilMs: until })).toBeNull()
+      expect(await findCrashReport({ directory: other, appId, sinceMs: since, untilMs: until, deviceUdid: MINE })).toBeNull()
     } finally {
       await rm(other, { recursive: true, force: true })
     }
@@ -140,23 +146,23 @@ describe('crash report finder', () => {
     try {
       await writeFile(join(other, 'A.ips'), header(`${appId}.extension`))
       await utimes(join(other, 'A.ips'), new Date('2026-11-23T01:02:00Z'), new Date('2026-11-23T01:02:00Z'))
-      expect(await findCrashReport({ directory: other, appId, sinceMs: since, untilMs: until })).toBeNull()
-      expect(await findCrashReport({ directory: other, appId: 'dev.deja.ios.checkout.extension', sinceMs: since, untilMs: until }))
+      expect(await findCrashReport({ directory: other, appId, sinceMs: since, untilMs: until, deviceUdid: MINE })).toBeNull()
+      expect(await findCrashReport({ directory: other, appId: 'dev.deja.ios.checkout.extension', sinceMs: since, untilMs: until, deviceUdid: MINE }))
         .toMatchObject({ source: 'crash-report', reportFile: 'A.ips' })
-      expect(await findCrashReport({ directory: other, appId: '.*', sinceMs: since, untilMs: until })).toBeNull()
+      expect(await findCrashReport({ directory: other, appId: '.*', sinceMs: since, untilMs: until, deviceUdid: MINE })).toBeNull()
     } finally {
       await rm(other, { recursive: true, force: true })
     }
   })
 
   test('a missing directory is no evidence, and a hostile process name is dropped', async () => {
-    expect(await findCrashReport({ directory: join(directory, 'nope'), appId, sinceMs: since, untilMs: until })).toBeNull()
+    expect(await findCrashReport({ directory: join(directory, 'nope'), appId, sinceMs: since, untilMs: until, deviceUdid: MINE })).toBeNull()
     const other = await mkdtemp(join(tmpdir(), 'deja-ips-name-'))
     try {
       await mkdir(other, { recursive: true })
       await writeFile(join(other, 'B.ips'), header(appId, 'x\\u0000 outcome=passed'))
       await utimes(join(other, 'B.ips'), new Date('2026-11-23T01:02:00Z'), new Date('2026-11-23T01:02:00Z'))
-      const found = await findCrashReport({ directory: other, appId, sinceMs: since, untilMs: until })
+      const found = await findCrashReport({ directory: other, appId, sinceMs: since, untilMs: until, deviceUdid: MINE })
       expect(found).toEqual({ source: 'crash-report', reportFile: 'B.ips' })
     } finally {
       await rm(other, { recursive: true, force: true })
@@ -170,7 +176,7 @@ describe('crash report finder', () => {
 
 describe('crash report hostile input and attribution', () => {
   const appId = 'dev.deja.ios.checkout'
-  const header = `{"app_name":"P"}\n{"procName":"P","bundleInfo":{"CFBundleIdentifier":"${appId}"}}`
+  const header = `{"app_name":"P"}\n{"procName":"P","procPath":"${procPath(MINE)}","bundleInfo":{"CFBundleIdentifier":"${appId}"}}`
 
   test('a symlinked .ips is never read, even when it points at a real matching report', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'deja-ips-link-'))
@@ -179,7 +185,7 @@ describe('crash report hostile input and attribution', () => {
       await writeFile(target, header)
       await symlink(target, join(dir, 'Link.ips'))
       const now = Date.now()
-      expect(await findCrashReport({ directory: dir, appId, sinceMs: now - 60_000, untilMs: now + 60_000 })).toBeNull()
+      expect(await findCrashReport({ directory: dir, appId, sinceMs: now - 60_000, untilMs: now + 60_000, deviceUdid: MINE })).toBeNull()
     } finally {
       await rm(dir, { recursive: true, force: true })
     }
@@ -191,10 +197,10 @@ describe('crash report hostile input and attribution', () => {
       await writeFile(join(dir, 'Big.ips'), `${header}\n${'x'.repeat(5_000_000)}`)
       await writeFile(join(dir, 'Far.ips'), `{"app_name":"P"}\n${' '.repeat(100_000)}"CFBundleIdentifier":"${appId}"`)
       const now = Date.now()
-      const found = await findCrashReport({ directory: dir, appId, sinceMs: now - 60_000, untilMs: now + 60_000 })
+      const found = await findCrashReport({ directory: dir, appId, sinceMs: now - 60_000, untilMs: now + 60_000, deviceUdid: MINE })
       expect(found).toEqual({ source: 'crash-report', reportFile: 'Big.ips', process: 'P' })
       await rm(join(dir, 'Big.ips'))
-      expect(await findCrashReport({ directory: dir, appId, sinceMs: now - 60_000, untilMs: now + 60_000 })).toBeNull()
+      expect(await findCrashReport({ directory: dir, appId, sinceMs: now - 60_000, untilMs: now + 60_000, deviceUdid: MINE })).toBeNull()
     } finally {
       await rm(dir, { recursive: true, force: true })
     }
@@ -205,7 +211,7 @@ describe('crash report hostile input and attribution', () => {
     try {
       await writeFile(join(dir, 'Huge.ips'), `${header}\n${'x'.repeat(9 * 1024 * 1024)}`)
       const now = Date.now()
-      expect(await findCrashReport({ directory: dir, appId, sinceMs: now - 60_000, untilMs: now + 60_000 })).toBeNull()
+      expect(await findCrashReport({ directory: dir, appId, sinceMs: now - 60_000, untilMs: now + 60_000, deviceUdid: MINE })).toBeNull()
     } finally {
       await rm(dir, { recursive: true, force: true })
     }
@@ -221,9 +227,9 @@ describe('crash report hostile input and attribution', () => {
       const landed = new Date('2026-11-23T01:00:12Z')
       await utimes(join(dir, 'Late.ips'), landed, landed)
       const grace = 10_000
-      expect(await findCrashReport({ directory: dir, appId, sinceMs: Date.parse('2026-11-23T01:00:00Z'), untilMs: end1 + grace }))
+      expect(await findCrashReport({ directory: dir, appId, sinceMs: Date.parse('2026-11-23T01:00:00Z'), untilMs: end1 + grace, deviceUdid: MINE }))
         .toMatchObject({ reportFile: 'Late.ips' })
-      expect(await findCrashReport({ directory: dir, appId, sinceMs: start2, untilMs: end2 + grace })).toBeNull()
+      expect(await findCrashReport({ directory: dir, appId, sinceMs: start2, untilMs: end2 + grace, deviceUdid: MINE })).toBeNull()
     } finally {
       await rm(dir, { recursive: true, force: true })
     }
@@ -235,14 +241,14 @@ describe('MaestroWalkRunner crash report written after the attempt ends', () => 
     const dir = await mkdtemp(join(tmpdir(), 'deja-ips-nowait-'))
     try {
       const runner = new MaestroWalkRunner({
-        workspaceRoot: dir, executable: '/unused', device: 'sim', timeoutMs: 1000,
-        adapter: iosMaestroAdapter({ device: 'sim' }), appId: 'dev.deja.ios.checkout',
+        workspaceRoot: dir, executable: '/unused', device: MINE, timeoutMs: 1000,
+        adapter: iosMaestroAdapter({ device: MINE }), appId: 'dev.deja.ios.checkout',
         crashReportDirectory: join(dir, 'empty'), crashReportGraceMs: 5000, crashReportPollMs: 25,
       })
       for (const [timedOut, kind] of [[true, 'timeout'], [false, 'launch']] as const) {
         const begun = Date.now()
         const adapted = await runner.adapt({
-          platform: 'ios', device: 'sim', flowPath: join(dir, 'flow.yaml'),
+          platform: 'ios', device: MINE, flowPath: join(dir, 'flow.yaml'),
           startedAt: new Date(begun - 1000).toISOString(), endedAt: new Date(begun).toISOString(),
           durationMs: 1000, monotonicDurationMs: 1000, exitCode: 1, signal: null, timedOut,
           passed: false, stdout: '', stderr: '', output: 'Tap on id: a... FAILED\n', errors: [{ kind, message: 'x' }],
@@ -261,18 +267,18 @@ describe('MaestroWalkRunner crash report written after the attempt ends', () => 
     await mkdir(reports)
     try {
       const runner = new MaestroWalkRunner({
-        workspaceRoot: dir, executable: '/unused', device: 'sim', timeoutMs: 1000,
-        adapter: iosMaestroAdapter({ device: 'sim' }), appId: 'dev.deja.ios.checkout',
+        workspaceRoot: dir, executable: '/unused', device: MINE, timeoutMs: 1000,
+        adapter: iosMaestroAdapter({ device: MINE }), appId: 'dev.deja.ios.checkout',
         crashReportDirectory: reports, crashReportGraceMs: 3000, crashReportPollMs: 25,
       })
       const ended = new Date()
       const output = 'Tap on id: checkout_button... FAILED\n\nElement not found: Id matching regex: checkout_button\n'
       setTimeout(() => {
         void writeFile(join(reports, 'Late-2026.ips'),
-          '{"app_name":"P"}\n{"procName":"P","bundleInfo":{"CFBundleIdentifier":"dev.deja.ios.checkout"}}')
+          `{"app_name":"P"}\n{"procName":"P","procPath":"${procPath(MINE)}","bundleInfo":{"CFBundleIdentifier":"dev.deja.ios.checkout"}}`)
       }, 200)
       const adapted = await runner.adapt({
-        platform: 'ios', device: 'sim', flowPath: join(dir, 'flow.yaml'),
+        platform: 'ios', device: MINE, flowPath: join(dir, 'flow.yaml'),
         startedAt: new Date(ended.getTime() - 1000).toISOString(), endedAt: ended.toISOString(),
         durationMs: 1000, monotonicDurationMs: 1000, exitCode: 1, signal: null, timedOut: false,
         passed: false, stdout: output, stderr: '', output, errors: [{ kind: 'execution', message: 'x' }],
@@ -283,17 +289,118 @@ describe('MaestroWalkRunner crash report written after the attempt ends', () => 
 
       // With no report in the grace window the same output stays the repair-eligible selector label.
       const quiet = new MaestroWalkRunner({
-        workspaceRoot: dir, executable: '/unused', device: 'sim', timeoutMs: 1000,
-        adapter: iosMaestroAdapter({ device: 'sim' }), appId: 'dev.deja.ios.checkout',
+        workspaceRoot: dir, executable: '/unused', device: MINE, timeoutMs: 1000,
+        adapter: iosMaestroAdapter({ device: MINE }), appId: 'dev.deja.ios.checkout',
         crashReportDirectory: join(dir, 'empty'), crashReportGraceMs: 100, crashReportPollMs: 25,
       })
       const second = await quiet.adapt({
-        platform: 'ios', device: 'sim', flowPath: join(dir, 'flow.yaml'),
+        platform: 'ios', device: MINE, flowPath: join(dir, 'flow.yaml'),
         startedAt: new Date(Date.now() - 1000).toISOString(), endedAt: new Date().toISOString(),
         durationMs: 1000, monotonicDurationMs: 1000, exitCode: 1, signal: null, timedOut: false,
         passed: false, stdout: output, stderr: '', output, errors: [{ kind: 'execution', message: 'x' }],
       })
       expect(second.failure).toMatchObject({ category: 'selector', repairEligible: true })
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('crash report belongs to the run simulator', () => {
+  const appId = 'dev.deja.ios.checkout'
+  const since = Date.parse('2026-11-23T01:00:00Z')
+  const until = Date.parse('2026-11-23T01:05:00Z')
+  const when = new Date('2026-11-23T01:02:00Z')
+  const body = (path: string | null) =>
+    `{"app_name":"P"}\n{"procName":"P",${path === null ? '' : `"procPath":"${path}",`}"bundleInfo":{"CFBundleIdentifier":"${appId}"}}`
+
+  async function find(files: Record<string, string>, deviceUdid: string | undefined) {
+    const dir = await mkdtemp(join(tmpdir(), 'deja-ips-udid-'))
+    const ignored: string[] = []
+    try {
+      for (const [name, text] of Object.entries(files)) {
+        await writeFile(join(dir, name), text)
+        await utimes(join(dir, name), when, when)
+      }
+      const found = await findCrashReport({
+        directory: dir, appId, sinceMs: since, untilMs: until,
+        ...(deviceUdid === undefined ? {} : { deviceUdid }),
+        onIgnored: (file, reason) => ignored.push(`${reason}: ${file}`),
+      })
+      return { found, ignored }
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  }
+
+  test('a report from this simulator is accepted', async () => {
+    const { found, ignored } = await find({ 'Mine.ips': body(procPath(MINE)) }, MINE)
+    expect(found).toEqual({ source: 'crash-report', reportFile: 'Mine.ips', process: 'P' })
+    expect(ignored).toEqual([])
+  })
+
+  test('a report from another simulator is ignored and the reason is recorded', async () => {
+    const { found, ignored } = await find({ 'Other.ips': body(procPath(OTHER)) }, MINE)
+    expect(found).toBeNull()
+    expect(ignored).toEqual(['other simulator: Other.ips'])
+  })
+
+  test('another simulator newer than this one does not hide this one', async () => {
+    const { found } = await find({ 'Mine.ips': body(procPath(MINE)), 'Other.ips': body(procPath(OTHER)) }, MINE)
+    expect(found).toMatchObject({ reportFile: 'Mine.ips' })
+  })
+
+  test('a report with no simulator is ignored: a host path, no procPath, or a UDID in another field', async () => {
+    const { found, ignored } = await find({
+      'Host.ips': body('\\/Applications\\/Xcode.app\\/Contents\\/usr\\/bin\\/swiftpm-testing-helper'),
+      'None.ips': body(null),
+      'Field.ips': `{"app_name":"P"}\n{"procName":"P","note":"${procPath(MINE)}","bundleInfo":{"CFBundleIdentifier":"${appId}"}}`,
+    }, MINE)
+    expect(found).toBeNull()
+    expect(ignored.sort()).toEqual([
+      'no simulator in report: Field.ips', 'no simulator in report: Host.ips', 'no simulator in report: None.ips',
+    ])
+  })
+
+  test('the UDID is compared case-insensitively and unescaped slashes work', async () => {
+    const plain = '/Users/x/Library/Developer/CoreSimulator/Devices/' + MINE.toLowerCase() + '/data/App'
+    expect((await find({ 'Lower.ips': body(procPath(MINE.toLowerCase())) }, MINE)).found).toMatchObject({ reportFile: 'Lower.ips' })
+    expect((await find({ 'Upper.ips': body(procPath(MINE.toUpperCase())) }, MINE.toLowerCase())).found).toMatchObject({ reportFile: 'Upper.ips' })
+    expect((await find({ 'Plain.ips': body(plain) }, MINE)).found).toMatchObject({ reportFile: 'Plain.ips' })
+  })
+
+  test('an unknown run UDID accepts nothing, even a report that names a simulator', async () => {
+    for (const unknown of [undefined, '', 'booted', 'iPhone 17', 'sim']) {
+      const { found, ignored } = await find({ 'Any.ips': body(procPath(MINE)) }, unknown)
+      expect(found).toBeNull()
+      expect(ignored).toEqual(['run simulator unknown: Any.ips'])
+    }
+  })
+
+  test('a procPath beyond the 32 KB head is not seen, so the report is ignored', async () => {
+    const far = `{"app_name":"P"}\n{"procName":"P","bundleInfo":{"CFBundleIdentifier":"${appId}"},"pad":"${'x'.repeat(40_000)}","procPath":"${procPath(MINE)}"}`
+    const { found, ignored } = await find({ 'Far.ips': far }, MINE)
+    expect(found).toBeNull()
+    expect(ignored).toEqual(['no simulator in report: Far.ips'])
+  })
+
+  test('a crash report from another simulator never labels the run app_crash', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'deja-ips-run-'))
+    try {
+      await writeFile(join(dir, 'Other.ips'), body(procPath(OTHER)))
+      const runner = new MaestroWalkRunner({
+        workspaceRoot: dir, executable: '/unused', device: MINE, timeoutMs: 1000,
+        adapter: iosMaestroAdapter({ device: MINE }), appId,
+        crashReportDirectory: dir, crashReportGraceMs: 0, crashReportPollMs: 25,
+      })
+      const output = 'Tap on id: checkout_button... FAILED\n\nElement not found: Id matching regex: checkout_button\n'
+      const adapted = await runner.adapt({
+        platform: 'ios', device: MINE, flowPath: join(dir, 'flow.yaml'),
+        startedAt: new Date(Date.now() - 1000).toISOString(), endedAt: new Date().toISOString(),
+        durationMs: 1000, monotonicDurationMs: 1000, exitCode: 1, signal: null, timedOut: false,
+        passed: false, stdout: output, stderr: '', output, errors: [{ kind: 'execution', message: 'x' }],
+      })
+      expect(adapted.failure).toMatchObject({ category: 'selector', repairEligible: true })
     } finally {
       await rm(dir, { recursive: true, force: true })
     }

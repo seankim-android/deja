@@ -53,6 +53,8 @@ export type FindCrashReportOptions = {
     appId: string;
     sinceMs: number;
     untilMs: number;
+    deviceUdid?: string;
+    onIgnored?: (reportFile: string, reason: string) => void;
 };
 export declare function idSelector(id: string): string;
 export type InstallEngineOptions = {
