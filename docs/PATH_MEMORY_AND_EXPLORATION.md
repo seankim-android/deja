@@ -770,8 +770,11 @@ The assertion must also pass in the verified save (8.2 step 7).
 - A target exists only once it is approved by the owner's files, by the owner's rules plus the
   threshold, or by a person, and only at the verified save (8.2). Its `assertionsSha256` is stored
   with the goal and the path.
-- `assertionsSha256` covers every product assertion in the flow, mid-flow ones included, as a
-  sorted list that keeps repeats. Replay, repair, composition and deduplication must produce the
+- (DEJA-36 built this form: `ASSERTION_HASH_VERSION` 1 in `packages/core/src/flow-assertions.ts`,
+  described in REFERENCE.md. It also covers file paths, call chains, order, `env`, `repeat`/`retry`/`runFlow`
+  parameters, `evalScript` and `runScript` bytes, so it fails closed. DEJA-19 reuses it and must not define a second
+  `assertionsSha256`.) `assertionsSha256` covers every product assertion in the flow, mid-flow ones
+  included, as a sorted list that keeps repeats. Replay, repair, composition and deduplication must produce the
   same list. The engine compares hashes and refuses any flow whose hash differs. Dedup never drops
   an assertion, not even a repeated one. A changed target needs a new approval.
 - Repair starts only from an action command (tap, input, scroll), never from an assertion. This is

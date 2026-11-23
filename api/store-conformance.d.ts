@@ -1,6 +1,6 @@
 // typescript 7.0.2
 // entry . (./src/index.ts)
-// exports: ContractScene, ExplorationDriverContractImplementation, MetadataTamper, StoreFailureInjection, WalkStoreContractImplementation, contractIdentity, initialValidation, laterValidation, localStoreContract, runExplorationDriverContractTests, runWalkStoreContractTests, runWriterLockContractTests, sqliteStoreContract
+// exports: ContractScene, ExplorationDriverContractImplementation, MetadataTamper, StoreFailureInjection, WalkStoreContractImplementation, contractIdentity, initialValidation, laterValidation, localStoreContract, runConsumerFlowContractTests, runExplorationDriverContractTests, runWalkStoreContractTests, runWriterLockContractTests, sqliteStoreContract
 export declare function contractIdentity(overrides?: Partial<WalkIdentity>): WalkIdentity;
 export type ContractScene = {
     ids: string[];
@@ -24,6 +24,7 @@ export declare const initialValidation = "2026-11-22T00:00:00.000Z";
 export declare const laterValidation = "2026-11-22T00:01:00.000Z";
 export declare const localStoreContract: WalkStoreContractImplementation;
 export type MetadataTamper = 'malformed' | 'unsupported-schema' | 'invalid-entry' | 'duplicate-identity';
+export declare function runConsumerFlowContractTests(implementation: WalkStoreContractImplementation): void;
 export declare function runExplorationDriverContractTests(implementation: ExplorationDriverContractImplementation): void;
 export declare function runWalkStoreContractTests(implementation: WalkStoreContractImplementation): void;
 export declare function runWriterLockContractTests(implementation: WalkStoreContractImplementation): void;
@@ -36,7 +37,11 @@ export type WalkStoreContractImplementation = {
     name: string;
     kind: 'local' | 'sqlite';
     metadataPath(workspaceRoot: string, storeId?: string): string;
-    createStore(workspaceRoot: string, failures?: StoreFailureInjection, storeId?: string): WalkStore;
+    createStore(workspaceRoot: string, failures?: StoreFailureInjection, storeId?: string, manifest?: {
+        path: string;
+        forbiddenValues?: string[];
+        flowsDir?: string;
+    }): WalkStore;
     closeStore(store: WalkStore): void | Promise<void>;
     snapshotMetadata(workspaceRoot: string): Promise<Buffer>;
     tamperMetadata(workspaceRoot: string, kind: MetadataTamper): Promise<void>;

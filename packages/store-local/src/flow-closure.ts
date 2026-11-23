@@ -11,6 +11,14 @@ export class FlowClosureError extends Error {
   }
 }
 
+/** A file the flow runs is gone. In manifest mode the consumer deleted or moved it. */
+export class MissingFlowFileError extends FlowClosureError {
+  constructor(path: string) {
+    super(`referenced file does not exist: ${path}`)
+    this.name = 'MissingFlowFileError'
+  }
+}
+
 const MAX_FILES = 64
 const MAX_DEPTH = 16
 const MAX_FILE_BYTES = 1024 * 1024
@@ -20,6 +28,8 @@ export type ClosureFile = {
   path: string
   sha256: string
   bytes: Buffer
+  /** `script` is a JavaScript file run by `runScript`; the rest are Maestro flows. */
+  kind: 'flow' | 'script'
 }
 
 export type FlowClosure = {
@@ -77,7 +87,7 @@ function commonDirectory(directories: string[]) {
  * Maestro does, and must stay inside the workspace by path and after symlinks resolve.
  */
 export async function collectFlowClosure(root: string, main: string): Promise<FlowClosure> {
-  const found = new Map<string, Buffer>()
+  const found = new Map<string, { bytes: Buffer; kind: 'flow' | 'script' }>()
   const allowedHidden = new Set(
     posix(relative(root, main)).split('/').slice(0, -1).filter(segment => segment.startsWith('.')),
   )
@@ -88,7 +98,7 @@ export async function collectFlowClosure(root: string, main: string): Promise<Fl
       canonical = await realpath(path)
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-        throw new FlowClosureError(`referenced file does not exist: ${posix(relative(root, path))}`)
+        throw new MissingFlowFileError(posix(relative(root, path)))
       }
       throw error
     }
@@ -122,7 +132,7 @@ export async function collectFlowClosure(root: string, main: string): Promise<Fl
       )
     }
     const bytes = await read(path)
-    found.set(path, bytes)
+    found.set(path, { bytes, kind })
     if (found.size > MAX_FILES) throw new FlowClosureError(`flow runs more than ${MAX_FILES} files`)
     if (kind === 'script') return
     let references
@@ -156,13 +166,19 @@ export async function collectFlowClosure(root: string, main: string): Promise<Fl
   await visit(main, 'flow', [])
   const base = commonDirectory([...found.keys()].map(path => dirname(path)))
   const files = [...found.entries()]
-    .map(([path, bytes]) => ({ path: posix(relative(base, path)), sha256: sha256(bytes), bytes }))
+    .map(([path, { bytes, kind }]) => ({ path: posix(relative(base, path)), sha256: sha256(bytes), bytes, kind }))
     .sort((left, right) => (left.path < right.path ? -1 : left.path > right.path ? 1 : 0))
   return {
     main: posix(relative(base, main)),
     files,
-    sha256: sha256(files.map(file => `${file.path}\n${file.sha256}\n`).join('')),
+    sha256: closureSha256Of(files),
   }
+}
+
+/** The closure checksum: every path (from the closure root) and file checksum, sorted by path. */
+export function closureSha256Of(files: { path: string; sha256: string }[]) {
+  const sorted = [...files].sort((left, right) => (left.path < right.path ? -1 : left.path > right.path ? 1 : 0))
+  return sha256(sorted.map(file => `${file.path}\n${file.sha256}\n`).join(''))
 }
 
 export type StoredClosurePlan = {

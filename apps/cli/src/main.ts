@@ -2,6 +2,7 @@ import { readFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import {
   createDeja,
+  InvalidWalkManifestError,
   UnsupportedPlatformExplorer,
   type EngineReport,
   type RunReporter,
@@ -9,8 +10,10 @@ import {
 } from '@deja-qa/core'
 import { OpenClawWalkExplorer } from '@deja-qa/explorer-openclaw'
 import {
+  ConsumerFlowError,
   InvalidWalkMemoryError,
   LocalWalkStore,
+  ManifestLockedError,
   StoreLockedError,
   StoreLockUnavailableError,
 } from '@deja-qa/store-local'
@@ -35,7 +38,7 @@ import {
   type ProductionConfiguration,
 } from './config.ts'
 import { prepareJunit, JunitReporter, writeErroredJunit } from './junit.ts'
-import { HELP, renderResult, renderSummary, renderWalks } from './output.ts'
+import { HELP, renderMigration, renderResult, renderSummary, renderWalks } from './output.ts'
 import { createRedactor, redactJson } from './redaction.ts'
 import { JsonRunReporter, readRunReport } from './reporter.ts'
 import { renderDoctor, runDoctor, type DoctorProbe } from './doctor.ts'
@@ -96,6 +99,9 @@ type ParsedArguments = {
   summary: boolean
   help: boolean
   version: boolean
+  verify: boolean
+  acceptAssertionChange: boolean
+  dryRun: boolean
 }
 
 function parseArguments(argv: string[]): ParsedArguments {
@@ -108,11 +114,17 @@ function parseArguments(argv: string[]): ParsedArguments {
   let summary = false
   let help = false
   let version = false
+  let verify = false
+  let acceptAssertionChange = false
+  let dryRun = false
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index]
     if (argument === '--json') json = true
     else if (argument === '--summary') summary = true
     else if (argument === '--version' || argument === '-v') version = true
+    else if (argument === '--verify') verify = true
+    else if (argument === '--accept-assertion-change') acceptAssertionChange = true
+    else if (argument === '--dry-run') dryRun = true
     else if (argument === '-h' || argument === '--help' || argument === 'help') help = true
     else if (argument === '--config' || argument === '--flow' || argument === '--junit' || argument === '--store') {
       const value = argv[index + 1]
@@ -140,6 +152,9 @@ function parseArguments(argv: string[]): ParsedArguments {
     summary,
     help,
     version,
+    verify,
+    acceptAssertionChange,
+    dryRun,
   }
 }
 
@@ -152,6 +167,7 @@ function goal(positionals: string[]) {
 function resultExitCode(result: RunResult) {
   if (result.passed) return 0
   if (result.outcome === 'exploration-rejected') return 3
+  if (['flow-changed', 'not-validated', 'needs-migration', 'assertions-changed'].includes(result.outcome)) return 6
   return 1
 }
 
@@ -166,6 +182,14 @@ function createOrchestration(
   const store = new LocalWalkStore({
     workspaceRoot: configuration.workspaceRoot,
     ...(storeId ? { storeId } : {}),
+    ...(configuration.manifest ? {
+      manifest: {
+        path: configuration.manifest,
+        ...(configuration.flowsDir ? { flowsDir: configuration.flowsDir } : {}),
+        // A fixture login must never end up in a file that gets committed.
+        forbiddenValues: configuration.explore.fixtureCredentials.map(credential => credential.value),
+      },
+    } : {}),
   })
   const executionAdapter = configuration.explore.platform === 'web'
     ? webMaestroAdapter({
@@ -196,6 +220,7 @@ function createOrchestration(
     app: { appId: configuration.explore.appId, buildPath: configuration.explore.buildPath },
     adapter: executionAdapter,
     store,
+    ...(configuration.manifest ? { manifestPath: configuration.manifest } : {}),
     runner,
     reporter,
     ...(configuration.semantic ? {
@@ -225,7 +250,7 @@ function createOrchestration(
         store,
       })
     },
-    ...(configuration.repair && configuration.explore.platform === 'android' ? {
+    ...(configuration.repair && configuration.explore.platform === 'android' && !configuration.manifest ? {
       repairer: () => new BoundedSelectorRepairer({
         workspaceRoot: configuration.workspaceRoot,
         policy: configuration.repair!.policy,
@@ -243,7 +268,7 @@ function createOrchestration(
       }),
     } : {}),
   })
-  return { store, orchestration }
+  return { store, orchestration, adapterId: executionAdapter.id }
 }
 
 export async function runCli(argv: string[], io: CliIo = {
@@ -272,7 +297,7 @@ export async function runCli(argv: string[], io: CliIo = {
       io.stdout(HELP)
       return parsed.command === '' && !parsed.help ? 2 : 0
     }
-    if (!['explore', 'run', 'remember', 'list', 'inspect', 'engine', 'doctor'].includes(parsed.command)) {
+    if (!['explore', 'run', 'remember', 'list', 'inspect', 'migrate', 'engine', 'doctor'].includes(parsed.command)) {
       throw new CliConfigurationError(`Unknown command: ${parsed.command}`)
     }
     if (parsed.command === 'engine') {
@@ -307,15 +332,27 @@ export async function runCli(argv: string[], io: CliIo = {
     if (parsed.command !== 'remember' && parsed.flow) {
       throw new CliConfigurationError('--flow is valid only with remember')
     }
+    if (parsed.verify && parsed.command !== 'run') {
+      throw new CliConfigurationError('--verify is valid only with run')
+    }
+    if (parsed.dryRun && parsed.command !== 'migrate') {
+      throw new CliConfigurationError('--dry-run is valid only with migrate')
+    }
+    if (parsed.acceptAssertionChange && parsed.command !== 'remember') {
+      throw new CliConfigurationError('--accept-assertion-change is valid only with remember')
+    }
     const runsMaestro = ['explore', 'run', 'remember'].includes(parsed.command)
     if (parsed.junit && !runsMaestro) {
       throw new CliConfigurationError('--junit is valid only with explore, run, or remember')
     }
-    if (parsed.summary && parsed.command === 'list') {
+    if (parsed.summary && (parsed.command === 'list' || parsed.command === 'migrate')) {
       throw new CliConfigurationError('--summary is valid only with explore, run, remember, or inspect')
     }
     if (parsed.junit) junitPath = resolve(process.cwd(), parsed.junit)
     const configuration = await loadProductionConfiguration(parsed.configPath)
+    if ((parsed.verify || parsed.acceptAssertionChange || parsed.command === 'migrate') && !configuration.manifest) {
+      throw new CliConfigurationError(`${parsed.command === 'migrate' ? 'migrate' : parsed.verify ? '--verify' : '--accept-assertion-change'} needs a "manifest" in the config`)
+    }
     redact = createRedactor(
       configuration.workspaceRoot,
       configuration.explore.fixtureCredentials.map(credential => credential.value),
@@ -347,7 +384,7 @@ export async function runCli(argv: string[], io: CliIo = {
       ? new JunitReporter(jsonReporter, junitPath, configuration.workspaceRoot, redact)
       : jsonReporter
     const reporter = engine ? new EngineRunReporter(baseReporter, engine) : baseReporter
-    const { store, orchestration } = createOrchestration(
+    const { store, orchestration, adapterId } = createOrchestration(
       configuration, reporter, runsMaestro ? junitPath : undefined, parsed.store,
       selected?.resolved.executable ?? '',
       dependencies.compiledBinary ?? isCompiledBinary(),
@@ -362,6 +399,16 @@ export async function runCli(argv: string[], io: CliIo = {
       return 0
     }
 
+    if (parsed.command === 'migrate') {
+      if (parsed.positionals.length > 0) throw new CliConfigurationError('migrate accepts no positional arguments')
+      // A real migration takes the writer lock itself; a dry run only reads.
+      const report = await store.migrateToManifest({ dryRun: parsed.dryRun, adapter: adapterId })
+      io.stdout(parsed.json
+        ? `${JSON.stringify(redactJson({ migration: report }, redact), null, 2)}\n`
+        : renderMigration(report, redact))
+      return 0
+    }
+
     // Refuse a second writer now, not after a long run.
     store.acquireWriter()
     if (parsed.command === 'remember' && !parsed.flow) {
@@ -373,8 +420,10 @@ export async function runCli(argv: string[], io: CliIo = {
     const ran = parsed.command === 'explore'
       ? await orchestration.explore(goalText)
       : parsed.command === 'remember'
-        ? await orchestration.remember(goalText, parsed.flow!)
-        : await orchestration.run(goalText)
+        ? await orchestration.remember(goalText, parsed.flow!, {
+          ...(parsed.acceptAssertionChange ? { acceptAssertionChange: true } : {}),
+        })
+        : await orchestration.run(goalText, { ...(parsed.verify ? { verify: true } : {}) })
     const result: RunResult = engine ? { ...ran, engine } : ran
     io.stdout(parsed.json
       ? `${JSON.stringify(redactJson({ ...result, report: jsonReporter.receipt }, redact), null, 2)}\n`
@@ -396,11 +445,19 @@ export async function runCli(argv: string[], io: CliIo = {
       io.stderr('Store lock unavailable: this filesystem cannot hold the writer lock. Use a local disk for the workspace.\n')
       return 5
     }
+    if (error instanceof ManifestLockedError) {
+      io.stderr('Manifest locked: another run is writing deja.walks.json. All stores share it, so a different --store does not help. Run again in a moment.\n')
+      return 5
+    }
     if (error instanceof StoreLockedError) {
       io.stderr(error.code === 'STORE_LOCK_CONTENTION'
         ? 'Store lock contention: another run was taking over a stale lock. Run again.\n'
         : 'Store locked: another run is writing this store. Pass a different --store <id> for each device.\n')
       return 5
+    }
+    if (error instanceof InvalidWalkManifestError || error instanceof ConsumerFlowError) {
+      io.stderr('Manifest: fix the manifest or the flow path named above and run again. Déjà never edits it silently.\n')
+      return 2
     }
     if (error instanceof InvalidWalkMemoryError) {
       io.stderr('Memory recovery: preserve/quarantine the ignored .deja directory, then explore cold; never treat corrupt memory as a pass.\n')

@@ -120,3 +120,15 @@ A pass replaces the old build's entry and restarts its history (DEJA-12 tracks k
 The verified target is the dedicated iPhone 17 / iOS 27.0 `walkcache_ios` simulator with
 Xcode 27.2 and Maestro 2.12.0. The requested Android compatibility replay was blocked before boot
 by emulator disk capacity, as recorded in the WALK-011 evidence; portable tests do not replace it.
+
+## Manifest (DEJA-36)
+
+Set `"manifest": "deja.walks.json"` in the config to replay your own flow files in place. The
+manifest is committed with them. `run --verify` re-checks a changed flow, `remember
+--accept-assertion-change` accepts changed assertions, and exit code 6 means the flow changed, was
+never validated, needs migration, or its assertions changed. See
+[docs/REFERENCE.md](../../docs/REFERENCE.md#consumer-owned-flows-and-the-walk-manifest).
+
+`deja migrate [--dry-run]` moves walks from the old store into your own files under `flowsDir`
+(default `.maestro/flows/deja`) plus manifest entries. Cold exploration writes its verified flow
+there too, as a new file. Déjà writes the files and never commits them.

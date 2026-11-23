@@ -1,10 +1,14 @@
 import {
+  AssertionHashChangedError,
   ExpectedClosureMismatchError,
   ExpectedFlowChecksumMismatchError,
+  FlowChangedError,
   normalizeGoal,
+  OwnerRuleError,
   WALK_RESULT_SCHEMA_VERSION,
   type CacheStatus,
   type ExplorationResult,
+  type LookupMiss,
   type PersistedWalk,
   type RepairResult,
   type RunResult,
@@ -50,11 +54,43 @@ export type DejaDependencies = {
   artifactId?: (prefix: 'run' | 'remember') => string
 }
 
+/** Options for one `run`. */
+export type DejaRunOptions = {
+  /**
+   * Manifest mode: when the consumer's flow changed, or no build has validated it, re-run its
+   * current file in place as a check. A pass with an unchanged assertion hash updates the
+   * manifest's sha. A changed assertion hash fails and writes nothing.
+   */
+  verify?: boolean
+}
+
+/** Options for one `remember`. */
+export type DejaRememberOptions = {
+  /**
+   * Manifest mode: let this reviewed `remember` change the manifest's assertion hash. Without it, a
+   * flow whose assertions differ from the manifest's is refused.
+   */
+  acceptAssertionChange?: boolean
+}
+
 export class Deja {
   private readonly dependencies: DejaDependencies
 
   constructor(dependencies: DejaDependencies) {
+    if (dependencies.store.manifestPath !== undefined && dependencies.createRepairer) {
+      // Repair works on a stored copy; with a manifest the flow is the consumer's own file (DEJA-6).
+      throw new TypeError('Repair is not supported with a manifest yet; omit the repairer')
+    }
     this.dependencies = dependencies
+  }
+
+  private get manifestMode() {
+    return this.dependencies.store.manifestPath !== undefined
+  }
+
+  /** Manifest mode without a flows folder: a verified explore result would have nowhere to go. */
+  private get exploreOutputMissing() {
+    return this.manifestMode && this.dependencies.store.manifestFlowsDir === undefined
   }
 
   private now() {
@@ -92,7 +128,7 @@ export class Deja {
     return result
   }
 
-  async run(identity: WalkIdentity): Promise<RunResult> {
+  async run(identity: WalkIdentity, options: DejaRunOptions = {}): Promise<RunResult> {
     const start = this.base(identity, 'run', 'miss')
     // Exact lookup deliberately precedes every lazy factory, including semantic embeddings. A warm
     // hit cannot construct OpenClaw, an MCP transport, an embedding client, or a repairer.
@@ -114,6 +150,11 @@ export class Deja {
           errors: ['Semantic goal safety check rejected the request; cold exploration was not attempted'],
         })
       }
+      // With a manifest the goal belongs to the consumer's files. No miss may reach the explorer, and
+      // only a stale build may reach the replay policy; the rest is a precise refusal or a verify.
+      if (this.manifestMode && (retrieval.miss.reason !== 'stale-build' || options.verify)) {
+        return this.manifestMiss(identity, missStart, retrieval.miss, options)
+      }
       if (retrieval.miss.reason === 'stale-build') {
         if (!this.dependencies.createRepairer &&
             this.dependencies.staleBuild === 'replay-last-verified') {
@@ -125,7 +166,9 @@ export class Deja {
             outcome: 'repair-rejected', passed: false, modelCalls: 0,
             modelCallBasis: 'stale-build diagnosis never constructs a model client', assertions: null,
             repairCount: 0, yamlPath: null, yamlSha256: null, failure: null,
-            artifacts: [], diffs: [], errors: ['A stale build requires a configured selector repairer; cold exploration was not substituted'],
+            artifacts: [], diffs: [], errors: [this.manifestMode
+              ? 'This build has not validated the flow. Run with --verify, or set staleBuild to replay-last-verified; cold exploration was not substituted'
+              : 'A stale build requires a configured selector repairer; cold exploration was not substituted'],
           })
         }
         const repair = await this.dependencies.createRepairer().repair({ identity })
@@ -181,9 +224,10 @@ export class Deja {
       ? 'exact local hit: explorer and model factories were not invoked'
       : 'semantic hit: embedding calls reported separately; stored YAML replayed and explorer not invoked'
     if (execution.passed) {
-      await this.dependencies.store.recordValidation(selectedIdentity, {
+      const changed = await this.recordOrFlowChanged(selectedIdentity, {
         passed: true, at: execution.endedAt,
-      })
+      }, hitStart, execution)
+      if (changed) return changed
       return this.finish(hitStart, {
         outcome: 'passed', passed: true, modelCalls: 0,
         modelCallBasis,
@@ -208,9 +252,10 @@ export class Deja {
       })
     }
 
-    await this.dependencies.store.recordValidation(selectedIdentity, {
+    const changedAfterFailure = await this.recordOrFlowChanged(selectedIdentity, {
       passed: false, at: execution.endedAt,
-    })
+    }, hitStart, execution)
+    if (changedAfterFailure) return changedAfterFailure
     const productRegression = execution.failure?.category === 'product_assertion'
     return this.finish(hitStart, {
       outcome: productRegression ? 'product-regression' : 'failed', passed: false,
@@ -328,11 +373,26 @@ export class Deja {
 
   async explore(identity: WalkIdentity): Promise<RunResult> {
     const start = this.base(identity, 'explore', 'not-checked')
+    if (this.exploreOutputMissing) return this.finish(start, this.manifestExplorationRefused())
+    if (this.manifestMode) {
+      // A forced exploration would spend a model run on a goal whose flow is already the consumer's.
+      const current = await this.dependencies.store.lookup(identity)
+      if (current.status === 'hit' || current.reason !== 'not-found') {
+        return this.finish(start, {
+          ...this.manifestExplorationRefused(),
+          errors: ['The manifest already lists this goal, so it was not explored. Edit your flow and run remember, or run it.'],
+        })
+      }
+    }
     const exploration = await this.dependencies.createExplorer().explore({ identity })
     return this.finish(start, this.explorationDetails(exploration))
   }
 
-  async remember(identity: WalkIdentity, candidatePath: string): Promise<RunResult> {
+  async remember(
+    identity: WalkIdentity,
+    candidatePath: string,
+    options: DejaRememberOptions = {},
+  ): Promise<RunResult> {
     const start = this.base(identity, 'remember', 'not-checked')
     const attempt = `.deja/attempts/${this.artifactId('remember')}`
     // Verify a private copy of the flow and everything it runs, then store exactly those bytes.
@@ -351,11 +411,37 @@ export class Deja {
         errors: ['Candidate verification failed; successful memory was not replaced'], execution,
       })
     }
-    const persisted = await this.dependencies.store.persistVerifiedCandidate({
-      identity, candidatePath: snapshot?.candidatePath ?? candidatePath,
-      validation: { passed: true, at: execution.endedAt }, origin: 'remember',
-      ...(snapshot ? { expectedClosureSha256: snapshot.closureSha256 } : {}),
-    })
+    let persisted: PersistedWalk
+    try {
+      persisted = await this.dependencies.store.persistVerifiedCandidate({
+        identity, candidatePath: snapshot?.candidatePath ?? candidatePath,
+        validation: { passed: true, at: execution.endedAt }, origin: 'remember',
+        ...(this.manifestMode
+          ? { assertionChange: options.acceptAssertionChange ? 'accept' as const : 'refuse' as const }
+          : {}),
+        ...(snapshot ? { expectedClosureSha256: snapshot.closureSha256 } : {}),
+      })
+    } catch (error) {
+      if (error instanceof AssertionHashChangedError) {
+        return this.finish(start, {
+          outcome: 'assertions-changed', passed: false, modelCalls: 0,
+          modelCallBasis: 'remember performs independent verification only',
+          assertions: execution.assertions, repairCount: 0, yamlPath: null, yamlSha256: null,
+          failure: null, artifacts: execution.artifacts, diffs: [],
+          errors: [`${error.message}. Review the flow's assertions, then pass acceptAssertionChange (--accept-assertion-change).`],
+          execution,
+        })
+      }
+      if (error instanceof OwnerRuleError) {
+        return this.finish(start, {
+          outcome: 'rejected', passed: false, modelCalls: 0,
+          modelCallBasis: 'remember performs independent verification only',
+          assertions: execution.assertions, repairCount: 0, yamlPath: null, yamlSha256: null,
+          failure: null, artifacts: execution.artifacts, diffs: [], errors: [error.message], execution,
+        })
+      }
+      throw error
+    }
     return this.finish(start, {
       outcome: 'remembered', passed: true, modelCalls: 0,
       modelCallBasis: 'remember performs independent verification only',
@@ -366,8 +452,148 @@ export class Deja {
         ...execution.artifacts,
         { kind: 'yaml', path: persisted.flowPath, sha256: persisted.flowSha256 },
         { kind: 'memory', path: persisted.storedMetadataPath },
+        ...(persisted.manifest ? [{ kind: 'manifest' as const, path: persisted.manifest.path }] : []),
       ],
       diffs: [], errors: [], execution,
+    })
+  }
+
+  private manifestExplorationRefused(): RunDetails {
+    return {
+      outcome: 'exploration-rejected', passed: false, modelCalls: 0,
+      modelCallBasis: 'manifest mode: cold exploration was not attempted, so no model client was built',
+      assertions: null, repairCount: 0, yamlPath: null, yamlSha256: null,
+      failure: null, artifacts: [], diffs: [],
+      errors: ['Cold exploration needs a flows folder with a manifest, so its result can be written into your tree. Set one, or write the flow in your own files and run remember.'],
+    }
+  }
+
+  /** Record a replay result; if the consumer's files moved during the run, report that instead. */
+  private async recordOrFlowChanged(
+    identity: WalkIdentity,
+    validation: { passed: boolean; at: string },
+    start: RunStart,
+    execution: RunResult['execution'] & object,
+  ): Promise<RunResult | null> {
+    try {
+      await this.dependencies.store.recordValidation(identity, validation)
+      return null
+    } catch (error) {
+      if (!(error instanceof FlowChangedError)) throw error
+      return this.finish(start, {
+        outcome: 'flow-changed', passed: false, modelCalls: 0,
+        modelCallBasis: 'the flow changed during the run; nothing was recorded',
+        assertions: execution.assertions, repairCount: 0, yamlPath: null, yamlSha256: null,
+        failure: null, artifacts: execution.artifacts, diffs: [],
+        errors: [`${error.message}. The run is not recorded as a pass or a failure.`],
+      })
+    }
+  }
+
+  /** Manifest mode: every miss except a stale build ends here, before any explorer or repairer. */
+  private async manifestMiss(
+    identity: WalkIdentity,
+    missStart: RunStart,
+    miss: LookupMiss,
+    options: DejaRunOptions,
+  ): Promise<RunResult> {
+    const refuse = (outcome: RunResult['outcome'], message: string) => this.finish(missStart, {
+      outcome, passed: false, modelCalls: 0,
+      modelCallBasis: 'manifest mode: this miss never constructs an explorer, repairer or model client',
+      assertions: null, repairCount: 0, yamlPath: null, yamlSha256: null,
+      failure: null, artifacts: [], diffs: [], errors: [message],
+    })
+    const verifiable = miss.flowPath !== undefined &&
+      ['flow-changed', 'not-validated', 'failed-validation', 'stale-build'].includes(miss.reason)
+    if (options.verify && verifiable) return this.verifyFlow(identity, missStart, miss.flowPath!)
+    switch (miss.reason) {
+      case 'flow-changed':
+        return refuse('flow-changed',
+          'The flow or a file it runs no longer matches the manifest. Nothing was replayed. Run with --verify to re-check it.')
+      case 'missing-flow':
+        return refuse('flow-changed', 'A file the manifest names is missing. Nothing was replayed.')
+      case 'not-validated':
+        return refuse('not-validated',
+          'The manifest lists this flow, but no build has validated it in this store. Run with --verify.')
+      case 'needs-migration':
+        return refuse('needs-migration',
+          'This goal has only a walk from the old store. Run "deja migrate", or run remember on your own flow file.')
+      case 'failed-validation':
+        return refuse('failed', 'The last run of this flow on this build failed. Fix the app or the flow, or run with --verify.')
+      case 'not-found': {
+        // A new goal: explore it cold, when verified output can be written into the consumer's tree.
+        if (this.exploreOutputMissing) return this.finish(missStart, this.manifestExplorationRefused())
+        const exploration = await this.dependencies.createExplorer().explore({ identity })
+        return this.finish(missStart, this.explorationDetails(exploration))
+      }
+      default:
+        return refuse('failed', `The manifest does not match this run (${miss.reason}).`)
+    }
+  }
+
+  /**
+   * Re-run the consumer's current file in place. Only a pass whose assertions are unchanged can
+   * update the manifest; the store checks that, and re-hashes the files so a change during the run
+   * is refused.
+   */
+  private async verifyFlow(
+    identity: WalkIdentity,
+    missStart: RunStart,
+    flowPath: string,
+  ): Promise<RunResult> {
+    const { store, runner } = this.dependencies
+    const attempt = `.deja/attempts/${this.artifactId('run')}`
+    const snapshot = await store.snapshotCandidate?.(flowPath, `${attempt}/candidate`)
+    const execution = await runner.run({
+      flowPath: snapshot?.candidatePath ?? flowPath,
+      artifactDirectory: attempt,
+    })
+    const verifyStart = { ...missStart, execution }
+    const modelCallBasis = 'verify replays the consumer\'s current file in place; explorer, repairer and model factories were not invoked'
+    if (!execution.passed) {
+      const productRegression = execution.failure?.category === 'product_assertion'
+      return this.finish(verifyStart, {
+        outcome: productRegression ? 'product-regression' : 'failed', passed: false,
+        modelCalls: 0, modelCallBasis, assertions: execution.assertions, repairCount: 0,
+        yamlPath: null, yamlSha256: null, failure: execution.failure,
+        artifacts: execution.artifacts, diffs: [],
+        errors: ['The flow did not pass on this build; the manifest and history are unchanged'],
+      })
+    }
+    let persisted: PersistedWalk
+    try {
+      persisted = await store.persistVerifiedCandidate({
+        identity, candidatePath: snapshot?.candidatePath ?? flowPath,
+        validation: { passed: true, at: execution.endedAt }, origin: 'verify',
+        assertionChange: 'refuse',
+        ...(snapshot ? { expectedClosureSha256: snapshot.closureSha256 } : {}),
+      })
+    } catch (error) {
+      const outcome = error instanceof AssertionHashChangedError ? 'assertions-changed'
+        : error instanceof ExpectedClosureMismatchError || error instanceof FlowChangedError ? 'flow-changed'
+          : error instanceof OwnerRuleError ? 'failed' : null
+      if (!outcome) throw error
+      return this.finish(verifyStart, {
+        outcome, passed: false, modelCalls: 0, modelCallBasis,
+        assertions: execution.assertions, repairCount: 0, yamlPath: null, yamlSha256: null,
+        failure: null, artifacts: execution.artifacts, diffs: [],
+        errors: [error instanceof AssertionHashChangedError
+          ? `${error.message}. The manifest and history are unchanged. Review the change, then run remember with --accept-assertion-change.`
+          : `${(error as Error).message}. The manifest and history are unchanged.`],
+      })
+    }
+    return this.finish(verifyStart, {
+      outcome: 'passed', passed: true, modelCalls: 0, modelCallBasis,
+      assertions: execution.assertions, repairCount: 0,
+      yamlPath: persisted.flowPath, yamlSha256: persisted.flowSha256,
+      failure: null,
+      artifacts: [
+        ...execution.artifacts,
+        { kind: 'yaml', path: persisted.flowPath, sha256: persisted.flowSha256 },
+        { kind: 'memory', path: persisted.storedMetadataPath },
+        ...(persisted.manifest ? [{ kind: 'manifest' as const, path: persisted.manifest.path }] : []),
+      ],
+      diffs: [], errors: [],
     })
   }
 

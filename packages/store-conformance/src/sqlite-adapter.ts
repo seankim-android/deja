@@ -17,10 +17,16 @@ function databasePath(workspaceRoot: string, storeId?: string) {
   return resolve(workspaceRoot, storeMetadataPath(SQLITE_MEMORY_PATH, storeId))
 }
 
-function createSQLiteStore(workspaceRoot: string, failures: StoreFailureInjection = {}, storeId?: string) {
+function createSQLiteStore(
+  workspaceRoot: string,
+  failures: StoreFailureInjection = {},
+  storeId?: string,
+  manifest?: { path: string; forbiddenValues?: string[]; flowsDir?: string },
+) {
   return new SQLiteWalkStore({
     workspaceRoot,
     ...(storeId ? { storeId } : {}),
+    ...(manifest ? { manifest } : {}),
     renameFile: async (from, to) => {
       if (failures.failFlowRename) throw new Error('simulated interruption before flow rename')
       await rename(from, to)

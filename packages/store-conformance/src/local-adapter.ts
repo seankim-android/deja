@@ -20,11 +20,17 @@ async function writeMetadata(workspaceRoot: string, value: unknown) {
   await writeFile(resolve(workspaceRoot, LOCAL_MEMORY_PATH), `${JSON.stringify(value, null, 2)}\n`)
 }
 
-function createLocalStore(workspaceRoot: string, failures: StoreFailureInjection = {}, storeId?: string) {
+function createLocalStore(
+  workspaceRoot: string,
+  failures: StoreFailureInjection = {},
+  storeId?: string,
+  manifest?: { path: string; forbiddenValues?: string[]; flowsDir?: string },
+) {
   const memoryPath = resolve(workspaceRoot, LOCAL_MEMORY_PATH)
   return new LocalWalkStore({
     workspaceRoot,
     ...(storeId ? { storeId } : {}),
+    ...(manifest ? { manifest } : {}),
     renameFile: async (from, to) => {
       if (failures.failFlowRename && to.endsWith('.yaml')) {
         throw new Error('simulated interruption before flow rename')

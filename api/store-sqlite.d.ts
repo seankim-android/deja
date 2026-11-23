@@ -1,10 +1,11 @@
 // typescript 7.0.2
 // entry . (./src/index.ts)
-// exports: InvalidWalkMemoryError, MAESTRO_FLOW_SCHEMA_VERSION, SQLITE_MEMORY_PATH, SQLITE_MEMORY_SCHEMA_VERSION, SQLiteWalkStore, SQLiteWalkStoreOptions
+// exports: InvalidWalkMemoryError, MAESTRO_FLOW_SCHEMA_VERSION, SQLITE_MEMORY_CONSUMER_SCHEMA_VERSION, SQLITE_MEMORY_PATH, SQLITE_MEMORY_SCHEMA_VERSION, SQLiteWalkStore, SQLiteWalkStoreOptions
 export declare class InvalidWalkMemoryError extends Error {
     constructor(message: string, options?: ErrorOptions);
 }
 export declare const MAESTRO_FLOW_SCHEMA_VERSION = "maestro/v1";
+export declare const SQLITE_MEMORY_CONSUMER_SCHEMA_VERSION = 4;
 export declare const SQLITE_MEMORY_PATH = ".deja/memory/walks.sqlite";
 export declare const SQLITE_MEMORY_SCHEMA_VERSION = 3;
 export declare class SQLiteWalkStore implements WalkStore {
@@ -15,6 +16,9 @@ export declare class SQLiteWalkStore implements WalkStore {
     private readonly renameFile;
     private readonly replaceMetadata;
     private database;
+    readonly manifestPath: string | undefined;
+    readonly manifestFlowsDir: string | undefined;
+    private readonly consumer;
     constructor(options: SQLiteWalkStoreOptions);
     close(): void;
     acquireWriter(): void;
@@ -30,10 +34,12 @@ export declare class SQLiteWalkStore implements WalkStore {
     private storedFlowPath;
     private atomicWriteFlow;
     private persistVerified;
+    private persistConsumer;
     snapshotCandidate(candidatePath: string, directory: string): Promise<CandidateSnapshot>;
     persistVerifiedCandidate(options: PersistVerifiedOptions): Promise<PersistedWalk>;
     persistVerifiedRepair(options: PersistVerifiedRepairOptions): Promise<PersistedWalk>;
     list(): Promise<StoredWalk[]>;
+    migrateToManifest(options?: MigrateOptions): Promise<MigrationReport>;
     lookup(identityInput: WalkIdentity): Promise<LookupHit | LookupMiss>;
     lookupPreviousSuccessful(identityInput: WalkIdentity): Promise<LookupHit | LookupMiss>;
     recordValidation(identityInput: WalkIdentity, validation: WalkValidation): Promise<StoredWalk>;
@@ -41,6 +47,11 @@ export declare class SQLiteWalkStore implements WalkStore {
 export type SQLiteWalkStoreOptions = {
     workspaceRoot: string;
     storeId?: string;
+    manifest?: {
+        path: string;
+        forbiddenValues?: string[];
+        flowsDir?: string;
+    };
     renameFile?: (temporaryPath: string, destinationPath: string) => Promise<void>;
     replaceMetadata?: (walks: StoredWalk[]) => void;
 };
