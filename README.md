@@ -27,6 +27,7 @@ Déjà is a memory layer for app tests. Learn a test once, then replay it with n
 - A test is saved only after it passes on its own run.
 - A renamed selector gets one scoped repair, and a real product bug still fails.
 - Tests are plain YAML files that your team owns and reviews in pull requests.
+- A coding agent can replay your saved tests after each edit, with 0 model calls (`deja mcp`, beta).
 
 ## How it works
 
@@ -46,7 +47,104 @@ flowchart LR
 
 ## Quick start
 
-This Android path needs no model and no OpenClaw. It assumes a running API 34 emulator, Bun 1.4 or newer, OpenJDK 21, `adb`, and Maestro 2.12.0 on `PATH`. You install Maestro yourself.
+Déjà is not on npm yet, so you run the CLI from a clone. These steps add Déjà to your own iOS app on a simulator. They need no AI model. You need a Mac with Xcode, Bun 1.4 or newer, and Java 17 or newer.
+
+**1. Install the CLI and its test runner.** Déjà downloads its own pinned Maestro and never touches another Maestro on your machine.
+
+```sh
+git clone https://github.com/seankim-android/deja.git ~/deja
+cd ~/deja && bun install
+alias deja="bun ~/deja/apps/cli/deja.ts"
+
+deja engine install
+deja doctor
+```
+
+**2. Set up a simulator and build your app.** Use a simulator only Déjà uses, so other work doesn't move it. Build the app into a folder inside your repo, then install it.
+
+```sh
+UDID=$(xcrun simctl create deja com.apple.CoreSimulator.SimDeviceType.iPhone-17)
+xcrun simctl boot "$UDID" && xcrun simctl bootstatus "$UDID" -b
+
+xcodebuild -scheme MyApp -configuration Debug -sdk iphonesimulator \
+  -derivedDataPath build CODE_SIGNING_ALLOWED=NO build
+xcrun simctl install "$UDID" build/Build/Products/Debug-iphonesimulator/MyApp.app
+echo "$UDID"
+```
+
+Déjà does not install the app for you. Install it again after each build.
+
+**3. Add `deja.config.json` to your app's repo.** Put the simulator ID from step 2 in `device`.
+
+```json
+{
+  "workspaceRoot": ".",
+  "platform": "ios",
+  "appId": "com.example.myapp",
+  "buildPath": "build/Build/Products/Debug-iphonesimulator/MyApp.app",
+  "device": "YOUR-SIMULATOR-UDID",
+  "fixtureCredentials": [],
+  "manifest": "deja.walks.json",
+  "flowsDir": ".maestro/flows/deja",
+  "verificationTimeoutMs": 180000,
+  "maestro": { "timeoutMs": 180000 }
+}
+```
+
+Add `.deja/` to your `.gitignore`. It holds local run history and reports.
+
+**4. Write a test, or bring one you have.** Tests are plain Maestro YAML, for example `.maestro/flows/deja/checkout.yaml`:
+
+```yaml
+appId: com.example.myapp
+---
+- launchApp
+- tapOn: "Checkout"
+- assertVisible: "Order placed"
+```
+
+**5. Save it.** Déjà runs the test on its own and saves it only if every check passes. It also writes `deja.walks.json`. Commit that file with your tests.
+
+```sh
+deja remember checkout --flow .maestro/flows/deja/checkout.yaml
+```
+
+**6. Replay it.** Expect `Cache status: hit` and `Model calls: 0`.
+
+```sh
+deja run checkout
+```
+
+On a new build, `deja run checkout --verify` checks the test again. To let a coding agent replay your saved tests after each edit, run `deja mcp` ([MCP server](docs/REFERENCE.md#mcp-server)). Android and Chromium configs, and letting an AI model write tests for you (`explore`, Android only), are in [docs/REFERENCE.md](docs/REFERENCE.md#configuration).
+
+<details>
+<summary>Run the iOS demo app</summary>
+
+The demo app lives in `spikes/003-ios-deja`. It needs step 1 first.
+
+```sh
+cd ~/deja/spikes/003-ios-deja
+UDID=$(xcrun simctl create deja-demo com.apple.CoreSimulator.SimDeviceType.iPhone-17)
+xcrun simctl boot "$UDID" && xcrun simctl bootstatus "$UDID" -b
+
+xcodebuild -project DejaFixture.xcodeproj -scheme DejaFixture -configuration Debug \
+  -sdk iphonesimulator -derivedDataPath build CODE_SIGNING_ALLOWED=NO build
+xcrun simctl install "$UDID" build/Build/Products/Debug-iphonesimulator/DejaFixture.app
+```
+
+Put `$UDID` in the `device` field of `deja.config.json` in that folder. Then:
+
+```sh
+deja remember checkout --flow flows/checkout.yaml
+deja run checkout
+```
+
+</details>
+
+<details>
+<summary>Run the hackathon demo (Android fixture)</summary>
+
+The demo app lives in `spikes/001-android-deja`. It needs a running API 34 emulator, OpenJDK 21, `adb`, and the Maestro engine from step 1.
 
 ```sh
 git clone https://github.com/seankim-android/deja.git
@@ -68,7 +166,9 @@ bun ../../apps/cli/deja.ts remember checkout \
 bun ../../apps/cli/deja.ts run checkout --config deja.config.json
 ```
 
-For cold exploration, set up OpenClaw with a Cerebras credential. Then run `explore checkout`. If you already have a `.deja` folder, move it aside first. More steps are in [docs/REFERENCE.md](docs/REFERENCE.md).
+For cold exploration, set up OpenClaw with a Cerebras credential. Then run `explore checkout`. If you already have a `.deja` folder, move it aside first.
+
+</details>
 
 ## What works today
 
