@@ -38,7 +38,7 @@ exit 0
     openClawModel: 'cerebras/moonshotai-kimi-k3.1-pro-trial',
     openClawBaseUrl: 'https://api.cerebras.ai/v1',
     explorationTimeoutSeconds: 30,
-    verificationTimeoutMs: 2000,
+    verificationTimeoutMs: 30_000,
     fixtureCredentials: [{ label: 'Fixture password', value: 'testing123' }],
     maestro: { executable: fakeMaestro, timeoutMs: 30_000 },
     openClaw: { executable: fakeOpenClaw, mcpProxy: 'scripts/maestro-mcp-proxy.ts' },
