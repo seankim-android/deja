@@ -36,8 +36,8 @@ source text, and evidence-linked rehearsal results are curated intentionally.
 ## Reproduce a clean checkout
 
 ```sh
-git clone https://github.com/seankim-android/kimi-hackathon.git
-cd kimi-hackathon
+git clone https://github.com/seankim-android/deja.git
+cd deja
 bun install --frozen-lockfile
 bun run lint
 bun test --timeout=10000

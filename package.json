@@ -5,11 +5,11 @@
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/seankim-android/kimi-hackathon.git"
+    "url": "git+https://github.com/seankim-android/deja.git"
   },
-  "homepage": "https://github.com/seankim-android/kimi-hackathon#readme",
+  "homepage": "https://github.com/seankim-android/deja#readme",
   "bugs": {
-    "url": "https://github.com/seankim-android/kimi-hackathon/issues"
+    "url": "https://github.com/seankim-android/deja/issues"
   },
   "keywords": [
     "maestro",

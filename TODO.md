@@ -96,7 +96,7 @@ Check an item only when its ticket is complete and its evidence is linked. All t
   [`standalone Android YAML`](spikes/001-android-walkcache/evidence/walk013-standalone-android.txt),
   [`artifact validation`](spikes/001-android-walkcache/evidence/walk013-artifact-validation.txt),
   [`CI guide`](docs/CI.md), and
-  [passing GitHub Actions run 45060550371](https://github.com/seankim-android/kimi-hackathon/actions/runs/45060550371)
+  [passing GitHub Actions run 45060550371](https://github.com/seankim-android/deja/actions/runs/45060550371)
   on `main` at `b827311` (every portable step green in 15 seconds).
 - [x] [WALK-014](tickets/WALK-014-demo-assets-rehearsal.md) — Prepare deterministic demo assets and
   complete two evidence-checked rehearsals before the 6:30 AM milestone gate.

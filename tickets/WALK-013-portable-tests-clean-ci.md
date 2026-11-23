@@ -53,7 +53,7 @@ Evidence:
 - Release history was checked on clean `main...origin/main` at `b827311` before this evidence closeout.
   Demo asset commit `8c301cd` was already pushed before its Slack upload; no local commit is presented
   as merged/public before its actual push.
-- [GitHub Actions run 45060550371](https://github.com/seankim-android/kimi-hackathon/actions/runs/45060550371)
+- [GitHub Actions run 45060550371](https://github.com/seankim-android/deja/actions/runs/45060550371)
   ([structured receipt](../spikes/001-android-walkcache/evidence/walk013-github-actions.json)): final
   `success` on `main` commit `b8273117ca671b1fb70b4d56f3c2d2b42e12ed28`; every setup/checkout/install/
   lint/test/build/artifact/revision step passed in 15 seconds. Earlier validator-setup runs failed and
