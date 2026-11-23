@@ -52,7 +52,7 @@ Core imports no Maestro, OpenClaw, React, filesystem, demo, or platform implemen
 | --- | --- | --- |
 | `WalkStore` | Exact lookup, prior-success diagnostic lookup, verified persistence/replacement, validation history, listing | CLI default `LocalWalkStore` in `packages/store-local`; second conforming `SQLiteWalkStore` in `packages/store-sqlite` |
 | `WalkRunner` | Execute a flow; return timing, assertions, artifacts, exit state, and conservative failure classification | `MaestroWalkRunner` plus Android/Web/iOS execution adapters in `packages/maestro` |
-| `WalkExplorer` | Cold exploration and independently verified candidate persistence | `OpenClawWalkExplorer` for Android; explicit `UnsupportedPlatformExplorer` for Web/iOS |
+| `WalkExplorer` | Cold exploration and independently verified candidate persistence | `OpenClawWalkExplorer` for Android; explicit `UnsupportedPlatformExplorer` (in core) for Web/iOS |
 | `SelectorRepairer` | At most one bounded diagnosis/source-patch/verification result | `BoundedSelectorRepairer` for the configured Android Checkout policy only |
 | `RunReporter` | Serialize a completed result without changing orchestration | Atomic local `JsonRunReporter` in `apps/cli` |
 | `GoalEmbeddingProvider` | Lazily embed one goal only after exact `not-found`; report calls separately | Opt-in deterministic `LocalLexicalEmbeddingProvider` in `packages/semantic-local`; no service or vector DB |
