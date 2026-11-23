@@ -1,0 +1,278 @@
+import { describe, expect, test } from 'bun:test'
+import { mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { iosMaestroAdapter } from '@deja-qa/maestro'
+import { LocalWalkStore } from '@deja-qa/store-local'
+import { runCli } from '../src/main.ts'
+import { parseGoals } from '../src/gate.ts'
+
+const FLOW = 'appId: dev.deja.fixture\n---\n- launchApp\n- assertVisible:\n    id: "screen.today"\n'
+const T1 = '2026-11-22T00:00:00.000Z'
+const T2 = '2026-11-22T00:01:00.000Z'
+const SECRET = 'hunter2-fixture'
+const adapter = iosMaestroAdapter({ device: 'DFC4D233-498B-4B33-B713-E59B239FA86A' })
+
+async function workspace(config: Record<string, unknown> = {}) {
+  const temporary = await realpath(await mkdtemp(join(tmpdir(), 'deja-gate-cli-')))
+  const root = join(temporary, 'workspace')
+  await mkdir(join(root, 'Fixture.app'), { recursive: true })
+  await mkdir(join(root, '.maestro/flows'), { recursive: true })
+  await writeFile(join(root, 'Fixture.app/Fixture'), 'binary-one')
+  await writeFile(join(root, '.maestro/flows/today.yaml'), FLOW)
+  await writeFile(join(root, '.maestro/flows/pay.yaml'), FLOW)
+  await writeFile(join(root, 'deja.config.json'), JSON.stringify({
+    workspaceRoot: '.', appId: 'dev.deja.fixture', platform: 'ios', adapter: 'maestro-ios/v1',
+    device: 'DFC4D233-498B-4B33-B713-E59B239FA86A', buildPath: 'Fixture.app',
+    fixtureCredentials: [{ label: 'Fixture password', value: SECRET }],
+    ...config,
+  }))
+  const fingerprint = () => adapter.buildFingerprint(root, 'Fixture.app')
+  const store = (manifest = false) => new LocalWalkStore({
+    workspaceRoot: root, ...(manifest ? { manifest: { path: 'deja.walks.json' } } : {}),
+  })
+  const identity = async (goal: string) => ({
+    goal, appId: 'dev.deja.fixture', platform: 'ios', flowSchemaVersion: 'maestro/v1',
+    buildFingerprint: await fingerprint(), adapter: 'maestro-ios/v1',
+  })
+  const remember = async (goal: string, at = T1, manifest = false, path = '.maestro/flows/today.yaml') => {
+    const walks = store(manifest)
+    try {
+      return await walks.persistVerifiedCandidate({
+        identity: await identity(goal), candidatePath: manifest ? path : path,
+        validation: { passed: true, at }, origin: 'remember',
+      })
+    } finally { walks.close() }
+  }
+  const fail = async (goal: string, at: string, manifest = false) => {
+    const walks = store(manifest)
+    try { await walks.recordValidation(await identity(goal), { passed: false, at }) } finally { walks.close() }
+  }
+  const goals = (text: string) => writeFile(join(root, 'goals.txt'), text)
+  const gate = async (...args: string[]) => {
+    const stdout: string[] = []
+    const stderr: string[] = []
+    const exit = await runCli(
+      ['gate', '--config', join(root, 'deja.config.json'), ...args],
+      { stdout: text => stdout.push(text), stderr: text => stderr.push(text) },
+    )
+    return { exit, stdout: stdout.join(''), stderr: stderr.join('') }
+  }
+  const evidence = async () => JSON.parse(await readFile(join(root, '.deja/gate/evidence.json'), 'utf8'))
+  return { temporary, root, remember, fail, goals, gate, evidence, fingerprint, store }
+}
+
+describe('deja gate', () => {
+  test('opens only when every goal passed on this build, and writes JSON plus a text table', async () => {
+    const ws = await workspace()
+    try {
+      await ws.goals('# core flows\nToday\n\nPay\n')
+      await ws.remember('Today')
+      await ws.remember('Pay')
+      const result = await ws.gate('--goals', join(ws.root, 'goals.txt'), '--label', 'abc1234 simulator')
+      expect(result.exit).toBe(0)
+      expect(result.stdout).toContain('Release gate: OPEN (2 of 2 goals passed)')
+      expect(result.stdout).toContain('label: abc1234 simulator')
+      const evidence = await ws.evidence()
+      expect(evidence).toMatchObject({
+        schemaVersion: 1, command: 'gate', verdict: 'passed', passed: true, label: 'abc1234 simulator',
+        buildFingerprint: await ws.fingerprint(), manifest: null, build: 'Fixture.app',
+      })
+      expect(evidence.goals).toMatchObject([
+        { goal: 'Today', outcome: 'passed', validatedAt: T1, reportPath: null },
+        { goal: 'Pay', outcome: 'passed', validatedAt: T1 },
+      ])
+      expect(evidence.goals[0].flowSha256).toMatch(/^[0-9a-f]{64}$/)
+      expect(await readFile(join(ws.root, '.deja/gate/evidence.txt'), 'utf8')).toContain('OPEN')
+      expect((await ws.gate('--goals', join(ws.root, 'goals.txt'), '--json')).stdout).toContain('"verdict": "passed"')
+    } finally { await rm(ws.temporary, { recursive: true, force: true }) }
+  })
+
+  test('closes with exit 10 for failed, not-run and a missing goal, and a new build has no passes', async () => {
+    const ws = await workspace()
+    try {
+      await ws.goals('Today\nPay\nMissing goal\n')
+      await ws.remember('Today')
+      await ws.remember('Pay')
+      await ws.fail('Pay', T2)
+      const closed = await ws.gate('--goals', join(ws.root, 'goals.txt'))
+      expect(closed.exit).toBe(10)
+      expect((await ws.evidence()).goals.map((goal: { outcome: string }) => goal.outcome)).toEqual(['passed', 'failed', 'not-run'])
+      expect(closed.stdout).toContain('CLOSED (1 of 3 goals passed)')
+
+      await ws.goals('Today\n')
+      expect((await ws.gate('--goals', join(ws.root, 'goals.txt'))).exit).toBe(0)
+      // The next build: the old pass does not count.
+      await writeFile(join(ws.root, 'Fixture.app/Fixture'), 'binary-two')
+      const next = await ws.gate('--goals', join(ws.root, 'goals.txt'))
+      expect(next.exit).toBe(10)
+      expect((await ws.evidence()).goals[0]).toMatchObject({ outcome: 'not-run', validatedAt: null, flowSha256: null })
+    } finally { await rm(ws.temporary, { recursive: true, force: true }) }
+  })
+
+  test('--build fingerprints the named build, not the configured one', async () => {
+    const ws = await workspace()
+    try {
+      await mkdir(join(ws.root, 'Other.app'), { recursive: true })
+      await writeFile(join(ws.root, 'Other.app/Fixture'), 'binary-one')
+      await ws.goals('Today\n')
+      await ws.remember('Today')
+      // Same bytes under another name: same fingerprint, because the hash covers paths inside the tree only.
+      expect((await ws.gate('--goals', join(ws.root, 'goals.txt'), '--build', 'Other.app')).exit).toBe(0)
+      await writeFile(join(ws.root, 'Other.app/Fixture'), 'binary-three')
+      expect((await ws.gate('--goals', join(ws.root, 'goals.txt'), '--build', 'Other.app')).exit).toBe(10)
+    } finally { await rm(ws.temporary, { recursive: true, force: true }) }
+  })
+
+  test('a failure that a run report names as flaky reads flaky, and the report is linked', async () => {
+    const ws = await workspace()
+    try {
+      await ws.goals('Today\nPay\n')
+      await ws.remember('Today')
+      await ws.remember('Pay')
+      await ws.fail('Pay', T2)
+      const fingerprint = await ws.fingerprint()
+      const report = (outcome: string, goalKey: string, endedAt: string, shape: 'attempts' | 'execution') => JSON.stringify({
+        schemaVersion: 1, command: 'run', goalKey, outcome, passed: false, cacheStatus: 'hit',
+        identity: { buildFingerprint: fingerprint }, artifacts: [], diffs: [],
+        ...(shape === 'attempts' ? { attempts: [{ attempt: 1, endedAt }, { attempt: 2, endedAt: '2026-11-22T00:09:00.000Z' }] } : { execution: { endedAt } }),
+      })
+      await mkdir(join(ws.root, '.deja/reports'), { recursive: true })
+      await writeFile(join(ws.root, '.deja/reports/run-1.json'), report('flaky', 'pay', T2, 'attempts'))
+      await writeFile(join(ws.root, '.deja/reports/run-2.json'), report('passed', 'today', T1, 'execution'))
+      await writeFile(join(ws.root, '.deja/reports/run-3.json'), '{not json')
+      const result = await ws.gate('--goals', join(ws.root, 'goals.txt'))
+      expect(result.exit).toBe(10)
+      expect((await ws.evidence()).goals).toMatchObject([
+        { goal: 'Today', outcome: 'passed', reportPath: '.deja/reports/run-2.json' },
+        { goal: 'Pay', outcome: 'flaky', reportPath: '.deja/reports/run-1.json' },
+      ])
+      // A flaky report for another build or another time never turns a failure into anything but closed.
+      await writeFile(join(ws.root, '.deja/reports/run-1.json'), report('flaky', 'pay', '2026-11-22T00:05:00.000Z', 'attempts'))
+      await ws.gate('--goals', join(ws.root, 'goals.txt'))
+      expect((await ws.evidence()).goals[1].outcome).toBe('failed')
+    } finally { await rm(ws.temporary, { recursive: true, force: true }) }
+  })
+
+  test('manifest mode: the manifest is the goals file, and a changed flow closes the gate with flow-changed', async () => {
+    const ws = await workspace({ manifest: 'deja.walks.json' })
+    try {
+      await ws.remember('Today', T1, true)
+      await ws.remember('Pay', T1, true, '.maestro/flows/pay.yaml')
+      const open = await ws.gate('--goals', join(ws.root, 'deja.walks.json'))
+      expect(open.exit).toBe(0)
+      expect((await ws.evidence())).toMatchObject({ manifest: 'deja.walks.json', verdict: 'passed' })
+      expect((await ws.evidence()).goals[0]).toMatchObject({ goal: 'Pay' })
+      expect((await ws.evidence()).goals[0].closureSha256).toMatch(/^[0-9a-f]{64}$/)
+
+      await writeFile(join(ws.root, '.maestro/flows/pay.yaml'), `${FLOW}- assertVisible: Receipt\n`)
+      const changed = await ws.gate('--goals', join(ws.root, 'deja.walks.json'))
+      expect(changed.exit).toBe(10)
+      expect((await ws.evidence()).goals.map((goal: { outcome: string }) => goal.outcome)).toEqual(['flow-changed', 'passed'])
+      expect(changed.stdout).toContain('flow-changed')
+    } finally { await rm(ws.temporary, { recursive: true, force: true }) }
+  })
+
+  test('a corrupt store exits 11, writes error evidence and replaces an older passing file', async () => {
+    const ws = await workspace()
+    try {
+      await ws.goals('Today\n')
+      await ws.remember('Today')
+      expect((await ws.gate('--goals', join(ws.root, 'goals.txt'))).exit).toBe(0)
+      expect((await ws.evidence()).verdict).toBe('passed')
+      await writeFile(join(ws.root, '.deja/memory/walks.json'), '{not json\n')
+      const result = await ws.gate('--goals', join(ws.root, 'goals.txt'))
+      expect(result.exit).toBe(11)
+      expect(result.stdout).toContain('Release gate: ERROR')
+      expect(await ws.evidence()).toMatchObject({ verdict: 'error', passed: false })
+      expect((await ws.evidence()).error).toMatch(/walks\.json/)
+      expect((await ws.evidence()).goals[0].outcome).toBe('not-run')
+    } finally { await rm(ws.temporary, { recursive: true, force: true }) }
+  })
+
+  test('a build that cannot be fingerprinted exits 11 and never passes', async () => {
+    const ws = await workspace()
+    try {
+      await ws.goals('Today\n')
+      await ws.remember('Today')
+      const result = await ws.gate('--goals', join(ws.root, 'goals.txt'), '--build', 'Missing.app')
+      expect(result.exit).toBe(11)
+      expect(await ws.evidence()).toMatchObject({ verdict: 'error', buildFingerprint: null })
+    } finally { await rm(ws.temporary, { recursive: true, force: true }) }
+  })
+
+  test('usage errors exit 2 and delete an older evidence file', async () => {
+    const ws = await workspace()
+    try {
+      await ws.goals('Today\n')
+      await ws.remember('Today')
+      expect((await ws.gate('--goals', join(ws.root, 'goals.txt'))).exit).toBe(0)
+      expect((await ws.gate('--goals', join(ws.root, 'nope.txt'))).exit).toBe(2)
+      await expect(readFile(join(ws.root, '.deja/gate/evidence.json'), 'utf8')).rejects.toThrow()
+      await ws.goals('# nothing\n\n')
+      expect((await ws.gate('--goals', join(ws.root, 'goals.txt'))).exit).toBe(2)
+      expect((await ws.gate()).exit).toBe(2)
+      expect((await ws.gate('--goals', join(ws.root, 'goals.txt'), '--verify')).exit).toBe(2)
+      expect((await ws.gate('--goals', join(ws.root, 'goals.txt'), 'extra')).exit).toBe(2)
+      expect((await ws.gate('--goals', join(ws.root, 'goals.txt'), '--allow-failed')).exit).toBe(2)
+    } finally { await rm(ws.temporary, { recursive: true, force: true }) }
+  })
+
+  test('it only reads: no store change, no writer lock file, and it runs beside a held writer lock', async () => {
+    const ws = await workspace()
+    try {
+      await ws.goals('Today\n')
+      await ws.remember('Today')
+      const files = async () => (await readdir(join(ws.root, '.deja/memory'))).sort()
+      const before = await readFile(join(ws.root, '.deja/memory/walks.json'))
+      const listed = await files()
+      const writer = ws.store()
+      writer.acquireWriter()
+      try {
+        expect((await ws.gate('--goals', join(ws.root, 'goals.txt'))).exit).toBe(0)
+      } finally { writer.close() }
+      expect((await readFile(join(ws.root, '.deja/memory/walks.json'))).equals(before)).toBe(true)
+      expect(await files()).toEqual(listed)
+    } finally { await rm(ws.temporary, { recursive: true, force: true }) }
+  })
+
+  test('the evidence goes through the run-report redaction', async () => {
+    const ws = await workspace()
+    try {
+      await ws.goals('Today\n')
+      await ws.remember('Today')
+      const result = await ws.gate('--goals', join(ws.root, 'goals.txt'), '--label', `sha ${SECRET} ${ws.root}`)
+      expect(result.exit).toBe(0)
+      for (const text of [
+        result.stdout, await readFile(join(ws.root, '.deja/gate/evidence.json'), 'utf8'),
+        await readFile(join(ws.root, '.deja/gate/evidence.txt'), 'utf8'),
+      ]) {
+        expect(text).not.toContain(SECRET)
+        expect(text).not.toContain(ws.root)
+      }
+      expect((await ws.evidence()).label).toBe('sha <redacted-fixture-value> <workspace>')
+    } finally { await rm(ws.temporary, { recursive: true, force: true }) }
+  })
+
+  test('the gate options are valid only with gate', async () => {
+    const ws = await workspace()
+    try {
+      const stderr: string[] = []
+      const exit = await runCli(['list', '--goals', 'x', '--config', join(ws.root, 'deja.config.json')],
+        { stdout: () => {}, stderr: text => stderr.push(text) })
+      expect(exit).toBe(2)
+      expect(stderr.join('')).toContain('valid only with gate')
+    } finally { await rm(ws.temporary, { recursive: true, force: true }) }
+  })
+})
+
+describe('goals file', () => {
+  test('reads a list, a JSON array and a manifest, normalizes and drops repeats', () => {
+    expect(parseGoals('# c\nToday\n  Pay  \ntoday\n', 'g')).toEqual(['Today', 'Pay'])
+    expect(parseGoals('["Today", "Pay", " today "]', 'g')).toEqual(['Today', 'Pay'])
+    expect(() => parseGoals('', 'g')).toThrow(/no goals/)
+    expect(() => parseGoals('[1]', 'g')).toThrow(/array of goal strings/)
+    expect(() => parseGoals('{"nope": 1}', 'g')).toThrow(/neither an array/)
+    expect(() => parseGoals('[""]', 'g')).toThrow(/empty goal/)
+  })
+})

@@ -14,6 +14,7 @@ Usage:
   deja remember <goal> --flow <candidate.yaml> [--accept-assertion-change] [--config <file>] [--json] [--junit <file>] [--summary]
   deja list [--config <file>] [--json]
   deja migrate [--dry-run] [--store <id>] [--config <file>] [--json]
+  deja gate --goals <file> [--build <path>] [--label <text>] [--evidence <file>] [--store <id>] [--config <file>] [--json]
   deja inspect <report> [--config <file>] [--json] [--summary]
   deja engine install [--json]
   deja doctor [--config <file>] [--json]
@@ -29,6 +30,11 @@ Commands:
   remember  Independently verify an existing YAML candidate before storing it.
   migrate   With a manifest: move walks from the old store (memory schema 3) into your own flow
             files plus manifest entries. Writes new files and the manifest; never commits.
+  gate      Read-only release gate: did every listed goal pass on this exact build? It fingerprints the
+            build, reads the recorded validations and prints one outcome per goal: passed, failed,
+            flaky, not-run (no validation on this fingerprint, even if older builds passed),
+            flow-changed (manifest: the flow no longer matches) or invalid. Exit 0 only when every
+            goal passed. It never runs Maestro, explores, repairs, calls a model or writes the store.
   list      List local walks without constructing an explorer or runner invocation.
   inspect   Summarize a saved run result, artifact paths, failures, and source diffs.
   engine install
@@ -46,6 +52,14 @@ Options:
   --junit <file>   Write Maestro's own JUnit report to <file> (config field: "junit"). If Maestro
                    never ran or did not pass, a minimal report with one failed testcase is written,
                    so a missing file is never a pass. Listed as a junit artifact in the result.
+  --goals <file>   gate only: the goals to check. A plain list (one goal per line, # comments), a JSON
+                   array of goals, or the walk manifest itself. A missing file or an empty list fails.
+  --build <path>   gate only: the build to fingerprint (default: the config's buildPath).
+  --label <text>   gate only: recorded in the evidence as given, for example the commit SHA. The gate
+                   never checks it.
+  --evidence <file>
+                   gate only: where to write the evidence JSON (default .deja/gate/evidence.json). A text
+                   table is written beside it. An old file is deleted first, so a stale pass is never read.
   --dry-run        migrate only: show what would be written, and write nothing.
   --verify         With a manifest: if the flow changed, or no build has validated it, re-run your
                    current file in place. A pass with unchanged assertions updates the manifest's sha.
@@ -91,6 +105,9 @@ Exit codes:
   5  Store locked: another run is writing the same store. Use a different --store <id>.
   6  Manifest: flow-changed, not-validated, needs-migration or assertions-changed. Nothing was
      replayed or written. Run with --verify, or review the change and run remember.
+  10 gate: closed. At least one goal is failed, flaky, not-run, flow-changed or invalid.
+  11 gate: could not decide. The store or build could not be read, or the evidence not written.
+     Gate usage errors (no --goals, unreadable or empty goals file) exit 2. 0 means every goal passed.
 
 YAML verification and replay always invoke standalone Maestro flows. No YAML depends on
 Déjà or an LLM after it has been written.
