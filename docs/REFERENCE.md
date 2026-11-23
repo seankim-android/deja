@@ -469,7 +469,7 @@ What the server will not do, whatever a tool call says:
   is KEY, APIKEY, TOKEN, SECRET, PASSWORD, PASSWD, PASS, PWD, PRIVATE, CREDENTIAL(S), AUTH, SESSION or COOKIE, so `SSH_KEY` and
   `DB_PASS` count and `KEYBOARD` does not. The shell's own `PWD` and `OLDPWD` (a directory) are left out. A key-like variable
   always redacts its value, so an ordinary word in one (a `KEY` set to `dvorak-layout`) is hidden too; hiding too much is the
-  safe side. and artifact paths are relative to the workspace.
+  safe side. Artifact paths are relative to the workspace.
 - One writer per store: a second `deja_run`, `deja_remember` or `deja_explore` while one is running is
   refused at once with `error.code` `STORE_LOCKED`. `deja_list` and `deja_inspect` never take the lock.
   Run one `deja mcp --store <id>` per device.
