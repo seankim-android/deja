@@ -46,7 +46,7 @@ type Sample = {
 const samples: Sample[] = []
 const screens: {
   step: string; marker: string | null; markers: string[]; anchors: string[]; fingerprint: string
-  stable: boolean; unstableReason: string | null; markersInDocumentOrder: string[]; keyboardVisible: boolean; systemUi: string | null; truncated: boolean
+  stable: boolean; stableScoped: boolean; fingerprintScoped: string; unstableReason: string | null; markersInDocumentOrder: string[]; keyboardVisible: boolean; systemUi: string | null; truncated: boolean
   elementCount: number; observation: Observation
 }[] = []
 
@@ -81,6 +81,7 @@ async function observe(step: string, chromeIds: string[] = []) {
   screens.push({
     step, marker: fp.marker, markers: fp.markers, anchors: fp.anchors, fingerprint: fp.fingerprint,
     stable: fp.stable, unstableReason: fp.unstableReason,
+    ...(() => { const scoped = fingerprintScreenV2(observation.elements, { ...config, markerScope: 'last-marker' }); return { stableScoped: scoped.stable, fingerprintScoped: scoped.fingerprint } })(),
     markersInDocumentOrder: [...new Set(observation.elements.filter(e => !e.overlay && e.id && fp.markers.includes(e.id)).map(e => e.id!))],
     keyboardVisible: observation.keyboardVisible,
     systemUi: observation.systemUi?.kind ?? null, truncated: observation.truncated,

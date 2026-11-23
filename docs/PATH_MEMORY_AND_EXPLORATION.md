@@ -997,6 +997,31 @@ use at least 30 steps where a rate is asked for.
 | Crash detection | A forced crash is detected on 5 of 5 tries (output or "no app IDs on two reads") | No `crashed` signal: no unattended search. Depends on DEJA-7 |
 | Keyboard dismissal (`hideKeyboard`, `pressKey: Enter`) with the keyboard up on 2.1 Today | Closes it on 5 of 5 tries | Typing goals stay out of scope until it does |
 
+### 13.2 DEJA-18 results (measured 2026-11-22)
+
+Raw data and commands: `spikes/004-ios-observation/evidence/RESULTS.md`. iPhone 17 simulator, iOS 27.2,
+Maestro 2.12.0, Blankaday Dev in `uiTesting` mode, machine load 100 to 500 (each sample records it).
+Fewer than 30 steps per transport, so these are first numbers, not rates.
+
+| Fact | Result | Gate |
+| --- | --- | --- |
+| State survives | A flow with no `launchApp` acted on live state in every step of both walks (about 50 steps each); the hierarchy returned SwiftUI IDs | go |
+| Step cost, process transport | act median 23.1 s, p90 29.2 s; observe median 15.1 s, p90 17.5 s (load about 425) | no-go: over 10 s and 20 s |
+| Step cost, MCP session | act median 3.2 s, p90 7.5 s; observe median 0.2 s, p90 0.3 s (load about 230); session start 4.5 s | go for act plus observe. `settle()` not measured on MCP |
+| Fingerprint repeat | Same screen twice: same hash on every pair. Today, Feed and Settings include a hidden Journal marker, so default rules call them gaps (`marker-conflict`). `markerScope: last-marker` made all 14 observations stable and Today first visit equal to Today later | go only with the scope option, or a Blankaday fix |
+| Keyboard | Keys, accessory views and Done are overlays; fingerprint equal with and without keyboard | go |
+| Share sheet | Seen as `ActivityListView`. The page behind it is not in the hierarchy, so the fingerprint differs; check `systemUi()` before fingerprinting | go with that rule |
+| Roles and flags | No role or trait. `enabled`, `focused`, `selected`, `checked` exist. Roles come from ID shape | no-go as written: use the fallback (roles from config, `interactive` = has an ID) |
+| Duplicate IDs, regex | `id:` is a full-match regular expression (`.` matches any character). Duplicates on Today: 4 IDs of 60 (`calendar.pages` x6) | go, with escaping |
+| `waitForAnimationToEnd` | Finished 3 of 3 on Today (process transport, cost hidden by process start) | not enough tries |
+| Crash, system permission sheet | Not measured conclusively | no signal yet |
+| Keyboard dismissal | `pressKey: Enter` closed it. `hideKeyboard` failed and a tap outside did not close it | go for Enter only |
+
+Budgets (7.5) stay placeholders for model calls. Per-step cost for planning: MCP, 3.5 s median and
+8 s p90 for one `act` plus `observe`; a reset costs about 7 s. With the process transport one step
+is 25 to 45 s, which would make a 60-action run take 25 to 45 minutes, so the process transport
+is not used for exploration.
+
 ## 14. Options rejected
 
 | Option | Why not |

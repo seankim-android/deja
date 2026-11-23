@@ -222,6 +222,7 @@ export type FingerprintConfig = {
     screenMarkerPattern?: string;
     ignore?: string[];
     chromeIds?: string[];
+    markerScope?: 'last-marker';
 };
 export interface FingerprintRules {
     normalizeId(raw: string): string | null;

@@ -4,11 +4,11 @@
   "maestro": "2.12.0 (~/.local/share/deja/maestro/2.12.0)",
   "device": "BA555783-AC7E-46E3-B749-34F9499B2C2B",
   "repeats": 6,
-  "startupMs": 3256,
+  "startupMs": 4549,
   "loadAverageAtEnd": [
-    172.375,
-    225.54931640625,
-    305.2900390625
+    202.615234375,
+    232.32421875,
+    224.94091796875
   ],
   "chromeIds": [
     "feed",
@@ -25,364 +25,364 @@
     {
       "step": "reset:smoke",
       "op": "reset",
-      "ms": 31489,
-      "load1": 107.8837890625,
+      "ms": 45522,
+      "load1": 258.98828125,
       "passed": true,
       "failure": null
     },
     {
       "step": "wait:today",
       "op": "act",
-      "ms": 2511,
-      "load1": 107.8837890625,
+      "ms": 4586,
+      "load1": 266.43603515625,
       "passed": true,
       "failure": null
     },
     {
       "step": "today#1",
       "op": "observe",
-      "ms": 265,
-      "load1": 107.8837890625,
+      "ms": 1219,
+      "load1": 266.43603515625,
       "passed": true
     },
     {
       "step": "today#2",
       "op": "observe",
-      "ms": 219,
-      "load1": 107.8837890625,
+      "ms": 208,
+      "load1": 266.43603515625,
       "passed": true
     },
     {
       "step": "tap:tab.feed",
       "op": "act",
-      "ms": 4119,
-      "load1": 114.13916015625,
+      "ms": 11003,
+      "load1": 269.04296875,
       "passed": true,
       "failure": null
     },
     {
       "step": "wait:feed",
       "op": "act",
-      "ms": 1754,
-      "load1": 114.13916015625,
+      "ms": 1511,
+      "load1": 269.0390625,
       "passed": true,
       "failure": null
     },
     {
       "step": "feed#1",
       "op": "observe",
-      "ms": 150,
-      "load1": 114.13916015625,
+      "ms": 227,
+      "load1": 269.0390625,
       "passed": true
     },
     {
       "step": "feed#2",
       "op": "observe",
-      "ms": 145,
-      "load1": 114.13916015625,
+      "ms": 227,
+      "load1": 269.0390625,
       "passed": true
     },
     {
       "step": "tap:tab.journal",
       "op": "act",
-      "ms": 5558,
-      "load1": 120.6513671875,
+      "ms": 3152,
+      "load1": 269.0390625,
       "passed": true,
       "failure": null
     },
     {
       "step": "wait:journal",
       "op": "act",
-      "ms": 1389,
-      "load1": 120.6513671875,
+      "ms": 1872,
+      "load1": 261.42822265625,
       "passed": true,
       "failure": null
     },
     {
       "step": "journal#1",
       "op": "observe",
-      "ms": 190,
-      "load1": 120.6513671875,
+      "ms": 153,
+      "load1": 261.42822265625,
       "passed": true
     },
     {
       "step": "journal#2",
       "op": "observe",
-      "ms": 180,
-      "load1": 120.6513671875,
+      "ms": 142,
+      "load1": 261.42822265625,
       "passed": true
     },
     {
       "step": "tap:tab.today",
       "op": "act",
-      "ms": 4095,
-      "load1": 129.88818359375,
+      "ms": 3981,
+      "load1": 253.3056640625,
       "passed": true,
       "failure": null
     },
     {
       "step": "wait:today-back",
       "op": "act",
-      "ms": 1458,
-      "load1": 129.88818359375,
+      "ms": 1642,
+      "load1": 253.3056640625,
       "passed": true,
       "failure": null
     },
     {
       "step": "today-back#1",
       "op": "observe",
-      "ms": 135,
-      "load1": 129.88818359375,
+      "ms": 129,
+      "load1": 253.3056640625,
       "passed": true
     },
     {
       "step": "today-back#2",
       "op": "observe",
-      "ms": 155,
-      "load1": 129.88818359375,
+      "ms": 132,
+      "load1": 253.3056640625,
       "passed": true
     },
     {
       "step": "tap:today.answer",
       "op": "act",
-      "ms": 2624,
-      "load1": 138.06494140625,
+      "ms": 2206,
+      "load1": 253.3056640625,
       "passed": true,
       "failure": null
     },
     {
       "step": "wait:space",
       "op": "act",
-      "ms": 1390,
-      "load1": 138.06494140625,
+      "ms": 1310,
+      "load1": 244.95263671875,
       "passed": true,
       "failure": null
     },
     {
       "step": "today-keyboard#1",
       "op": "observe",
-      "ms": 253,
-      "load1": 138.06494140625,
+      "ms": 188,
+      "load1": 244.95263671875,
       "passed": true
     },
     {
       "step": "today-keyboard#2",
       "op": "observe",
-      "ms": 244,
-      "load1": 138.06494140625,
+      "ms": 165,
+      "load1": 244.95263671875,
       "passed": true
     },
     {
       "step": "key:enter",
       "op": "act",
-      "ms": 1616,
-      "load1": 138.06494140625,
+      "ms": 1679,
+      "load1": 244.95263671875,
       "passed": true,
       "failure": null
     },
     {
       "step": "today-after-keyboard",
       "op": "observe",
-      "ms": 313,
-      "load1": 138.06494140625,
+      "ms": 240,
+      "load1": 244.95263671875,
       "passed": true
     },
     {
       "step": "reset:history",
       "op": "reset",
-      "ms": 7836,
-      "load1": 149.2490234375,
+      "ms": 6792,
+      "load1": 239.58447265625,
       "passed": true,
       "failure": null
     },
     {
       "step": "tap:today.you",
       "op": "act",
-      "ms": 9756,
-      "load1": 181.82958984375,
+      "ms": 7532,
+      "load1": 237.69580078125,
       "passed": true,
       "failure": null
     },
     {
       "step": "tap:you.settings",
       "op": "act",
-      "ms": 6249,
-      "load1": 197.7783203125,
+      "ms": 8189,
+      "load1": 228.04638671875,
       "passed": true,
       "failure": null
     },
     {
       "step": "tap:settings.category.privacyAndData",
       "op": "act",
-      "ms": 2818,
-      "load1": 211.9697265625,
+      "ms": 2497,
+      "load1": 228.04638671875,
       "passed": true,
       "failure": null
     },
     {
       "step": "scroll:settings.export",
       "op": "act",
-      "ms": 1630,
-      "load1": 211.9697265625,
+      "ms": 1695,
+      "load1": 221.15576171875,
       "passed": true,
       "failure": null
     },
     {
       "step": "settings-before-share",
       "op": "observe",
-      "ms": 204,
-      "load1": 211.9697265625,
+      "ms": 253,
+      "load1": 221.15576171875,
       "passed": true
     },
     {
       "step": "tap:settings.export",
       "op": "act",
-      "ms": 2835,
-      "load1": 215.7353515625,
+      "ms": 2889,
+      "load1": 221.15576171875,
       "passed": true,
       "failure": null
     },
     {
       "step": "tap:export.csv",
       "op": "act",
-      "ms": 2926,
-      "load1": 215.7353515625,
+      "ms": 2932,
+      "load1": 212.01416015625,
       "passed": true,
       "failure": null
     },
     {
       "step": "wait:ActivityListView",
       "op": "act",
-      "ms": 3293,
-      "load1": 213.75439453125,
+      "ms": 1251,
+      "load1": 212.01416015625,
       "passed": true,
       "failure": null
     },
     {
       "step": "share-sheet#1",
       "op": "observe",
-      "ms": 218,
-      "load1": 213.75439453125,
+      "ms": 168,
+      "load1": 212.01416015625,
       "passed": true
     },
     {
       "step": "swipe:close-sheet",
       "op": "act",
-      "ms": 3628,
-      "load1": 214.49462890625,
+      "ms": 2815,
+      "load1": 206.5673828125,
       "passed": true,
       "failure": null
     },
     {
       "step": "settings-after-share",
       "op": "observe",
-      "ms": 296,
-      "load1": 214.49462890625,
+      "ms": 204,
+      "load1": 206.5673828125,
       "passed": true
     },
     {
       "step": "reset:bench",
       "op": "reset",
-      "ms": 10033,
-      "load1": 199.33203125,
+      "ms": 7279,
+      "load1": 202.4375,
       "passed": true,
       "failure": null
     },
     {
       "step": "bench:wait",
       "op": "act",
-      "ms": 4493,
-      "load1": 190.49658203125,
+      "ms": 4281,
+      "load1": 201.28125,
       "passed": true,
       "failure": null
     },
     {
       "step": "bench-observe#1",
       "op": "observe",
-      "ms": 817,
-      "load1": 190.49658203125,
+      "ms": 1758,
+      "load1": 201.28125,
       "passed": true
     },
     {
       "step": "bench-observe#2",
       "op": "observe",
-      "ms": 198,
-      "load1": 190.49658203125,
+      "ms": 315,
+      "load1": 201.28125,
       "passed": true
     },
     {
       "step": "bench-observe#3",
       "op": "observe",
-      "ms": 195,
-      "load1": 190.49658203125,
+      "ms": 253,
+      "load1": 201.28125,
       "passed": true
     },
     {
       "step": "bench-observe#4",
       "op": "observe",
-      "ms": 183,
-      "load1": 190.49658203125,
+      "ms": 168,
+      "load1": 201.28125,
       "passed": true
     },
     {
       "step": "bench-observe#5",
       "op": "observe",
-      "ms": 180,
-      "load1": 190.49658203125,
+      "ms": 156,
+      "load1": 207.02392578125,
       "passed": true
     },
     {
       "step": "bench-observe#6",
       "op": "observe",
-      "ms": 171,
-      "load1": 190.49658203125,
+      "ms": 177,
+      "load1": 207.02392578125,
       "passed": true
     },
     {
       "step": "bench-tap#1",
       "op": "act",
-      "ms": 3149,
-      "load1": 180.52685546875,
+      "ms": 5124,
+      "load1": 205.50048828125,
       "passed": true,
       "failure": null
     },
     {
       "step": "bench-tap#2",
       "op": "act",
-      "ms": 4567,
-      "load1": 180.52685546875,
+      "ms": 3363,
+      "load1": 205.50048828125,
       "passed": true,
       "failure": null
     },
     {
       "step": "bench-tap#3",
       "op": "act",
-      "ms": 6638,
-      "load1": 178.29931640625,
+      "ms": 4522,
+      "load1": 201.2958984375,
       "passed": true,
       "failure": null
     },
     {
       "step": "bench-tap#4",
       "op": "act",
-      "ms": 6090,
-      "load1": 178.43505859375,
+      "ms": 3770,
+      "load1": 193.98486328125,
       "passed": true,
       "failure": null
     },
     {
       "step": "bench-tap#5",
       "op": "act",
-      "ms": 4685,
-      "load1": 176.23779296875,
+      "ms": 4404,
+      "load1": 204.23583984375,
       "passed": true,
       "failure": null
     },
     {
       "step": "bench-tap#6",
       "op": "act",
-      "ms": 3202,
-      "load1": 172.375,
+      "ms": 3310,
+      "load1": 204.23583984375,
       "passed": true,
       "failure": null
     }
@@ -433,6 +433,8 @@
       "fingerprint": "61bd03a0d1e5db584e606d49d8e21b55a88521a12a81c3829e254a12fa706cc6",
       "stable": false,
       "unstableReason": "marker-conflict",
+      "stableScoped": true,
+      "fingerprintScoped": "b1fff986c76a6aa30d0e5ab234eda60dfd97f1e1a2aab97294cae29c6ee95428",
       "markersInDocumentOrder": [
         "screen.journal",
         "screen.today"
@@ -489,6 +491,8 @@
       "fingerprint": "61bd03a0d1e5db584e606d49d8e21b55a88521a12a81c3829e254a12fa706cc6",
       "stable": false,
       "unstableReason": "marker-conflict",
+      "stableScoped": true,
+      "fingerprintScoped": "b1fff986c76a6aa30d0e5ab234eda60dfd97f1e1a2aab97294cae29c6ee95428",
       "markersInDocumentOrder": [
         "screen.journal",
         "screen.today"
@@ -538,6 +542,8 @@
       "fingerprint": "ec0c2428926830b03dc0bd1868ab4929343ad5cacb7e0f055bffdc6c698348de",
       "stable": false,
       "unstableReason": "marker-conflict",
+      "stableScoped": true,
+      "fingerprintScoped": "cf8e1b9d2b4f37ba701a019912f4e41a63a9058273f1de16bfabc37184c495d2",
       "markersInDocumentOrder": [
         "screen.journal",
         "screen.feed"
@@ -587,6 +593,8 @@
       "fingerprint": "ec0c2428926830b03dc0bd1868ab4929343ad5cacb7e0f055bffdc6c698348de",
       "stable": false,
       "unstableReason": "marker-conflict",
+      "stableScoped": true,
+      "fingerprintScoped": "cf8e1b9d2b4f37ba701a019912f4e41a63a9058273f1de16bfabc37184c495d2",
       "markersInDocumentOrder": [
         "screen.journal",
         "screen.feed"
@@ -627,6 +635,8 @@
       "fingerprint": "bd7b96c6ea4bf5a10a753e4be01cd6821f94b27dc1a6f266447d6ce420fea70c",
       "stable": true,
       "unstableReason": null,
+      "stableScoped": true,
+      "fingerprintScoped": "bd7b96c6ea4bf5a10a753e4be01cd6821f94b27dc1a6f266447d6ce420fea70c",
       "markersInDocumentOrder": [
         "screen.journal"
       ],
@@ -666,6 +676,8 @@
       "fingerprint": "bd7b96c6ea4bf5a10a753e4be01cd6821f94b27dc1a6f266447d6ce420fea70c",
       "stable": true,
       "unstableReason": null,
+      "stableScoped": true,
+      "fingerprintScoped": "bd7b96c6ea4bf5a10a753e4be01cd6821f94b27dc1a6f266447d6ce420fea70c",
       "markersInDocumentOrder": [
         "screen.journal"
       ],
@@ -712,6 +724,8 @@
       "fingerprint": "b1fff986c76a6aa30d0e5ab234eda60dfd97f1e1a2aab97294cae29c6ee95428",
       "stable": true,
       "unstableReason": null,
+      "stableScoped": true,
+      "fingerprintScoped": "b1fff986c76a6aa30d0e5ab234eda60dfd97f1e1a2aab97294cae29c6ee95428",
       "markersInDocumentOrder": [
         "screen.today"
       ],
@@ -758,6 +772,8 @@
       "fingerprint": "b1fff986c76a6aa30d0e5ab234eda60dfd97f1e1a2aab97294cae29c6ee95428",
       "stable": true,
       "unstableReason": null,
+      "stableScoped": true,
+      "fingerprintScoped": "b1fff986c76a6aa30d0e5ab234eda60dfd97f1e1a2aab97294cae29c6ee95428",
       "markersInDocumentOrder": [
         "screen.today"
       ],
@@ -804,6 +820,8 @@
       "fingerprint": "b1fff986c76a6aa30d0e5ab234eda60dfd97f1e1a2aab97294cae29c6ee95428",
       "stable": true,
       "unstableReason": null,
+      "stableScoped": true,
+      "fingerprintScoped": "b1fff986c76a6aa30d0e5ab234eda60dfd97f1e1a2aab97294cae29c6ee95428",
       "markersInDocumentOrder": [
         "screen.today"
       ],
@@ -850,6 +868,8 @@
       "fingerprint": "b1fff986c76a6aa30d0e5ab234eda60dfd97f1e1a2aab97294cae29c6ee95428",
       "stable": true,
       "unstableReason": null,
+      "stableScoped": true,
+      "fingerprintScoped": "b1fff986c76a6aa30d0e5ab234eda60dfd97f1e1a2aab97294cae29c6ee95428",
       "markersInDocumentOrder": [
         "screen.today"
       ],
@@ -896,6 +916,8 @@
       "fingerprint": "b1fff986c76a6aa30d0e5ab234eda60dfd97f1e1a2aab97294cae29c6ee95428",
       "stable": true,
       "unstableReason": null,
+      "stableScoped": true,
+      "fingerprintScoped": "b1fff986c76a6aa30d0e5ab234eda60dfd97f1e1a2aab97294cae29c6ee95428",
       "markersInDocumentOrder": [
         "screen.today"
       ],
@@ -943,6 +965,8 @@
       "fingerprint": "741d04501c5617dc5dd3d645c3d67e9f05550bb48eeb4cbcd5062a5bcddbd681",
       "stable": false,
       "unstableReason": "marker-conflict",
+      "stableScoped": true,
+      "fingerprintScoped": "e02e1884d160cea300c9a1c1dd287b0604a9f9b28546c5f367c4d78e4a5e7cf5",
       "markersInDocumentOrder": [
         "screen.journal",
         "screen.settings.privacyAndData"
@@ -974,6 +998,8 @@
       "fingerprint": "789042f30bc955a67120a6939f2ccd6659aa0813d796f6eec0c8d10d652e28e1",
       "stable": true,
       "unstableReason": null,
+      "stableScoped": true,
+      "fingerprintScoped": "789042f30bc955a67120a6939f2ccd6659aa0813d796f6eec0c8d10d652e28e1",
       "markersInDocumentOrder": [],
       "keyboardVisible": false,
       "systemUi": "share-sheet",
@@ -1019,6 +1045,8 @@
       "fingerprint": "741d04501c5617dc5dd3d645c3d67e9f05550bb48eeb4cbcd5062a5bcddbd681",
       "stable": false,
       "unstableReason": "marker-conflict",
+      "stableScoped": true,
+      "fingerprintScoped": "e02e1884d160cea300c9a1c1dd287b0604a9f9b28546c5f367c4d78e4a5e7cf5",
       "markersInDocumentOrder": [
         "screen.journal",
         "screen.settings.privacyAndData"
@@ -1075,6 +1103,8 @@
       "fingerprint": "61bd03a0d1e5db584e606d49d8e21b55a88521a12a81c3829e254a12fa706cc6",
       "stable": false,
       "unstableReason": "marker-conflict",
+      "stableScoped": true,
+      "fingerprintScoped": "b1fff986c76a6aa30d0e5ab234eda60dfd97f1e1a2aab97294cae29c6ee95428",
       "markersInDocumentOrder": [
         "screen.journal",
         "screen.today"
@@ -1131,6 +1161,8 @@
       "fingerprint": "61bd03a0d1e5db584e606d49d8e21b55a88521a12a81c3829e254a12fa706cc6",
       "stable": false,
       "unstableReason": "marker-conflict",
+      "stableScoped": true,
+      "fingerprintScoped": "b1fff986c76a6aa30d0e5ab234eda60dfd97f1e1a2aab97294cae29c6ee95428",
       "markersInDocumentOrder": [
         "screen.journal",
         "screen.today"
@@ -1187,6 +1219,8 @@
       "fingerprint": "61bd03a0d1e5db584e606d49d8e21b55a88521a12a81c3829e254a12fa706cc6",
       "stable": false,
       "unstableReason": "marker-conflict",
+      "stableScoped": true,
+      "fingerprintScoped": "b1fff986c76a6aa30d0e5ab234eda60dfd97f1e1a2aab97294cae29c6ee95428",
       "markersInDocumentOrder": [
         "screen.journal",
         "screen.today"
@@ -1243,6 +1277,8 @@
       "fingerprint": "61bd03a0d1e5db584e606d49d8e21b55a88521a12a81c3829e254a12fa706cc6",
       "stable": false,
       "unstableReason": "marker-conflict",
+      "stableScoped": true,
+      "fingerprintScoped": "b1fff986c76a6aa30d0e5ab234eda60dfd97f1e1a2aab97294cae29c6ee95428",
       "markersInDocumentOrder": [
         "screen.journal",
         "screen.today"
@@ -1299,6 +1335,8 @@
       "fingerprint": "61bd03a0d1e5db584e606d49d8e21b55a88521a12a81c3829e254a12fa706cc6",
       "stable": false,
       "unstableReason": "marker-conflict",
+      "stableScoped": true,
+      "fingerprintScoped": "b1fff986c76a6aa30d0e5ab234eda60dfd97f1e1a2aab97294cae29c6ee95428",
       "markersInDocumentOrder": [
         "screen.journal",
         "screen.today"
@@ -1355,6 +1393,8 @@
       "fingerprint": "61bd03a0d1e5db584e606d49d8e21b55a88521a12a81c3829e254a12fa706cc6",
       "stable": false,
       "unstableReason": "marker-conflict",
+      "stableScoped": true,
+      "fingerprintScoped": "b1fff986c76a6aa30d0e5ab234eda60dfd97f1e1a2aab97294cae29c6ee95428",
       "markersInDocumentOrder": [
         "screen.journal",
         "screen.today"

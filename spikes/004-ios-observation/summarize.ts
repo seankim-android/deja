@@ -12,7 +12,7 @@ type Walk = {
   samples: { step: string; op: string; ms: number; load1: number; passed?: boolean; failure?: string | null }[]
   screens: {
     step: string; marker: string | null; markers: string[]; anchors: string[]; fingerprint: string
-    fingerprintWithChrome: string; stable: boolean; unstableReason: string | null; markersInDocumentOrder: string[]; keyboardVisible: boolean; systemUi: string | null
+    fingerprintWithChrome: string; stable: boolean; stableScoped?: boolean; fingerprintScoped?: string; unstableReason: string | null; markersInDocumentOrder: string[]; keyboardVisible: boolean; systemUi: string | null
     truncated: boolean; elementCount: number
   }[]
 }
@@ -77,6 +77,22 @@ const checks: [string, string, string][] = [
   ['Settings before vs after the share sheet', 'settings-before-share', 'settings-after-share'],
 ]
 for (const walk of walks.filter(entry => !entry.transport.endsWith('-bench'))) for (const [label, a, b] of checks) lines.push(`| ${walk.transport} | ${label} | ${same(walk, a, b)} |`)
+
+lines.push('', '## Proposed fix: markerScope last-marker', '',
+  'Same observations, fingerprinted with `markerScope: "last-marker"` (foreground = last marker in document order, only elements from it on). Recorded only where the walk was run with the option.', '',
+  '| Transport | Check | Result |', '| --- | --- | --- |')
+const sameScoped = (walk: Walk, a: string, b: string) => {
+  const left = walk.screens.find(screen => screen.step === a)
+  const right = walk.screens.find(screen => screen.step === b)
+  if (!left?.fingerprintScoped || !right?.fingerprintScoped) return 'not measured'
+  if (!left.stableScoped || !right.stableScoped) return 'gap'
+  return left.fingerprintScoped === right.fingerprintScoped ? 'same' : 'DIFFERENT'
+}
+for (const walk of walks.filter(entry => !entry.transport.endsWith('-bench'))) {
+  for (const [label, a, b] of checks) lines.push(`| ${walk.transport} | ${label} | ${sameScoped(walk, a, b)} |`)
+  const scopedStable = walk.screens.filter(screen => screen.fingerprintScoped && !screen.step.startsWith('bench'))
+  if (scopedStable.length) lines.push(`| ${walk.transport} | Observations that are stable, default rules / with the fix | ${walk.screens.filter(s => !s.step.startsWith('bench') && s.stable).length} / ${scopedStable.filter(s => s.stableScoped).length} of ${walk.screens.filter(s => !s.step.startsWith('bench')).length} |`)
+}
 
 lines.push('', '## Distinct screens', '',
   'Today, Feed and Journal must have different fingerprints.', '')

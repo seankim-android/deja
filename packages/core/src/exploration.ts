@@ -178,6 +178,13 @@ export type FingerprintConfig = {
   ignore?: string[]
   /** IDs present on most screens in the graph, for example `tab.today`. See `findChromeIds`. */
   chromeIds?: string[]
+  /**
+   * What to do when more than one marker matches. Default: the screen is a gap (`marker-conflict`).
+   * `last-marker`: the foreground screen is the one whose marker comes last in document order, and
+   * only elements from that marker on count. Measured on Blankaday iOS (DEJA-18): a hidden page's
+   * elements come first. Opt-in, because it is a platform observation, not a rule.
+   */
+  markerScope?: 'last-marker'
 }
 
 export type ScreenFingerprintV2 = {
@@ -226,7 +233,14 @@ export function fingerprintScreenV2(
   const chrome = new Set(config.chromeIds ?? [])
   const ignore = config.ignore ?? []
   const kept = new Set<string>()
-  for (const element of elements) {
+  let scoped = elements
+  if (marker && config.markerScope === 'last-marker') {
+    const at = elements.flatMap((element, index) =>
+      element.id !== null && !element.overlay && marker.test(element.id) ? [index] : [])
+    const distinct = new Set(at.map(index => elements[index].id))
+    if (distinct.size > 1) scoped = elements.slice(at[at.length - 1])
+  }
+  for (const element of scoped) {
     if (element.id === null || element.overlay) continue
     if (ignored(element.id, ignore) || isDynamicId(element.id) || chrome.has(element.id)) continue
     kept.add(element.id)

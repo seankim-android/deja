@@ -115,6 +115,18 @@ describe('fingerprint v2', () => {
     expect(matchScreenV2([], two).status).toBe('gap')
   })
 
+  test('markerScope last-marker keeps the foreground screen: a hidden page that comes first is dropped', () => {
+    const clean = fingerprintScreenV2([el('screen.today'), el('today.answer'), el('tab.today')], config)
+    const leaked = [el('screen.journal'), el('journal.you'), el('screen.today'), el('today.answer'), el('tab.today')]
+    expect(fingerprintScreenV2(leaked, config).stable).toBe(false)
+    const scoped = fingerprintScreenV2(leaked, { ...config, markerScope: 'last-marker' })
+    expect(scoped).toMatchObject({ stable: true, marker: 'screen.today' })
+    expect(scoped.fingerprint).toBe(clean.fingerprint)
+    // One marker: nothing before it is dropped.
+    const single = [el('toolbar.x'), el('screen.today')]
+    expect(fingerprintScreenV2(single, { ...config, markerScope: 'last-marker' }).anchors).toEqual(['toolbar.x'])
+  })
+
   test('a screen with no stable IDs is not stable', () => {
     expect(fingerprintScreenV2([el(null), el('calendar.noAnswer.2026-11-08')], config))
       .toMatchObject({ stable: false, unstableReason: 'no-stable-ids' })
