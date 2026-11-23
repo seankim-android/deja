@@ -1,11 +1,21 @@
 import { describe, expect, test } from 'bun:test'
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { existsSync } from 'node:fs'
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises'
 import { hostname, tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { InvalidStoreIdError, StoreLockedError } from '@deja-qa/store-local'
 import { contractIdentity, initialValidation, type WalkStoreContractImplementation } from './walk-store-contract.ts'
+
+async function temporaryFilesUnder(root: string): Promise<string[]> {
+  const found: string[] = []
+  for (const entry of await readdir(root, { withFileTypes: true })) {
+    const path = join(root, entry.name)
+    if (entry.isDirectory()) found.push(...await temporaryFilesUnder(path))
+    else if (entry.name.endsWith('.tmp')) found.push(path)
+  }
+  return found
+}
 
 const writerProcess = resolve(import.meta.dir, '../test/fixtures/writer-process.ts')
 
@@ -14,6 +24,8 @@ type Child = {
   /** The first line it printed: ACQUIRED or LOCKED:<code>. */
   first: Promise<string>
   exited: Promise<number | null>
+  /** The signal that ended it, if any. */
+  signal: Promise<string | null>
 }
 
 function startWriter(
@@ -35,7 +47,8 @@ function startWriter(
     child.once('error', reject)
   })
   const exited = new Promise<number | null>(resolveExit => child.once('close', code => resolveExit(code)))
-  return { process: child, first, exited }
+  const signal = new Promise<string | null>(resolveSignal => child.once('close', (_code, ended) => resolveSignal(ended)))
+  return { process: child, first, exited, signal }
 }
 
 async function workspace() {
@@ -159,6 +172,53 @@ export function runWriterLockContractTests(implementation: WalkStoreContractImpl
       } finally {
         await implementation.closeStore(store)
         await rm(temporary, { recursive: true, force: true })
+      }
+    })
+
+    test.each(['SIGINT', 'SIGTERM'] as const)('%s releases the lock and still ends the process', async name => {
+      const { temporary, workspaceRoot } = await workspace()
+      try {
+        const child = startWriter(implementation, workspaceRoot, undefined)
+        expect(await child.first).toBe('ACQUIRED')
+        const lockPath = lockPathOf(implementation, workspaceRoot)
+        expect(existsSync(lockPath)).toBe(true)
+        child.process.kill(name)
+        await child.exited
+        expect(await child.signal).toBe(name)
+        expect(existsSync(lockPath)).toBe(false)
+        const store = implementation.createStore(workspaceRoot)
+        try {
+          await persist(store, 'After signal')
+        } finally {
+          await implementation.closeStore(store)
+        }
+      } finally {
+        await rm(temporary, { recursive: true, force: true })
+      }
+    })
+
+    test('stores with different ids in one process write the same flow in parallel without errors or torn reads', async () => {
+      for (let round = 0; round < 8; round += 1) {
+        const { temporary, workspaceRoot } = await workspace()
+        const stores = ['a', 'b', 'c', 'd', 'e', 'f'].map(id => implementation.createStore(workspaceRoot, {}, id))
+        try {
+          const results = await Promise.allSettled(stores.map(async store => {
+            const persisted = await persist(store)
+            // A reader that arrives while other stores rewrite the same flow sees a whole file.
+            const hit = await store.lookup(contractIdentity())
+            expect(hit.status).toBe('hit')
+            return persisted.flowPath
+          }))
+          expect(results.filter(result => result.status === 'rejected')).toEqual([])
+          const paths = new Set(results.map(result => (result as PromiseFulfilledResult<string>).value))
+          expect(paths.size).toBe(1)
+          expect(await readFile(join(workspaceRoot, [...paths][0]), 'utf8'))
+            .toBe('appId: dev.deja.checkout\n---\n- assertVisible: Order confirmed\n')
+          expect((await temporaryFilesUnder(join(workspaceRoot, '.deja')))).toEqual([])
+        } finally {
+          for (const store of stores) await implementation.closeStore(store)
+          await rm(temporary, { recursive: true, force: true })
+        }
       }
     })
 

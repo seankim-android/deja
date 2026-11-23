@@ -10,11 +10,14 @@ export declare const SQLITE_MEMORY_SCHEMA_VERSION = 3;
 export declare class SQLiteWalkStore implements WalkStore {
     readonly workspaceRoot: string;
     readonly memoryPath: string;
+    readonly relativeMemoryPath: string;
+    private writerLock;
     private readonly renameFile;
     private readonly replaceMetadata;
     private database;
     constructor(options: SQLiteWalkStoreOptions);
     close(): void;
+    acquireWriter(): void;
     private openExisting;
     private openWritable;
     private loadMemory;
@@ -37,6 +40,7 @@ export declare class SQLiteWalkStore implements WalkStore {
 }
 export type SQLiteWalkStoreOptions = {
     workspaceRoot: string;
+    storeId?: string;
     renameFile?: (temporaryPath: string, destinationPath: string) => Promise<void>;
     replaceMetadata?: (walks: StoredWalk[]) => void;
 };

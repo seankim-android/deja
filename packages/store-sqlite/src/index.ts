@@ -46,7 +46,13 @@ export {
   type WalkValidation,
 } from '@deja-qa/core'
 
-export { InvalidStoreIdError, StoreLockedError, storeMetadataPath } from '@deja-qa/store-local'
+export {
+  InvalidStoreIdError,
+  StoreLockContentionError,
+  StoreLockUnavailableError,
+  StoreLockedError,
+  storeMetadataPath,
+} from '@deja-qa/store-local'
 
 export const SQLITE_MEMORY_SCHEMA_VERSION = 3
 export const MAESTRO_FLOW_SCHEMA_VERSION = 'maestro/v1'

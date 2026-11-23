@@ -295,7 +295,9 @@ export async function runCli(argv: string[], io: CliIo = {
       summarize(null, goalText)
     }
     if (error instanceof StoreLockedError) {
-      io.stderr('Store locked: another run is writing this store. Pass a different --store <id> for each device.\n')
+      io.stderr(error.code === 'STORE_LOCK_CONTENTION'
+        ? 'Store lock contention: another run was taking over a stale lock. Run again.\n'
+        : 'Store locked: another run is writing this store. Pass a different --store <id> for each device.\n')
       return 5
     }
     if (error instanceof InvalidWalkMemoryError) {

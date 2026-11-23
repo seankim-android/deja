@@ -297,20 +297,36 @@ See `packages/store-sqlite/README.md` for setup and durability boundaries.
 ### One writer per store, one store per device (DEJA-4)
 
 Both stores take a writer lock on their first write (persist, repair, validation) and keep it until
-`close()` or process exit. The lock is a file beside the metadata (`walks.json.lock`,
-`walks.sqlite.lock`) holding the holder's pid, `ps` start time and host, created whole by a hard
-link. A second writer gets `StoreLockedError` (`code: 'STORE_LOCKED'`), and the CLI exits 5 before it
-runs anything. Reads (`lookup`, `list`, `deja list`) never take the lock. A lock is stale only when
-it is on this host and its pid is gone or now has a different start time; then the next writer
-takes over under a short `.break` file. Another host, an unreadable file, or a failed `ps` all mean
-held (fail closed). A killed process leaves its file behind until the next writer replaces it.
-The lock does not cover a network filesystem shared between hosts.
+`close()`, process exit, SIGINT or SIGTERM (a host that handles those signals itself keeps control
+and should call `close()`). The lock is a file beside the metadata (`walks.json.lock`,
+`walks.sqlite.lock`) holding the holder's pid, start time, host, machine id and a token, created
+whole by a hard link. Every write re-reads the file and refuses to continue if the token is no
+longer its own. A second writer gets `StoreLockedError` (`code: 'STORE_LOCKED'`), and the CLI exits 5
+before it runs anything. Reads (`lookup`, `list`, `deja list`) never take the lock.
+
+A lock is stale only when it is on this machine (same hostname, or same machine id) and its pid is
+gone or now has a different start time. The start time is `/proc/<pid>/stat` field 22 on Linux and
+`ps -o lstart` elsewhere. Another machine, an unreadable file, or a start time that cannot be read
+(for example BusyBox `ps`, so a reused pid is not noticed) all mean held: delete the lock by hand.
+A killed process (SIGKILL) leaves its file behind until the next writer replaces it.
+
+Takeover of a stale lock goes through a `.break` file, and nothing is ever deleted by path: a
+file judged dead is first renamed to a name only the taker knows, its token is checked, and if it
+was not the file that was judged (someone replaced it) it is linked back and the taker reports
+`StoreLockContentionError` (`STORE_LOCK_CONTENTION`, a subclass of `StoreLockedError`; run again).
+An unreadable `.break` older than 10 seconds is a crash leftover and is replaced. Residual risk: a
+check-then-rename window of microseconds between a taker's read and its rename. The holder's
+re-check on every write turns a lost lock into an error instead of two writers. The lock does not
+cover a network filesystem shared between machines, or one without hard links
+(`StoreLockUnavailableError`).
 
 To run several devices at once, give each its own store with `storeId` (`--store <id>` on the CLI;
 a simulator UDID works). History goes to `.deja/memory/stores/<id>/walks.{json,sqlite}` with its
-own lock. Flow files stay in the shared `.deja/flows`: they are content-addressed and written
-atomically, so two stores writing the same bytes agree. Without an id the store is the original
-single store, unchanged. Ids are 1 to 128 of `[A-Za-z0-9._-]`, starting with a letter or digit.
+own lock. Flow files stay in the shared `.deja/flows`: they are content-addressed and every write
+goes to a uniquely named temporary file and is renamed into place, so several stores in one
+process (or several processes) writing the same bytes agree and a reader never sees a partial flow.
+Without an id the store is the original single store, unchanged. Ids are 1 to 128 of
+`[A-Za-z0-9._-]`, starting with a letter or digit.
 Reports in `.deja/reports` are named per process, but `latest.json` is last-writer-wins, so a
 parallel host should read each run's own report path. Each device learns on its own: a flow
 remembered under one id is not a hit under another.
