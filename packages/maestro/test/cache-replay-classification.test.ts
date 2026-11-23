@@ -63,6 +63,7 @@ test('a failing cache hit stays at zero model calls and its failed validation is
       validation: { passed: true, at: '2026-11-22T00:00:00.000Z' },
       origin: 'remember',
     })
+    store.close() // The CLI run below is the next writer.
     const goodFlow = await readFile(join(workspaceRoot, persisted.flowPath), 'utf8')
 
     const failedHit = await execute(workspaceRoot)

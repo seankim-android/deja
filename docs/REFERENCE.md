@@ -44,7 +44,8 @@ bun run deja -- --help
 | `inspect <report>` | Print a saved, redacted report. Inspecting a failed result returns its original failure class. |
 
 Global options are `--config <file>` (default `./deja.config.json`), `--json`, and
-`-h`/`--help`. `--flow` is valid only with `remember`. `--junit <file>` (`explore`, `run`,
+`-h`/`--help`. `--store <id>` keeps this run's history in its own store (see
+[One store per device](#one-store-per-device)). `--flow` is valid only with `remember`. `--junit <file>` (`explore`, `run`,
 `remember`) and `--summary` (those three and `inspect`) are described in
 [JUnit and summary output](#junit-and-summary-output-for-ci-hosts). Goals may contain multiple words; quote them
 as one shell argument.
@@ -205,6 +206,25 @@ fails with exit 2 or 4 after it was parsed, the line still prints, with `outcome
 | `2` | Usage, configuration, report-inspection, or direct I/O error; also no command |
 | `3` | Cold exploration was rejected or failed to produce a verified reusable walk |
 | `4` | Invalid/corrupt local memory; quarantine it and recover through verified cold exploration |
+| `5` | The store is locked by another run (`STORE_LOCKED`), two runs collided taking over a stale lock (`STORE_LOCK_CONTENTION`), or the filesystem cannot hold the lock (`STORE_LOCK_UNAVAILABLE`). Use a different `--store <id>` per device; for contention, run again |
+
+### One store per device
+
+A store has one writer. To run several devices at once, start one `deja` per device with its own
+store id, for example a simulator UDID:
+
+```sh
+deja run checkout --store "$UDID1" &   # .deja/memory/stores/<UDID1>/
+deja run checkout --store "$UDID2" &
+```
+
+Ids are 1 to 128 of `[A-Za-z0-9._-]`, starting with a letter or digit. Flow files stay shared in
+`.deja/flows` (content-addressed, written atomically). Without `--store` the original single store
+is used. `list` and `inspect` work while a run holds the lock. Two runs on one store: the second
+exits `5` before it runs anything. The lock is released on exit, SIGINT and SIGTERM; after SIGKILL
+or a crash the next run takes over once the holder is provably gone. Hosts with a Bun or Node API
+pass `storeId` to `LocalWalkStore` or `SQLiteWalkStore`. Details and limits:
+[ARCHITECTURE.md](ARCHITECTURE.md#one-writer-per-store-one-store-per-device-deja-4).
 
 ### Artifacts and clean-state recovery
 
@@ -213,7 +233,9 @@ All runtime state is generated beneath the configured workspace's ignored `.deja
 ```text
 .deja/
   flows/<goal>/<platform>-<flow-sha256>.yaml  # content-addressed verified flows
-  memory/walks.json                           # schema-2 exact identities and validation history
+  memory/walks.json                           # schema-3 exact identities and validation history
+  memory/walks.json.lock                      # writer lock, present while a run can write
+  memory/stores/<id>/walks.json               # the same, for `--store <id>`
   attempts/                                   # cold/remember candidates and bounded raw logs
   patches/                                    # repair diagnosis, diff, prior bytes, verification
   reports/<command>-<timestamp>-<pid>.json    # immutable per-run result
@@ -227,6 +249,24 @@ metadata is malformed or unsafe, the CLI exits `4` without launching Maestro. Qu
 ignored directory, then run verified cold exploration. Never delete curated files under
 `spikes/*/evidence/` as part of cleanup. Only reviewed, secret-free reports, logs, flows, and diffs
 belong in committed evidence.
+
+## Bring your own model
+
+Only cold exploration uses a model. Remember, replay and repair work without OpenClaw or any model,
+and replay never needs a provider key. Cold exploration runs through OpenClaw, so any model with an
+OpenAI-compatible chat API and tool calls can be configured in `deja.config.json`:
+
+```json
+{
+  "openClawModel": "cerebras/moonshotai-kimi-k3.1-pro-trial",
+  "openClawBaseUrl": "https://api.cerebras.ai/v1"
+}
+```
+
+`openClawModel` is `provider/model`, and `openClawBaseUrl` must be an `https://` URL. OpenClaw
+reads the provider key from its own settings, so Déjà never stores it. Changing the model only
+changes how a test is first learned. Only Kimi K3.1 Pro on Cerebras has been measured. Other models
+should work but are not tested yet.
 
 ## Safety rules
 
@@ -257,6 +297,17 @@ support boundary. It does not claim instant replay. [`demo/SCRIPT.md`](../demo/S
 claim to raw artifacts; [`demo/rehearsal/`](../demo/rehearsal/REVIEW.md) records the rejected 65-second
 take and two complete 58-second decode/evidence rehearsals. Regenerate with
 `python3 demo/generate_video.py && python3 demo/rehearse.py` (Pillow and FFmpeg required).
+
+## Tech stack
+
+- Bun and TypeScript
+- OpenClaw
+- Kimi K3.1 Pro on Cerebras (`moonshotai-kimi-k3.1-pro-trial`)
+- Maestro 2.12, installed by the host (Déjà does not install or manage it yet)
+- MCP SDK
+- React viewer (read-only, optional)
+
+Déjà was formerly called WalkCache.
 
 ## Development
 

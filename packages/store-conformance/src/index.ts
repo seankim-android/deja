@@ -14,3 +14,4 @@ export {
   type ContractScene,
   type ExplorationDriverContractImplementation,
 } from './driver-contract.ts'
+export { runWriterLockContractTests } from './writer-lock-contract.ts'

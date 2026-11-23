@@ -27,6 +27,8 @@ import {
   planStoredClosure,
   readStoredFlowFiles,
   snapshotFlowClosure,
+  storeMetadataPath,
+  WriterLock,
 } from '@deja-qa/store-local'
 
 export {
@@ -44,12 +46,25 @@ export {
   type WalkValidation,
 } from '@deja-qa/core'
 
+export {
+  InvalidStoreIdError,
+  StoreLockContentionError,
+  StoreLockUnavailableError,
+  StoreLockedError,
+  storeMetadataPath,
+} from '@deja-qa/store-local'
+
 export const SQLITE_MEMORY_SCHEMA_VERSION = 3
 export const MAESTRO_FLOW_SCHEMA_VERSION = 'maestro/v1'
 export const SQLITE_MEMORY_PATH = '.deja/memory/walks.sqlite'
 
 export type SQLiteWalkStoreOptions = {
   workspaceRoot: string
+  /**
+   * Keep this store's history in its own folder, for example one per device. Without it the
+   * store is the workspace's single store. One writer per store: a second one gets StoreLockedError.
+   */
+  storeId?: string
   /** Test-only deterministic filesystem failure injection; production uses fs.rename. */
   renameFile?: (temporaryPath: string, destinationPath: string) => Promise<void>
   /** Test-only transaction failure injection; production uses one IMMEDIATE SQLite transaction. */
@@ -212,20 +227,38 @@ type Commit = (walks: StoredWalk[]) => void
 export class SQLiteWalkStore implements WalkStore {
   readonly workspaceRoot: string
   readonly memoryPath: string
+  /** The database path relative to the workspace. */
+  readonly relativeMemoryPath: string
+  private writerLock: WriterLock | null = null
   private readonly renameFile: (temporaryPath: string, destinationPath: string) => Promise<void>
   private readonly replaceMetadata: Commit
   private database: Database | null = null
 
   constructor(options: SQLiteWalkStoreOptions) {
     this.workspaceRoot = resolve(options.workspaceRoot)
-    this.memoryPath = resolve(this.workspaceRoot, SQLITE_MEMORY_PATH)
+    this.relativeMemoryPath = storeMetadataPath(SQLITE_MEMORY_PATH, options.storeId)
+    this.memoryPath = resolve(this.workspaceRoot, this.relativeMemoryPath)
     this.renameFile = options.renameFile ?? rename
     this.replaceMetadata = options.replaceMetadata ?? (walks => this.commitMetadata(walks))
   }
 
+  /** Close the database and release the writer lock. */
   close() {
     this.database?.close()
     this.database = null
+    this.writerLock?.release()
+  }
+
+  /**
+   * Take the single writer lock now (throws StoreLockedError). Writes take it on their own; a host
+   * calls this first to be refused before a long run, not after it. Reads never take it.
+   */
+  acquireWriter() {
+    if (!this.writerLock) {
+      const metadata = canonicalMetadataTarget(this.workspaceRoot, this.memoryPath)
+      this.writerLock = new WriterLock(`${metadata.path}.lock`)
+    }
+    this.writerLock.acquire()
   }
 
   private openExisting(path: string) {
@@ -449,6 +482,7 @@ export class SQLiteWalkStore implements WalkStore {
   }
 
   private commitMetadata(walks: StoredWalk[]) {
+    this.acquireWriter() // Still the holder? A lost lock stops the write before it commits.
     this.validateUniqueIdentities(walks)
     const database = this.openWritable()
     database.exec('BEGIN IMMEDIATE')
@@ -564,6 +598,7 @@ export class SQLiteWalkStore implements WalkStore {
       throw new TypeError('Verified persistence requires a valid validation timestamp')
     }
     const identity = normalizeIdentity(options.identity)
+    this.acquireWriter()
     const root = await this.canonicalRoot()
     const candidate = await this.existingFile(root, options.candidatePath, true)
     if (!candidate) throw new Error(`Verified candidate flow does not exist: ${options.candidatePath}`)
@@ -620,7 +655,7 @@ export class SQLiteWalkStore implements WalkStore {
       walk,
       flowPath,
       flowSha256,
-      storedMetadataPath: SQLITE_MEMORY_PATH,
+      storedMetadataPath: this.relativeMemoryPath,
       atomicWrite: true,
     }
   }
@@ -708,6 +743,7 @@ export class SQLiteWalkStore implements WalkStore {
   async recordValidation(identityInput: WalkIdentity, validation: WalkValidation): Promise<StoredWalk> {
     if (!timestamp(validation.at)) throw new TypeError('Validation requires a valid timestamp')
     const identity = normalizeIdentity(identityInput)
+    this.acquireWriter()
     const hit = await this.lookup(identity)
     if (hit.status !== 'hit') {
       throw new InvalidWalkMemoryError(`cannot validate a flow that is not a usable hit: ${hit.reason}`)

@@ -31,8 +31,10 @@ export type MetadataTamper = 'malformed' | 'unsupported-schema' | 'invalid-entry
 /** Backend-specific setup and tamper hooks; every behavioral assertion below is shared verbatim. */
 export type WalkStoreContractImplementation = {
   name: string
-  metadataPath(workspaceRoot: string): string
-  createStore(workspaceRoot: string, failures?: StoreFailureInjection): WalkStore
+  /** Which store the writer-process fixture should build. */
+  kind: 'local' | 'sqlite'
+  metadataPath(workspaceRoot: string, storeId?: string): string
+  createStore(workspaceRoot: string, failures?: StoreFailureInjection, storeId?: string): WalkStore
   closeStore(store: WalkStore): void | Promise<void>
   snapshotMetadata(workspaceRoot: string): Promise<Buffer>
   tamperMetadata(workspaceRoot: string, kind: MetadataTamper): Promise<void>
@@ -71,6 +73,8 @@ export function runWalkStoreContractTests(implementation: WalkStoreContractImple
     const value = await fixture()
     const stores: WalkStore[] = []
     const makeStore = (injectedFailures = failures) => {
+      // One writer per store: a store opened later in the same process takes over from earlier ones.
+      for (const earlier of stores) void implementation.closeStore(earlier)
       const store = implementation.createStore(value.workspaceRoot, injectedFailures)
       stores.push(store)
       return store

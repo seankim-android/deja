@@ -1,9 +1,15 @@
 {
+  "extends": "../../tsconfig.workspace.json",
   "compilerOptions": {
     "tsBuildInfoFile": "../../node_modules/.tmp/tsconfig.repair.tsbuildinfo",
     "target": "es2023",
-    "lib": ["ES2023"],
-    "types": ["node", "bun"],
+    "lib": [
+      "ES2023"
+    ],
+    "types": [
+      "node",
+      "bun"
+    ],
     "skipLibCheck": true,
     "module": "nodenext",
     "allowImportingTsExtensions": true,
@@ -16,5 +22,8 @@
     "noImplicitOverride": true,
     "noFallthroughCasesInSwitch": true
   },
-  "include": ["src", "test"]
+  "include": [
+    "src",
+    "test"
+  ]
 }

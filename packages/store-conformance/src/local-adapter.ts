@@ -3,7 +3,9 @@ import { dirname, resolve } from 'node:path'
 import {
   LOCAL_MEMORY_PATH,
   LocalWalkStore,
+  storeMetadataPath,
 } from '@deja-qa/store-local'
+import type { WalkStore } from '@deja-qa/core'
 import type {
   MetadataTamper,
   StoreFailureInjection,
@@ -18,10 +20,11 @@ async function writeMetadata(workspaceRoot: string, value: unknown) {
   await writeFile(resolve(workspaceRoot, LOCAL_MEMORY_PATH), `${JSON.stringify(value, null, 2)}\n`)
 }
 
-function createLocalStore(workspaceRoot: string, failures: StoreFailureInjection = {}) {
+function createLocalStore(workspaceRoot: string, failures: StoreFailureInjection = {}, storeId?: string) {
   const memoryPath = resolve(workspaceRoot, LOCAL_MEMORY_PATH)
   return new LocalWalkStore({
     workspaceRoot,
+    ...(storeId ? { storeId } : {}),
     renameFile: async (from, to) => {
       if (failures.failFlowRename && to.endsWith('.yaml')) {
         throw new Error('simulated interruption before flow rename')
@@ -64,9 +67,10 @@ async function downgradeLocalToSchema2(workspaceRoot: string) {
 
 export const localStoreContract: WalkStoreContractImplementation = {
   name: 'LocalWalkStore (filesystem + JSON)',
-  metadataPath: workspaceRoot => resolve(workspaceRoot, LOCAL_MEMORY_PATH),
+  kind: 'local',
+  metadataPath: (workspaceRoot, storeId) => resolve(workspaceRoot, storeMetadataPath(LOCAL_MEMORY_PATH, storeId)),
   createStore: createLocalStore,
-  closeStore: () => {},
+  closeStore: (store: WalkStore) => (store as LocalWalkStore).close(),
   snapshotMetadata: workspaceRoot => readFile(resolve(workspaceRoot, LOCAL_MEMORY_PATH)),
   tamperMetadata: tamperLocalMetadata,
   editSubflowMetadata: editLocalSubflowMetadata,

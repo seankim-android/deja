@@ -287,12 +287,51 @@ Temporary files left before flow rename are never loaded. SQLite validation writ
 transaction mechanism; filesystem validation and report writes use temporary file plus rename.
 
 Filesystem rename and SQLite commit provide local replacement integrity, not one cross-resource
-transaction, distributed transactions, or multi-writer coordination. SQLite serializes immediate
+transaction, distributed transactions, or multi-writer merging. SQLite serializes immediate
 writers and has a 1-second busy timeout, but its high-level read/modify/write lifecycle has no
-optimistic revision check or update merge: persistence/validation writers must be single-writer per
-workspace. Deterministic rename failures and a real trigger-aborted SQLite transaction are tested;
-power loss, drive failures, every crash point, and concurrent-writer conflicts are not certified.
+optimistic revision check or update merge, so each store has exactly one writer (DEJA-4, below).
+Deterministic rename failures and a real trigger-aborted SQLite transaction are tested;
+power loss, drive failures and every crash point are not certified.
 See `packages/store-sqlite/README.md` for setup and durability boundaries.
+
+### One writer per store, one store per device (DEJA-4)
+
+Both stores take a writer lock on their first write (persist, repair, validation) and keep it until
+`close()`, process exit, SIGINT or SIGTERM (a host that handles those signals itself keeps control
+and should call `close()`). The lock is a file beside the metadata (`walks.json.lock`,
+`walks.sqlite.lock`) holding the holder's pid, start time, host, machine id and a token, created
+whole by a hard link. Every write re-reads the file when it starts and again right before it
+commits its metadata (the rename for `walks.json`, the transaction for SQLite), and stops if the
+token is no longer its own. That narrows a lost lock to the instant between the last check and the
+commit; it does not make the commit itself exclusive. A second writer gets `StoreLockedError` (`code: 'STORE_LOCKED'`), and the CLI exits 5
+before it runs anything. Reads (`lookup`, `list`, `deja list`) never take the lock.
+
+A lock is stale only when it is on this machine (same machine id when both have one, otherwise the same hostname) and its pid is
+gone or now has a different start time. The start time is `/proc/<pid>/stat` field 22 on Linux and
+`ps -o lstart` elsewhere. Another machine, an unreadable file, or a start time that cannot be read
+(for example BusyBox `ps`, so a reused pid is not noticed) all mean held: delete the lock by hand.
+A killed process (SIGKILL) leaves its file behind until the next writer replaces it.
+
+Takeover of a stale lock goes through a `.break` file, and nothing is ever deleted by path: a
+file judged dead is first renamed to a name only the taker knows, its token is checked, and if it
+was not the file that was judged (someone replaced it) it is linked back and the taker reports
+`StoreLockContentionError` (`STORE_LOCK_CONTENTION`, a subclass of `StoreLockedError`; run again).
+An unreadable `.break` older than 10 seconds is a crash leftover and is replaced. Residual risk: a
+check-then-rename window of microseconds between a taker's read and its rename. The holder's
+re-checks (above) turn a lost lock into an error for every write that has not yet committed. The lock does not
+cover a network filesystem shared between machines, or one without hard links
+(`StoreLockUnavailableError`, also exit 5).
+
+To run several devices at once, give each its own store with `storeId` (`--store <id>` on the CLI;
+a simulator UDID works). History goes to `.deja/memory/stores/<id>/walks.{json,sqlite}` with its
+own lock. Flow files stay in the shared `.deja/flows`: they are content-addressed and every write
+goes to a uniquely named temporary file and is renamed into place, so several stores in one
+process (or several processes) writing the same bytes agree and a reader never sees a partial flow.
+Without an id the store is the original single store, unchanged. Ids are 1 to 128 of
+`[A-Za-z0-9._-]`, starting with a letter or digit.
+Reports in `.deja/reports` are named per process, but `latest.json` is last-writer-wins, so a
+parallel host should read each run's own report path. Each device learns on its own: a flow
+remembered under one id is not a hit under another.
 
 Reports are written under `.deja/reports/<command>-<time>-<pid>.json`, then `latest.json` is
 atomically replaced. Runner artifacts retain separate `stdout.log`, `stderr.log`, and combined

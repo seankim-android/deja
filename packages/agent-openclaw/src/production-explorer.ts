@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import { delimiter, relative, resolve, sep } from 'node:path'
 import type {
@@ -142,7 +143,7 @@ export class OpenClawWalkExplorer implements WalkExplorer {
     }
     const attemptDirectory = resolve(
       root,
-      `.deja/attempts/explore-${Date.now()}-${process.pid}`,
+      `.deja/attempts/explore-${Date.now()}-${process.pid}-${randomUUID().slice(0, 8)}`,
     )
     const report = await runColdExploration({
       goal: request.identity.goal,

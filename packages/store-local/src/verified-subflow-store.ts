@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { mkdir, readFile, realpath, rename, stat, writeFile } from 'node:fs/promises'
 import { dirname, isAbsolute, resolve, sep } from 'node:path'
 import {
@@ -166,7 +166,7 @@ export class LocalVerifiedSubflowStore implements VerifiedSubflowStore {
     if (!inside(root, canonicalParent)) {
       throw new InvalidSubflowMemoryError(`atomic write destination escapes workspace: ${path}`)
     }
-    const temporary = `${path}.${process.pid}.tmp`
+    const temporary = `${path}.${process.pid}-${randomUUID()}.tmp`
     await writeFile(temporary, contents)
     await this.renameFile(temporary, path)
   }

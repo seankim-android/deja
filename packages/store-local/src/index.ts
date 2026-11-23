@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { lstatSync, realpathSync, statSync } from 'node:fs'
 import { mkdir, readFile, realpath, rename, stat, writeFile } from 'node:fs/promises'
 import { dirname, isAbsolute, relative, resolve, sep } from 'node:path'
@@ -26,6 +26,7 @@ import {
   readStoredFlowFiles,
   snapshotFlowClosure,
 } from './flow-closure.ts'
+import { WriterLock, storeMetadataPath } from './writer-lock.ts'
 
 export {
   type CandidateSnapshot,
@@ -53,6 +54,11 @@ export type WalkMemory = {
 
 export type LocalWalkStoreOptions = {
   workspaceRoot: string
+  /**
+   * Keep this store's history in its own folder, for example one per device. Without it the
+   * store is the workspace's single store. One writer per store: a second one gets StoreLockedError.
+   */
+  storeId?: string
   /** Injectable only to model filesystem failures deterministically; production uses fs.rename. */
   renameFile?: (temporaryPath: string, destinationPath: string) => Promise<void>
 }
@@ -318,12 +324,33 @@ function flowSlug(goalKey: string) {
 export class LocalWalkStore implements WalkStore {
   readonly workspaceRoot: string
   readonly memoryPath: string
+  /** The metadata path relative to the workspace. */
+  readonly relativeMemoryPath: string
   private readonly renameFile: (temporaryPath: string, destinationPath: string) => Promise<void>
+  private writerLock: WriterLock | null = null
 
   constructor(options: LocalWalkStoreOptions) {
     this.workspaceRoot = resolve(options.workspaceRoot)
-    this.memoryPath = resolve(this.workspaceRoot, LOCAL_MEMORY_PATH)
+    this.relativeMemoryPath = storeMetadataPath(LOCAL_MEMORY_PATH, options.storeId)
+    this.memoryPath = resolve(this.workspaceRoot, this.relativeMemoryPath)
     this.renameFile = options.renameFile ?? rename
+  }
+
+  /**
+   * Take the single writer lock now (throws StoreLockedError). Writes take it on their own; a host
+   * calls this first to be refused before a long run, not after it. Reads never take it.
+   */
+  acquireWriter() {
+    if (!this.writerLock) {
+      const metadata = canonicalMetadataTarget(this.workspaceRoot, this.memoryPath)
+      this.writerLock = new WriterLock(`${metadata.path}.lock`)
+    }
+    this.writerLock.acquire()
+  }
+
+  /** Release the writer lock. The store can still be read, and takes the lock again on its next write. */
+  close() {
+    this.writerLock?.release()
   }
 
   private async loadMemory(): Promise<WalkMemory> {
@@ -386,7 +413,10 @@ export class LocalWalkStore implements WalkStore {
     if (!inside(root, canonicalParent)) {
       throw new InvalidWalkMemoryError(`atomic write destination escapes workspace: ${path}`)
     }
-    const temporary = `${path}.${process.pid}.tmp`
+    // A unique name per call: stores in one process share a pid and may write the same
+    // content-addressed flow at once. rename replaces the destination atomically, so a reader sees a
+    // whole file, and two identical writes leave one identical file.
+    const temporary = `${path}.${process.pid}-${randomUUID()}.tmp`
     await writeFile(temporary, contents)
     // If this rename is interrupted, only the *.tmp file remains. Lookup reads exact metadata and
     // content-addressed final flow names, never temporary files or unreferenced flows.
@@ -394,6 +424,7 @@ export class LocalWalkStore implements WalkStore {
   }
 
   private async writeMemory(memory: WalkMemory) {
+    this.acquireWriter() // Still the holder? A lost lock stops the write before it commits.
     const metadata = canonicalMetadataTarget(this.workspaceRoot, this.memoryPath)
     // A walk from before schema 3 has no stored subflows: mark it so lookup misses instead of guessing.
     const walks = memory.walks.map(walk => walk.subflowFiles
@@ -412,6 +443,7 @@ export class LocalWalkStore implements WalkStore {
       throw new TypeError('Verified persistence requires a valid validation timestamp')
     }
     const identity = normalizeIdentity(options.identity)
+    this.acquireWriter()
     const root = await this.canonicalRoot()
     const candidate = await this.existingFile(root, options.candidatePath, true)
     if (!candidate) throw new Error(`Verified candidate flow does not exist: ${options.candidatePath}`)
@@ -471,7 +503,7 @@ export class LocalWalkStore implements WalkStore {
       walk,
       flowPath,
       flowSha256,
-      storedMetadataPath: LOCAL_MEMORY_PATH,
+      storedMetadataPath: this.relativeMemoryPath,
       atomicWrite: true,
     }
   }
@@ -559,6 +591,7 @@ export class LocalWalkStore implements WalkStore {
   async recordValidation(identityInput: WalkIdentity, validation: WalkValidation): Promise<StoredWalk> {
     if (!timestamp(validation.at)) throw new TypeError('Validation requires a valid timestamp')
     const identity = normalizeIdentity(identityInput)
+    this.acquireWriter()
     const hit = await this.lookup(identity)
     if (hit.status !== 'hit') {
       throw new InvalidWalkMemoryError(`cannot validate a flow that is not a usable hit: ${hit.reason}`)
@@ -608,6 +641,16 @@ export {
 } from '@deja-qa/core'
 
 export { FlowClosureError } from './flow-closure.ts'
+export {
+  InvalidStoreIdError,
+  StoreLockContentionError,
+  StoreLockUnavailableError,
+  StoreLockedError,
+  WriterLock,
+  storeMetadataPath,
+  type LockHolder,
+  type LockTestHooks,
+} from './writer-lock.ts'
 export {
   checkStoredSubflows,
   collectFlowClosure,
