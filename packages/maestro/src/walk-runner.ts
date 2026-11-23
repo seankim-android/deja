@@ -75,6 +75,7 @@ export class MaestroWalkRunner implements WalkRunner {
     flowPath: string,
     artifactDirectory: string,
     timeoutMs = this.options.timeoutMs,
+    env?: Record<string, string>,
   ): Promise<MaestroRunResult> {
     return runMaestro({
       executable: this.options.executable,
@@ -84,6 +85,7 @@ export class MaestroWalkRunner implements WalkRunner {
       workspaceRoot: this.options.workspaceRoot,
       flowPath,
       timeoutMs,
+      ...(env ? { env } : {}),
       ...(this.options.androidSdkRoot ? { androidSdkRoot: this.options.androidSdkRoot } : {}),
       ...(this.options.javaHome ? { javaHome: this.options.javaHome } : {}),
       ...(this.options.junitPath ? { junitPath: this.options.junitPath } : {}),
@@ -126,6 +128,7 @@ export class MaestroWalkRunner implements WalkRunner {
       resolve(this.options.workspaceRoot, request.flowPath),
       request.artifactDirectory,
       request.timeoutMs,
+      request.env,
     ))
   }
 }

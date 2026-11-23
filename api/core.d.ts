@@ -1,9 +1,26 @@
 // typescript 7.0.2
 // entry . (./src/index.ts)
-// exports: ArtifactKind, CONTRACT_VERSION, CacheMissReason, CacheStatus, CandidateSnapshot, CompositionModelMetrics, CompositionStepMetrics, CreateDejaOptions, DEFAULT_FLOW_SCHEMA_VERSION, DEFAULT_MINIMUM_MARGIN, DEFAULT_MINIMUM_SIMILARITY, Deja, DejaAdapter, DejaCallOptions, DejaClient, DejaDependencies, DejaFactoryContext, EvidenceArtifact, ExactFirstLookupResult, ExactFirstWalkRetriever, ExecutionResult, ExpectedClosureMismatchError, ExpectedFlowChecksumMismatchError, ExplorationDetails, ExplorationResult, ExploreRequest, FailedBranch, FailureCategory, FlowReference, FlowReferenceError, Goal, GoalEmbeddingProvider, InvalidRouteGraphError, InvalidSubflowError, LookupHit, LookupMiss, NewBuildReplayReport, PersistVerifiedOptions, PersistVerifiedRepairOptions, PersistVerifiedSubflowOptions, PersistedWalk, ROUTE_GRAPH_FALLBACK, ROUTE_GRAPH_SCHEMA_VERSION, RepairProvenance, RepairRequest, RepairResult, ReportReceipt, RouteAction, RouteGraph, RouteGraphProvenance, RunArtifact, RunOutcome, RunReporter, RunResult, RunnerRequest, SCREEN_FINGERPRINT_VERSION, ScreenMatch, ScreenMatchOptions, ScreenNode, ScreenObservation, SelectorRepairer, SemanticLookupReason, SemanticLookupReport, SemanticLookupStatus, SemanticRetrievalOptions, SemanticSelectedWalk, SourceDiff, StaleBuildPolicy, StoredFlowFile, StoredValidation, StoredWalk, SubflowContract, SubflowEvidenceArtifact, SubflowIdentity, SubflowInput, SubflowOutput, SubflowPostcondition, SubflowPrecondition, SubflowProvenance, UnsupportedPlatformExplorer, VERIFIED_SUBFLOW_SCHEMA_VERSION, VerifiedSubflow, VerifiedSubflowHit, VerifiedSubflowLookup, VerifiedSubflowStore, VerifiedTransition, WALK_RESULT_SCHEMA_VERSION, WalkExplorer, WalkFailure, WalkIdentity, WalkRunner, WalkStore, WalkValidation, cosineSimilarity, createDeja, findFlowReferences, fingerprintScreen, goalsAreContradictory, hasAdversarialGoalMarker, makeScreenNode, matchScreen, normalizeGoal, sameSubflowIdentity, subflowMissReason, validateRouteGraph, validateSubflowContract
+// exports: ActionChoice, ActionChooser, ArtifactKind, CONTRACT_VERSION, CacheMissReason, CacheStatus, CandidateAction, CandidateSnapshot, CompositionModelMetrics, CompositionStepMetrics, CreateDejaOptions, DEFAULT_FLOW_SCHEMA_VERSION, DEFAULT_MINIMUM_MARGIN, DEFAULT_MINIMUM_SIMILARITY, Deja, DejaAdapter, DejaCallOptions, DejaClient, DejaDependencies, DejaFactoryContext, ElementObservation, ElementRole, EvidenceArtifact, ExactFirstLookupResult, ExactFirstWalkRetriever, ExecutionResult, ExpectedClosureMismatchError, ExpectedFlowChecksumMismatchError, ExplorationDetails, ExplorationDriver, ExplorationResult, ExploreRequest, FailedBranch, FailureCategory, FingerprintConfig, FingerprintRules, FlowReference, FlowReferenceError, Goal, GoalEmbeddingProvider, InvalidRouteGraphError, InvalidSubflowError, LaunchProfile, LookupHit, LookupMiss, MAX_OBSERVED_ELEMENTS, NewBuildReplayReport, Observation, ObservationReport, PersistVerifiedOptions, PersistVerifiedRepairOptions, PersistVerifiedSubflowOptions, PersistedWalk, ROUTE_GRAPH_FALLBACK, ROUTE_GRAPH_SCHEMA_VERSION, RawElement, RepairProvenance, RepairRequest, RepairResult, ReportReceipt, RouteAction, RouteGraph, RouteGraphProvenance, RunArtifact, RunOutcome, RunReporter, RunResult, RunnerRequest, SCREEN_FINGERPRINT_V2, SCREEN_FINGERPRINT_VERSION, ScreenFingerprintV2, ScreenMatch, ScreenMatchOptions, ScreenMatchV2, ScreenNode, ScreenObservation, Segment, SelectorRepairer, SemanticLookupReason, SemanticLookupReport, SemanticLookupStatus, SemanticRetrievalOptions, SemanticSelectedWalk, SourceDiff, StaleBuildPolicy, StepResult, StoredFlowFile, StoredScreen, StoredValidation, StoredWalk, SubflowContract, SubflowEvidenceArtifact, SubflowIdentity, SubflowInput, SubflowOutput, SubflowPostcondition, SubflowPrecondition, SubflowProvenance, SystemUiKind, SystemUiState, UnsupportedPlatformExplorer, VERIFIED_SUBFLOW_SCHEMA_VERSION, VerifiedSubflow, VerifiedSubflowHit, VerifiedSubflowLookup, VerifiedSubflowStore, VerifiedTransition, WALK_RESULT_SCHEMA_VERSION, WalkExplorer, WalkFailure, WalkIdentity, WalkRunner, WalkStore, WalkValidation, cosineSimilarity, createDeja, findChromeIds, findFlowReferences, fingerprintScreen, fingerprintScreenV2, goalsAreContradictory, hasAdversarialGoalMarker, isDynamicId, makeScreenNode, matchScreen, matchScreenV2, normalizeElements, normalizeGoal, normalizedSnapshot, observationReport, sameSubflowIdentity, subflowMissReason, validateRouteGraph, validateSubflowContract
+export type ActionChoice = {
+    action: CandidateAction | null;
+    reason: string;
+};
+export interface ActionChooser {
+    choose(input: {
+        observation: Observation;
+        candidates: CandidateAction[];
+        goal: string | null;
+    }): Promise<ActionChoice>;
+}
 export type ArtifactKind = 'yaml' | 'output' | 'attempt' | 'repair-report' | 'diff' | 'memory' | 'model-metrics' | 'junit';
 export type CacheMissReason = 'not-found' | 'wrong-app' | 'wrong-platform' | 'wrong-flow-schema' | 'wrong-adapter' | 'wrong-browser' | 'stale-build' | 'missing-flow' | 'failed-validation' | 'legacy-closure-unknown';
 export type CacheStatus = 'hit' | 'miss' | 'not-checked';
+export type CandidateAction = {
+    kind: 'tap' | 'back' | 'dismiss' | 'swipe' | 'other';
+    targetId: string | null;
+    via?: string;
+    segment: Segment;
+};
 export type CandidateSnapshot = {
     candidatePath: string;
     closureSha256: string;
@@ -99,6 +116,15 @@ export type DejaFactoryContext = {
     signal?: AbortSignal;
     timeoutMs?: number;
 };
+export type ElementObservation = {
+    id: string | null;
+    role: ElementRole;
+    enabled: boolean;
+    interactive: boolean;
+    label: string | null;
+    overlay: boolean;
+};
+export type ElementRole = 'button' | 'text-field' | 'secure-field' | 'cell' | 'switch' | 'tab' | 'text' | 'other';
 export type EvidenceArtifact = {
     path: string;
     sha256: string;
@@ -147,6 +173,15 @@ export type ExplorationDetails = {
     modelCalls: number | null;
     modelCallBasis: string;
 };
+export interface ExplorationDriver {
+    readonly platform: 'ios' | 'android' | 'web';
+    readonly rules: FingerprintRules;
+    reset(profile: LaunchProfile, statePaths: Segment[][]): Promise<StepResult>;
+    observe(): Promise<Observation>;
+    act(segment: Segment, env?: Record<string, string>): Promise<StepResult>;
+    backActions(observation: Observation): CandidateAction[];
+    systemUi(observation: Observation): SystemUiState | null;
+}
 export type ExplorationResult = {
     passed: boolean;
     durationMs: number;
@@ -175,8 +210,26 @@ export type FailedBranch = {
     failedAt: string;
 };
 export type FailureCategory = 'selector' | 'navigation' | 'product_assertion' | 'runner' | 'timeout' | 'unknown';
+export declare function findChromeIds(screens: {
+    anchors: string[];
+    markers?: string[];
+}[], options?: {
+    fraction?: number;
+    minScreens?: number;
+}): string[];
 export declare function findFlowReferences(contents: string): FlowReference[];
+export type FingerprintConfig = {
+    screenMarkerPattern?: string;
+    ignore?: string[];
+    chromeIds?: string[];
+};
+export interface FingerprintRules {
+    normalizeId(raw: string): string | null;
+    isOverlay(element: RawElement): boolean;
+    isSystemUi(element: RawElement): boolean;
+}
 export declare function fingerprintScreen(input: ScreenObservation[]): string;
+export declare function fingerprintScreenV2(elements: ElementObservation[], config?: FingerprintConfig): ScreenFingerprintV2;
 export type FlowReference = {
     kind: 'flow' | 'script';
     path: string;
@@ -201,6 +254,13 @@ export declare class InvalidRouteGraphError extends Error {
 export declare class InvalidSubflowError extends Error {
     constructor(message: string);
 }
+export declare function isDynamicId(id: string): boolean;
+export type LaunchProfile = {
+    appId: string;
+    arguments: Record<string, string | boolean>;
+    clearState: boolean;
+    permissions?: Record<string, 'allow' | 'deny' | 'unset'>;
+};
 export type LookupHit = {
     status: 'hit';
     walk: StoredWalk;
@@ -212,6 +272,8 @@ export type LookupMiss = {
 };
 export declare function makeScreenNode(nodeId: string, input: ScreenObservation[], validatedAt: string): ScreenNode;
 export declare function matchScreen(graphInput: RouteGraph, options: ScreenMatchOptions): ScreenMatch;
+export declare function matchScreenV2(stored: StoredScreen[], current: ScreenFingerprintV2, expectedNodeId?: string): ScreenMatchV2;
+export declare const MAX_OBSERVED_ELEMENTS = 400;
 export type NewBuildReplayReport = {
     policy: StaleBuildPolicy;
     previousBuildFingerprint: string;
@@ -219,7 +281,51 @@ export type NewBuildReplayReport = {
     previousValidatedAt: string;
     recordedForNewBuild: boolean;
 };
+export declare function normalizedSnapshot(observation: Pick<Observation, 'elements' | 'keyboardVisible' | 'truncated'>, options?: {
+    includeLabels?: boolean;
+}): {
+    body: {
+        keyboardVisible: boolean;
+        truncated: boolean;
+        elements: {
+            id: string | null;
+            role: ElementRole;
+            enabled: boolean;
+            interactive: boolean;
+            overlay: boolean;
+            label?: string | null | undefined;
+        }[];
+    };
+    json: string;
+    sha256: string;
+};
+export declare function normalizeElements(raw: RawElement[], rules: FingerprintRules, limit?: number): {
+    elements: ElementObservation[];
+    truncated: boolean;
+};
 export declare function normalizeGoal(goal: string): Goal;
+export type Observation = {
+    elements: ElementObservation[];
+    systemUi: SystemUiState | null;
+    keyboardVisible: boolean;
+    truncated: boolean;
+    snapshot: {
+        path: string;
+        sha256: string;
+    };
+    capturedAt: string;
+    durationMs: number;
+};
+export declare function observationReport(match: ScreenMatchV2, stored: StoredScreen[], truncated: boolean): ObservationReport;
+export type ObservationReport = {
+    status: 'ok' | 'ambiguous';
+    ambiguous: boolean;
+    candidates: {
+        nodeId: string;
+        marker: string | null;
+    }[];
+    truncated: boolean;
+};
 export type PersistedWalk = {
     walk: StoredWalk;
     flowPath: string;
@@ -247,6 +353,17 @@ export type PersistVerifiedSubflowOptions = {
     contract: SubflowContract;
     candidatePath: string;
     validation: WalkValidation;
+};
+export type RawElement = {
+    rawId: string | null;
+    label: string | null;
+    bounds: [number, number, number, number] | null;
+    enabled: boolean;
+    focused: boolean;
+    selected: boolean;
+    checked: boolean;
+    role: ElementRole;
+    interactive: boolean;
 };
 export type RepairProvenance = {
     attemptId: string;
@@ -315,6 +432,7 @@ export type RunnerRequest = {
     flowPath: string;
     artifactDirectory: string;
     timeoutMs?: number;
+    env?: Record<string, string>;
 };
 export type RunOutcome = 'passed' | 'remembered' | 'cold-recorded' | 'repaired' | 'rejected' | 'exploration-rejected' | 'product-regression' | 'repair-rejected' | 'failed';
 export interface RunReporter {
@@ -349,7 +467,17 @@ export type RunResult = {
     replayedOnNewBuild?: NewBuildReplayReport;
 };
 export declare function sameSubflowIdentity(left: SubflowIdentity, right: SubflowIdentity): boolean;
+export declare const SCREEN_FINGERPRINT_V2 = 2;
 export declare const SCREEN_FINGERPRINT_VERSION = 1;
+export type ScreenFingerprintV2 = {
+    version: typeof SCREEN_FINGERPRINT_V2;
+    marker: string | null;
+    markers: string[];
+    anchors: string[];
+    fingerprint: string;
+    stable: boolean;
+    unstableReason: 'no-stable-ids' | 'marker-conflict' | null;
+};
 export type ScreenMatch = {
     status: 'matched' | 'repeated' | 'ambiguous' | 'changed' | 'unknown';
     fingerprint: string;
@@ -362,6 +490,12 @@ export type ScreenMatchOptions = {
     expectedNodeId?: string;
     previousNodeId?: string;
 };
+export type ScreenMatchV2 = {
+    status: 'matched' | 'matched-scrolled' | 'ambiguous' | 'changed' | 'unknown' | 'gap';
+    fingerprint: string;
+    candidateNodeIds: string[];
+    ambiguous: boolean;
+};
 export type ScreenNode = {
     nodeId: string;
     observations: ScreenObservation[];
@@ -371,6 +505,10 @@ export type ScreenNode = {
 export type ScreenObservation = {
     kind: 'android-resource-id';
     value: string;
+};
+export type Segment = {
+    label: string;
+    yaml: string;
 };
 export interface SelectorRepairer {
     repair(request: RepairRequest): Promise<RepairResult>;
@@ -409,9 +547,21 @@ export type SourceDiff = {
     autoCommit: false;
 };
 export type StaleBuildPolicy = 'replay-last-verified';
+export type StepResult = {
+    passed: boolean;
+    failure: WalkFailure | null;
+    durationMs: number;
+    crashed: boolean;
+};
 export type StoredFlowFile = {
     path: string;
     sha256: string;
+};
+export type StoredScreen = {
+    nodeId: string;
+    marker: string | null;
+    anchors: string[];
+    fingerprint: string;
 };
 export type StoredValidation = WalkValidation & {
     flowSha256: string;
@@ -476,6 +626,11 @@ export type SubflowProvenance = {
     kind: 'deterministic-fixture';
     fixtureId: string;
     newDeviceRunRecorded: false;
+};
+export type SystemUiKind = 'alert' | 'permission' | 'share-sheet' | 'keyboard' | 'other';
+export type SystemUiState = {
+    kind: SystemUiKind;
+    evidence: string[];
 };
 export declare class UnsupportedPlatformExplorer implements WalkExplorer {
     private readonly platform;

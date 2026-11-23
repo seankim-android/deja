@@ -9,3 +9,8 @@ export {
 } from './walk-store-contract.ts'
 export { localStoreContract } from './local-adapter.ts'
 export { sqliteStoreContract } from './sqlite-adapter.ts'
+export {
+  runExplorationDriverContractTests,
+  type ContractScene,
+  type ExplorationDriverContractImplementation,
+} from './driver-contract.ts'

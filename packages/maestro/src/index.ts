@@ -35,6 +35,23 @@ export {
 } from './execution-observations.ts'
 
 export {
+  iosExplorationDriver,
+  iosFingerprintRules,
+  parseMaestroHierarchy,
+  type IosExplorationDriverOptions,
+  type MaestroFlowResult,
+  type MaestroHierarchyResult,
+  type MaestroTransport,
+} from './ios-exploration.ts'
+
+export {
+  McpMaestroTransport,
+  ProcessMaestroTransport,
+  type McpMaestroTransportOptions,
+  type ProcessMaestroTransportOptions,
+} from './transports.ts'
+
+export {
   androidMaestroAdapter,
   iosMaestroAdapter,
   webMaestroAdapter,
@@ -85,6 +102,8 @@ export type RunMaestroOptions = {
   workspaceRoot: string
   flowPath: string
   timeoutMs: number
+  /** Flow variables, passed as `-e KEY=VALUE` before the flow path. */
+  env?: Record<string, string>
   androidSdkRoot?: string
   javaHome?: string
   /** Absolute path for Maestro's own JUnit report (`--format=JUNIT --output=`). Opt-in. */
@@ -300,14 +319,23 @@ export async function runMaestro(options: RunMaestroOptions): Promise<MaestroRun
     )
   }
 
+  const baseArguments = options.adapter?.commandArguments(flowPath, { junitPath: options.junitPath }) ??
+    [
+      '--no-ansi', '--device', options.device, 'test',
+      ...(options.junitPath ? ['--format=JUNIT', `--output=${options.junitPath}`] : []),
+      flowPath,
+    ]
+  const envArguments = Object.entries(options.env ?? {}).flatMap(([key, value]) => {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) throw new TypeError(`Invalid flow variable name: ${key}`)
+    return ['-e', `${key}=${value}`]
+  })
+  // Adapters put the flow path last, so variables go just before it.
+  const commandArguments = envArguments.length > 0
+    ? [...baseArguments.slice(0, -1), ...envArguments, baseArguments[baseArguments.length - 1]]
+    : baseArguments
   const child = spawn(
     options.executable,
-    options.adapter?.commandArguments(flowPath, { junitPath: options.junitPath }) ??
-      [
-        '--no-ansi', '--device', options.device, 'test',
-        ...(options.junitPath ? ['--format=JUNIT', `--output=${options.junitPath}`] : []),
-        flowPath,
-      ],
+    commandArguments,
     {
       cwd: resolve(options.workspaceRoot),
       env: maestroEnvironment(options),
