@@ -14,7 +14,7 @@ Shared Maestro YAML does not establish cross-platform support. See the
 [Android evidence](../spikes/001-android-deja/README.md),
 [Chromium fixture and command boundary](../spikes/002-web-deja/README.md),
 [native iOS fixture and command boundary](../spikes/003-ios-deja/README.md), and
-[WALK-010](../tickets/WALK-010-verified-web-proof.md)/[WALK-011](../tickets/WALK-011-verified-ios-proof.md)
+WALK-010/WALK-011
 for the evidence behind this matrix. The post-WALK-011 Android compatibility attempt was blocked
 before boot by insufficient emulator disk space; its exact limit is linked from WALK-011.
 
@@ -202,7 +202,7 @@ The package scripts also include `preview` for the built viewer.
 - [`spikes/001-android-deja/`](../spikes/001-android-deja/README.md) — preserved Android fixture/evidence.
 - [`spikes/002-web-deja/`](../spikes/002-web-deja/README.md) — bounded Chromium fixture/evidence.
 - [`spikes/003-ios-deja/`](../spikes/003-ios-deja/README.md) — bounded native iOS simulator fixture/evidence.
-- [`TODO.md`](../TODO.md) and [`tickets/README.md`](../tickets/README.md) — repo-local backlog, status, and dependencies.
+- [`TODO.md`](../TODO.md) — standing rules. The backlog, status and dependencies are in the Linear team DEJA.
 - [`docs/PROJECT_PLAN.md`](PROJECT_PLAN.md) — historical hackathon scope and plan; current verified behavior is defined by ticket evidence, not aspirations.
 
 Déjà uses repo-local `WALK-` tickets, not Linear objects. A ticket becomes `done` only when
