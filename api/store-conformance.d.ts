@@ -1,6 +1,15 @@
 // typescript 7.0.2
 // entry . (./src/index.ts)
-// exports: ContractScene, ExplorationDriverContractImplementation, MetadataTamper, StoreFailureInjection, WalkStoreContractImplementation, contractIdentity, initialValidation, laterValidation, localStoreContract, runConsumerFlowContractTests, runExplorationDriverContractTests, runWalkStoreContractTests, runWriterLockContractTests, sqliteStoreContract
+// exports: ContractExpect, ContractHarness, ContractScene, ExpectResult, ExplorationDriverContractImplementation, Matchers, MetadataTamper, PortableStoreImplementation, StoreFailureInjection, WalkStoreContractImplementation, contractIdentity, initialValidation, laterValidation, localStoreContract, resolveHarness, runConsumerFlowContractTests, runExplorationDriverContractTests, runPortableWalkStoreContractTests, runSqliteDriverContractTests, runWalkStoreContractTests, runWriterLockContractTests, sqliteStoreContract
+export type ContractExpect = {
+    (actual: unknown, message?: string): ExpectResult;
+    stringMatching(pattern: RegExp): unknown;
+};
+export type ContractHarness = {
+    describe(name: string, body: () => void): void;
+    test(name: string, body: () => void | Promise<void>): void;
+    expect: ContractExpect;
+};
 export declare function contractIdentity(overrides?: Partial<WalkIdentity>): WalkIdentity;
 export type ContractScene = {
     ids: string[];
@@ -8,6 +17,11 @@ export type ContractScene = {
     ghost?: string[];
     keyboard?: boolean;
     extra?: number;
+};
+export type ExpectResult = Matchers & {
+    not: Matchers;
+    rejects: Matchers;
+    resolves: Matchers;
 };
 export type ExplorationDriverContractImplementation = {
     name: string;
@@ -23,11 +37,34 @@ export type ExplorationDriverContractImplementation = {
 export declare const initialValidation = "2026-11-22T00:00:00.000Z";
 export declare const laterValidation = "2026-11-22T00:01:00.000Z";
 export declare const localStoreContract: WalkStoreContractImplementation;
+export type Matchers = {
+    toBe(expected: unknown): void;
+    toEqual(expected: unknown): void;
+    toMatchObject(expected: unknown): void;
+    toHaveLength(length: number): void;
+    toContain(item: unknown): void;
+    toMatch(pattern: RegExp): void;
+    toThrow(expected?: string | RegExp | (new (...args: never[]) => unknown)): void;
+    toBeInstanceOf(constructor: abstract new (...args: never[]) => unknown): void;
+    toBeGreaterThan(value: number): void;
+    toBeLessThan(value: number): void;
+    toBeUndefined(): void;
+    toBeDefined(): void;
+    toBeNull(): void;
+};
 export type MetadataTamper = 'malformed' | 'unsupported-schema' | 'invalid-entry' | 'duplicate-identity';
-export declare function runConsumerFlowContractTests(implementation: WalkStoreContractImplementation): void;
-export declare function runExplorationDriverContractTests(implementation: ExplorationDriverContractImplementation): void;
-export declare function runWalkStoreContractTests(implementation: WalkStoreContractImplementation): void;
-export declare function runWriterLockContractTests(implementation: WalkStoreContractImplementation): void;
+export type PortableStoreImplementation = {
+    name: string;
+    createStore(workspaceRoot: string): WalkStore;
+    closeStore?(store: WalkStore): void | Promise<void>;
+};
+export declare function resolveHarness(harness?: ContractHarness): ContractHarness;
+export declare function runConsumerFlowContractTests(implementation: WalkStoreContractImplementation, harness?: ContractHarness): void;
+export declare function runExplorationDriverContractTests(implementation: ExplorationDriverContractImplementation, harness?: ContractHarness): void;
+export declare function runPortableWalkStoreContractTests(implementation: PortableStoreImplementation, harness?: ContractHarness): void;
+export declare function runSqliteDriverContractTests(harness?: ContractHarness): void;
+export declare function runWalkStoreContractTests(implementation: WalkStoreContractImplementation, harness?: ContractHarness): void;
+export declare function runWriterLockContractTests(implementation: WalkStoreContractImplementation, harness?: ContractHarness): void;
 export declare const sqliteStoreContract: WalkStoreContractImplementation;
 export type StoreFailureInjection = {
     failFlowRename?: boolean;
@@ -48,4 +85,41 @@ export type WalkStoreContractImplementation = {
     setFirstFlowPath(workspaceRoot: string, flowPath: string): Promise<void>;
     editSubflowMetadata(workspaceRoot: string, kind: 'strip' | 'empty'): Promise<void>;
     downgradeToSchema2(workspaceRoot: string): Promise<void>;
+};
+
+// entry ./node (./src/node-binding.ts)
+// exports: nodeHarness
+export declare const nodeHarness: ContractHarness;
+// referenced
+export type ContractExpect = {
+    (actual: unknown, message?: string): ExpectResult;
+    stringMatching(pattern: RegExp): unknown;
+};
+// referenced
+export type ContractHarness = {
+    describe(name: string, body: () => void): void;
+    test(name: string, body: () => void | Promise<void>): void;
+    expect: ContractExpect;
+};
+// referenced
+export type ExpectResult = Matchers & {
+    not: Matchers;
+    rejects: Matchers;
+    resolves: Matchers;
+};
+// referenced
+export type Matchers = {
+    toBe(expected: unknown): void;
+    toEqual(expected: unknown): void;
+    toMatchObject(expected: unknown): void;
+    toHaveLength(length: number): void;
+    toContain(item: unknown): void;
+    toMatch(pattern: RegExp): void;
+    toThrow(expected?: string | RegExp | (new (...args: never[]) => unknown)): void;
+    toBeInstanceOf(constructor: abstract new (...args: never[]) => unknown): void;
+    toBeGreaterThan(value: number): void;
+    toBeLessThan(value: number): void;
+    toBeUndefined(): void;
+    toBeDefined(): void;
+    toBeNull(): void;
 };

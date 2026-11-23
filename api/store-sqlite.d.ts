@@ -1,13 +1,31 @@
 // typescript 7.0.2
 // entry . (./src/index.ts)
-// exports: InvalidWalkMemoryError, MAESTRO_FLOW_SCHEMA_VERSION, SQLITE_MEMORY_CONSUMER_SCHEMA_VERSION, SQLITE_MEMORY_PATH, SQLITE_MEMORY_SCHEMA_VERSION, SQLiteWalkStore, SQLiteWalkStoreOptions
+// exports: InvalidWalkMemoryError, MAESTRO_FLOW_SCHEMA_VERSION, SQLITE_MEMORY_CONSUMER_SCHEMA_VERSION, SQLITE_MEMORY_PATH, SQLITE_MEMORY_SCHEMA_VERSION, SQLiteWalkStore, SQLiteWalkStoreOptions, SqliteConnection, SqliteOpenOptions, SqliteRow, SqliteRuntime, SqliteStatement, SqliteValue, openSqlite, sqliteRuntime
 export declare class InvalidWalkMemoryError extends Error {
     constructor(message: string, options?: ErrorOptions);
 }
 export declare const MAESTRO_FLOW_SCHEMA_VERSION = "maestro/v1";
+export declare function openSqlite(path: string, options?: SqliteOpenOptions): SqliteConnection;
 export declare const SQLITE_MEMORY_CONSUMER_SCHEMA_VERSION = 4;
 export declare const SQLITE_MEMORY_PATH = ".deja/memory/walks.sqlite";
 export declare const SQLITE_MEMORY_SCHEMA_VERSION = 3;
+export interface SqliteConnection {
+    exec(sql: string): void;
+    query(sql: string): SqliteStatement;
+    close(): void;
+}
+export type SqliteOpenOptions = {
+    readonly?: boolean;
+};
+export type SqliteRow = Record<string, SqliteValue>;
+export declare const sqliteRuntime: SqliteRuntime;
+export type SqliteRuntime = 'bun' | 'node';
+export interface SqliteStatement {
+    get(...parameters: SqliteValue[]): SqliteRow | null;
+    all(...parameters: SqliteValue[]): SqliteRow[];
+    run(...parameters: SqliteValue[]): void;
+}
+export type SqliteValue = string | number | null | Uint8Array;
 export declare class SQLiteWalkStore implements WalkStore {
     readonly workspaceRoot: string;
     readonly memoryPath: string;

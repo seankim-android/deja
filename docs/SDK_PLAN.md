@@ -175,11 +175,15 @@ are not negotiable in the engine, not the policy: product assertion failures are
 
 ## Distribution
 
-- **Runtimes.** Node 20+ and Bun 1.4+. Today the code is Bun-first: `store-sqlite` and
-  `store-conformance` use `bun:sqlite`, `store-conformance` uses `bun:test`, and `repair` calls
-  `Bun.file`. Plan: replace `Bun.file` with `node:fs/promises`; give `store-sqlite` a driver seam
-  (`bun:sqlite` on Bun, `node:sqlite` or `better-sqlite3` on Node; that dependency needs approval);
-  split the conformance suite into runner-neutral cases plus thin Bun and Vitest/Node bindings.
+- **Runtimes.** Node 22.13+ and Bun 1.4+ (decided, DEJA-14). `node:sqlite` is built into Node 22.5+,
+  but before 22.13.0 it needs `--experimental-sqlite`, so the floor is 22.13.0; `engines.node` is
+  `>=22.13`. It still prints an experimental warning on Node 22 and 24. Node 20 is not supported:
+  the other choice was `better-sqlite3`, a native dependency, and we add none. Done: `Bun.file` is
+  `node:fs/promises`; `store-sqlite` has a driver seam (`src/driver.ts`) that loads `bun:sqlite` on Bun
+  and `node:sqlite` on Node with a dynamic import, so neither runtime resolves the other's module; the
+  conformance suite is runner-neutral and takes `describe`, `test` and `expect` from a binding
+  (`bun:test` by default, `node:test` from `@deja-qa/store-conformance/node`). CI runs the suite on
+  Node 22.13.0 and 24, and on Bun in `bun test`. The CLI is a Bun program and its binary is Bun.
 - **Format.** ESM only, `"type": "module"`, `exports` maps, `.d.ts` files. Build with tsup.
   Relative cross-package imports become package imports through Bun workspaces.
 - **CLI.** `npx @deja-qa/cli run checkout`. The config file is `deja.config.json`, runtime state lives
@@ -202,8 +206,8 @@ Sizes: S is under a day, M is a few days, L is a week or more.
 | --- | --- | --- |
 | Done: Bun workspaces and a `package.json` per package; replace relative `../../x/src` imports | M | `bun test` and `bun run build` pass with only package imports |
 | Done: remove `repair` -> `store-local` edge; explorer takes a narrow Maestro runner type | S | a test fails on a forbidden import |
-| tsup build per package, ESM and `.d.ts` | S | `npm pack` of each package installs into an empty Node 20 project and type-checks |
-| Remove `Bun.file`; sqlite driver seam | M | the store conformance suite passes on Node 20 and Bun 1.4 |
+| tsup build per package, ESM and `.d.ts` | S | `npm pack` of each package installs into an empty Node 22 project and type-checks |
+| Done: remove `Bun.file`; sqlite driver seam | M | the store conformance suite passes on Node 22.13+ and Bun 1.4 |
 | Publish 0.1.0 under the chosen scope with provenance | S | `npm view @deja-qa/core version` prints 0.1.0 |
 
 ### Phase 1: stable API and CI
@@ -246,7 +250,8 @@ Sizes: S is under a day, M is a few days, L is a week or more.
 - **Model-provider keys.** Today the provider key stays in OpenClaw's own credential config, and
   the generated config holds no secrets. An SDK must keep that rule: no key in `createDeja` options,
   reports or MCP responses. Replay needs no key at all, and the docs should say so first.
-- **Bun-only code.** `bun:sqlite`, `bun:test` and `Bun.file` block Node users until Phase 0 is done.
+- **Bun-only code.** Done in DEJA-14: the library packages run on Node 22.13+. `node:sqlite` is still
+  experimental in Node; watch for API changes.
 - **Single writer.** Both stores assume one writer per workspace. Parallel CI shards that share a
   workspace can corrupt history. Document it, and make the hosted store solve it before release.
 - **Honest claims.** Supported behavior is what the evidence shows: Android cold exploration and
@@ -262,6 +267,6 @@ Sizes: S is under a day, M is a few days, L is a week or more.
 2. Done: Bun workspaces, one `package.json` per package, and package imports.
 3. Done: removed the two forbidden edges; `scripts/workspace-boundaries.test.ts` fails if either
    comes back.
-4. Make the packages run on Node 20: drop `Bun.file`, add the sqlite driver seam, and run the store
+4. Done: the packages run on Node 22.13+: no `Bun.file`, a sqlite driver seam, and the store
    conformance suite on both runtimes in CI.
 5. Build with tsup, `npm pack` each package into an empty Node project, then publish 0.1.0.

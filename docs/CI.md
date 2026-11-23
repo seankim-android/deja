@@ -15,6 +15,10 @@ bun scripts/validate-release-artifacts.ts
 git rev-parse HEAD
 ```
 
+A second job, `node-conformance`, installs Node 22.13.0 and Node 24 beside Bun, builds the packages, and
+runs the store conformance suites on Node with `node:test` (`bun run test:node`) against the built
+`dist/` output and a third-party in-memory store fixture.
+
 The 221 deterministic unit/component/contract tests (1,129 assertions) cover orchestration, exact/corrupt storage,
 runner behavior and platform adapters, OpenClaw exploration boundaries, bounded repair, failure
 classification, cold/warm metrics, CLI/report behavior, the local viewer, diagnostic-only route

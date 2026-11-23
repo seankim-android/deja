@@ -27,5 +27,5 @@ export function versionLine() {
 
 /** True inside a `bun build --compile` binary, where `process.execPath` is deja itself, not Bun. */
 export function isCompiledBinary() {
-  return /\$bunfs|~BUN/.test(Bun.main)
+  return typeof Bun !== 'undefined' && /\$bunfs|~BUN/.test(Bun.main)
 }

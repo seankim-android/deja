@@ -1,7 +1,7 @@
 // A separate process that opens one store, takes the writer lock with a real write, and holds it.
-// Usage: bun writer-process.ts <local|sqlite> <workspace> <storeId or -> [exit-now]
+// Usage: bun|node writer-process.mjs <local|sqlite> <workspace> <storeId or -> [exit-now]
 // Prints ACQUIRED or LOCKED:<code>, then (if it holds the lock) waits for a line on stdin.
-import { localStoreContract, sqliteStoreContract, contractIdentity } from '../../src/index.ts'
+import { localStoreContract, sqliteStoreContract, contractIdentity } from '@deja-qa/store-conformance'
 
 const [kind, workspaceRoot, storeArgument, mode] = process.argv.slice(2)
 const implementation = kind === 'sqlite' ? sqliteStoreContract : localStoreContract
@@ -14,12 +14,12 @@ try {
     origin: 'remember',
   })
 } catch (error) {
-  console.log(`LOCKED:${(error as { code?: string }).code ?? 'other'}`)
+  console.log(`LOCKED:${error?.code ?? 'other'}`)
   process.exit(3)
 }
 console.log('ACQUIRED')
 if (mode !== 'exit-now') {
-  await new Promise<void>(resolveLine => process.stdin.once('data', () => resolveLine()))
+  await new Promise(resolveLine => process.stdin.once('data', () => resolveLine()))
 }
 await implementation.closeStore(store)
 process.exit(0)

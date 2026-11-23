@@ -3,7 +3,13 @@
 This package exports one behavior suite and runs it unchanged against:
 
 - `LocalWalkStore`: JSON metadata plus content-addressed YAML; and
-- `SQLiteWalkStore`: Bun SQLite relational metadata plus content-addressed YAML.
+- `SQLiteWalkStore`: SQLite (`bun:sqlite` or `node:sqlite`) relational metadata plus content-addressed YAML.
+
+The suites run on Bun with `bun:test` and on Node 22.13+ with `node:test`: each `run…ContractTests`
+function takes an optional `ContractHarness` (`describe`, `test`, `expect`). With none, it uses `bun:test`.
+On Node, pass `nodeHarness` from `@deja-qa/store-conformance/node`. `runPortableWalkStoreContractTests`
+is the part of the contract that assumes nothing about where a store keeps its metadata, so an
+in-memory or remote store can pass it; `test/node/memory-store.mjs` is one.
 
 The adapter hooks only construct backends, close them, snapshot real metadata, inject write failures,
 and corrupt real persisted state for negative tests.
