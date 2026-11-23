@@ -205,6 +205,11 @@ export type FlowAssertion = {
     entry: string;
     command: string;
     id: string | null;
+    always: boolean;
+    call?: {
+        kind: 'flow' | 'script';
+        path: string;
+    };
 };
 export declare class FlowChangedError extends Error {
     constructor(manifestClosureSha256: string, currentClosureSha256: string);
@@ -501,7 +506,7 @@ export type SemanticSelectedWalk = {
 export declare function serializeWalkManifest(manifest: WalkManifest): string;
 export type SkippedWalk = {
     goal: string;
-    reason: 'not-passing' | 'subflows-not-stored' | 'copy-missing' | 'copy-changed' | 'adapter-unknown' | 'would-overwrite' | 'manifest-differs' | 'closure-error' | 'holds-fixture-value';
+    reason: 'not-passing' | 'subflows-not-stored' | 'copy-missing' | 'copy-changed' | 'adapter-unknown' | 'would-overwrite' | 'manifest-differs' | 'closure-error' | 'holds-fixture-value' | 'manifest-invalid';
     detail: string;
 };
 export type SourceDiff = {

@@ -129,15 +129,20 @@ refused (exit 2). The CLI also refuses to write it if it would hold a `fixtureCr
   is `assertions-changed`, exit 6, and nothing is written.
 - **Changing assertions** needs a reviewed `remember <goal> --flow <file> --accept-assertion-change`.
   Without the flag, `remember` refuses a flow whose assertions differ from the manifest's.
-- **Assertion hash, version 1.** A sorted list that keeps repeats, over every YAML file in the
-  closure: each mapping key starting with `assert`, with its whole command mapping (canonical
-  JSON, sorted keys) and the keys it sits under; the parameters of each `runFlow`, `repeat` and
-  `retry` (`when`, `times`, `while`, `maxRetries`, so `times: 0` or a new condition changes it);
-  every `env` mapping, where it sits (an assertion that reads `${VAR}` is only as strong as the
-  value passed in); and the sha256 of every `runScript` file, because `assertTrue` can read script
-  output. Adding `optional: true`, wrapping an assertion in a condition, or editing a script changes
-  it. Moving an assertion between files does not, and neither does a `label`. `extendedWaitUntil`
-  is a wait, not a product assertion, so it is not in the hash. Golden vectors are in
+- **Assertion hash, version 1** (not on `main` yet, so this PR defines its meaning). An ordered list
+  that keeps repeats, built by walking the flow the way it runs, from the main file down. Every
+  line starts with the file's path and the chain of calls that reaches it, each with its
+  parameters and the blocks around it, so an assertion moved into another file, or into a subflow
+  that is called under a `when`, is a different line. The lines are:
+  each mapping key starting with `assert`, with its whole command mapping (canonical JSON, sorted
+  keys); each `runFlow`, `retry` and `runScript` call with its parameters (`when`, `times`,
+  `while`, `maxRetries`, `env`, an inline `script`) and the file it reaches; each `repeat`; every
+  `evalScript` with its source and every `env` mapping, because `assertTrue` and `${VAR}`
+  selectors read what they set; and the sha256 of every `runScript` file. Adding `optional:
+  true`, wrapping an assertion in a condition, `times: 0`, a loosened env value, another script
+  result, or swapping two assertions all change it. Not in it: actions (`tapOn` and the like), so
+  an assertion moved before the action it checks is not seen; `label`; and `extendedWaitUntil`,
+  which is a wait, not a product assertion. Golden vectors are in
   `packages/core/test/flow-assertions.test.ts` and `packages/store-local/test/consumer-flow.test.ts`.
 - **Stateless CI.** A checkout with an empty `.deja/` has no validation history, so each run says
   `not-validated` until `--verify` runs. `--verify` also accepts a changed flow, so a CI job that

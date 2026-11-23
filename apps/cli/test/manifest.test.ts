@@ -183,7 +183,7 @@ describe('manifest mode on the CLI', () => {
     } finally {
       await rm(without.temporary, { recursive: true, force: true })
     }
-    for (const flowsDir of ['/abs', '../out', '.deja/flows', 'a//b']) {
+    for (const flowsDir of ['/abs', '../out', '.deja/flows', '.DEJA/flows', 'a//b']) {
       const bad = await workspace({ flowsDir })
       try {
         const result = await execute(bad.root, ['migrate', '--dry-run'])
@@ -218,6 +218,12 @@ describe('manifest mode on the CLI', () => {
       }
       await rm(join(root, 'deja.walks.json'))
       // The goal text itself must not smuggle a fixture value into a committed file.
+      // A goal the reader would refuse must not leave a manifest that fails every later run.
+      const path = await execute(root, ['remember', 'open /private/tmp notes', '--flow', '.maestro/flows/today.yaml'])
+      expect(path.exitCode).toBe(2)
+      expect(path.stderr).toContain('would not read back')
+      await expect(readFile(join(root, 'deja.walks.json'))).rejects.toBeDefined()
+      await expect(readFile(join(root, '.deja/memory/walks.json'))).rejects.toBeDefined()
       const leaked = await execute(root, ['remember', 'hunter2-fixture', '--flow', '.maestro/flows/today.yaml'])
       expect(leaked.exitCode).toBe(2)
       await expect(readFile(join(root, 'deja.walks.json'))).rejects.toBeDefined()

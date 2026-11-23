@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { link, lstat, mkdir, readFile, realpath, rename, stat, unlink, writeFile } from 'node:fs/promises'
-import { dirname, isAbsolute, relative, resolve, sep } from 'node:path'
+import { dirname, isAbsolute, posix as posixPath, relative, resolve, sep } from 'node:path'
 import {
   AssertionHashChangedError,
   ASSERTION_HASH_VERSION,
@@ -27,7 +27,7 @@ import {
   type WalkIdentity,
   type WalkManifest,
 } from '@deja-qa/core'
-import { closureSha256Of, collectFlowClosure, MissingFlowFileError, type FlowClosure } from './flow-closure.ts'
+import { closureSha256Of, collectFlowClosure, FlowClosureError, MissingFlowFileError, type FlowClosure } from './flow-closure.ts'
 import { StoreLockedError, WriterLock } from './writer-lock.ts'
 
 /** The verified flow is not the consumer's own file, so manifest mode cannot keep it. */
@@ -43,6 +43,20 @@ export class ManifestChangedError extends Error {
   constructor() {
     super('The manifest changed while this run was saving; nothing was written. Run again.')
     this.name = 'ManifestChangedError'
+  }
+}
+
+/** Another run is writing the shared manifest. Unlike a store lock, a different `--store` does not help. */
+export class ManifestLockedError extends Error {
+  readonly lockPath: string
+
+  constructor(lockPath: string) {
+    super(
+      `Another run is writing the walk manifest (${lockPath}). All stores of one workspace share it: ` +
+      'run again in a moment. If no run is active, delete that lock file.',
+    )
+    this.name = 'ManifestLockedError'
+    this.lockPath = lockPath
   }
 }
 
@@ -66,36 +80,64 @@ function errorCode(error: unknown) {
   return (error as NodeJS.ErrnoException).code
 }
 
-/** The product assertions of a closure: every assert command, call condition and script (hash form version 1). */
-export function closureAssertions(closure: FlowClosure): FlowAssertion[] {
-  const found: FlowAssertion[] = []
-  for (const file of closure.files) {
-    if (file.kind === 'script') {
-      // `assertTrue` can read what a script sets, so a script's bytes are part of the assertions.
-      found.push({ entry: `|runScript|sha256=${file.sha256}`, command: 'runScript', id: null })
-    } else {
-      found.push(...findFlowAssertions(file.bytes.toString('utf8')))
+/** One line of the assertion hash, with where it sits and how it is reached. */
+export type ClosureAssertion = FlowAssertion & {
+  /** True when the line runs whenever the flow does: every call on the way is unconditional too. */
+  reachedAlways: boolean
+}
+
+/**
+ * The assertions of a closure in the order the flow runs them (hash form version 1). Every line
+ * carries the path of its file and the chain of calls that reaches it, each with its parameters
+ * and the blocks around it. So moving an assertion into a subflow that is called under a condition,
+ * moving it between files, or making the script that feeds it return something else, changes it.
+ */
+export function closureAssertions(closure: FlowClosure): ClosureAssertion[] {
+  const files = new Map(closure.files.map(file => [file.path, file]))
+  const found: ClosureAssertion[] = []
+  const walk = (path: string, chain: string[], reachedAlways: boolean) => {
+    if (chain.length > 16) throw new FlowClosureError('flows are nested more than 16 deep')
+    const file = files.get(path)!
+    for (const item of findFlowAssertions(file.bytes.toString('utf8'))) {
+      const line = `${path}|${chain.join(' > ')}|${item.entry}`
+      found.push({ ...item, entry: line, reachedAlways })
+      if (!item.call) continue
+      const target = posixPath.normalize(posixPath.join(posixPath.dirname(path), item.call.path))
+      const reached = files.get(target)
+      if (!reached) throw new FlowClosureError(`${path} runs ${item.call.path}, which the closure does not hold`)
+      if (item.call.kind === 'script') {
+        // `assertTrue` can read what a script sets, so a script's bytes are part of the assertions.
+        found.push({
+          entry: `${line}|script=${target}|sha256=${reached.sha256}`, command: 'runScript', id: null,
+          always: item.always, reachedAlways,
+        })
+      } else {
+        walk(target, [...chain, line], reachedAlways && item.always)
+      }
     }
   }
+  walk(closure.main, [], true)
   return found
 }
 
-/** One hash over the sorted assertion lines, repeats kept. */
+/** One hash over the ordered assertion lines, repeats kept. */
 export function assertionsSha256(closure: FlowClosure): string {
   const lines = closureAssertions(closure).map(assertion => assertion.entry)
-    .sort((left, right) => (left < right ? -1 : left > right ? 1 : 0))
   return sha256(`deja-assertions-v${ASSERTION_HASH_VERSION}\n${lines.join('\n')}\n`)
 }
 
-function checkOwnerRules(rules: ManifestOwnerRules | undefined, assertions: FlowAssertion[]) {
+function checkOwnerRules(rules: ManifestOwnerRules | undefined, assertions: ClosureAssertion[]) {
   if (!rules) return
   const asserts = assertions.filter(assertion => assertion.command.startsWith('assert'))
   if (rules.minAssertions !== undefined && asserts.length < rules.minAssertions) {
     throw new OwnerRuleError(`the flow has ${asserts.length} assertions, the manifest requires at least ${rules.minAssertions}`)
   }
-  const visibleIds = new Set(asserts.filter(a => a.command === 'assertVisible').map(a => a.id))
+  // A required id counts only when it always runs: not under a condition, a repeat or a retry, not
+  // `optional`, and not behind a conditional call.
+  const visibleIds = new Set(asserts
+    .filter(item => item.command === 'assertVisible' && item.always && item.reachedAlways).map(item => item.id))
   for (const id of rules.requiredAssertionIds ?? []) {
-    if (!visibleIds.has(id)) throw new OwnerRuleError(`the flow never runs assertVisible on id "${id}"`)
+    if (!visibleIds.has(id)) throw new OwnerRuleError(`the flow never runs assertVisible on id "${id}" unconditionally`)
   }
 }
 
@@ -172,7 +214,7 @@ function flowSlug(goalKey: string) {
 export function checkFlowsDir(path: string) {
   if (typeof path !== 'string' || isAbsolute(path) || path.includes('\\') || path.includes('\0') ||
       path.split('/').some(segment => segment === '' || segment === '.' || segment === '..') ||
-      path.split('/')[0] === '.deja') {
+      path.split('/')[0].toLowerCase() === '.deja') {
     throw new InvalidWalkManifestError(`the flows folder must be a relative folder outside .deja/: ${path}`)
   }
   return path
@@ -342,7 +384,8 @@ export class ConsumerFlows {
         lock.acquire()
         break
       } catch (error) {
-        if (!(error instanceof StoreLockedError) || attempt >= LOCK_RETRIES) throw error
+        if (!(error instanceof StoreLockedError)) throw error
+        if (attempt >= LOCK_RETRIES) throw new ManifestLockedError(lock.path)
         await new Promise(done => setTimeout(done, LOCK_WAIT_MS))
       }
     }
@@ -483,7 +526,7 @@ export class ConsumerFlows {
     const root = await this.canonicalRoot()
     try {
       const canonical = await realpath(isAbsolute(candidatePath) ? candidatePath : resolve(root, candidatePath))
-      return inside(root, canonical) && posix(relative(root, canonical)).split('/')[0] === '.deja'
+      return inside(root, canonical) && posix(relative(root, canonical)).split('/')[0].toLowerCase() === '.deja'
     } catch (error) {
       if (errorCode(error) === 'ENOENT') return false
       throw error
@@ -590,6 +633,17 @@ export class ConsumerFlows {
         throw new InvalidWalkManifestError('the manifest would hold a fixture credential value; nothing was written')
       }
     }
+    // Whatever is written must read back. A goal or app id that the reader refuses (a path, say)
+    // would leave a manifest that fails every later run, so it is refused here, before any write.
+    try {
+      parseWalkManifest(text)
+    } catch (error) {
+      throw new InvalidWalkManifestError(
+        `the manifest would not read back (${(error as Error).message.replace(/^Invalid walk manifest: /, '')}); nothing was written. ` +
+        'Use a goal without a path in it.',
+        { cause: error },
+      )
+    }
     return text
   }
 
@@ -602,9 +656,24 @@ export class ConsumerFlows {
     if (parent !== root && !inside(root, parent)) {
       throw new InvalidWalkManifestError('the manifest path escapes the workspace')
     }
+    // A symlinked manifest would be replaced by a plain file, so it is refused.
+    try {
+      if ((await lstat(target)).isSymbolicLink()) {
+        throw new InvalidWalkManifestError('the manifest is a symbolic link; replace it with a regular file')
+      }
+    } catch (error) {
+      if (error instanceof InvalidWalkManifestError) throw error
+      if (errorCode(error) !== 'ENOENT') throw error
+    }
     const temporary = `${target}.${process.pid}-${randomUUID()}.tmp`
-    await writeFile(temporary, text)
-    await rename(temporary, target)
+    try {
+      await writeFile(temporary, text)
+      await rename(temporary, target)
+    } catch (error) {
+      // A failed write leaves nothing behind in the consumer's tree.
+      await unlink(temporary).catch(() => {})
+      throw error
+    }
   }
 }
 
@@ -612,7 +681,7 @@ export class ConsumerFlows {
 export function checkManifestPath(path: string) {
   if (typeof path !== 'string' || isAbsolute(path) || path.includes('\\') || path.includes('\0') ||
       path.split('/').some(segment => segment === '' || segment === '.' || segment === '..') ||
-      path.split('/')[0] === '.deja' || !path.endsWith('.json')) {
+      path.split('/')[0].toLowerCase() === '.deja' || !path.endsWith('.json')) {
     throw new InvalidWalkManifestError(`the manifest path must be a relative .json path outside .deja/: ${path}`)
   }
   return path

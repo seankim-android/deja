@@ -523,6 +523,59 @@ export function runConsumerFlowContractTests(implementation: WalkStoreContractIm
       }
     })
 
+    test('a goal the reader would refuse is refused before anything is written', async () => {
+      const ctx = await context()
+      try {
+        const store = ctx.open()
+        for (const goal of ['open /private/tmp notes', '/abs goal', 'see ~/notes']) {
+          await expect(ctx.persist(store, { identity: identity({ goal }) })).rejects.toThrow(/would not read back/)
+        }
+        await expect(ctx.persist(store, { identity: identity({ appId: '/Users/x/app' }) })).rejects.toBeInstanceOf(InvalidWalkManifestError)
+        expect(existsSync(join(ctx.workspaceRoot, MANIFEST))).toBe(false)
+        expect(existsSync(implementation.metadataPath(ctx.workspaceRoot))).toBe(false)
+        // A goal with a slash that is not a path is fine, and the manifest it writes reads back.
+        await ctx.persist(store, { identity: identity({ goal: 'checkout and/or pay' }) })
+        expect(parseWalkManifest(await ctx.manifestText()).walks[0].goal).toBe('checkout and/or pay')
+      } finally {
+        await ctx.cleanup()
+      }
+    })
+
+    test('required assertion ids count only when they always run', async () => {
+      const ctx = await context()
+      try {
+        const store = ctx.open()
+        await ctx.persist(store)
+        const rules = async (requiredAssertionIds: string[]) => {
+          const manifest = parseWalkManifest(await ctx.manifestText())
+          manifest.walks[0].ownerRules = { requiredAssertionIds }
+          await ctx.write(MANIFEST, `${JSON.stringify(manifest, null, 2)}\n`)
+        }
+        await rules(['screen.today', 'today.saved'])
+        await ctx.persist(store, { origin: 'verify' })
+        const main = (assertions: string) => `appId: dev.deja.fixture\n---\n${assertions}`
+        const cases: [string, string][] = [
+          ['optional', '- assertVisible:\n    id: "screen.today"\n    optional: true\n'],
+          ['under a condition', '- runFlow:\n    when:\n      visible: x\n    commands:\n      - assertVisible:\n          id: "screen.today"\n'],
+          ['in a repeat', '- repeat:\n    times: 1\n    commands:\n      - assertVisible:\n          id: "screen.today"\n'],
+        ]
+        for (const [, body] of cases) {
+          await ctx.write(MAIN, main(`${body}- assertVisible:\n    id: "today.saved"\n`))
+          await rules(['screen.today'])
+          await expect(ctx.persist(store, { origin: 'verify', assertionChange: 'accept' })).rejects.toBeInstanceOf(OwnerRuleError)
+        }
+        // Behind a conditional call it does not always run either.
+        await rules(['screen.today'])
+        await ctx.write(MAIN, main('- runFlow:\n    file: ../subflows/type.yaml\n    when:\n      platform: iOS\n'))
+        await ctx.write(SUB, '- assertVisible:\n    id: "screen.today"\n')
+        await expect(ctx.persist(store, { origin: 'remember', assertionChange: 'accept' })).rejects.toBeInstanceOf(OwnerRuleError)
+        await ctx.write(MAIN, main('- runFlow: ../subflows/type.yaml\n'))
+        await ctx.persist(store, { origin: 'remember', assertionChange: 'accept' })
+      } finally {
+        await ctx.cleanup()
+      }
+    })
+
     test('a manifest write that would hold a fixture credential is refused', async () => {
       const ctx = await context()
       try {
@@ -663,6 +716,22 @@ export function runConsumerFlowContractTests(implementation: WalkStoreContractIm
           origin: 'explore',
         })
         expect(clean.flowPath).toBe(`${FLOWS}/login.yaml`)
+      } finally {
+        await ctx.cleanup()
+      }
+    })
+
+    test('migrate leaves a walk whose goal the manifest reader would refuse, and moves the rest', async () => {
+      const ctx = await withFlows()
+      try {
+        await ctx.legacy('dev', [{ goal: 'open /private/tmp notes', path: SMOKE }, { goal: 'Today', path: MAIN }])
+        const store = ctx.openFlows('dev')
+        const report = await store.migrateToManifest!({})
+        expect(report.migrated.map(walk => walk.goal)).toEqual(['Today'])
+        expect(report.skipped.map(item => [item.goal, item.reason])).toEqual([['open /private/tmp notes', 'manifest-invalid']])
+        expect(existsSync(join(ctx.workspaceRoot, FLOWS, 'open-private-tmp-notes.yaml'))).toBe(false)
+        expect(parseWalkManifest(await ctx.manifestText()).walks.map(walk => walk.goal)).toEqual(['Today'])
+        expect((await store.lookup(identity())).status).toBe('hit')
       } finally {
         await ctx.cleanup()
       }

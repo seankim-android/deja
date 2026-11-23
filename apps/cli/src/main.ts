@@ -11,6 +11,7 @@ import {
   ConsumerFlowError,
   InvalidWalkMemoryError,
   LocalWalkStore,
+  ManifestLockedError,
   StoreLockedError,
   StoreLockUnavailableError,
 } from '@deja-qa/store-local'
@@ -345,6 +346,10 @@ export async function runCli(argv: string[], io: CliIo = {
     }
     if (error instanceof StoreLockUnavailableError) {
       io.stderr('Store lock unavailable: this filesystem cannot hold the writer lock. Use a local disk for the workspace.\n')
+      return 5
+    }
+    if (error instanceof ManifestLockedError) {
+      io.stderr('Manifest locked: another run is writing deja.walks.json. All stores share it, so a different --store does not help. Run again in a moment.\n')
       return 5
     }
     if (error instanceof StoreLockedError) {

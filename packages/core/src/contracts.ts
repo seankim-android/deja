@@ -233,7 +233,7 @@ export type MigratedWalk = {
 export type SkippedWalk = {
   goal: string
   reason: 'not-passing' | 'subflows-not-stored' | 'copy-missing' | 'copy-changed' | 'adapter-unknown' |
-    'would-overwrite' | 'manifest-differs' | 'closure-error' | 'holds-fixture-value'
+    'would-overwrite' | 'manifest-differs' | 'closure-error' | 'holds-fixture-value' | 'manifest-invalid'
   detail: string
 }
 

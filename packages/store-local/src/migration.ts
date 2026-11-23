@@ -2,7 +2,10 @@ import { copyFile, constants, readFile, realpath } from 'node:fs/promises'
 import { relative, resolve, sep } from 'node:path'
 import { createHash } from 'node:crypto'
 import {
+  emptyWalkManifest,
   manifestWalkKey,
+  parseWalkManifest,
+  serializeWalkManifest,
   type ManifestWalk,
   type MigratedWalk,
   type MigrateOptions,
@@ -123,6 +126,13 @@ export async function runMigration(context: MigrationContext): Promise<Migration
       goal: chosen.goal, appId: chosen.appId, platform: chosen.platform, adapter,
       ...(chosen.browser !== undefined ? { browser: chosen.browser } : {}),
       flow: plan.flow, closureSha256: plan.closureSha256, assertionsSha256: plan.assertionsSha256,
+    }
+    // An entry the reader would refuse (a goal with a path in it, say) must never be written.
+    try {
+      parseWalkManifest(serializeWalkManifest({ ...emptyWalkManifest(), walks: [entry] }))
+    } catch (error) {
+      skip('manifest-invalid', `the manifest would not read back: ${(error as Error).message.replace(/^Invalid walk manifest: /, '')}; remember it again under a goal without a path in it`)
+      continue
     }
     const existing = manifest.walks.find(item => manifestWalkKey(item) === manifestWalkKey(entry))
     if (existing && (existing.flow !== entry.flow || existing.closureSha256 !== entry.closureSha256 ||
