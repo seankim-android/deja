@@ -6,7 +6,7 @@
 My AI testing agent learned our checkout in 13 model calls. Now it replays it with 0.
 
 Project Name: Déjà (formerly WalkCache)
-Team Members: @YOUR_X_HANDLE
+Team Members: @YOUR_X_HANDLE (X), u/kssc0112 (Reddit)
 Project Description: Kimi K3.1 Pro on Cerebras explores an Android app once through OpenClaw and writes a Maestro test. Déjà runs that test again by itself and saves it only if all 14 checks pass. Every later run replays the saved test with no model. A real bug still fails the test.
 GitHub Repository: https://github.com/seankim-android/deja
 Demo Video: (attached)
