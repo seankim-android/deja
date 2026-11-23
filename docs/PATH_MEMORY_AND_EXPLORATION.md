@@ -604,7 +604,7 @@ A saved test needs an approved target: the product assertions that say the goal 
 | --- | --- | --- |
 | Owner goal spec | `goals/reveal.json`: `profile: uiTesting`, target `assertVisible id screen.reveal`, `assertVisible id reveal.results` | Writing the file |
 | Owner YAML | The final assertions of a remembered flow | Writing the file |
-| Natural-language goal | "Answer today's blank and see the results" | A person approving a proposal (8.2) |
+| Natural-language goal | "Answer today's blank and see the results" | The owner's rules plus the threshold, or a person (8.2) |
 
 The harness also adds **checkpoints**: `assertVisible` of each screen's marker along the path. They
 show the route held. They are not product assertions and are labeled so in YAML comments.
@@ -619,10 +619,16 @@ show the route held. They are not product assertions and are labeled so in YAML 
 3. The harness writes those picks as `assertVisible` commands and runs the checks in 8.3.
 4. The result is a `target-assertions` proposal in the review queue (section 9.3), with the draft
    YAML in `.deja/attempts/`. It is never saved to `WalkStore`.
-5. A person approves, edits or rejects it. Approval writes a `GoalTarget` with
-   `source: 'approved-proposal'`. Then the normal path runs: stitch, verify from clean state, save.
+5. The owner's assertion rules run first (config and goal spec: required assertion kinds, IDs or
+   text that must be asserted, selectors never allowed as targets, per-goal minimums). A proposal
+   that breaks a rule is refused whatever its confidence. Rules only tighten the bar.
+6. If every rule and every check in 8.3 passes and the confidence is at or above the configured
+   `targetAutoApproveThreshold`, the proposal is applied through `applyProposal` with trigger
+   `auto-merged` and writes a `GoalTarget` with `source: 'auto-approved-proposal'`. Otherwise a
+   person approves, edits or rejects it, which writes `source: 'approved-proposal'`. Either way the
+   normal path then runs: stitch, verify from clean state, save, and the assertion hash freezes it.
 
-Auto-merge never applies to target assertions.
+Target auto-approval is off until the owner sets a threshold (decision 1, section 17).
 
 ### 8.3 Checks on every target assertion
 
@@ -703,7 +709,7 @@ export type Proposal = {
   take the same code path, and each adds a `GraphVersion` with trigger `approved` or `auto-merged`.
 - Auto-merge is off by default. It is on only for kinds the owner lists, above a threshold the owner
   sets, and only for `repair`, `subflow-extraction` and `dedup`. Each still needs a verified pass.
-  `target-assertions` and `gap-id` always need a person.
+  `target-assertions` follow their own rules and threshold (8.2). `gap-id` always needs a person.
 - A `contradiction` is informational. Applying it changes nothing.
 - `revert(version)` adds a `revert` version that restores an earlier state.
 
@@ -796,7 +802,7 @@ factories after, so a warm hit builds no explorer, driver or chooser.
 | Model answers in free form | Can name elements that don't exist; closed answers are checkable |
 | Text or screenshot fingerprints | Locale, theme and size change them; text can hold personal data |
 | Fuzzy matches counted as matches | Turns uncertainty into false hits |
-| Auto-merge for assertions | A person must approve what the product is supposed to do |
+| Unrestricted auto-merge for assertions | Owner rules and checks must bound what the model may call a pass; it is allowed only above a threshold after them (8.2) |
 | Random or reinforcement-learning exploration | Each step costs seconds on a simulator |
 | Coordinate record and replay | Breaks across sizes (iPhone SE to the Duo outer display) |
 | A graph database | Thousands of rows at most |
@@ -830,17 +836,24 @@ factories after, so a warm hit builds no explorer, driver or chooser.
 
 DEJA-19 and DEJA-20 keep their graph in memory for the run only. DEJA-21 makes it durable.
 
-## 17. Open decisions for the owner
+## 17. Decisions
 
-1. **Model target for natural-language goals.** Recommended: model-proposed assertions always go to
-   the review queue and need a person. They never auto-merge.
-2. **Auto-merge.** Recommended: off by default, and only for `repair`, `subflow-extraction` and
-   `dedup`, above an owner-set threshold.
-3. **YAML parser dependency.** Recommended: add the `yaml` npm package to `@deja-qa/maestro`. Today
-   the code uses regular expressions (`countFlowAssertions`, `packages/maestro/src/walk-runner.ts`).
-4. **Record slots while history is parked.** Recommended: current build plus last passing build.
-5. **Screen markers.** Recommended: optional `config.screenMarkerPattern`; Blankaday sets
-   `^screen\.`.
-6. **Chooser transport.** Recommended: a generic chat API with JSON output, so any provider works;
-   OpenClaw stays for Android.
-7. **Snapshot labels.** Recommended: off by default, because UI copy can hold personal data.
+Decided by the owner on 2026-11-22:
+
+1. **Model-proposed target assertions** save on their own only when their confidence is at or above a
+   configured threshold and they pass every target check (section 8). Below the threshold they end in
+   a draft plus a proposal for a person. Owners can add rules in config and the goal spec: required
+   assertion kinds, IDs or text that must be asserted, selectors never allowed as targets, and
+   per-goal minimums. Rules are checked before the threshold, can only tighten the bar, and refuse a
+   proposal whatever its confidence. The approved assertion hash still freezes a saved test.
+2. **Auto-merge** is off by default. When on, only `repair`, `subflow-extraction` and `dedup` can
+   apply on their own, above an owner-set threshold, inside `.deja` only. `gap-id` always needs a person.
+3. **YAML parser:** the `yaml` npm package is approved, so parsing works on Node and Bun alike.
+6. **Chooser transport:** any OpenAI-compatible chat API with JSON output. OpenClaw stays for Android.
+
+Decided as defaults (the owner can override):
+
+4. **Record slots while history is parked:** current build plus last passing build (DEJA-12 tracks
+   full history).
+5. **Screen markers:** optional `config.screenMarkerPattern`; Blankaday sets `^screen\.`.
+7. **Snapshot labels:** off by default, because UI copy can hold personal data.
