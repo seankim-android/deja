@@ -1,7 +1,7 @@
 # Bounded route graphs and screen fingerprints (WALK-017)
 
 Route graphs are **diagnostic navigation memory**, not a second cache and not an executable flow.
-They do not participate in `WalkCache.run`, `LocalWalkStore.lookup`, exploration, repair, or cache
+They do not participate in `Deja.run`, `LocalWalkStore.lookup`, exploration, repair, or cache
 identity. The existing exact replay and cold-exploration lifecycle remains the only way to execute or
 persist a walk.
 
@@ -55,8 +55,8 @@ Duplicate logical nodes and duplicate successful transitions are invalid. Failed
 
 ## Curated Android graph and exact provenance
 
-[`walk017-route-graph.json`](../spikes/001-android-walkcache/evidence/walk017-route-graph.json) is a
-four-node, three-transition Android graph for `dev.walkcache.checkout` at build SHA-256
+[`walk017-route-graph.json`](../spikes/001-android-deja/evidence/walk017-route-graph.json) is a
+four-node, three-transition Android graph for `dev.deja.checkout` at build SHA-256
 `6aec5fea876938db14007ba3dbcb91f698832fe855886abd9dea1e7b28861759`:
 
 ```text

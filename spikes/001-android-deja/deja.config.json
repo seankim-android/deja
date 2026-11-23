@@ -1,0 +1,41 @@
+{
+  "workspaceRoot": ".",
+  "appId": "dev.deja.checkout",
+  "platform": "android",
+  "buildPath": "app/build/outputs/apk/debug/app-debug.apk",
+  "device": "emulator-5554",
+  "openClawModel": "cerebras/moonshotai-kimi-k3.1-pro-trial",
+  "openClawBaseUrl": "https://api.cerebras.ai/v1",
+  "explorationTimeoutSeconds": 900,
+  "verificationTimeoutMs": 120000,
+  "fixtureCredentials": [
+    {
+      "label": "Fixture email",
+      "value": "qa@deja.dev"
+    },
+    {
+      "label": "Fixture password",
+      "value": "testing123"
+    }
+  ],
+  "maestro": {
+    "executable": "maestro",
+    "timeoutMs": 120000
+  },
+  "openClaw": {
+    "executable": "openclaw",
+    "mcpProxy": "scripts/maestro-mcp-proxy.ts"
+  },
+  "repair": {
+    "sourceRoots": [
+      "app/src/main/java/dev/deja/checkout",
+      "app/src/main/res/values"
+    ],
+    "permittedFileTypes": [".java", ".xml"],
+    "affectedFiles": [
+      "app/src/main/java/dev/deja/checkout/MainActivity.java",
+      "app/src/main/res/values/ids.xml"
+    ],
+    "timeBudgetMs": 240000
+  }
+}

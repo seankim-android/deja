@@ -4,7 +4,7 @@ This package implements only the validated Android Checkout repair from WALK-001
 general autonomous repair engine and makes no model calls. The patch is a deterministic, exact-text
 edit to two files:
 
-- `app/src/main/java/dev/walkcache/checkout/MainActivity.java`
+- `app/src/main/java/dev/deja/checkout/MainActivity.java`
 - `app/src/main/res/values/ids.xml`
 
 ## Admission and write boundaries
@@ -15,7 +15,7 @@ Repair proceeds only when WALK-006 classifies the result as `selector`, marks it
 the sole failing step is exactly:
 
 ```text
-Tap on id: dev.walkcache.checkout:id/checkout_button
+Tap on id: dev.deja.checkout:id/checkout_button
 ```
 
 Product assertions, navigation, unknown/ambiguous failures, timeouts, runner/infrastructure errors,
@@ -40,21 +40,21 @@ The rebuilt fingerprint must differ from the diagnosis fingerprint. The unchange
 including its final product assertion, then passes independently before
 `LocalWalkStore.persistVerifiedRepair` atomically replaces metadata. Repair metadata retains earlier
 validation history and previous exploration metrics; the exact prior flow and metadata bytes are also
-saved under `.walkcache/patches/<attempt>/previous/`.
+saved under `.deja/patches/<attempt>/previous/`.
 
 ## Evidence and Git boundary
 
 Every attempt preserves its diagnosis logs, proposed diff and plan when eligible, build/install logs
 and report, verification logs/report when reached, previous memory/flow snapshots, and final repair
 report. The CLI prints the exact diff and affected files before writing. It never invokes Git, commits
-a repair, or creates a pull request. Generated `.walkcache/` data remains ignored; only reviewed,
+a repair, or creates a pull request. Generated `.deja/` data remains ignored; only reviewed,
 secret-free reports and logs are copied into curated evidence.
 
 From the Android spike, after seeding a known-good walk:
 
 ```sh
-WALKCACHE_REPAIR_TIMEOUT_MS=240000 \
-  bun scripts/walkcache.ts repair checkout --config repair.config.json
+DEJA_REPAIR_TIMEOUT_MS=240000 \
+  bun scripts/deja.ts repair checkout --config repair.config.json
 ```
 
 Focused deterministic checks:

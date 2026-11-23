@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { runCheckoutBuildAndInstall } from '../src/build.ts'
 
 async function fixture(gradleExitCode: number) {
-  const temporary = await mkdtemp(join(tmpdir(), 'walkcache-build-install-'))
+  const temporary = await mkdtemp(join(tmpdir(), 'deja-build-install-'))
   const gradle = join(temporary, 'fake-gradlew')
   const adb = join(temporary, 'fake-adb')
   const installMarker = join(temporary, 'install-args.txt')

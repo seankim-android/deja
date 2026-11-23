@@ -131,7 +131,7 @@ describe('typed reusable subflow contracts', () => {
   test('miss diagnoses remain exact and fail closed', () => {
     const base = contract()
     const segment: VerifiedSubflow = {
-      ...base, flowPath: '.walkcache/segments/login-v1/fixture.yaml', flowSha256: 'c'.repeat(64),
+      ...base, flowPath: '.deja/segments/login-v1/fixture.yaml', flowSha256: 'c'.repeat(64),
       lastValidation: { passed: true, at: '2026-11-22T00:00:00.000Z' },
     }
     expect(subflowMissReason(base.identity, [])).toBe('not-found')

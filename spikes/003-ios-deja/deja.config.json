@@ -1,0 +1,23 @@
+{
+  "workspaceRoot": ".",
+  "appId": "dev.deja.ios.checkout",
+  "platform": "ios",
+  "adapter": "maestro-ios@2.12.0",
+  "buildPath": "build/Build/Products/Debug-iphonesimulator/DejaFixture.app",
+  "device": "DFC4D233-498B-4B33-B713-E59B239FA86A",
+  "verificationTimeoutMs": 180000,
+  "fixtureCredentials": [
+    {
+      "label": "Fixture email",
+      "value": "qa@deja.dev"
+    },
+    {
+      "label": "Fixture password",
+      "value": "testing123"
+    }
+  ],
+  "maestro": {
+    "executable": "maestro",
+    "timeoutMs": 180000
+  }
+}

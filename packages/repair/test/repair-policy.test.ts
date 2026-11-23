@@ -24,16 +24,16 @@ const ids = `<resources>
 `
 
 async function fixture() {
-  const temporary = await mkdtemp(join(tmpdir(), 'walkcache-repair-policy-'))
+  const temporary = await mkdtemp(join(tmpdir(), 'deja-repair-policy-'))
   const root = join(temporary, 'workspace')
-  await mkdir(join(root, 'app/src/main/java/dev/walkcache/checkout'), { recursive: true })
+  await mkdir(join(root, 'app/src/main/java/dev/deja/checkout'), { recursive: true })
   await mkdir(join(root, 'app/src/main/res/values'), { recursive: true })
   await writeFile(join(root, CHECKOUT_COMPONENT_PATH), component)
   await writeFile(join(root, CHECKOUT_IDS_PATH), ids)
   const policy: CheckoutRepairPolicy = {
     workspaceRoot: root,
     sourceRoots: [
-      'app/src/main/java/dev/walkcache/checkout',
+      'app/src/main/java/dev/deja/checkout',
       'app/src/main/res/values',
     ],
     permittedFileTypes: ['.java', '.xml'],

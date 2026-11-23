@@ -26,15 +26,15 @@ export class JsonRunReporter implements RunReporter {
   }
 
   async report(result: RunResult): Promise<ReportReceipt> {
-    const directory = resolve(this.workspaceRoot, '.walkcache/reports')
+    const directory = resolve(this.workspaceRoot, '.deja/reports')
     const reportPath = resolve(
       directory,
       `${result.command}-${Date.now()}-${process.pid}.json`,
     )
     const latestPath = resolve(directory, 'latest.json')
     const receipt = {
-      reportPath: `.walkcache/reports/${reportPath.split(sep).at(-1)}`,
-      latestPath: '.walkcache/reports/latest.json',
+      reportPath: `.deja/reports/${reportPath.split(sep).at(-1)}`,
+      latestPath: '.deja/reports/latest.json',
     }
     const serialized = `${JSON.stringify(redactJson(result, this.redact), null, 2)}\n`
     await atomicWrite(reportPath, serialized)
@@ -67,7 +67,7 @@ export async function readRunReport(
       typeof value.cacheStatus !== 'string' || typeof value.outcome !== 'string' ||
       typeof value.passed !== 'boolean' || !Array.isArray(value.artifacts) ||
       !Array.isArray(value.diffs)) {
-    throw new CliConfigurationError('Report is not a supported WalkCache run result')
+    throw new CliConfigurationError('Report is not a supported Déjà run result')
   }
   return redactJson(value, redact)
 }

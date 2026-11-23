@@ -33,7 +33,7 @@ export {
 
 export const SQLITE_MEMORY_SCHEMA_VERSION = 2
 export const MAESTRO_FLOW_SCHEMA_VERSION = 'maestro/v1'
-export const SQLITE_MEMORY_PATH = '.walkcache/memory/walks.sqlite'
+export const SQLITE_MEMORY_PATH = '.deja/memory/walks.sqlite'
 
 export type SQLiteWalkStoreOptions = {
   workspaceRoot: string
@@ -167,7 +167,7 @@ function readExploration(value: unknown): ExplorationDetails {
 
 function readRepairProvenance(value: unknown): RepairProvenance {
   if (!object(value) || !nonEmptyString(value.attemptId) || !nonEmptyString(value.patchPath) ||
-      !value.patchPath.startsWith('.walkcache/patches/') || isAbsolute(value.patchPath) ||
+      !value.patchPath.startsWith('.deja/patches/') || isAbsolute(value.patchPath) ||
       value.patchPath.split('/').includes('..') || !fingerprint(value.previousBuildFingerprint) ||
       !fingerprint(value.previousFlowSha256)) {
     throw new InvalidWalkMemoryError('walk repair provenance is invalid')
@@ -470,15 +470,15 @@ export class SQLiteWalkStore implements WalkStore {
   private async storedFlowPath(walk: StoredWalk): Promise<string | null> {
     const root = await this.canonicalRoot()
     const candidate = resolve(root, walk.flowPath)
-    const flowRoot = resolve(root, '.walkcache/flows')
+    const flowRoot = resolve(root, '.deja/flows')
     if (isAbsolute(walk.flowPath) || !inside(flowRoot, candidate)) {
-      throw new InvalidWalkMemoryError(`stored flow must stay under .walkcache/flows: ${walk.flowPath}`)
+      throw new InvalidWalkMemoryError(`stored flow must stay under .deja/flows: ${walk.flowPath}`)
     }
     const canonical = await this.existingFile(root, walk.flowPath)
     if (!canonical) return null
     const canonicalFlowRoot = await realpath(flowRoot)
     if (!inside(root, canonicalFlowRoot) || !inside(canonicalFlowRoot, canonical)) {
-      throw new InvalidWalkMemoryError(`canonical stored flow escapes .walkcache/flows: ${walk.flowPath}`)
+      throw new InvalidWalkMemoryError(`canonical stored flow escapes .deja/flows: ${walk.flowPath}`)
     }
     return canonical
   }
@@ -522,7 +522,7 @@ export class SQLiteWalkStore implements WalkStore {
     const candidateBytes = await readFile(candidate)
     const flowSha256 = sha256(candidateBytes)
     const platformSlug = flowSlug(normalizeGoalContract(identity.platform).key)
-    const flowPath = `.walkcache/flows/${flowSlug(identity.goalKey)}/${platformSlug}-${flowSha256}.yaml`
+    const flowPath = `.deja/flows/${flowSlug(identity.goalKey)}/${platformSlug}-${flowSha256}.yaml`
     await this.atomicWriteFlow(resolve(root, flowPath), candidateBytes)
 
     const validation = { passed: true as const, at: options.validation.at }

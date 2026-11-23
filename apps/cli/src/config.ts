@@ -180,7 +180,7 @@ export async function loadProductionConfiguration(configPath: string): Promise<P
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('expected an object')
     raw = parsed as Record<string, unknown>
   } catch (error) {
-    throw new CliConfigurationError(`Cannot read WalkCache config ${configPath}`, { cause: error })
+    throw new CliConfigurationError(`Cannot read Déjà config ${configPath}`, { cause: error })
   }
   let explore: ExploreConfiguration | WebExploreConfiguration | IosExploreConfiguration
   try {
@@ -190,7 +190,7 @@ export async function loadProductionConfiguration(configPath: string): Promise<P
         ? loadIosExploreConfiguration(absolute, raw)
         : loadExploreConfiguration(absolute)
   } catch (error) {
-    throw new CliConfigurationError('Invalid WalkCache fixture configuration', { cause: error })
+    throw new CliConfigurationError('Invalid Déjà fixture configuration', { cause: error })
   }
   const root = explore.workspaceRoot
   const maestro = typeof raw.maestro === 'object' && raw.maestro !== null
@@ -210,7 +210,7 @@ export async function loadProductionConfiguration(configPath: string): Promise<P
     openClawConfiguration = {
       executable: text(
         openClaw.executable,
-        process.env.WALKCACHE_OPENCLAW ?? 'openclaw',
+        process.env.DEJA_OPENCLAW ?? 'openclaw',
         'openClaw.executable',
       ),
       mcpProxy,
@@ -274,12 +274,12 @@ export async function loadProductionConfiguration(configPath: string): Promise<P
     maestro: {
       executable: text(
         maestro.executable,
-        process.env.WALKCACHE_MAESTRO ?? 'maestro',
+        process.env.DEJA_MAESTRO ?? 'maestro',
         'maestro.executable',
       ),
       timeoutMs: positiveInteger(
         maestro.timeoutMs,
-        Number(process.env.WALKCACHE_TIMEOUT_MS ?? 120_000),
+        Number(process.env.DEJA_TIMEOUT_MS ?? 120_000),
         'maestro.timeoutMs',
       ),
     },
@@ -298,7 +298,7 @@ export async function buildFingerprint(
 }
 
 export function defaultConfigPath(configDirectory = process.cwd()) {
-  return resolve(configDirectory, 'walkcache.config.json')
+  return resolve(configDirectory, 'deja.config.json')
 }
 
 export function configurationDirectory(configuration: ProductionConfiguration) {

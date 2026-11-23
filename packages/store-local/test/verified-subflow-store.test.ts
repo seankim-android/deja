@@ -30,8 +30,8 @@ function contract(): SubflowContract {
 async function fixture() {
   const temporary = await mkdtemp(join(tmpdir(), 'walk018-segment-store-'))
   const workspaceRoot = join(temporary, 'workspace')
-  await mkdir(join(workspaceRoot, '.walkcache/attempts'), { recursive: true })
-  const candidatePath = '.walkcache/attempts/login.yaml'
+  await mkdir(join(workspaceRoot, '.deja/attempts'), { recursive: true })
+  const candidatePath = '.deja/attempts/login.yaml'
   const bytes = 'appId: fixture.app\n---\n- assertVisible:\n    id: screen_catalog\n'
   await writeFile(resolve(workspaceRoot, candidatePath), bytes)
   return { temporary, workspaceRoot, candidatePath, bytes }
@@ -139,7 +139,7 @@ describe('local verified reusable segment store', () => {
       const previous = await save(originalStore, ctx.candidatePath)
       const indexBefore = await readFile(originalStore.indexPath)
       const flowBefore = await readFile(resolve(ctx.workspaceRoot, previous.flowPath))
-      const replacementPath = '.walkcache/attempts/replacement.yaml'
+      const replacementPath = '.deja/attempts/replacement.yaml'
       await writeFile(resolve(ctx.workspaceRoot, replacementPath),
         '# replacement candidate\nappId: fixture.app\n---\n- assertVisible:\n    id: screen_catalog\n')
       const failingStore = new LocalVerifiedSubflowStore({

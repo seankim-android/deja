@@ -1,0 +1,12 @@
+{
+  "sourceRoots": [
+    "app/src/main/java/dev/deja/checkout",
+    "app/src/main/res/values"
+  ],
+  "permittedFileTypes": [".java", ".xml"],
+  "affectedFiles": [
+    "app/src/main/java/dev/deja/checkout/MainActivity.java",
+    "app/src/main/res/values/ids.xml"
+  ],
+  "timeBudgetMs": 240000
+}

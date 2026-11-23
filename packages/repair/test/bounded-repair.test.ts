@@ -18,7 +18,7 @@ const diagnosisBuild = 'a'.repeat(64)
 const repairedBuild = 'c'.repeat(64)
 const timestamp = '2026-11-22T00:00:00.000Z'
 const verifiedTimestamp = '2026-11-22T00:02:00.000Z'
-const checkoutStep = 'Tap on id: dev.walkcache.checkout:id/checkout_button'
+const checkoutStep = 'Tap on id: dev.deja.checkout:id/checkout_button'
 const finalAssertion = 'Assert that "Order #WC-1001 · Mochi sticker pack" is visible... FAILED'
 
 const staleComponent = `final class MainActivity {
@@ -35,12 +35,12 @@ const staleIds = `<?xml version="1.0" encoding="utf-8"?>
     <!-- checkout_button is deliberately absent for the selector-repair spike. -->
 </resources>
 `
-const flow = `appId: dev.walkcache.checkout
+const flow = `appId: dev.deja.checkout
 ---
 - launchApp:
     clearState: true
 - tapOn:
-    id: dev.walkcache.checkout:id/checkout_button
+    id: dev.deja.checkout:id/checkout_button
 - assertVisible: Order confirmed
 - assertVisible: "Order #WC-1001 · Mochi sticker pack"
 `
@@ -50,7 +50,7 @@ function runnerResult(
   startedAt = timestamp,
 ): MaestroRunResult {
   const passed = category === 'passed'
-  let output = 'Launch app "dev.walkcache.checkout" with clear state... COMPLETED\n'
+  let output = 'Launch app "dev.deja.checkout" with clear state... COMPLETED\n'
   let timedOut = false
   let errors: MaestroRunResult['errors'] = []
   let exitCode: number | null = 0
@@ -65,7 +65,7 @@ function runnerResult(
   } else if (category === 'product_assertion') {
     output += `${finalAssertion}\nAssertion is false: Order #WC-1001 · Mochi sticker pack\n`
   } else if (category === 'navigation') {
-    output += 'Launch app "dev.walkcache.checkout"... FAILED\nUnable to launch app: dev.walkcache.checkout\n'
+    output += 'Launch app "dev.deja.checkout"... FAILED\nUnable to launch app: dev.deja.checkout\n'
   } else if (category === 'timeout') {
     timedOut = true
     exitCode = null
@@ -115,9 +115,9 @@ function buildResult(passed = true): RepairBuildResult {
 }
 
 async function fixture() {
-  const temporary = await mkdtemp(join(tmpdir(), 'walkcache-repair-'))
+  const temporary = await mkdtemp(join(tmpdir(), 'deja-repair-'))
   const root = join(temporary, 'workspace')
-  await mkdir(join(root, 'app/src/main/java/dev/walkcache/checkout'), { recursive: true })
+  await mkdir(join(root, 'app/src/main/java/dev/deja/checkout'), { recursive: true })
   await mkdir(join(root, 'app/src/main/res/values'), { recursive: true })
   await writeFile(join(root, CHECKOUT_AFFECTED_FILES[0]), staleComponent)
   await writeFile(join(root, CHECKOUT_AFFECTED_FILES[1]), staleIds)
@@ -127,7 +127,7 @@ async function fixture() {
   const persisted = await store.persistVerifiedCandidate({
     identity: {
       goal: 'checkout',
-      appId: 'dev.walkcache.checkout',
+      appId: 'dev.deja.checkout',
       platform: 'android',
       flowSchemaVersion: MAESTRO_FLOW_SCHEMA_VERSION,
       buildFingerprint: oldBuild,
@@ -139,7 +139,7 @@ async function fixture() {
   const policy = {
     workspaceRoot: root,
     sourceRoots: [
-      'app/src/main/java/dev/walkcache/checkout',
+      'app/src/main/java/dev/deja/checkout',
       'app/src/main/res/values',
     ],
     permittedFileTypes: ['.java', '.xml'],
@@ -175,7 +175,7 @@ async function runRepair(
   const repairer = new BoundedCheckoutRepairer({
     workspaceRoot: context.root,
     goal: 'checkout',
-    appId: 'dev.walkcache.checkout',
+    appId: 'dev.deja.checkout',
     platform: 'android',
     timeoutMs: overrides.timeoutMs ?? 1000,
     policy: context.policy,
@@ -256,7 +256,7 @@ describe('bounded checkout selector repair', () => {
         previousBuildFingerprint: oldBuild,
       })
       expect((await context.store.lookup({
-        goal: 'checkout', appId: 'dev.walkcache.checkout', platform: 'android',
+        goal: 'checkout', appId: 'dev.deja.checkout', platform: 'android',
         flowSchemaVersion: MAESTRO_FLOW_SCHEMA_VERSION, buildFingerprint: repairedBuild,
       })).status).toBe('hit')
       expect(beforeMemory.equals(await readFile(join(context.root, result.report.attemptDirectory, 'previous/walks.json')))).toBe(true)

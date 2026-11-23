@@ -10,8 +10,8 @@ import type {
 } from './contracts.ts'
 import { redactViewerJson, redactViewerText } from './redaction.ts'
 
-const REPORT_DIRECTORY = '.walkcache/reports'
-const MEMORY_PATH = '.walkcache/memory/walks.json'
+const REPORT_DIRECTORY = '.deja/reports'
+const MEMORY_PATH = '.deja/memory/walks.json'
 const MAX_FILE_BYTES = 2_000_000
 const MAX_REPORTS = 50
 const VIEWABLE_KINDS = new Set(['yaml', 'diff', 'memory', 'model-metrics', 'repair-report'])
@@ -37,13 +37,13 @@ function timestamp(value: unknown): value is string {
 }
 
 function safeReportPath(path: string) {
-  return /^\.walkcache\/reports\/[a-zA-Z0-9][a-zA-Z0-9._-]*\.json$/.test(path) &&
+  return /^\.deja\/reports\/[a-zA-Z0-9][a-zA-Z0-9._-]*\.json$/.test(path) &&
     !path.split('/').some(segment => FORBIDDEN_NAME.test(segment))
 }
 
 export function safeArtifactPath(path: string) {
   if (path.length === 0 || path.length > 1_024 || path.includes('\0') || path.includes('\\') ||
-      isAbsolute(path) || !path.startsWith('.walkcache/') || path.split('/').includes('..') ||
+      isAbsolute(path) || !path.startsWith('.deja/') || path.split('/').includes('..') ||
       !VIEWABLE_EXTENSIONS.has(extname(path).toLowerCase()) ||
       path.split('/').some(segment => FORBIDDEN_NAME.test(segment))) return false
   return path.split('/').every(segment => segment.length > 0 && segment !== '.' && segment !== '..')
@@ -113,7 +113,7 @@ function parseReport(contents: string): NonNullable<ViewerReportEntry['report']>
     throw new ViewerError(202, 'in-progress', 'The report is still being written; no outcome is assumed.')
   }
   if (!supportedReport(value)) {
-    throw new ViewerError(422, 'malformed', 'The report does not match WalkCache run schema v1.')
+    throw new ViewerError(422, 'malformed', 'The report does not match Déjà run schema v1.')
   }
   return value
 }
@@ -150,7 +150,7 @@ export async function listWorkspaceReports(workspaceRoot: string): Promise<Viewe
     const entries = await readdir(directory, { withFileTypes: true })
     const reports = await Promise.all(entries
       .filter(entry => entry.isFile() && entry.name.endsWith('.json'))
-      .map(entry => `.walkcache/reports/${entry.name}`)
+      .map(entry => `.deja/reports/${entry.name}`)
       .filter(safeReportPath)
       .sort().reverse().slice(0, MAX_REPORTS)
       .map(async path => {
@@ -178,7 +178,7 @@ function declaredArtifacts(report: NonNullable<ViewerReportEntry['report']>) {
 
 async function readReportForArtifact(root: string, reportPath: string) {
   if (!safeReportPath(reportPath)) {
-    throw new ViewerError(403, 'restricted', 'Only a direct .walkcache/reports JSON file can authorize artifacts.')
+    throw new ViewerError(403, 'restricted', 'Only a direct .deja/reports JSON file can authorize artifacts.')
   }
   try {
     const canonical = await realpath(resolve(root, reportPath))
@@ -199,7 +199,7 @@ export async function readDeclaredArtifact(
 ): Promise<ViewerArtifact> {
   const root = await realpath(resolve(workspaceRoot))
   if (!safeArtifactPath(artifactPath)) {
-    throw new ViewerError(403, 'restricted', 'Only safe relative .walkcache YAML, JSON, text, and diff artifacts are viewable.')
+    throw new ViewerError(403, 'restricted', 'Only safe relative .deja YAML, JSON, text, and diff artifacts are viewable.')
   }
   const report = await readReportForArtifact(root, reportPath)
   const kind = declaredArtifacts(report).get(artifactPath)
@@ -214,9 +214,9 @@ export async function readDeclaredArtifact(
     if (errorCode(error) === 'ENOENT') throw new ViewerError(404, 'missing', 'The declared artifact is missing or still being written.')
     throw error
   }
-  const allowedRoot = resolve(root, '.walkcache')
+  const allowedRoot = resolve(root, '.deja')
   if (!canonical.startsWith(`${allowedRoot}${sep}`)) {
-    throw new ViewerError(403, 'restricted', 'The artifact resolves outside .walkcache; symlinks are not followed.')
+    throw new ViewerError(403, 'restricted', 'The artifact resolves outside .deja; symlinks are not followed.')
   }
   return {
     state: 'ready', path: artifactPath,
@@ -231,8 +231,8 @@ export async function readValidationHistory(workspaceRoot: string, goalKey: stri
   }
   try {
     const canonical = await realpath(resolve(root, MEMORY_PATH))
-    if (!canonical.startsWith(`${resolve(root, '.walkcache')}${sep}`)) {
-      return { state: 'unavailable', entries: [], message: 'Validation memory resolves outside .walkcache.' }
+    if (!canonical.startsWith(`${resolve(root, '.deja')}${sep}`)) {
+      return { state: 'unavailable', entries: [], message: 'Validation memory resolves outside .deja.' }
     }
     const value: unknown = JSON.parse(await readBoundedFile(canonical))
     if (!object(value) || ![1, 2].includes(Number(value.schemaVersion)) || !Array.isArray(value.walks)) {
@@ -277,11 +277,11 @@ export function viewerHandler(workspaceRoot: string) {
       return
     }
     try {
-      if (url.pathname === '/api/walkcache/runs') {
+      if (url.pathname === '/api/deja/runs') {
         sendJson(response, 200, await listWorkspaceReports(workspaceRoot))
-      } else if (url.pathname === '/api/walkcache/history') {
+      } else if (url.pathname === '/api/deja/history') {
         sendJson(response, 200, await readValidationHistory(workspaceRoot, url.searchParams.get('goal') ?? ''))
-      } else if (url.pathname === '/api/walkcache/artifact') {
+      } else if (url.pathname === '/api/deja/artifact') {
         sendJson(response, 200, await readDeclaredArtifact(
           workspaceRoot,
           url.searchParams.get('report') ?? '',
@@ -300,11 +300,11 @@ export function viewerHandler(workspaceRoot: string) {
   }
 }
 
-/** Optional standalone read-only server; it never imports or starts the WalkCache lifecycle. */
+/** Optional standalone read-only server; it never imports or starts the Déjà lifecycle. */
 export function createViewerServer(workspaceRoot: string) {
   const handler = viewerHandler(workspaceRoot)
   return createHttpServer((request, response) => {
-    if (!(request.url ?? '').startsWith('/api/walkcache/')) {
+    if (!(request.url ?? '').startsWith('/api/deja/')) {
       sendJson(response, 404, { state: 'missing', message: 'Use the Vite viewer for the local UI.' })
       return
     }

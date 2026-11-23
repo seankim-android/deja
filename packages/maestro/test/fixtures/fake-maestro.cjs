@@ -24,9 +24,9 @@ if (modeArgument === 'grandchild' || modeArgument === 'bystander') {
   console.log('fake stdout')
   console.error('fake stderr')
 
-  if (process.env.WALKCACHE_FAKE_MAESTRO_MODE === 'selector') {
+  if (process.env.DEJA_FAKE_MAESTRO_MODE === 'selector') {
     console.log('Running on fixture')
-    console.log('Launch app "dev.walkcache.checkout" with clear state... COMPLETED')
+    console.log('Launch app "dev.deja.checkout" with clear state... COMPLETED')
     console.log('Assert that id: screen_cart is visible... COMPLETED')
     console.log('Tap on id: checkout_button... FAILED')
     console.log('')
@@ -34,8 +34,8 @@ if (modeArgument === 'grandchild' || modeArgument === 'bystander') {
     process.exitCode = 1
   }
 
-  if (process.env.WALKCACHE_FAKE_MAESTRO_MODE === 'product') {
-    console.log('Launch app "dev.walkcache.checkout" with clear state... COMPLETED')
+  if (process.env.DEJA_FAKE_MAESTRO_MODE === 'product') {
+    console.log('Launch app "dev.deja.checkout" with clear state... COMPLETED')
     console.log('Assert that "Order #WC-1001" is visible... FAILED')
     console.log('Assertion is false: "Order #WC-1001" is visible')
     process.exitCode = 1

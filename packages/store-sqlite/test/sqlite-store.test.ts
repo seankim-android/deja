@@ -13,7 +13,7 @@ import {
 function identity(overrides: Partial<WalkIdentity> = {}): WalkIdentity {
   return {
     goal: 'Checkout',
-    appId: 'dev.walkcache.checkout',
+    appId: 'dev.deja.checkout',
     platform: 'android',
     flowSchemaVersion: MAESTRO_FLOW_SCHEMA_VERSION,
     buildFingerprint: 'a'.repeat(64),
@@ -22,7 +22,7 @@ function identity(overrides: Partial<WalkIdentity> = {}): WalkIdentity {
 }
 
 test('a real SQLite error rolls back the entire metadata replacement and retains the known-good walk', async () => {
-  const temporary = await mkdtemp(join(tmpdir(), 'walkcache-sqlite-rollback-'))
+  const temporary = await mkdtemp(join(tmpdir(), 'deja-sqlite-rollback-'))
   const workspaceRoot = join(temporary, 'workspace')
   const store = new SQLiteWalkStore({ workspaceRoot })
   try {

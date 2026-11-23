@@ -41,7 +41,7 @@ case each. The shared tests perform no device operations and require no model/ac
 
 ## Actual warm orchestration
 
-Each implementation also receives one separate `WalkCache.run` test using the production
+Each implementation also receives one separate `Deja.run` test using the production
 `MaestroWalkRunner`, its existing deterministic local executable fixture, and production
 `JsonRunReporter`. The runner really resolves persisted YAML, launches the child process, preserves
 logs, classifies the result, and counts assertions. The test reads the real JSON report and output

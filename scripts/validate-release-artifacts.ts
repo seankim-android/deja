@@ -11,7 +11,7 @@ function git(args: string[]) {
 
 const files = git(['ls-files', '-z']).split('\0').filter(Boolean)
 const forbiddenPaths = [
-  /(^|\/)\.walkcache\//,
+  /(^|\/)\.deja\//,
   /(^|\/)\.tmp\//,
   /(^|\/)node_modules\//,
   /(^|\/)dist\//,

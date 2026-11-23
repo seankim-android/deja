@@ -1,5 +1,5 @@
 import { resolve } from 'node:path'
-import { WalkCache, type RunResult } from '../../../packages/core/src/index.ts'
+import { Deja, type RunResult } from '../../../packages/core/src/index.ts'
 import { OpenClawWalkExplorer } from '../../../packages/agent-openclaw/src/index.ts'
 import {
   InvalidWalkMemoryError,
@@ -116,7 +116,7 @@ function createOrchestration(
       : {}),
     ...(process.env.JAVA_HOME ? { javaHome: process.env.JAVA_HOME } : {}),
   })
-  const orchestration = new WalkCache({
+  const orchestration = new Deja({
     store,
     runner,
     reporter,
@@ -240,9 +240,9 @@ export async function runCli(argv: string[], io: CliIo = {
     return resultExitCode(result)
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
-    io.stderr(`${redact(message)}\nRun "walkcache --help" for usage and exit codes.\n`)
+    io.stderr(`${redact(message)}\nRun "deja --help" for usage and exit codes.\n`)
     if (error instanceof InvalidWalkMemoryError) {
-      io.stderr('Memory recovery: preserve/quarantine the ignored .walkcache directory, then explore cold; never treat corrupt memory as a pass.\n')
+      io.stderr('Memory recovery: preserve/quarantine the ignored .deja directory, then explore cold; never treat corrupt memory as a pass.\n')
       return 4
     }
     return 2

@@ -11,7 +11,7 @@ export const laterValidation = '2026-11-22T00:01:00.000Z'
 export function contractIdentity(overrides: Partial<WalkIdentity> = {}): WalkIdentity {
   return {
     goal: 'Checkout',
-    appId: 'dev.walkcache.checkout',
+    appId: 'dev.deja.checkout',
     platform: 'android',
     flowSchemaVersion: 'maestro/v1',
     buildFingerprint: 'a'.repeat(64),
@@ -50,13 +50,13 @@ async function temporaryFiles(root: string): Promise<string[]> {
 }
 
 async function fixture() {
-  const temporary = await mkdtemp(join(tmpdir(), 'walkcache-store-contract-'))
+  const temporary = await mkdtemp(join(tmpdir(), 'deja-store-contract-'))
   const workspaceRoot = join(temporary, 'workspace')
-  await mkdir(join(workspaceRoot, '.walkcache/attempts'), { recursive: true })
-  const candidatePath = '.walkcache/attempts/candidate.yaml'
+  await mkdir(join(workspaceRoot, '.deja/attempts'), { recursive: true })
+  const candidatePath = '.deja/attempts/candidate.yaml'
   await writeFile(
     join(workspaceRoot, candidatePath),
-    'appId: dev.walkcache.checkout\n- assertVisible: Order confirmed\n',
+    'appId: dev.deja.checkout\n- assertVisible: Order confirmed\n',
   )
   return { temporary, workspaceRoot, candidatePath }
 }
@@ -141,7 +141,7 @@ export function runWalkStoreContractTests(implementation: WalkStoreContractImple
       const ctx = await context()
       try {
         const { store } = await ctx.seed()
-        expect(await store.lookup(contractIdentity({ appId: 'dev.walkcache.other' })))
+        expect(await store.lookup(contractIdentity({ appId: 'dev.deja.other' })))
           .toEqual({ status: 'miss', reason: 'wrong-app' })
       } finally {
         await ctx.cleanup()
@@ -261,7 +261,7 @@ export function runWalkStoreContractTests(implementation: WalkStoreContractImple
         await writeFile(join(ctx.workspaceRoot, 'outside.yaml'), '# outside\n')
         const { store } = await ctx.seed()
         await implementation.setFirstFlowPath(ctx.workspaceRoot, '../outside.yaml')
-        await expect(store.lookup(contractIdentity())).rejects.toThrow('must stay under .walkcache/flows')
+        await expect(store.lookup(contractIdentity())).rejects.toThrow('must stay under .deja/flows')
       } finally {
         await ctx.cleanup()
       }
@@ -274,10 +274,10 @@ export function runWalkStoreContractTests(implementation: WalkStoreContractImple
         const { store } = await ctx.seed()
         const outside = join(ctx.temporary, 'outside.yaml')
         await writeFile(outside, '# outside\n')
-        const linkDirectory = join(ctx.workspaceRoot, '.walkcache/flows/escape')
+        const linkDirectory = join(ctx.workspaceRoot, '.deja/flows/escape')
         await mkdir(linkDirectory, { recursive: true })
         await symlink(outside, join(linkDirectory, 'android.yaml'))
-        await implementation.setFirstFlowPath(ctx.workspaceRoot, '.walkcache/flows/escape/android.yaml')
+        await implementation.setFirstFlowPath(ctx.workspaceRoot, '.deja/flows/escape/android.yaml')
         await expect(store.lookup(contractIdentity())).rejects.toThrow()
       } finally {
         await ctx.cleanup()
@@ -289,7 +289,7 @@ export function runWalkStoreContractTests(implementation: WalkStoreContractImple
       const ctx = await context()
       try {
         const outside = join(ctx.temporary, 'outside-memory')
-        const memoryDirectory = join(ctx.workspaceRoot, '.walkcache/memory')
+        const memoryDirectory = join(ctx.workspaceRoot, '.deja/memory')
         await mkdir(outside, { recursive: true })
         await symlink(outside, memoryDirectory)
         const store = ctx.makeStore()
@@ -310,7 +310,7 @@ export function runWalkStoreContractTests(implementation: WalkStoreContractImple
     test('rejects metadata paths that traverse a non-directory on reads and writes', async () => {
       const ctx = await context()
       try {
-        const metadataFile = join(ctx.workspaceRoot, '.walkcache/memory')
+        const metadataFile = join(ctx.workspaceRoot, '.deja/memory')
         await writeFile(metadataFile, '# not a directory\n')
         const store = ctx.makeStore()
         await expect(store.lookup(contractIdentity())).rejects.toThrow('metadata path')
@@ -330,7 +330,7 @@ export function runWalkStoreContractTests(implementation: WalkStoreContractImple
       try {
         const { store, persisted } = await ctx.seed()
         const outside = join(ctx.temporary, 'outside-valid-memory')
-        const memoryDirectory = join(ctx.workspaceRoot, '.walkcache/memory')
+        const memoryDirectory = join(ctx.workspaceRoot, '.deja/memory')
         await rename(memoryDirectory, outside)
         await symlink(outside, memoryDirectory)
         const outsideMetadata = join(
@@ -460,7 +460,7 @@ export function runWalkStoreContractTests(implementation: WalkStoreContractImple
           validation: { passed: true, at: laterValidation },
           previous: { buildFingerprint: oldIdentity.buildFingerprint, flowSha256: previous.flowSha256 },
           repair: {
-            attemptId: 'contract-repair', patchPath: '.walkcache/patches/contract-repair/proposed.patch',
+            attemptId: 'contract-repair', patchPath: '.deja/patches/contract-repair/proposed.patch',
             previousBuildFingerprint: oldIdentity.buildFingerprint, previousFlowSha256: previous.flowSha256,
           },
         })
@@ -488,7 +488,7 @@ export function runWalkStoreContractTests(implementation: WalkStoreContractImple
           validation: { passed: true, at: laterValidation },
           previous: { buildFingerprint: 'c'.repeat(64), flowSha256: persisted.flowSha256 },
           repair: {
-            attemptId: 'stale-repair', patchPath: '.walkcache/patches/stale-repair/proposed.patch',
+            attemptId: 'stale-repair', patchPath: '.deja/patches/stale-repair/proposed.patch',
             previousBuildFingerprint: 'c'.repeat(64), previousFlowSha256: persisted.flowSha256,
           },
         })).rejects.toThrow('previous successful repair base changed')

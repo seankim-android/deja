@@ -1,26 +1,26 @@
-# Headless `walkcache` CLI
+# Headless `deja` CLI
 
-Run from the repository root with `bun apps/cli/walkcache.ts …`, or use `bun run walkcache -- …`.
+Run from the repository root with `bun apps/cli/deja.ts …`, or use `bun run deja -- …`.
 The executable imports only the plugin implementations named by configuration; the orchestrator in
 `packages/core` has no OpenClaw, Maestro, React, filesystem, demo, or platform dependency.
 
 ```sh
 # From the validated Android fixture, after `. ./scripts/env.sh` and build/install:
-bun ../../apps/cli/walkcache.ts --help
-bun ../../apps/cli/walkcache.ts explore checkout --config walkcache.config.json
-bun ../../apps/cli/walkcache.ts run checkout --config walkcache.config.json
-bun ../../apps/cli/walkcache.ts remember checkout --flow evidence/repaired-checkout.yaml \
-  --config walkcache.config.json
-bun ../../apps/cli/walkcache.ts list --config walkcache.config.json
-bun ../../apps/cli/walkcache.ts inspect .walkcache/reports/latest.json \
-  --config walkcache.config.json
+bun ../../apps/cli/deja.ts --help
+bun ../../apps/cli/deja.ts explore checkout --config deja.config.json
+bun ../../apps/cli/deja.ts run checkout --config deja.config.json
+bun ../../apps/cli/deja.ts remember checkout --flow flows/repaired-checkout.yaml \
+  --config deja.config.json
+bun ../../apps/cli/deja.ts list --config deja.config.json
+bun ../../apps/cli/deja.ts inspect .deja/reports/latest.json \
+  --config deja.config.json
 ```
 
-The combined [`walkcache.config.json`](../../spikes/001-android-walkcache/walkcache.config.json)
+The combined [`deja.config.json`](../../spikes/001-android-deja/deja.config.json)
 explicitly names workspace, app/build/device, fixture-only credentials, provider/model, bounded
 timeouts, executable names, MCP proxy, and the WALK-007 two-file repair policy. `maestro` and
-`openclaw` resolve through the sourced fixture `PATH`; `WALKCACHE_MAESTRO`,
-`WALKCACHE_OPENCLAW`, and `WALKCACHE_TIMEOUT_MS` can override defaults when the corresponding
+`openclaw` resolve through the sourced fixture `PATH`; `DEJA_MAESTRO`,
+`DEJA_OPENCLAW`, and `DEJA_TIMEOUT_MS` can override defaults when the corresponding
 JSON fields are omitted. Android SDK/Java locations come only from the environment and are not
 serialized into reports.
 
@@ -29,12 +29,12 @@ factory: a warm hit never constructs OpenClaw/MCP or invokes a model. A normal m
 verified cold lifecycle. A stale-build miss goes directly to bounded selector repair; core never
 substitutes blind exploration after a repair rejection. Product assertion and unknown failures
 stop without repair. `remember` independently verifies YAML and never saves a failed candidate.
-Generated YAML still runs directly with `maestro test` and has no WalkCache/LLM dependency.
+Generated YAML still runs directly with `maestro test` and has no Déjà/LLM dependency.
 
 Output always includes outcome, cache status/reason, model-call basis, duration, assertions, repair
 count, YAML/report paths, errors/failure category, artifacts, and diff state. Repair output includes
 the exact proposed source diff and `autoCommit: false`. Reports are atomic under ignored
-`.walkcache/reports/`; raw model, screen, and subprocess logs stay ignored. Terminal and JSON output
+`.deja/reports/`; raw model, screen, and subprocess logs stay ignored. Terminal and JSON output
 redacts configured fixture values, credentials-like fields, workspace/home absolute paths. Generated
 YAML may contain deterministic fixture inputs but is never printed by the CLI summary.
 
@@ -71,7 +71,7 @@ not generalized semantic correctness or a remote vector service.
 
 ## WALK-010 Web boundary
 
-[`spikes/002-web-walkcache`](../../spikes/002-web-walkcache/README.md) adds a distinct Maestro Web
+[`spikes/002-web-deja`](../../spikes/002-web-deja/README.md) adds a distinct Maestro Web
 execution adapter for the installed 2.12.0 Beta Chromium runtime. Its configuration explicitly
 requires `platform: web`, `browser: chromium`, an adapter identity, loopback `appId`, `device:
 chromium`, browser settings, and a static build tree. The adapter owns browser command selection,
@@ -88,7 +88,7 @@ speedup claim is made. Actual commands/results are linked from the Web fixture R
 
 ## WALK-011 iOS boundary
 
-[`spikes/003-ios-walkcache`](../../spikes/003-ios-walkcache/README.md) adds a distinct native iOS
+[`spikes/003-ios-deja`](../../spikes/003-ios-deja/README.md) adds a distinct native iOS
 execution adapter. Configuration requires `platform: ios`, a fixture bundle identifier, an `.app`
 build tree, an explicit simulator UDID, and adapter identity. The adapter hashes every regular file
 and relative path in the native bundle, includes the adapter in exact cache identity, and executes

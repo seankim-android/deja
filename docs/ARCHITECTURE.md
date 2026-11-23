@@ -1,4 +1,4 @@
-# Déjà (formerly WalkCache) architecture
+# Déjà architecture
 
 This document describes the implementation in this repository, not a proposed general framework.
 The CLI and local fixture adapters are the product surface; the preserved spikes and curated evidence
@@ -29,7 +29,7 @@ validation continues                   independent full-flow verification
                                   atomic verified persistence/replacement
 ```
 
-`WalkCache.run` performs storage lookup before either lazy plugin factory is called. A warm hit never
+`Deja.run` performs storage lookup before either lazy plugin factory is called. A warm hit never
 constructs `OpenClawWalkExplorer`, its model/MCP client, or a repairer. Cold exploration and repair
 are not concurrent fallback branches. After a repair rejection, core does not substitute blind cold
 exploration.
@@ -84,7 +84,7 @@ exact match for:
 - adapter and browser when supplied by an adapter (required by Web); and
 - a recomputed SHA-256 of the canonical stored flow, equal to its metadata checksum.
 
-Flow paths must remain regular files beneath `.walkcache/flows` after symlink resolution. Missing
+Flow paths must remain regular files beneath `.deja/flows` after symlink resolution. Missing
 flows, stale builds, identity mismatches, unreferenced/temporary flows, and a failed latest validation
 never become hits. Malformed JSON, unsupported schemas, invalid/duplicate identities, checksum
 mismatches, or path escapes raise `InvalidWalkMemoryError`; entries are not silently discarded to
@@ -171,7 +171,7 @@ boundary. Nested subflows, duplicate login commands, second launches, containmen
 identity/checksum mismatches, missing observations, and mismatched contract accounting fail closed.
 Segment storage is separate from goal memory and content-checks reusable YAML. Runner failure
 performs no goal write; goal metadata failure preserves its old bytes and never mutates verified
-segment bytes. Ordinary `WalkCache.run` then replays the stored composed flow under the unchanged
+segment bytes. Ordinary `Deja.run` then replays the stored composed flow under the unchanged
 exact identity and zero-model lookup behavior.
 
 See [the WALK-018 composition guide](SUBFLOW_COMPOSITION.md) for curated YAML, clean-state and failure
@@ -180,9 +180,9 @@ limits. No new device execution is claimed.
 
 ## Memory schema
 
-The CLI-default `LocalWalkStore` uses the `.walkcache/memory/walks.json` envelope at schema **2**.
+The CLI-default `LocalWalkStore` uses the `.deja/memory/walks.json` envelope at schema **2**.
 The same `StoredWalk` logical contract is stored relationally by the second local `SQLiteWalkStore`
-in `.walkcache/memory/walks.sqlite` (`PRAGMA user_version = 2`), with separate ordered history tables:
+in `.deja/memory/walks.sqlite` (`PRAGMA user_version = 2`), with separate ordered history tables:
 
 ```ts
 type WalkMemory = {
@@ -251,7 +251,7 @@ submetrics. These numbers are not automatically a comparable cold/warm benchmark
 Verified flow files are content-addressed:
 
 ```text
-.walkcache/flows/<normalized-goal-slug>/<platform>-<flow-sha256>.yaml
+.deja/flows/<normalized-goal-slug>/<platform>-<flow-sha256>.yaml
 ```
 
 Both stores write/rename the flow before atomically replacing metadata. `LocalWalkStore` replaces
@@ -270,13 +270,13 @@ workspace. Deterministic rename failures and a real trigger-aborted SQLite trans
 power loss, drive failures, every crash point, and concurrent-writer conflicts are not certified.
 See `packages/store-sqlite/README.md` for setup and durability boundaries.
 
-Reports are written under `.walkcache/reports/<command>-<time>-<pid>.json`, then `latest.json` is
+Reports are written under `.deja/reports/<command>-<time>-<pid>.json`, then `latest.json` is
 atomically replaced. Runner artifacts retain separate `stdout.log`, `stderr.log`, and combined
-`output.log`. Cold/remember attempts and repair evidence stay under ignored `.walkcache/attempts/`
-and `.walkcache/patches/`; accepted repair attempts also preserve the exact previous metadata/flow
+`output.log`. Cold/remember attempts and repair evidence stay under ignored `.deja/attempts/`
+and `.deja/patches/`; accepted repair attempts also preserve the exact previous metadata/flow
 bytes. Raw logs and runtime state are never curated automatically.
 
-The optional viewer accepts only valid report-declared artifacts under `.walkcache`, with canonical
+The optional viewer accepts only valid report-declared artifacts under `.deja`, with canonical
 path/symlink checks and response redaction. It has read-only local `GET` endpoints and no command or
 write path. Core and CLI do not depend on it.
 

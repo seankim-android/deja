@@ -1,0 +1,31 @@
+url: http://127.0.0.1:4174
+---
+- openLink: http://127.0.0.1:4174
+- assertVisible:
+    id: screen_login
+- assertVisible: Déjà Web Shop
+- tapOn:
+    id: username
+- inputText: qa@deja.dev
+- assertVisible: qa@deja.dev
+- tapOn:
+    id: password
+- inputText: testing123
+- tapOn:
+    id: login_button
+- assertVisible:
+    id: screen_catalog
+- assertVisible: Mochi sticker pack
+- assertVisible: $5.00 · 6 stickers
+- tapOn:
+    id: add_to_cart
+- assertVisible:
+    id: screen_cart
+- assertVisible: 1 × Mochi sticker pack
+- assertVisible: "Total: $5.00"
+- tapOn:
+    id: checkout_button
+- assertVisible:
+    id: order_confirmation
+- assertVisible: Order confirmed
+- assertVisible: "Order WC-1001 · Mochi sticker pack"

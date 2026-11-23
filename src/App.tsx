@@ -336,9 +336,9 @@ export default function App() {
   return (
     <div className="viewer-shell">
       <header className="topbar">
-        <a className="brand" href="/" aria-label="WalkCache local viewer home">
+        <a className="brand" href="/" aria-label="Déjà local viewer home">
           <span className="brand-mark">WC</span>
-          <span><strong>WALKCACHE</strong><small>LOCAL RUN VIEWER</small></span>
+          <span><strong>DEJA</strong><small>LOCAL RUN VIEWER</small></span>
         </a>
         <div className="topbar-meta"><span className="local-indicator">127.0.0.1</span><span className="read-badge">READ ONLY</span></div>
       </header>
@@ -374,7 +374,7 @@ export default function App() {
                 {indexLoading ? 'Reading…' : 'Refresh'}
               </button>
             </div>
-            <p className="sidebar-note">Latest .walkcache/reports JSON, capped at 50.</p>
+            <p className="sidebar-note">Latest .deja/reports JSON, capped at 50.</p>
             {runList.state === 'unavailable' && <div className="sidebar-state"><strong>Viewer API unavailable</strong><p>{runList.message}</p></div>}
             {runList.state === 'ready' && runList.reports.length === 0 && !indexLoading && (
               <div className="sidebar-state"><strong>No local reports</strong><p>This is empty, not a pass. Select a fixture or use the CLI.</p></div>
@@ -390,7 +390,7 @@ export default function App() {
               ))}
             </nav>
           </section>
-          <div className="security-note"><strong>Bounded inspection</strong><p>No run controls. No uploads. Only declared .walkcache artifacts are read.</p></div>
+          <div className="security-note"><strong>Bounded inspection</strong><p>No run controls. No uploads. Only declared .deja artifacts are read.</p></div>
         </aside>
         <main>
           {selection ? (
@@ -407,13 +407,13 @@ export default function App() {
           )}
           <section className="cli-fallback" aria-label="Headless CLI fallback">
             <div><p className="eyebrow">Headless fallback / always available</p><h2>The CLI does not need this viewer.</h2><p>Run from the configured workspace. Inspection is read-only; lifecycle commands stay explicit in the terminal.</p></div>
-            <div className="cli-command"><span>$</span><code>bun run walkcache -- inspect .walkcache/reports/latest.json --config walkcache.config.json</code></div>
-            <div className="cli-command"><span>$</span><code>bun run walkcache -- list --config walkcache.config.json</code></div>
+            <div className="cli-command"><span>$</span><code>bun run deja -- inspect .deja/reports/latest.json --config deja.config.json</code></div>
+            <div className="cli-command"><span>$</span><code>bun run deja -- list --config deja.config.json</code></div>
             <p className="fallback-note">If the viewer is stopped or unavailable, these commands provide the same outcome, metrics, artifact paths, failures, and diffs.</p>
           </section>
         </main>
       </div>
-      <footer><span>WALKCACHE / SCHEMA V1</span><span>NO ARBITRARY FILE LOADS · NO COMMAND EXECUTION · NO AUTO-COMMIT</span></footer>
+      <footer><span>DEJA / SCHEMA V1</span><span>NO ARBITRARY FILE LOADS · NO COMMAND EXECUTION · NO AUTO-COMMIT</span></footer>
     </div>
   )
 }

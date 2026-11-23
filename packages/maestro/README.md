@@ -6,15 +6,15 @@
 import { runMaestro } from './src/index.ts'
 
 const result = await runMaestro({
-  executable: process.env.WALKCACHE_MAESTRO!,
+  executable: process.env.DEJA_MAESTRO!,
   device: 'emulator-5554',
   platform: 'android',
   workspaceRoot: '/path/to/workspace',
-  flowPath: '.walkcache/flows/checkout/android.yaml',
+  flowPath: '.deja/flows/checkout/android.yaml',
   timeoutMs: 120_000,
   androidSdkRoot: process.env.ANDROID_HOME,
   javaHome: process.env.JAVA_HOME,
-  artifacts: { directory: '.walkcache/reports/checkout' },
+  artifacts: { directory: '.deja/reports/checkout' },
 })
 ```
 
@@ -27,7 +27,7 @@ Generic interfaces alone are never treated as platform proof.
 Flows must resolve to a regular file inside the canonical workspace, including after following
 symlinks. Artifact directories have the same boundary. When configured, the runner writes
 `stdout.log`, `stderr.log`, and combined `output.log` in that directory. These are generated run
-artifacts and should live under an ignored directory such as `.walkcache/`.
+artifacts and should live under an ignored directory such as `.deja/`.
 
 Every result preserves separate and combined output, ISO start/end timestamps, wall-clock and
 monotonic durations, exit code/signal, timeout state, pass/fail, and structured `errors`. Error

@@ -67,8 +67,8 @@ async function clearAndroidApp(configuration: ExploreConfiguration) {
 
 function mcpEnvironment(configuration: ExploreConfiguration, executable: string) {
   const env: Record<string, string> = {
-    WALKCACHE_MAESTRO: executable,
-    WALKCACHE_DEVICE: configuration.device,
+    DEJA_MAESTRO: executable,
+    DEJA_DEVICE: configuration.device,
     MAESTRO_CLI_NO_ANALYTICS: '1',
     MAESTRO_CLI_ANALYSIS_NOTIFICATION_DISABLED: 'true',
   }
@@ -134,7 +134,7 @@ export class OpenClawWalkExplorer implements WalkExplorer {
     }
     const attemptDirectory = resolve(
       root,
-      `.walkcache/attempts/explore-${Date.now()}-${process.pid}`,
+      `.deja/attempts/explore-${Date.now()}-${process.pid}`,
     )
     const report = await runColdExploration({
       goal: request.identity.goal,

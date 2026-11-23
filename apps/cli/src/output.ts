@@ -5,15 +5,15 @@ import type {
 } from '../../../packages/core/src/index.ts'
 import { redactJson, type Redactor } from './redaction.ts'
 
-export const HELP = `WalkCache — explore once, replay without a model, repair only bounded staleness.
+export const HELP = `Déjà — explore once, replay without a model, repair only bounded staleness.
 
 Usage:
-  walkcache explore <goal> [--config <file>] [--json]
-  walkcache run <goal> [--config <file>] [--json]
-  walkcache remember <goal> --flow <candidate.yaml> [--config <file>] [--json]
-  walkcache list [--config <file>] [--json]
-  walkcache inspect <report> [--config <file>] [--json]
-  walkcache help
+  deja explore <goal> [--config <file>] [--json]
+  deja run <goal> [--config <file>] [--json]
+  deja remember <goal> --flow <candidate.yaml> [--config <file>] [--json]
+  deja list [--config <file>] [--json]
+  deja inspect <report> [--config <file>] [--json]
+  deja help
 
 Commands:
   explore   Force verified cold exploration and store only a passing candidate.
@@ -25,8 +25,8 @@ Commands:
   inspect   Summarize a saved run result, artifact paths, failures, and source diffs.
 
 Options:
-  --config <file>  Combined fixture/plugin configuration (default: ./walkcache.config.json).
-  --flow <file>    Candidate YAML for remember; independently runnable without WalkCache.
+  --config <file>  Combined fixture/plugin configuration (default: ./deja.config.json).
+  --flow <file>    Candidate YAML for remember; independently runnable without Déjà.
   --json           Emit a redacted machine-readable result instead of human-readable text.
   -h, --help       Show help without loading configuration or constructing plugins.
 
@@ -45,7 +45,7 @@ Exit codes:
   4  Invalid/corrupt local memory; quarantine it and use cold exploration to recover.
 
 YAML verification and replay always invoke standalone Maestro flows. No YAML depends on
-WalkCache or an LLM after it has been written.
+Déjà or an LLM after it has been written.
 `
 
 export function renderResult(

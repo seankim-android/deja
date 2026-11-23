@@ -2,16 +2,16 @@
 
 WALK-018 demonstrates one deliberately narrow composition: reuse a verified Android login segment in
 the materially different goal **“Sign in and check out Mochi sticker pack.”** It does not infer a
-route, choose a subflow with a model, or add a second cache. `WalkCache.run`, exact goal identity,
+route, choose a subflow with a model, or add a second cache. `Deja.run`, exact goal identity,
 lookup ordering, semantic retrieval, and repair orchestration are unchanged. Composition is an
 explicit operation that always executes the complete expanded journey before storing it.
 
 ## Typed contract and exact identity
 
-[`login-contract.json`](../spikes/001-android-walkcache/evidence/walk018/login-contract.json) is a
+[`login-contract.json`](../spikes/001-android-deja/evidence/walk018/login-contract.json) is a
 closed schema-1 `SubflowContract` validated by `packages/core/src/subflow.ts`:
 
-- **Identity:** `dev.walkcache.checkout`, Android, `maestro/v1`, APK/build SHA-256
+- **Identity:** `dev.deja.checkout`, Android, `maestro/v1`, APK/build SHA-256
   `6aec5fea876938db14007ba3dbcb91f698832fe855886abd9dea1e7b28861759`.
 - **Inputs:** required `username` (`text`) and `password` (`credential`). Input values are not legal
   contract-metadata fields. The YAML retains only the already accepted WALK-020 test-fixture values,
@@ -25,8 +25,8 @@ closed schema-1 `SubflowContract` validated by `packages/core/src/subflow.ts`:
 
 Unknown fields, raw input values, arbitrary screen text/UI dumps, path escapes, missing conditions,
 duplicate names, and unsupported versions are rejected. `LocalVerifiedSubflowStore` stores the actual
-YAML at `.walkcache/segments/login-v1/android-<sha256>.yaml` and its closed index at
-`.walkcache/segments/index.json`. Lookup requires the same app/platform/schema/build plus optional
+YAML at `.deja/segments/login-v1/android-<sha256>.yaml` and its closed index at
+`.deja/segments/index.json`. Lookup requires the same app/platform/schema/build plus optional
 adapter/browser identity, verifies the current file checksum, and fails closed on invalid metadata.
 It never performs semantic segment selection.
 
@@ -47,8 +47,8 @@ password steps/values. The reference is relative from peer directories, so it re
 both required locations:
 
 ```text
-candidate: .walkcache/composed/<goal>/candidate.yaml
-persisted: .walkcache/flows/<goal>/<platform>-<composed-sha256>.yaml
+candidate: .deja/composed/<goal>/candidate.yaml
+persisted: .deja/flows/<goal>/<platform>-<composed-sha256>.yaml
 reference: ../../segments/login-v1/android-<login-sha256>.yaml
 ```
 
@@ -69,9 +69,9 @@ without following a preexisting goal-directory or composed-root link to an exter
 
 Curated artifacts:
 
-- [Independently reusable login YAML](../spikes/001-android-walkcache/evidence/walk018/segments/login-v1/android-c415a62dae8b1346213ac1f92c5201d2a8c17e01d98c84e6ab979f4d785f3266.yaml), SHA-256 `c415a62dae8b1346213ac1f92c5201d2a8c17e01d98c84e6ab979f4d785f3266`;
-- [New checkout continuation](../spikes/001-android-walkcache/evidence/walk018/continuation/checkout.yaml); and
-- [Composed YAML](../spikes/001-android-walkcache/evidence/walk018/composed/sign-in-and-check-out-mochi-sticker-pack/candidate.yaml), SHA-256 `59778cf6a4dd43d2cac304e2af0145fd6ffde695031e8154221832f5295908ab`.
+- [Independently reusable login YAML](../spikes/001-android-deja/evidence/walk018/segments/login-v1/android-c415a62dae8b1346213ac1f92c5201d2a8c17e01d98c84e6ab979f4d785f3266.yaml), SHA-256 `c415a62dae8b1346213ac1f92c5201d2a8c17e01d98c84e6ab979f4d785f3266`;
+- [New checkout continuation](../spikes/001-android-deja/evidence/walk018/continuation/checkout.yaml); and
+- [Composed YAML](../spikes/001-android-deja/evidence/walk018/composed/sign-in-and-check-out-mochi-sticker-pack/candidate.yaml), SHA-256 `59778cf6a4dd43d2cac304e2af0145fd6ffde695031e8154221832f5295908ab`.
 
 | Reported separately | Reused login | New checkout continuation | Complete expanded journey |
 | --- | ---: | ---: | ---: |
@@ -86,7 +86,7 @@ WALK-018 used no explorer or model client for derivation, composition, verificat
 
 ## Clean-state proof and preservation
 
-[`walk018-verification.json`](../spikes/001-android-walkcache/evidence/walk018/walk018-verification.json)
+[`walk018-verification.json`](../spikes/001-android-deja/evidence/walk018/walk018-verification.json)
 and its six raw deterministic runner logs plus one canonical-output attack log record this
 independently runnable sequence in isolated
 temporary storage:
@@ -97,7 +97,7 @@ temporary storage:
 3. Compose by reference and execute the complete candidate from clean state **before** goal
    persistence: 22 product steps, all 14 assertions, final `Order confirmed` and exact
    `Order #WC-1001 · Mochi sticker pack` assertions passed.
-4. Save the composed walk, then invoke ordinary `WalkCache.run`. The stored `runFlow` reference still
+4. Save the composed walk, then invoke ordinary `Deja.run`. The stored `runFlow` reference still
    resolves; exact status is `hit`, outcome `passed`, model calls `0`, explorer constructions `0`,
    and all 14 assertions execute from clean state again.
 5. Recompose the same goal with the unchanged YAML and an injected missing `checkout_button`. The
@@ -133,13 +133,13 @@ passing verification. It proves the same login bytes, previous flow, and previou
 unchanged and no new goal hit is manufactured. Segment-store tests likewise prove flow/index write
 failures preserve an earlier verified segment byte-for-byte and orphan YAML is not loaded.
 
-Evidence logs: [login](../spikes/001-android-walkcache/evidence/walk018/walk018-login-verification.log),
-[clean composed run](../spikes/001-android-walkcache/evidence/walk018/walk018-clean-state-composition.log),
-[stored exact replay](../spikes/001-android-walkcache/evidence/walk018/walk018-exact-replay.log),
-[failed recomposition](../spikes/001-android-walkcache/evidence/walk018/walk018-failed-composition.log),
-[wrong final text](../spikes/001-android-walkcache/evidence/walk018/walk018-wrong-final-text.log), and
-[late second clean launch](../spikes/001-android-walkcache/evidence/walk018/walk018-late-second-clear-launch.log), and
-[canonical output containment](../spikes/001-android-walkcache/evidence/walk018/walk018-canonical-output-containment.log).
+Evidence logs: [login](../spikes/001-android-deja/evidence/walk018/walk018-login-verification.log),
+[clean composed run](../spikes/001-android-deja/evidence/walk018/walk018-clean-state-composition.log),
+[stored exact replay](../spikes/001-android-deja/evidence/walk018/walk018-exact-replay.log),
+[failed recomposition](../spikes/001-android-deja/evidence/walk018/walk018-failed-composition.log),
+[wrong final text](../spikes/001-android-deja/evidence/walk018/walk018-wrong-final-text.log), and
+[late second clean launch](../spikes/001-android-deja/evidence/walk018/walk018-late-second-clear-launch.log), and
+[canonical output containment](../spikes/001-android-deja/evidence/walk018/walk018-canonical-output-containment.log).
 
 ## Exact provenance and reproduction
 

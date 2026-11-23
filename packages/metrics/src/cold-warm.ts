@@ -78,7 +78,7 @@ export const METRIC_BOUNDARIES = {
     'Every executed Maestro flow launches the fixture with clearState: true and asserts the exact Order #WC-1001 product outcome.',
   ],
   cold: {
-    start: 'Immediately before spawning bun scripts/walkcache.ts explore checkout --config explore.config.json.',
+    start: 'Immediately before spawning bun scripts/deja.ts explore checkout --config explore.config.json.',
     end: 'After that CLI process exits, including its final report write.',
     included: [
       'Bun/CLI startup, configuration loading, APK fingerprinting, and attempt setup.',
@@ -90,7 +90,7 @@ export const METRIC_BOUNDARIES = {
     internalTimers: 'runReport.durationMs is the internal lifecycle; explorationDurationMs and verificationDurationMs are nested components, not alternatives to command wall time.',
   },
   warm: {
-    start: 'Immediately before spawning bun scripts/walkcache.ts run checkout.',
+    start: 'Immediately before spawning bun scripts/deja.ts run checkout.',
     end: 'After that CLI process exits, including validation-history persistence and its final report write.',
     included: [
       'Bun/CLI startup, APK fingerprinting, exact cache lookup, and stored-flow loading.',
@@ -221,7 +221,7 @@ export function compareColdWarm(samples: MetricSample[]) {
       },
     },
     historicalOnly: {
-      source: 'spikes/001-android-walkcache/evidence/run-summary.json',
+      source: 'spikes/001-android-deja/evidence/run-summary.json',
       samplesMs: [24_824, 24_510],
       excludedFromComparableAggregates: true,
       reason: 'Historical WALK-001 warm runs used earlier/non-series conditions and have no matching full cold command-wall measurement.',
@@ -323,6 +323,6 @@ because the direct \`run\` path spawns neither Maestro MCP nor OpenClaw; this is
 ## Historical evidence (not comparable)
 
 The 24.824 s and 24.510 s WALK-001 runs remain historical-only in
-\`spikes/001-android-walkcache/evidence/run-summary.json\`. They are excluded from every aggregate above.
+\`spikes/001-android-deja/evidence/run-summary.json\`. They are excluded from every aggregate above.
 `
 }

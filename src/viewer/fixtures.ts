@@ -13,30 +13,30 @@ export type ViewerFixture = {
 
 const identity = {
   goal: 'checkout',
-  appId: 'dev.walkcache.checkout',
+  appId: 'dev.deja.checkout',
   platform: 'android',
   flowSchemaVersion: 'maestro/v1',
   buildFingerprint: '1de8864ea046b64d124ece93ca97b0ae69d11d1fc3d39a89ff405f0e2dd2262d',
 }
 const coldSha = 'a04eb69edc7081f24b5e8a11c5ef573d398724ba9b5619d37519e41f1a0b6c72'
 const repairedSha = 'be212808db3b372a6178a8f6ef03ca8894342b0edb021ab8cb9283c7319da07c'
-const coldYamlPath = '.walkcache/flows/checkout/fixture-checkout.yaml'
-const repairedYamlPath = '.walkcache/flows/checkout/fixture-repaired-checkout.yaml'
-const repairDiffPath = '.walkcache/patches/fixture-repair/proposed.diff'
-const coldYaml = `appId: dev.walkcache.checkout
+const coldYamlPath = '.deja/flows/checkout/fixture-checkout.yaml'
+const repairedYamlPath = '.deja/flows/checkout/fixture-repaired-checkout.yaml'
+const repairDiffPath = '.deja/patches/fixture-repair/proposed.diff'
+const coldYaml = `appId: dev.deja.checkout
 ---
 - launchApp:
     clearState: true
-- assertVisible: WalkCache Shop
+- assertVisible: Déjà Shop
 - tapOn: Add to cart
 - tapOn: Checkout
 - assertVisible: Order confirmed
 `
-const repairedYaml = `appId: dev.walkcache.checkout
+const repairedYaml = `appId: dev.deja.checkout
 ---
 - launchApp:
     clearState: true
-- assertVisible: WalkCache Shop
+- assertVisible: Déjà Shop
 - tapOn:
     id: add_to_cart
 - tapOn:
@@ -90,8 +90,8 @@ const coldReport: RunResult = {
   yamlPath: coldYamlPath,
   artifacts: [
     { kind: 'yaml', path: coldYamlPath, sha256: coldSha },
-    { kind: 'model-metrics', path: '.walkcache/reports/fixture-cold/model-metrics.json' },
-    { kind: 'output', path: '.walkcache/reports/fixture-cold/output.log' },
+    { kind: 'model-metrics', path: '.deja/reports/fixture-cold/model-metrics.json' },
+    { kind: 'output', path: '.deja/reports/fixture-cold/output.log' },
   ],
   diffs: [],
 }
@@ -110,7 +110,7 @@ const warmReport: RunResult = {
   yamlPath: coldYamlPath,
   artifacts: [
     { kind: 'yaml', path: coldYamlPath, sha256: coldSha },
-    { kind: 'output', path: '.walkcache/reports/fixture-warm/output.log' },
+    { kind: 'output', path: '.deja/reports/fixture-warm/output.log' },
   ],
   diffs: [],
 }
@@ -138,7 +138,7 @@ const repairReport: RunResult = {
   artifacts: [
     { kind: 'yaml', path: repairedYamlPath, sha256: repairedSha },
     { kind: 'diff', path: repairDiffPath },
-    { kind: 'repair-report', path: '.walkcache/patches/fixture-repair/repair-report.json' },
+    { kind: 'repair-report', path: '.deja/patches/fixture-repair/repair-report.json' },
   ],
   diffs: [{
     path: repairDiffPath,
@@ -163,11 +163,11 @@ const regressionReport: RunResult = {
   failure: {
     category: 'product_assertion', advisory: true, repairEligible: false,
     failingStep: 'assertVisible: Order confirmed',
-    rawArtifactPath: '.walkcache/reports/fixture-regression/output.log',
+    rawArtifactPath: '.deja/reports/fixture-regression/output.log',
   },
   artifacts: [
     { kind: 'yaml', path: coldYamlPath, sha256: coldSha },
-    { kind: 'output', path: '.walkcache/reports/fixture-regression/output.log' },
+    { kind: 'output', path: '.deja/reports/fixture-regression/output.log' },
   ],
   diffs: [],
   errors: ['Meaningful product assertion failed; repair was not attempted'],
@@ -182,7 +182,7 @@ export const fixtures: Record<FixtureName, ViewerFixture> = {
     name: 'cold', label: 'Cold discovery', entry: entry('cold', coldReport),
     artifacts: {
       [coldYamlPath]: coldYaml,
-      '.walkcache/reports/fixture-cold/model-metrics.json': JSON.stringify({
+      '.deja/reports/fixture-cold/model-metrics.json': JSON.stringify({
         explorationMs: 70_220, verificationMs: 25_131, modelCalls: 13, source: 'fixture-only',
       }, null, 2),
     },
@@ -203,7 +203,7 @@ export const fixtures: Record<FixtureName, ViewerFixture> = {
     artifacts: {
       [repairedYamlPath]: repairedYaml,
       [repairDiffPath]: repairDiff,
-      '.walkcache/patches/fixture-repair/repair-report.json': JSON.stringify({
+      '.deja/patches/fixture-repair/repair-report.json': JSON.stringify({
         status: 'repaired', attempts: 1, independentlyVerified: true, autoCommit: false,
       }, null, 2),
     },
