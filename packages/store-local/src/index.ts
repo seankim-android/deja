@@ -3,6 +3,8 @@ import { lstatSync, realpathSync, statSync } from 'node:fs'
 import { mkdir, readFile, realpath, rename, stat, writeFile } from 'node:fs/promises'
 import { dirname, isAbsolute, relative, resolve, sep } from 'node:path'
 import {
+  ExpectedClosureMismatchError,
+  ExpectedFlowChecksumMismatchError,
   normalizeGoal as normalizeGoalContract,
   type CandidateSnapshot,
   type ExplorationDetails,
@@ -239,8 +241,8 @@ function validateWalk(value: unknown, legacy = false, schemaVersion = LOCAL_MEMO
     throw new InvalidWalkMemoryError('lastValidation must equal the latest history entry for the stored flow')
   }
   if (value.origin !== undefined && value.origin !== 'remember' && value.origin !== 'explore' &&
-      value.origin !== 'repair') {
-    throw new InvalidWalkMemoryError('walk origin must be remember, explore, or repair')
+      value.origin !== 'repair' && value.origin !== 'replayed-on-new-build') {
+    throw new InvalidWalkMemoryError('walk origin must be remember, explore, repair, or replayed-on-new-build')
   }
   if (value.repairHistory !== undefined &&
       (!Array.isArray(value.repairHistory) || value.repairHistory.length === 0)) {
@@ -256,6 +258,9 @@ function validateWalk(value: unknown, legacy = false, schemaVersion = LOCAL_MEMO
   }
   const subflowFiles = value.subflowFiles === undefined ? undefined : readStoredFlowFiles(value.subflowFiles)
   if (subflowFiles === null) throw new InvalidWalkMemoryError('walk subflowFiles is invalid')
+  if (value.legacyClosure !== undefined && (value.legacyClosure !== true || schemaVersion < 3)) {
+    throw new InvalidWalkMemoryError('walk legacyClosure is invalid')
+  }
   return {
     goal: value.goal,
     goalKey: value.goalKey,
@@ -268,6 +273,7 @@ function validateWalk(value: unknown, legacy = false, schemaVersion = LOCAL_MEMO
     flowPath: value.flowPath,
     flowSha256: value.flowSha256,
     ...(subflowFiles ? { subflowFiles } : {}),
+    ...(value.legacyClosure ? { legacyClosure: true as const } : {}),
     lastValidation,
     validationHistory: history,
     ...(value.origin ? { origin: value.origin } : {}),
@@ -389,7 +395,9 @@ export class LocalWalkStore implements WalkStore {
 
   private async writeMemory(memory: WalkMemory) {
     const metadata = canonicalMetadataTarget(this.workspaceRoot, this.memoryPath)
-    const walks = memory.walks.map(walk => ({ ...walk, subflowFiles: walk.subflowFiles ?? [] }))
+    // A walk from before schema 3 has no stored subflows: mark it so lookup misses instead of guessing.
+    const walks = memory.walks.map(walk => walk.subflowFiles
+      ? walk : { ...walk, subflowFiles: [], legacyClosure: true as const })
     await this.atomicWrite(metadata.path, `${JSON.stringify({ ...memory, walks }, null, 2)}\n`)
   }
 
@@ -423,8 +431,12 @@ export class LocalWalkStore implements WalkStore {
     }
     if (repair) readRepairProvenance(repair.repair)
     const closure = await collectFlowClosure(root, candidate)
-    if (options.expectedClosureSha256 !== undefined && closure.sha256 !== options.expectedClosureSha256) {
-      throw new Error('The candidate or a file it runs changed after it was verified; nothing was stored')
+    const mainSha256 = closure.files.find(file => file.path === closure.main)!.sha256
+    if (options.expectedFlowSha256 !== undefined && options.expectedFlowSha256 !== mainSha256) {
+      throw new ExpectedFlowChecksumMismatchError(options.expectedFlowSha256, mainSha256)
+    }
+    if (options.expectedClosureSha256 !== undefined && options.expectedClosureSha256 !== closure.sha256) {
+      throw new ExpectedClosureMismatchError(options.expectedClosureSha256, closure.sha256)
     }
     const plan = planStoredClosure(
       closure,
@@ -506,7 +518,10 @@ export class LocalWalkStore implements WalkStore {
     if (sha256(await readFile(flowPath)) !== walk.flowSha256) {
       throw new InvalidWalkMemoryError(`stored flow checksum does not match ${walk.flowPath}`)
     }
-    const subflows = await checkStoredSubflows(await this.canonicalRoot(), walk.flowPath, walk.subflowFiles)
+    const subflows = await checkStoredSubflows(
+      await this.canonicalRoot(), walk.flowPath, walk.subflowFiles, walk.legacyClosure === true,
+    )
+    if (subflows.status === 'legacy') return { status: 'miss', reason: 'legacy-closure-unknown' }
     if (subflows.status === 'missing') return { status: 'miss', reason: 'missing-flow' }
     if (subflows.status === 'invalid') throw new InvalidWalkMemoryError(subflows.message)
     return { status: 'hit', walk, flowPath }
@@ -532,7 +547,10 @@ export class LocalWalkStore implements WalkStore {
     if (sha256(await readFile(flowPath)) !== walk.flowSha256) {
       throw new InvalidWalkMemoryError(`stored flow checksum does not match ${walk.flowPath}`)
     }
-    const subflows = await checkStoredSubflows(await this.canonicalRoot(), walk.flowPath, walk.subflowFiles)
+    const subflows = await checkStoredSubflows(
+      await this.canonicalRoot(), walk.flowPath, walk.subflowFiles, walk.legacyClosure === true,
+    )
+    if (subflows.status === 'legacy') return { status: 'miss', reason: 'legacy-closure-unknown' }
     if (subflows.status === 'missing') return { status: 'miss', reason: 'missing-flow' }
     if (subflows.status === 'invalid') throw new InvalidWalkMemoryError(subflows.message)
     return { status: 'hit', walk, flowPath }

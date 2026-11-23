@@ -95,21 +95,24 @@ all of them (DEJA-2). `remember` asks the store for a snapshot of the candidate 
 runs, verifies that copy, and persists exactly those bytes; persistence refuses if the closure no
 longer matches the snapshot's checksum (`expectedClosureSha256`). References are read with the `yaml`
 package. A flow that is not valid YAML, an absolute path, a variable, a NUL byte, a cycle, a hidden
-file (`.env*`), a key file (`*.pem`, `*.key`, ...), two spellings that differ only in case, and any
+file or folder (`.env`, `.secrets/`, `.git/`, checked on the path and after symlinks; only the dotted folders the main flow itself sits under, like `.maestro`, are allowed), a key file (`*.pem`, `*.key`, `*.env`, ...), two spellings that differ only in case, and any
 reference outside the workspace (by path or through a symlink) reject the flow, and nothing is
 written. Other scripts are copied verbatim, so keep secrets out of them. The closure goes to
 `.deja/flows/<goal>/<platform>-<closure sha>/` with its relative layout, and each extra file is
 recorded in `subflowFiles` (`path`, `sha256`). A changed subflow is a different closure folder.
 Lookup checks every stored file: a changed one is refused like a changed main flow, a missing one
 is `missing-flow`, and the references are read again from the stored flows, so metadata that lost
-a file cannot hide it. A flow that runs nothing keeps the one-file layout and records `[]`.
+a file cannot hide it (a hard error, not a miss, for schema 3 data that changed on disk).
+The stale-build replay runs a snapshot of the stored closure and persists it with
+`expectedFlowSha256` and `expectedClosureSha256`; `ExpectedClosureMismatchError` is handled like
+`ExpectedFlowChecksumMismatchError` (a failed result, nothing written). A flow that runs nothing keeps the one-file layout and records `[]`.
 Nested references resolve lexically (`dir-symlink/../x` collapses `..` before the OS would), and the
 files are hashed just before Maestro reads them, the same window the main flow has.
 
 Memory schema 3 requires `subflowFiles` on every walk (SQLite: `walks.has_files` and the
 `walk_files` table). Schemas 1 and 2 still load, with no file list and no subflow check; the next
-write rewrites them as schema 3 with an empty list, so a legacy flow that runs files then refuses
-until it is remembered again. An older binary refuses a schema 3 store.
+write rewrites them as schema 3 with an empty list and `legacyClosure`, so a legacy flow that runs
+files is a `legacy-closure-unknown` miss (and re-explores) until it is remembered again. An older binary refuses a schema 3 store.
 
 `lookupPreviousSuccessful` is diagnostic-only. It can locate the earlier successful build/flow for
 bounded repair but is not a warm hit and does not authorize persistence by itself.
@@ -228,7 +231,7 @@ type StoredWalk = {
     at: string
     flowSha256: string
   }>
-  origin?: 'remember' | 'explore' | 'repair'
+  origin?: 'remember' | 'explore' | 'repair' | 'replayed-on-new-build'
   exploration?: {
     explorationDurationMs: number | null
     verificationDurationMs: number | null
@@ -326,6 +329,21 @@ operator to reviewed YAML plus `remember`. Neither has a repair plugin: a stale 
 returns `repair-rejected`, never a blind Android repair or cold fallback. iOS support is limited to the
 real simulator `remember`/warm-replay/invalidation/regression behavior evidenced by WALK-011.
 
+WALK-021 adds one opt-in exception for iOS, `staleBuild: "replay-last-verified"` (core dependency
+`staleBuild`). On a stale-build miss with no repairer, core asks `lookupPreviousSuccessful` for the
+latest verified walk of the same goal/app/platform/schema/adapter/browser. The store re-checks its
+checksum, and core replays it once against the new build. A pass is stored for the new fingerprint
+through `persistVerifiedCandidate` with the same bytes and `origin: 'replayed-on-new-build'`, after a
+second checksum check. Core passes the replayed bytes' sha256 as `expectedFlowSha256`, and both stores
+refuse before writing anything if the file no longer matches. A pass **replaces the old build's
+entry** and **restarts its validation and repair history**; rolling back to the old build triggers
+another replay. Keeping history across builds is tracked as DEJA-12. A fail stores nothing for the new
+build and leaves the old build's walk verified, so each later run on that build replays again. The
+policy is iOS only: config rejects it elsewhere, and core returns the ordinary rejection for any
+other `identity.platform`. It never repairs or explores and
+never constructs a lazy factory. Both results carry `replayedOnNewBuild` with the previous build
+fingerprint, so a report always shows the walk ran on a build it was not verified on.
+
 ## Metrics and secrets
 
 Cold `modelCalls` means OpenClaw `assistantTurns` (completed assistant/provider round trips), not
@@ -360,9 +378,9 @@ src/, viewer/             Optional read-only local report viewer
 spikes/001-.../           Preserved Android fixture and curated evidence
 spikes/002-.../           Chromium fixture and explicit unsupported boundaries
 spikes/003-.../           Native iOS simulator fixture and reviewed-YAML/replay evidence
-tickets/, TODO.md         Repo-local delivery backlog and evidence index
+TODO.md                   Standing rules; the backlog is in Linear (team DEJA)
 ```
 
-Platform support is established only by real execution evidence linked from the corresponding ticket,
+Platform support is established only by real execution evidence in this repo (`spikes/*/evidence/`),
 never inferred from these interfaces. See the root [README](../README.md) for reproduction,
 support, CLI, and cleanup instructions.

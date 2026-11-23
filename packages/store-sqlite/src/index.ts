@@ -4,6 +4,8 @@ import { lstatSync, mkdirSync, realpathSync, statSync } from 'node:fs'
 import { mkdir, readFile, realpath, rename, stat, writeFile } from 'node:fs/promises'
 import { dirname, isAbsolute, relative, resolve, sep } from 'node:path'
 import {
+  ExpectedClosureMismatchError,
+  ExpectedFlowChecksumMismatchError,
   normalizeGoal as normalizeGoalContract,
   type CandidateSnapshot,
   type ExplorationDetails,
@@ -269,7 +271,8 @@ export class SQLiteWalkStore implements WalkStore {
           last_at TEXT NOT NULL,
           origin TEXT,
           exploration_json TEXT,
-          has_files INTEGER NOT NULL DEFAULT 0
+          has_files INTEGER NOT NULL DEFAULT 0,
+          legacy_closure INTEGER NOT NULL DEFAULT 0
         );
         CREATE TABLE IF NOT EXISTS validation_history (
           walk_id INTEGER NOT NULL REFERENCES walks(id) ON DELETE CASCADE,
@@ -300,6 +303,9 @@ export class SQLiteWalkStore implements WalkStore {
       if (!columns.some(column => column.name === 'has_files')) {
         // A schema 2 database: its walks stay unchecked until the next write rewrites them as schema 3.
         this.database.exec('ALTER TABLE walks ADD COLUMN has_files INTEGER NOT NULL DEFAULT 0')
+      }
+      if (!columns.some(column => column.name === 'legacy_closure')) {
+        this.database.exec('ALTER TABLE walks ADD COLUMN legacy_closure INTEGER NOT NULL DEFAULT 0')
       }
       // A new database is schema 3 at once. An older one is bumped in the transaction that rewrites it.
       if (prior === 0) this.database.exec(`PRAGMA user_version = ${SQLITE_MEMORY_SCHEMA_VERSION}`)
@@ -364,8 +370,9 @@ export class SQLiteWalkStore implements WalkStore {
         latest.flowSha256 !== row.flow_sha256) {
       throw new InvalidWalkMemoryError('lastValidation must equal the latest history entry for the stored flow')
     }
-    if (row.origin !== null && row.origin !== 'remember' && row.origin !== 'explore' && row.origin !== 'repair') {
-      throw new InvalidWalkMemoryError('walk origin must be remember, explore, or repair')
+    if (row.origin !== null && row.origin !== 'remember' && row.origin !== 'explore' &&
+        row.origin !== 'repair' && row.origin !== 'replayed-on-new-build') {
+      throw new InvalidWalkMemoryError('walk origin must be remember, explore, repair, or replayed-on-new-build')
     }
     let exploration: ExplorationDetails | undefined
     if (row.exploration_json !== null) {
@@ -402,6 +409,9 @@ export class SQLiteWalkStore implements WalkStore {
       if (read === null) throw new InvalidWalkMemoryError('walk subflowFiles is invalid')
       subflowFiles = read
     }
+    if (row.legacy_closure !== undefined && row.legacy_closure !== 0 && row.legacy_closure !== 1) {
+      throw new InvalidWalkMemoryError('walk legacyClosure is invalid')
+    }
     const walk: StoredWalk = {
       goal: row.goal,
       goalKey: row.goal_key,
@@ -414,6 +424,7 @@ export class SQLiteWalkStore implements WalkStore {
       flowPath: row.flow_path,
       flowSha256: row.flow_sha256,
       ...(subflowFiles ? { subflowFiles } : {}),
+      ...(row.legacy_closure === 1 ? { legacyClosure: true as const } : {}),
       lastValidation,
       validationHistory,
       ...(row.origin !== null ? { origin: row.origin as StoredWalk['origin'] } : {}),
@@ -460,13 +471,14 @@ export class SQLiteWalkStore implements WalkStore {
     const result = database.query(`
       INSERT INTO walks (
         goal, goal_key, app_id, platform, flow_schema_version, build_fingerprint,
-        adapter, browser, flow_path, flow_sha256, last_passed, last_at, origin, exploration_json, has_files
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1) RETURNING id
+        adapter, browser, flow_path, flow_sha256, last_passed, last_at, origin, exploration_json, has_files, legacy_closure
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?) RETURNING id
     `).get(
       walk.goal, walk.goalKey, walk.appId, walk.platform, walk.flowSchemaVersion,
       walk.buildFingerprint, walk.adapter ?? null, walk.browser ?? null, walk.flowPath,
       walk.flowSha256, walk.lastValidation.passed ? 1 : 0, walk.lastValidation.at,
       walk.origin ?? null, walk.exploration ? JSON.stringify(walk.exploration) : null,
+      walk.legacyClosure || !walk.subflowFiles ? 1 : 0,
     ) as { id: number }
     for (const [position, validation] of walk.validationHistory.entries()) {
       database.query(
@@ -566,8 +578,12 @@ export class SQLiteWalkStore implements WalkStore {
     }
     if (repair) readRepairProvenance(repair.repair)
     const closure = await collectFlowClosure(root, candidate)
-    if (options.expectedClosureSha256 !== undefined && closure.sha256 !== options.expectedClosureSha256) {
-      throw new Error('The candidate or a file it runs changed after it was verified; nothing was stored')
+    const mainSha256 = closure.files.find(file => file.path === closure.main)!.sha256
+    if (options.expectedFlowSha256 !== undefined && options.expectedFlowSha256 !== mainSha256) {
+      throw new ExpectedFlowChecksumMismatchError(options.expectedFlowSha256, mainSha256)
+    }
+    if (options.expectedClosureSha256 !== undefined && options.expectedClosureSha256 !== closure.sha256) {
+      throw new ExpectedClosureMismatchError(options.expectedClosureSha256, closure.sha256)
     }
     const plan = planStoredClosure(
       closure,
@@ -654,7 +670,10 @@ export class SQLiteWalkStore implements WalkStore {
     if (sha256(await readFile(flowPath)) !== walk.flowSha256) {
       throw new InvalidWalkMemoryError(`stored flow checksum does not match ${walk.flowPath}`)
     }
-    const subflows = await checkStoredSubflows(await this.canonicalRoot(), walk.flowPath, walk.subflowFiles)
+    const subflows = await checkStoredSubflows(
+      await this.canonicalRoot(), walk.flowPath, walk.subflowFiles, walk.legacyClosure === true,
+    )
+    if (subflows.status === 'legacy') return { status: 'miss', reason: 'legacy-closure-unknown' }
     if (subflows.status === 'missing') return { status: 'miss', reason: 'missing-flow' }
     if (subflows.status === 'invalid') throw new InvalidWalkMemoryError(subflows.message)
     return { status: 'hit', walk, flowPath }
@@ -677,7 +696,10 @@ export class SQLiteWalkStore implements WalkStore {
     if (sha256(await readFile(flowPath)) !== walk.flowSha256) {
       throw new InvalidWalkMemoryError(`stored flow checksum does not match ${walk.flowPath}`)
     }
-    const subflows = await checkStoredSubflows(await this.canonicalRoot(), walk.flowPath, walk.subflowFiles)
+    const subflows = await checkStoredSubflows(
+      await this.canonicalRoot(), walk.flowPath, walk.subflowFiles, walk.legacyClosure === true,
+    )
+    if (subflows.status === 'legacy') return { status: 'miss', reason: 'legacy-closure-unknown' }
     if (subflows.status === 'missing') return { status: 'miss', reason: 'missing-flow' }
     if (subflows.status === 'invalid') throw new InvalidWalkMemoryError(subflows.message)
     return { status: 'hit', walk, flowPath }

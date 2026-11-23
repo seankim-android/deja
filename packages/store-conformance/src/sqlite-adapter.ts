@@ -52,10 +52,10 @@ function cloneFirstWalk(database: Database, invalid = false) {
   const inserted = database.query(`
     INSERT INTO walks (
       goal, goal_key, app_id, platform, flow_schema_version, build_fingerprint,
-      adapter, browser, flow_path, flow_sha256, last_passed, last_at, origin, exploration_json, has_files
+      adapter, browser, flow_path, flow_sha256, last_passed, last_at, origin, exploration_json, has_files, legacy_closure
     )
     SELECT goal, ?, app_id, platform, flow_schema_version, build_fingerprint,
-      adapter, browser, flow_path, ?, last_passed, last_at, origin, exploration_json, has_files
+      adapter, browser, flow_path, ?, last_passed, last_at, origin, exploration_json, has_files, legacy_closure
     FROM walks ORDER BY id LIMIT 1 RETURNING id
   `).get(
     invalid ? 'broken' : original.goal_key,

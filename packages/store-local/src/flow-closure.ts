@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { mkdir, readFile, realpath, stat, writeFile } from 'node:fs/promises'
-import { basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path'
+import { dirname, isAbsolute, relative, resolve, sep } from 'node:path'
 import { findFlowReferences, FlowReferenceError, type StoredFlowFile } from '@deja-qa/core'
 
 /** A flow's references cannot be stored safely, so the flow is not remembered. */
@@ -39,11 +39,20 @@ function inside(root: string, candidate: string) {
   return candidate !== root && candidate.startsWith(`${root}${sep}`)
 }
 
-/** Dotfiles (`.env*`) and common key files are never copied into storage. */
-function secretLooking(path: string) {
-  const name = basename(path)
-  return name.startsWith('.') || /\.(?:pem|key|p12|pfx|jks|keystore)$/i.test(name) ||
-    /^(?:id_rsa|id_ed25519|id_ecdsa|credentials)/i.test(name)
+/** Key and environment files are never copied into storage, whatever their folder. */
+function secretName(name: string) {
+  return /\.(?:pem|key|p12|pfx|jks|keystore|env)$/i.test(name) || /^(?:id_rsa|id_ed25519|id_ecdsa|credentials)/i.test(name)
+}
+
+/**
+ * A hidden folder or file (`.env`, `.secrets/`, `.git/`, `.aws/`) is not copied unless the main flow
+ * itself sits under one of that name (the workspace's own `.maestro` or `.deja`). Both the path as
+ * resolved and the path after symlinks are checked, so an innocent name cannot point at a secret.
+ */
+function secretLooking(root: string, path: string, allowedHidden: Set<string>) {
+  const segments = posix(relative(root, path)).split('/')
+  return segments.some(segment => segment.startsWith('.') && !allowedHidden.has(segment)) ||
+    secretName(segments.at(-1) ?? '')
 }
 
 function posix(path: string) {
@@ -69,6 +78,9 @@ function commonDirectory(directories: string[]) {
  */
 export async function collectFlowClosure(root: string, main: string): Promise<FlowClosure> {
   const found = new Map<string, Buffer>()
+  const allowedHidden = new Set(
+    posix(relative(root, main)).split('/').slice(0, -1).filter(segment => segment.startsWith('.')),
+  )
 
   async function read(path: string) {
     let canonical: string
@@ -82,6 +94,11 @@ export async function collectFlowClosure(root: string, main: string): Promise<Fl
     }
     if (!inside(root, canonical)) {
       throw new FlowClosureError(`reference escapes the workspace: ${posix(relative(root, path))}`)
+    }
+    if (path !== main && (secretLooking(root, path, allowedHidden) || secretLooking(root, canonical, allowedHidden))) {
+      throw new FlowClosureError(
+        `reference looks like a secret or hidden file and would be copied into .deja/flows: ${posix(relative(root, path))}`,
+      )
     }
     const info = await stat(canonical)
     if (!info.isFile() || info.size > MAX_FILE_BYTES) {
@@ -120,11 +137,6 @@ export async function collectFlowClosure(root: string, main: string): Promise<Fl
     for (const reference of references) {
       if (reference.path.includes('\0')) {
         throw new FlowClosureError('reference contains a NUL byte')
-      }
-      if (secretLooking(reference.path)) {
-        throw new FlowClosureError(
-          `reference looks like a secret or hidden file and would be copied into .deja/flows: ${reference.path}`,
-        )
       }
       if (reference.path.includes('$') || reference.path.includes('{')) {
         throw new FlowClosureError(`reference uses a variable, so its file cannot be known: ${reference.path}`)
@@ -213,6 +225,7 @@ export function readStoredFlowFiles(value: unknown): StoredFlowFile[] | null {
 
 export type StoredClosureCheck =
   | { status: 'ok' }
+  | { status: 'legacy' }
   | { status: 'missing'; path: string }
   | { status: 'invalid'; message: string }
 
@@ -220,14 +233,28 @@ export type StoredClosureCheck =
  * Check that every file a stored walk runs is present, under `.deja/flows`, and unchanged, and that
  * the metadata lists everything the stored flows run. The last part re-reads the references from
  * the stored bytes, so metadata that was stripped or cut short cannot hide a file. `subflowFiles`
- * is undefined only for a walk from before memory schema 3, which is not checked.
+ * is undefined only for a walk from before memory schema 3, which is not checked. A walk marked
+ * `legacyClosure` was migrated from one: it is `legacy` when its flow runs files, since those were
+ * never stored.
  */
 export async function checkStoredSubflows(
   root: string,
   flowPath: string,
   subflowFiles: StoredFlowFile[] | undefined,
+  legacyClosure = false,
 ): Promise<StoredClosureCheck> {
-  if (!subflowFiles) return { status: 'ok' }
+  if (!subflowFiles || legacyClosure) {
+    // Stored before subflows were kept. It replays only if its flow runs no file at all.
+    try {
+      return findFlowReferences((await readFile(resolve(root, flowPath))).toString('utf8')).length > 0
+        ? { status: 'legacy' } : { status: 'ok' }
+    } catch (error) {
+      if (error instanceof FlowReferenceError || (error as NodeJS.ErrnoException).code === 'ENOENT') {
+        return { status: 'legacy' }
+      }
+      throw error
+    }
+  }
   const flowRoot = resolve(root, '.deja/flows')
   for (const file of subflowFiles) {
     const candidate = resolve(root, file.path)
