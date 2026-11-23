@@ -361,24 +361,17 @@ export class ConsumerFlows {
         // adapter and browser is fine, even if other entries of that goal belong to another platform.
         const sameGoal = manifest.walks.filter(entry => normalizeGoal(entry.goal).key === normalizeGoal(walk.goal).key)
         if (!sameGoal.some(sameIdentity)) {
-          const steps = [
-            { field: 'appId' as const, keep: (entry: ManifestWalk) => entry.appId === wanted.appId, config: wanted.appId, of: (entry: ManifestWalk) => entry.appId },
-            { field: 'platform' as const, keep: (entry: ManifestWalk) => entry.platform === wanted.platform, config: wanted.platform, of: (entry: ManifestWalk) => entry.platform },
-            { field: 'adapter' as const, keep: (entry: ManifestWalk) => entry.adapter === wanted.adapter, config: wanted.adapter, of: (entry: ManifestWalk) => entry.adapter },
-            { field: 'browser' as const, keep: (entry: ManifestWalk) => (entry.browser ?? null) === wanted.browser, config: wanted.browser, of: (entry: ManifestWalk) => entry.browser ?? null },
-          ]
-          let remaining = sameGoal
-          for (const step of steps) {
-            const next = remaining.filter(step.keep)
-            if (next.length === 0) {
-              entries.push({
-                ...base, status: 'identity-mismatch',
-                identity: { field: step.field, manifest: step.of(walk), config: step.config },
-              })
-              break
-            }
-            remaining = next
-          }
+          // The first field where this entry itself differs from the config, in the order `run` checks.
+          const own = [
+            { field: 'appId' as const, entry: walk.appId, config: wanted.appId },
+            { field: 'platform' as const, entry: walk.platform, config: wanted.platform },
+            { field: 'adapter' as const, entry: walk.adapter, config: wanted.adapter },
+            { field: 'browser' as const, entry: walk.browser ?? null, config: wanted.browser },
+          ].find(item => item.entry !== item.config)!
+          entries.push({
+            ...base, status: 'identity-mismatch',
+            identity: { field: own.field, manifest: own.entry, config: own.config },
+          })
           continue
         }
       }

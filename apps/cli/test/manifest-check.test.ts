@@ -318,6 +318,13 @@ describe('deja manifest check', () => {
       const identity = { appId: walk.appId, platform: 'web', adapter: 'maestro-web/v1', browser: 'chromium' }
       await write([web])
       expect((await flows.check({ identity })).entries[0]).toMatchObject({ status: 'identity-mismatch', identity: { field: 'browser', manifest: 'firefox', config: 'chromium' } })
+      // Each refused entry names a field where it itself differs from the config.
+      await write([{ ...walk, appId: 'dev.other.app' }, other])
+      const refused = (await flows.check({ identity: { ...identity, platform: 'ios', adapter: 'maestro-ios/v1', browser: null } })).entries
+      expect(refused.map(entry => entry.identity)).toEqual([
+        { field: 'appId', manifest: 'dev.other.app', config: walk.appId },
+        { field: 'platform', manifest: 'android', config: 'ios' },
+      ])
       await write([walk, other])
       const both = await flows.check({ identity: { ...identity, platform: 'ios', adapter: 'maestro-ios/v1', browser: null } })
       expect(both.entries.map(entry => entry.status)).toEqual(['ok', 'ok'])
@@ -326,28 +333,49 @@ describe('deja manifest check', () => {
     }
   })
 
-  test('the printed fix is safe to paste: quoted, escaped, `--` before a dash goal, and --config as typed', async () => {
+  test('the printed fix is plain single-quote quoting, runs the same in bash and dash, and is withheld for unsafe names', async () => {
     const { temporary, root } = await remembered()
     try {
-      const goals = ['it\'s $(touch PWNED) `x` "q" *', '-rf', 'two\nlines\u001b[2K', 'a b']
+      const safe = ['it\'s $(touch PWNED) `x` "q" *', '-rf', 'a b', 'a\'; touch PWNED_DASH; #', 'back\\slash']
+      const unsafe = [
+        'a\u0001\'; touch PWNED_DASH2; #', 'two\nlines\u001b[2K', 'c1\u0085x', 'sep\u2028x', 'para\u2029x',
+        'arabic\u061cx', 'bidi\u202ex', 'zero\u200bwidth',
+      ]
+      const goals = [...safe, ...unsafe]
       const walk = JSON.parse(await readFile(join(root, 'deja.walks.json'), 'utf8')).walks[0]
       const walks = goals.map(goal => ({ ...walk, goal, closureSha256: '0'.repeat(64) }))
       await writeFile(join(root, 'deja.walks.json'), JSON.stringify({ manifestVersion: 1, hashVersion: 1, walks }))
-      const result = await check(root, '--json')
-      const fixes: string[] = JSON.parse(result.stdout).entries.map((entry: { fix: string }) => entry.fix)
-      expect(fixes).toHaveLength(4)
-      for (const [index, goal] of goals.entries()) {
-        const words = spawnSync('bash', ['-c', `printf '%s\\0' ${fixes[index].replace(/^deja /, '').replace(/ --config \S+/, '')}`], { cwd: root }).stdout.toString().split('\0').slice(0, -1)
-        expect(words).toContain(goal)
-        expect(words).toContain('--verify')
+      const json = JSON.parse((await check(root, '--json')).stdout)
+      expect(json.entries).toHaveLength(goals.length)
+      const shells = ['/bin/bash', ...(await stat('/bin/dash').then(() => ['/bin/dash'], () => {
+        console.warn('manifest-check test: /bin/dash is missing, so the dash run is skipped')
+        return []
+      }))]
+      for (const entry of json.entries as { goal: string; fix?: string | null; fixUnsafe?: boolean }[]) {
+        if (unsafe.includes(entry.goal)) {
+          expect(entry.fix).toBeNull()
+          expect(entry.fixUnsafe).toBe(true)
+          continue
+        }
+        expect(entry.fix).not.toContain('$\'')
+        for (const shellPath of shells) {
+          // Print each word the shell makes of the fix line, minus the program name.
+          const line = (entry.fix as string).replace(/^deja /, '').replace(/ --config \S+/, '')
+          const words = spawnSync(shellPath, ['-c', `printf '%s\\0' ${line}`], { cwd: root }).stdout.toString().split('\0').slice(0, -1)
+          expect(words).toContain(entry.goal)
+          expect(words).toContain('--verify')
+        }
       }
-      await expect(stat(join(root, 'PWNED'))).rejects.toBeDefined()
-      expect(fixes[1]).toMatch(/^deja run --verify --config \S+ -- '-rf'$/)
-      // The table shows no raw control character.
+      for (const name of ['PWNED', 'PWNED_DASH', 'PWNED_DASH2']) await expect(stat(join(root, name))).rejects.toBeDefined()
+      expect(json.entries[1].fix).toMatch(/^deja run --verify --config \S+ -- '-rf'$/)
       const text = (await check(root)).stdout
+      // No raw unsafe character, and no runnable line for an unsafe name.
       // eslint-disable-next-line no-control-regex
-      expect(text).not.toMatch(/[\u0000-\u0008\u000b-\u001f\u007f]/)
+      expect(text).not.toMatch(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u061c\u200b-\u200f\u2028-\u202e\u2060\u2066-\u2069\ufeff]/)
       expect(text).toContain('two\\nlines\\x1b[2K')
+      for (const escaped of ['\\x85', '\\u2028', '\\u2029', '\\u061c', '\\u202e', '\\u200b']) expect(text).toContain(escaped)
+      expect(text).toContain("by hand (its name contains characters that can't be shown safely)")
+      expect(text).not.toContain("$'")
     } finally {
       await rm(temporary, { recursive: true, force: true })
     }
@@ -361,7 +389,10 @@ describe('deja manifest check', () => {
       const result = run(['manifest', 'check'])
       expect(result.status).toBe(8)
       expect(result.stdout).toContain('fix: deja run today --verify\n')
-      expect(run(['run', '--', 'x', '--verify']).stderr).not.toContain('Unknown option')
+      // The goal after `--` is read as given, dash and option-like words included.
+      const dashed = run(['run', '--json', '--', '-rf', '--verify'])
+      expect(dashed.stderr).not.toContain('Unknown option')
+      expect(`${dashed.stdout}${dashed.stderr}`).toContain('-rf --verify')
     } finally {
       await rm(temporary, { recursive: true, force: true })
     }

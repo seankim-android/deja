@@ -7,52 +7,60 @@ import { redactJson, type Redactor } from './redaction.ts'
 /** Exit code when any manifest entry no longer matches its files. Not used by any other command. */
 export const MANIFEST_MISMATCH_EXIT = 8
 
-// Control characters, DEL, C1 controls and the bidi controls: never printed raw.
+// Control characters, DEL, C1 controls, bidi controls (U+061C, U+200E/F, U+202A-E, U+2066-9), line and
+// paragraph separators, and the zero-width characters: never printed raw, and never in a fix line.
 // eslint-disable-next-line no-control-regex
-const UNSAFE = /[\u0000-\u001f\u007f-\u009f\u200e\u200f\u202a-\u202e\u2066-\u2069]/u
+const UNSAFE = /[\u0000-\u001f\u007f-\u009f\u061c\u200b-\u200f\u2028-\u202e\u2060\u2066-\u2069\ufeff]/u
 
-const NAMED: Record<string, string> = { '\n': 'n', '\r': 'r', '\t': 't', '\\': '\\' }
+const NAMED: Record<string, string> = { '\n': 'n', '\r': 'r', '\t': 't' }
 
-function escapeChars(text: string, quote: string) {
+/** Text for the screen: unsafe characters shown as escapes. */
+function display(text: string) {
   return [...text].map(character => {
-    if (NAMED[character]) return `\\${NAMED[character]}`
-    if (character === quote) return `\\${quote}`
     if (!UNSAFE.test(character)) return character
+    if (NAMED[character]) return `\\${NAMED[character]}`
     const code = character.codePointAt(0)!
     return code < 0x100 ? `\\x${code.toString(16).padStart(2, '0')}` : `\\u${code.toString(16).padStart(4, '0')}`
   }).join('')
 }
 
-/** Text for the screen: control and bidi characters shown as escapes. */
-function display(text: string) {
-  return [...text].map(character =>
-    UNSAFE.test(character) ? escapeChars(character, '') : character).join('')
-}
-
-/** Quote a word for bash or zsh, only when it needs it. Control characters use $'...'. */
+/** POSIX single-quote quoting only, valid in sh, dash, bash and zsh. The word must be safe. */
 function shell(word: string) {
   if (/^[A-Za-z0-9_./:@%+=-]+$/.test(word) && !word.startsWith('-')) return word
-  if (UNSAFE.test(word)) return `$'${escapeChars(word, "'")}'`
   return `'${word.replace(/'/g, `'\\''`)}'`
 }
 
 /**
  * The command that fixes one failing entry, or null when the fix is to restore or repair a file or
  * change the manifest or config. `config` is the `--config` value as typed; the default is omitted.
- * A goal that starts with `-` goes after `--`, so the CLI does not read it as an option.
+ * A goal that starts with `-` goes after `--`, so the CLI does not read it as an option. Plain
+ * single-quote quoting is the only quoting used. A goal, path or config word with an unsafe
+ * character gets no runnable line (`unsafe`): no quoting of it is the same in every shell.
  */
-export function fixCommand(entry: ManifestCheckEntry, config?: string): string | null {
+export function fixCommand(entry: ManifestCheckEntry, config?: string): string | { unsafe: string } | null {
+  if (entry.status !== 'flow-changed' && entry.status !== 'assertions-changed') return null
+  const words = [entry.goal, ...(entry.status === 'assertions-changed' ? [entry.flow] : []), ...(config ? [config] : [])]
+  if (words.some(word => UNSAFE.test(word))) {
+    return {
+      unsafe: entry.status === 'flow-changed' ? 'deja run --verify' : 'deja remember --flow <flow> --accept-assertion-change',
+    }
+  }
   const withGoal = (command: string, flags: string[]) => {
     const all = [...flags, ...(config ? ['--config', shell(config)] : [])]
     return entry.goal.startsWith('-')
       ? `deja ${command} ${[...all, '--', shell(entry.goal)].join(' ')}`
       : `deja ${command} ${[shell(entry.goal), ...all].join(' ')}`
   }
-  if (entry.status === 'flow-changed') return withGoal('run', ['--verify'])
-  if (entry.status === 'assertions-changed') {
-    return withGoal('remember', ['--flow', shell(entry.flow), '--accept-assertion-change'])
-  }
-  return null
+  return entry.status === 'flow-changed'
+    ? withGoal('run', ['--verify'])
+    : withGoal('remember', ['--flow', shell(entry.flow), '--accept-assertion-change'])
+}
+
+/** The `fix:` text for a person. */
+function fixText(fix: string | { unsafe: string }) {
+  return typeof fix === 'string'
+    ? fix
+    : `run \`${fix.unsafe}\` for this goal by hand (its name contains characters that can't be shown safely)`
 }
 
 function render(check: ManifestCheck, config?: string) {
@@ -76,10 +84,11 @@ function render(check: ManifestCheck, config?: string) {
       lines.push(`  assertions: manifest ${entry.manifestAssertionsSha256}`, `              current  ${entry.currentAssertionsSha256}`)
     }
     const fix = fixCommand(entry, config)
-    if (fix) lines.push(`  fix: ${fix}`)
+    if (fix) lines.push(`  fix: ${fixText(fix)}`)
     if (entry.assertionsAlsoChanged) {
-      lines.push('  The assertions changed too. If --verify reports assertions-changed, review them, then run:',
-        `    ${fixCommand({ ...entry, status: 'assertions-changed' }, config)}`)
+      const remember = fixCommand({ ...entry, status: 'assertions-changed' }, config)!
+      lines.push('  The assertions changed too. If --verify reports assertions-changed, review them, then:',
+        `    ${fixText(remember)}`)
     }
   }
   if (check.untracked) {
@@ -125,6 +134,7 @@ export async function runManifestCheck(options: {
   if (options.json) {
     const entries = check.entries.map(entry => {
       const fix = fixCommand(entry, options.configGiven)
+      if (fix && typeof fix !== 'string') return { ...entry, fix: null, fixUnsafe: true }
       return { ...entry, ...(fix ? { fix } : {}) }
     })
     io.stdout(`${JSON.stringify(redactJson({

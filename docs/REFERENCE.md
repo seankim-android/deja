@@ -292,10 +292,18 @@ another platform is fine when the goal also has an entry for this config, as in 
 When the closure and the assertions both differ, the status is `flow-changed` (the same order `run`
 uses), `assertionsAlsoChanged` is `true`, and the text adds the `remember` command to use if
 `--verify` then reports `assertions-changed`. The fix command keeps your
-`--config` as typed (it is left out for the default `./deja.config.json`), shell-quotes the goal and
-paths, writes control characters as `$'...'` escapes, and puts a goal that starts with `-` after
-`--` (the CLI reads every word after `--` as a positional). Control and bidi characters in goals and
-paths are shown as escapes in the text output.
+`--config` as typed (it is left out for the default `./deja.config.json`), uses only POSIX
+single-quote quoting for the goal and paths, so the line means the same in `sh`, `dash`, `bash` and
+`zsh`, and puts a goal that starts with `-` after `--` (the CLI reads every word after `--` as a
+positional). If the goal, the flow path or the config path holds a control character, a C1 control, a
+bidi control (including U+061C), a line or paragraph separator or a zero-width character, no
+runnable line is printed: the text says to run `deja run --verify` (or `deja remember --accept-assertion-change`)
+for that goal by hand, and `--json` gives `"fix": null` and `"fixUnsafe": true`. Such characters are
+shown as escapes (`\x1b`, `\u202e`) in the text output. They are a defect in the manifest entry.
+
+Every entry is checked, including entries for another platform than the config's, even when the same
+goal also has an entry for this config. That is stricter than `run`, which never reads them. An
+entry is `identity-mismatch` only when no entry of its goal fits the config, as in `run`.
 
 Exit `0` when every entry is `ok`. Exit `8` when any entry is not. Exit `2` for a manifest that is
 malformed, of an unknown `manifestVersion` or `hashVersion`, or missing (an absent file is refused
