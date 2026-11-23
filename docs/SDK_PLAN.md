@@ -219,7 +219,7 @@ Sizes: S is under a day, M is a few days, L is a week or more.
 | Partly done: `CONTRACT_VERSION` and the API snapshots are in. Still to do: the API review and freeze | M | an API report is checked in and diffed in CI |
 | Runner-neutral store conformance package | M | a sample third-party in-memory store passes it under Vitest |
 | `deja-action` | M | a sample repo replays the Android fixture in a workflow run with 0 model calls |
-| Done: MCP server (`deja mcp`) | M | an MCP client calls `deja_run` and gets a schema-1 `RunResult` |
+| Partly done: MCP server (`deja mcp`); the simulator evidence run is still open | M | an MCP client calls `deja_run` and gets a schema-1 `RunResult` |
 | Docs site from `docs/` | S | published; every claim links to the code or evidence, like the README |
 
 ### Phase 2: wider coverage

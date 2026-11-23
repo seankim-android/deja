@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test'
-import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises'
+import { link, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
@@ -7,7 +7,7 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import { LocalWalkStore } from '@deja-qa/store-local'
 import { loadProductionConfiguration } from '../src/config.ts'
-import { confineFlow, createMcpServer, parseMcpArguments } from '../src/mcp.ts'
+import { confineFlow, createMcpServer, flowAppId, parseMcpArguments, relativizeResult } from '../src/mcp.ts'
 import { runCli } from '../src/main.ts'
 
 const fakeMaestro = resolve(import.meta.dir, '../../../packages/maestro/test/fixtures/fake-maestro.cjs')
@@ -51,12 +51,13 @@ async function workspace(config: Record<string, unknown> = {}, executable = fake
   return { temporary, root }
 }
 
-async function connect(root: string, options: { storeId?: string } = {}) {
+async function connect(root: string, options: { storeId?: string; crashReportDirectory?: string; env?: NodeJS.ProcessEnv } = {}) {
   const configuration = await loadProductionConfiguration(join(root, 'deja.config.json'))
+  const { env: extraEnv, ...serverOptions } = options
   const server = createMcpServer({
     configuration,
-    ...options,
-    env: { ...process.env, DEJA_HOME: join(root, '..', 'deja-home'), DEJA_MAESTRO: '' },
+    ...serverOptions,
+    env: { ...process.env, DEJA_HOME: join(root, '..', 'deja-home'), DEJA_MAESTRO: '', ...extraEnv },
     compiledBinary: false,
     stderr: () => {},
   })
@@ -246,6 +247,10 @@ describe('deja mcp', () => {
     await writeFile(join(root, '.deja/flows/stored.yaml'), TODAY)
     await symlink(outside, join(root, '.maestro/flows/escape.yaml'))
     await symlink(join(root, '.deja/flows/stored.yaml'), join(root, '.maestro/flows/into-deja.yaml'))
+    await writeFile(join(root, '.env'), `appId: dev.deja.fixture\nSECRET=1\n`)
+    await symlink(join(root, '.env'), join(root, '.maestro/flows/dotenv.yaml'))
+    await writeFile(join(root, '.maestro/flows/shared.yaml'), TODAY)
+    await link(join(root, '.maestro/flows/shared.yaml'), join(root, '.maestro/flows/hard.yaml'))
     await symlink(temporary, join(root, 'linked-dir'))
     await writeFile(join(root, 'notes.txt'), TODAY)
     const client = await connect(root)
@@ -260,6 +265,8 @@ describe('deja mcp', () => {
       ['.deja/../.deja/flows/stored.yaml', /under \.deja/],
       ['.maestro/flows/into-deja.yaml', /into \.deja/],
       ['.maestro/flows/missing.yaml', /does not exist/],
+      ['.maestro/flows/dotenv.yaml', /resolve to a \.yaml or \.yml/],
+      ['.maestro/flows/hard.yaml', /hard link/],
       ['notes.txt', /\.yaml or \.yml/],
       ['.maestro/flows', /\.yaml or \.yml/],
     ]
@@ -272,7 +279,8 @@ describe('deja mcp', () => {
     await expect(readFile(join(root, 'deja.walks.json'), 'utf8')).rejects.toBeDefined()
     // A symlink that stays inside the workspace is fine.
     await symlink(join(root, '.maestro/flows/today.yaml'), join(root, '.maestro/flows/alias.yaml'))
-    expect(await confineFlow(root, '.maestro/flows/alias.yaml')).toBe('.maestro/flows/alias.yaml')
+    // The canonical path is what gets verified and saved.
+    expect(await confineFlow(root, '.maestro/flows/alias.yaml')).toBe('.maestro/flows/today.yaml')
   })
 
   test('inspect reads only reports under .deja/reports', async () => {
@@ -287,6 +295,101 @@ describe('deja mcp', () => {
       expect({ report, isError: result.isError }).toEqual({ report, isError: true })
       expect(result.text).not.toContain(root)
     }
+  })
+
+  test('a flow for another app is refused; a matching or absent appId header is accepted', async () => {
+    const { root } = await workspace()
+    await writeFile(join(root, '.maestro/flows/settings.yaml'), 'appId: com.apple.Preferences\n---\n- launchApp\n- assertVisible: Settings\n')
+    await writeFile(join(root, '.maestro/flows/quoted.yaml'), `appId: "dev.deja.fixture" # ours\n---\n- launchApp\n- assertVisible: x\n`)
+    await writeFile(join(root, '.maestro/flows/bare.yaml'), '- launchApp\n- assertVisible: x\n')
+    const client = await connect(root)
+    const refused = await call(client, 'deja_remember', { goal: 'settings', flow: '.maestro/flows/settings.yaml' })
+    expect(refused.payload.error).toMatchObject({ code: 'INVALID_PATH' })
+    expect(refused.payload.error.message).toContain('does not match the configured app ID')
+    await expect(readFile(join(root, 'deja.walks.json'), 'utf8')).rejects.toBeDefined()
+    expect((await call(client, 'deja_remember', { goal: 'quoted', flow: '.maestro/flows/quoted.yaml' })).payload.outcome).toBe('remembered')
+    expect((await call(client, 'deja_remember', { goal: 'bare', flow: '.maestro/flows/bare.yaml' })).payload.outcome).toBe('remembered')
+    expect(flowAppId('appId: a.b\n---\n- x')).toBe('a.b')
+    expect(flowAppId('- launchApp:\n    appId: other\n')).toBeNull()
+  })
+
+  test('inherited property names are unknown arguments, and rerunFailed is not an argument', async () => {
+    const { root } = await workspace()
+    const client = await connect(root)
+    for (const name of ['constructor', 'toString', 'hasOwnProperty', 'rerunFailed']) {
+      const outcome = await client.callTool({ name: 'deja_run', arguments: JSON.parse(`{"goal":"today","${name}":true}`) })
+        .then(() => 'resolved', (error: Error) => error.message)
+      expect({ name, outcome }).toEqual({ name, outcome: expect.stringMatching(/Unknown argument/) })
+    }
+    const { tools } = await client.listTools()
+    expect(JSON.stringify(tools)).not.toContain('rerun')
+  })
+
+  test('deja mcp still classifies app_crash from the output and from a crash report', async () => {
+    const { temporary, root } = await workspace()
+    const reports = join(temporary, 'DiagnosticReports')
+    await mkdir(reports)
+    const client = await connect(root, { crashReportDirectory: reports })
+    expect((await call(client, 'deja_remember', { goal: 'today', flow: '.maestro/flows/today.yaml' })).payload.outcome).toBe('remembered')
+    process.env.DEJA_FAKE_MAESTRO_SCRIPT = 'crash'
+    process.env.DEJA_FAKE_MAESTRO_COUNTER = join(temporary, 'counter-output')
+    const output = await call(client, 'deja_run', { goal: 'today' })
+    expect(output.payload).toMatchObject({ outcome: 'failed', passed: false, failure: { category: 'app_crash', repairEligible: false } })
+    expect(output.payload.attempts).toBeUndefined()
+
+    // A failed replay is not reusable: save the walk again before the next run.
+    delete process.env.DEJA_FAKE_MAESTRO_SCRIPT
+    expect((await call(client, 'deja_remember', { goal: 'today', flow: '.maestro/flows/today.yaml' })).payload.outcome).toBe('remembered')
+    // No crash line in Maestro's output: only the crash report for the configured app ID says so, which
+    // proves the runner got the app ID and the report directory.
+    process.env.DEJA_FAKE_MAESTRO_SCRIPT = 'quiet-crash'
+    process.env.DEJA_FAKE_MAESTRO_COUNTER = join(temporary, 'counter-report')
+    process.env.DEJA_FAKE_CRASH_REPORT = join(reports, 'DejaFixture-2026-11-23-010203.ips')
+    process.env.DEJA_FAKE_CRASH_REPORT_BODY =
+      '{"app_name":"DejaFixture"}\n{"procName":"DejaFixture","bundleInfo":{"CFBundleIdentifier":"dev.deja.fixture"},"private":"patient"}'
+    try {
+      const report = await call(client, 'deja_run', { goal: 'today' })
+      expect(report.payload.failure).toMatchObject({ category: 'app_crash', crash: { source: 'crash-report', process: 'DejaFixture' } })
+      expect(report.text).not.toContain('patient')
+    } finally {
+      for (const name of ['DEJA_FAKE_MAESTRO_SCRIPT', 'DEJA_FAKE_MAESTRO_COUNTER', 'DEJA_FAKE_CRASH_REPORT', 'DEJA_FAKE_CRASH_REPORT_BODY']) delete process.env[name]
+    }
+  })
+
+  test('relativizeResult rewrites paths in attempts, execution and failures', () => {
+    const root = '/work/space'
+    const failure = { category: 'app_crash', advisory: true, repairEligible: false, failingStep: null, rawArtifactPath: `${root}/.deja/reports/a/output.log` } as const
+    const result = {
+      yamlPath: `${root}/flow.yaml`, failure, artifacts: [{ kind: 'output', path: `${root}/.deja/x` }],
+      attempts: [
+        { attempt: 1, passed: false, failure, artifacts: [{ kind: 'output', path: `${root}/.deja/reports/a/output.log` }] },
+        { attempt: 2, passed: true, failure: null, artifacts: [{ kind: 'output', path: `/elsewhere/${root}/y` }] },
+      ],
+      execution: { failure, artifacts: [{ kind: 'output', path: `${root}/.deja/z` }] },
+    } as never
+    const text = JSON.stringify(relativizeResult(result, [root]))
+    expect(text).not.toContain(`"${root}`)
+    expect(text).toContain('".deja/reports/a/output.log"')
+    expect(text).toContain('"flow.yaml"')
+  })
+
+  test('provider keys are redacted from error responses and results', async () => {
+    // Built at runtime so no literal key sits in the repository.
+    const providerKey = `sk-${'a1b2c3d4'.repeat(4)}`
+    const { root } = await workspace({ buildPath: `${providerKey}.app` })
+    await mkdir(join(root, `${providerKey}.app`), { recursive: true })
+    await writeFile(join(root, `${providerKey}.app/Fixture`), 'binary')
+    const envKey = ['tok', 'en', '-', 'z9y8x7w6v5u4'].join('')
+    const client = await connect(root, { env: { OPENCLAW_API_KEY: envKey } })
+    await rm(join(root, `${providerKey}.app`), { recursive: true })
+    const failed = await call(client, 'deja_run', { goal: `look at ${envKey}` })
+    expect(failed.isError).toBe(true)
+    expect(failed.payload.error.code).toBe('INTERNAL')
+    expect(failed.text).not.toContain(providerKey)
+    expect(failed.text).toContain('<redacted-secret>')
+    expect(failed.text).not.toContain(root)
+    const listed = await call(client, 'deja_inspect', { report: '.deja/reports/none.json' })
+    expect(listed.text).not.toContain(envKey)
   })
 
   test('responses are redacted like CLI reports', async () => {

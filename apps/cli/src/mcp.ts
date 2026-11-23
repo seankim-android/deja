@@ -1,4 +1,4 @@
-import { realpath, stat } from 'node:fs/promises'
+import { readFile, realpath, stat } from 'node:fs/promises'
 import { extname, isAbsolute, relative, resolve, sep } from 'node:path'
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
@@ -101,13 +101,31 @@ const TOOLS: Record<string, ToolSpec> = {
     { goal: GOAL }, { title: 'Explore a goal (spends model calls)', readOnlyHint: false, destructiveHint: false, idempotentHint: false }),
 }
 
+/**
+ * On top of the CLI's redactor: the values of key-like environment variables, and the shapes provider
+ * keys take (`sk-…`, `Bearer …`), so a key echoed by a child process or an error never reaches an agent.
+ */
+export function providerKeyRedactor(env: NodeJS.ProcessEnv): Redactor {
+  const values = Object.entries(env)
+    .filter(([name, value]) => /(?:KEY|TOKEN|SECRET|PASSWORD)/i.test(name) && typeof value === 'string' && value.length >= 8)
+    .map(([, value]) => value!)
+    .sort((left, right) => right.length - left.length)
+  return text => {
+    let redacted = text
+    for (const value of values) redacted = redacted.split(value).join('<redacted-secret>')
+    return redacted
+      .replace(/\b(?:sk|pk|rk)-[A-Za-z0-9_-]{16,}/g, '<redacted-secret>')
+      .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]{8,}/gi, 'Bearer <redacted-secret>')
+  }
+}
+
 class InputError extends Error {}
 
 function parseInput(toolSpec: ToolSpec, raw: unknown): Record<string, string> {
   const value = raw === undefined ? {} : raw
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new InputError('Arguments must be an object')
   const input = value as Record<string, unknown>
-  const unknown = Object.keys(input).filter(key => !(key in toolSpec.fields))
+  const unknown = Object.keys(input).filter(key => !Object.hasOwn(toolSpec.fields, key))
   if (unknown.length > 0) throw new InputError(`Unknown argument: ${unknown.join(', ')}`)
   const parsed: Record<string, string> = {}
   for (const [key, field] of Object.entries(toolSpec.fields)) {
@@ -145,7 +163,7 @@ function underDeja(root: string, candidate: string) {
  * `.deja/`, and (after resolving every symlink) still a file inside the real workspace. Returns the
  * workspace-relative path to hand to `remember`.
  */
-export async function confineFlow(workspaceRoot: string, flow: string): Promise<string> {
+export async function confineFlow(workspaceRoot: string, flow: string, appId?: string): Promise<string> {
   if (isAbsolute(flow)) throw new FlowPathError('flow must be a path relative to the workspace')
   if (!['.yaml', '.yml'].includes(extname(flow).toLowerCase())) throw new FlowPathError('flow must be a .yaml or .yml file')
   const root = await realpath(resolve(workspaceRoot))
@@ -161,8 +179,29 @@ export async function confineFlow(workspaceRoot: string, flow: string): Promise<
   }
   if (!inside(root, canonical)) throw new FlowPathError('flow must stay inside the workspace, symlinks included')
   if (underDeja(root, canonical)) throw new FlowPathError('flow must not resolve into .deja/')
-  if (!(await stat(canonical)).isFile()) throw new FlowPathError('flow must be a file')
-  return relative(root, lexical)
+  if (!['.yaml', '.yml'].includes(extname(canonical).toLowerCase())) {
+    throw new FlowPathError('flow must resolve to a .yaml or .yml file')
+  }
+  const info = await stat(canonical)
+  if (!info.isFile()) throw new FlowPathError('flow must be a file')
+  // realpath cannot see a hard link to a file elsewhere, so a shared inode is refused.
+  if (info.nlink > 1) throw new FlowPathError('flow must not have more than one hard link')
+  if (appId !== undefined) {
+    const declared = flowAppId(await readFile(canonical, 'utf8'))
+    if (declared !== null && declared !== appId) {
+      throw new FlowPathError(`flow appId ${JSON.stringify(declared)} does not match the configured app ID ${JSON.stringify(appId)}`)
+    }
+  }
+  // The canonical path, so a symlink swapped after this check cannot change what is verified and saved.
+  return relative(root, canonical)
+}
+
+/** The `appId:` of a Maestro flow's header (the part before the first `---`), or null when it has none. */
+export function flowAppId(text: string): string | null {
+  const header = text.split(/^---\s*$/m)[0] ?? ''
+  const match = /^appId:[ \t]*(.*?)[ \t]*(?:#.*)?$/m.exec(header)
+  if (!match) return null
+  return match[1]!.replace(/^(['"])(.*)\1$/, '$2')
 }
 
 async function confineReport(workspaceRoot: string, report: string): Promise<string> {
@@ -194,11 +233,38 @@ function errorCode(error: unknown): string {
   return 'INTERNAL'
 }
 
+/** Rewrites every absolute path under one of `roots` to be relative to it, wherever a result carries one. */
+export function relativizeResult(result: RunResult, roots: string[]): RunResult {
+  const toRelative = (path: string) => {
+    for (const base of roots) {
+      if (isAbsolute(path) && (path === base || inside(base, path))) return relative(base, path) || '.'
+    }
+    return path
+  }
+  const artifacts = (list: RunResult['artifacts']) => list.map(artifact => ({ ...artifact, path: toRelative(artifact.path) }))
+  const failure = <T extends RunResult['failure']>(value: T): T =>
+    value && value.rawArtifactPath ? { ...value, rawArtifactPath: toRelative(value.rawArtifactPath) } : value
+  return {
+    ...result,
+    yamlPath: result.yamlPath === null ? null : toRelative(result.yamlPath),
+    failure: failure(result.failure),
+    artifacts: artifacts(result.artifacts),
+    ...(result.attempts
+      ? { attempts: result.attempts.map(attempt => ({ ...attempt, failure: failure(attempt.failure), artifacts: artifacts(attempt.artifacts) })) }
+      : {}),
+    ...(result.execution
+      ? { execution: { ...result.execution, failure: failure(result.execution.failure), artifacts: artifacts(result.execution.artifacts) } }
+      : {}),
+  }
+}
+
 export type McpServerOptions = {
   configuration: ProductionConfiguration
   storeId?: string
   env?: NodeJS.ProcessEnv
   compiledBinary?: boolean
+  /** Where iOS crash reports are written; defaults to ~/Library/Logs/DiagnosticReports. */
+  crashReportDirectory?: string
   /** Where engine warnings go. Never stdout: that carries the protocol. */
   stderr?: (text: string) => void
 }
@@ -213,11 +279,13 @@ export function createMcpServer(options: McpServerOptions): Server {
     root, configuration.explore.fixtureCredentials.map(credential => credential.value),
   )
   // The workspace may be reached through a symlink; redact its real path too.
-  let redact: Redactor = baseRedact
+  let redactPaths: Redactor = baseRedact
+  const redactKeys = providerKeyRedactor(options.env ?? process.env)
+  const redact: Redactor = text => redactKeys(redactPaths(text))
   const realRoot = realpath(root).then(real => {
     if (real !== root) {
       const realRedact = createRedactor(real, configuration.explore.fixtureCredentials.map(credential => credential.value))
-      redact = text => realRedact(baseRedact(text))
+      redactPaths = text => realRedact(baseRedact(text))
     }
     return real
   }, () => root)
@@ -242,34 +310,13 @@ export function createMcpServer(options: McpServerOptions): Server {
     }
   }
 
-  const relativeArtifacts = (result: RunResult, real: string): RunResult => {
-    const toRelative = (path: string) => {
-      for (const base of [root, real]) {
-        if (isAbsolute(path) && (path === base || inside(base, path))) return relative(base, path) || '.'
-      }
-      return path
-    }
-    const artifacts = (list: RunResult['artifacts']) => list.map(artifact => ({ ...artifact, path: toRelative(artifact.path) }))
-    const failure = <T extends RunResult['failure']>(value: T): T =>
-      value && value.rawArtifactPath ? { ...value, rawArtifactPath: toRelative(value.rawArtifactPath) } : value
-    return {
-      ...result,
-      yamlPath: result.yamlPath === null ? null : toRelative(result.yamlPath),
-      failure: failure(result.failure),
-      artifacts: artifacts(result.artifacts),
-      ...(result.execution
-        ? { execution: { ...result.execution, failure: failure(result.execution.failure), artifacts: artifacts(result.execution.artifacts) } }
-        : {}),
-    }
-  }
-
   const prepare = async (capabilities: OrchestrationCapabilities) => {
     const selected = await selectEngine(configuration, { env: options.env ?? process.env })
     if (selected.warning) stderr(`${redact(selected.warning)}\n`)
     const jsonReporter = new JsonRunReporter(root, text => redact(text))
     const reporter = new EngineRunReporter(jsonReporter, selected.report)
     const { store, orchestration } = createOrchestration(
-      configuration, reporter, undefined, options.storeId, selected.resolved.executable, compiled, capabilities,
+      configuration, reporter, undefined, options.storeId, selected.resolved.executable, options.crashReportDirectory, compiled, capabilities,
     )
     return { store, orchestration, jsonReporter, engine: selected.report }
   }
@@ -284,7 +331,7 @@ export function createMcpServer(options: McpServerOptions): Server {
       context.store.acquireWriter()
       const result = await work(context)
       const real = await realRoot
-      return asResult({ ...relativeArtifacts({ ...result, engine: context.engine }, real), report: context.jsonReporter.receipt })
+      return asResult({ ...relativizeResult({ ...result, engine: context.engine }, [root, real]), report: context.jsonReporter.receipt })
     } finally {
       context.store.close()
     }
@@ -307,7 +354,7 @@ export function createMcpServer(options: McpServerOptions): Server {
       switch (entry.tool.name) {
         case 'deja_list': {
           const { store } = createOrchestration(
-            configuration, new JsonRunReporter(root, redact), undefined, options.storeId, '', compiled,
+            configuration, new JsonRunReporter(root, redact), undefined, options.storeId, '', undefined, compiled,
             { repair: false, explore: false },
           )
           try {
@@ -338,7 +385,7 @@ export function createMcpServer(options: McpServerOptions): Server {
           return await write({ repair: false, explore: false },
             ({ orchestration }) => orchestration.run(input.goal!, callOptions))
         case 'deja_remember': {
-          const flow = await confineFlow(root, input.flow!)
+          const flow = await confineFlow(root, input.flow!, configuration.explore.appId)
           return await write({ repair: false, explore: false },
             ({ orchestration }) => orchestration.remember(input.goal!, flow, callOptions))
         }
@@ -378,7 +425,7 @@ export function parseMcpArguments(argv: string[]): McpArguments {
 /** Serve on stdio until the host closes it. Stdout is the protocol; everything else goes to stderr. */
 export async function runMcpServer(
   argv: string[],
-  dependencies: { env?: NodeJS.ProcessEnv; compiledBinary?: boolean; transport?: Transport } = {},
+  dependencies: { env?: NodeJS.ProcessEnv; compiledBinary?: boolean; crashReportDirectory?: string; transport?: Transport } = {},
 ): Promise<void> {
   const parsed = parseMcpArguments(argv)
   const configuration = await loadProductionConfiguration(parsed.configPath)
@@ -387,6 +434,7 @@ export async function runMcpServer(
     ...(parsed.storeId ? { storeId: parsed.storeId } : {}),
     ...(dependencies.env ? { env: dependencies.env } : {}),
     ...(dependencies.compiledBinary !== undefined ? { compiledBinary: dependencies.compiledBinary } : {}),
+    ...(dependencies.crashReportDirectory ? { crashReportDirectory: dependencies.crashReportDirectory } : {}),
   })
   const closed = new Promise<void>(done => { server.onclose = done })
   await server.connect(dependencies.transport ?? new StdioServerTransport())

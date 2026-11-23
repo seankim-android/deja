@@ -69,6 +69,7 @@ export function createOrchestration(
   junitPath: string | undefined,
   storeId: string | undefined,
   executable: string,
+  crashReportDirectory: string | undefined,
   compiledBinary: boolean,
   /** `deja mcp` turns repair off and, for replay tools, exploration too. The CLI leaves both on. */
   capabilities: OrchestrationCapabilities = { repair: true, explore: true },
@@ -103,6 +104,9 @@ export function createOrchestration(
     device: executionAdapter.device,
     adapter: executionAdapter,
     timeoutMs: configuration.maestro.timeoutMs,
+    appId: configuration.explore.appId,
+    ...(crashReportDirectory ? { crashReportDirectory } : {}),
+    crashReportGraceMs: configuration.crashReportGraceMs,
     ...(junitPath ? { junitPath } : {}),
     ...(process.env.ANDROID_HOME || process.env.ANDROID_SDK_ROOT
       ? { androidSdkRoot: process.env.ANDROID_HOME ?? process.env.ANDROID_SDK_ROOT }

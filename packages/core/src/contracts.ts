@@ -328,7 +328,20 @@ export type SemanticLookupReport = {
 }
 
 export type FailureCategory = 'selector' | 'navigation' | 'product_assertion' |
-  'runner' | 'timeout' | 'unknown'
+  'runner' | 'timeout' | 'unknown' |
+  /** The app process died, shown by an explicit signal (see `CrashSignal`). Never repair-eligible. */
+  'app_crash'
+
+/**
+ * The explicit evidence behind an `app_crash` label. `maestro-output` is one of Maestro's own crash
+ * lines; `crash-report` is a new `.ips` for the app ID written during the run. Only the report's
+ * file name and process name are kept, never its contents.
+ */
+export type CrashSignal = {
+  source: 'maestro-output' | 'crash-report'
+  reportFile?: string
+  process?: string
+}
 
 export type WalkFailure = {
   category: FailureCategory
@@ -336,6 +349,8 @@ export type WalkFailure = {
   repairEligible: boolean
   failingStep: string | null
   rawArtifactPath: string | null
+  /** Set only with `app_crash`. */
+  crash?: CrashSignal
 }
 
 export type ArtifactKind = 'yaml' | 'output' | 'attempt' | 'repair-report' |
@@ -437,7 +452,23 @@ export type RunOutcome = 'passed' | 'remembered' | 'cold-recorded' | 'repaired' 
   /** Manifest mode: the goal has only a schema 3 walk; run `deja migrate`. */
   'needs-migration' |
   /** Manifest mode: verify passed but the assertion hash differs; only a reviewed remember accepts it. */
-  'assertions-changed'
+  'assertions-changed' |
+  /**
+   * Opt-in rerun (DEJA-7): a failed replay passed on one rerun of the same bytes, or failed twice
+   * with a different label or step. Never a pass; `attempts` holds both runs.
+   */
+  'flaky'
+
+/** One replay of the same stored bytes. `RunResult.attempts` lists them, first attempt first. */
+export type RunAttempt = {
+  attempt: 1 | 2
+  passed: boolean
+  startedAt: string
+  endedAt: string
+  durationMs: number
+  failure: WalkFailure | null
+  artifacts: RunArtifact[]
+}
 
 /**
  * Opt-in WALK-021 policy for a stale-build miss with no repairer: replay the latest verified walk's
@@ -495,6 +526,8 @@ export type RunResult = {
   repair?: RepairResult
   replayedOnNewBuild?: NewBuildReplayReport
   engine?: EngineReport
+  /** Present only when an opt-in rerun happened: both attempts, in order. */
+  attempts?: RunAttempt[]
 }
 
 export type ReportReceipt = {
