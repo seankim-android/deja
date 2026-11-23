@@ -58,6 +58,8 @@ What it doesn't do yet: cold exploration and repair are Android only. Chromium a
 
 Every number in the video comes from a run report in the repo: https://github.com/seankim-android/deja
 
+Team: u/kssc0112
+
 I'd like to know which flow you would cache first: sign-in, checkout or onboarding?
 
 ## Engagement plan (first hour)
