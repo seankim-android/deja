@@ -437,6 +437,25 @@ describe('deja mcp', () => {
       .toBe('key <redacted-secret>, header Bearer <redacted-secret>, env <redacted-secret> and <redacted-secret>')
   })
 
+  test('letters-only secrets are redacted in secret-like variables, and spaces never make a value a word', () => {
+    const env = {
+      MY_TOKEN: 'abcDEFghiJKLmnoPQRst', DB_PASSWORD: 'correct horse battery', API_SECRET: 'lowercaseonlysecret',
+      SSH_PRIVATE: 'plain-words-here', KEYBOARD: 'dvorak-layout', SEARCH_KEY: 'two words here',
+    }
+    const redact = providerKeyRedactor(env)
+    expect(redact('abcDEFghiJKLmnoPQRst')).toBe('<redacted-secret>')
+    expect(redact('pw correct horse battery!')).toBe('pw <redacted-secret>!')
+    expect(redact('lowercaseonlysecret and plain-words-here')).toBe('<redacted-secret> and <redacted-secret>')
+    expect(redact('dvorak-layout')).toBe('dvorak-layout')
+    // A space is not a word separator any more, in any variable.
+    expect(redact('two words here')).toBe('<redacted-secret>')
+  })
+
+  test('a bad configured URL is a flow path error, not a crash', () => {
+    const header = 'url: http://127.0.0.1:4173/\n---\n- tapOn: x\n'
+    expect(() => checkFlowApp(header, { appId: 'not a url', platform: 'web' })).toThrow(/not on the configured page/)
+  })
+
   test('responses are redacted like CLI reports', async () => {
     const { root } = await workspace()
     const client = await connect(root)

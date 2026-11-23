@@ -106,15 +106,20 @@ const TOOLS: Record<string, ToolSpec> = {
  * On top of the CLI's redactor: the values of key-like environment variables, and the shapes provider
  * keys take (`sk-…`, `Bearer …`), so a key echoed by a child process or an error never reaches an agent.
  */
-/** A short value of letters and separators only (`dvorak-layout`) is a word, not a key: it has no digit and is not long. */
-function looksLikeWord(value: string) {
-  return value.length < 24 && /^[A-Za-z]+(?:[-_. ][A-Za-z]+)*$/.test(value)
+/**
+ * A short, all lower-case value of letters and separators (`dvorak-layout`) is a word, not a key. Never
+ * in a variable named like a password, secret or credential, and never with a space in it: those are
+ * secrets even when they read like words.
+ */
+function looksLikeWord(name: string, value: string) {
+  if (/(?:PASSWORD|PASSWD|SECRET|PRIVATE|CREDENTIAL)/i.test(name)) return false
+  return value.length < 24 && /^[a-z]+(?:[-_.][a-z]+)*$/.test(value)
 }
 
 export function providerKeyRedactor(env: NodeJS.ProcessEnv): Redactor {
   const values = Object.entries(env)
-    .filter(([name, value]) => /(?:KEY|TOKEN|SECRET|PASSWORD)/i.test(name) && typeof value === 'string' &&
-      value.length >= 8 && !looksLikeWord(value))
+    .filter(([name, value]) => /(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|PRIVATE|CREDENTIAL)/i.test(name) && typeof value === 'string' &&
+      value.length >= 8 && !looksLikeWord(name, value))
     .map(([, value]) => value!)
     .sort((left, right) => right.length - left.length)
   return text => {
@@ -222,9 +227,9 @@ export function checkFlowApp(text: string, app: { appId: string; platform: strin
   }
   const declared = (value as { value: string }).value
   if (key === 'url') {
-    let origin: string | null = null
-    try { origin = new URL(declared).origin } catch { /* refused below */ }
-    if (origin !== new URL(app.appId).origin) {
+    let onPage = false
+    try { onPage = new URL(declared).origin === new URL(app.appId).origin } catch { /* refused below */ }
+    if (!onPage) {
       throw new FlowPathError(`flow url ${JSON.stringify(declared)} is not on the configured page ${JSON.stringify(app.appId)}`)
     }
   } else if (declared !== app.appId) {

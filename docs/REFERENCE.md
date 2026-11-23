@@ -464,8 +464,8 @@ What the server will not do, whatever a tool call says:
   app IDs such as `launchApp: {appId}` are not (DEJA-41). The canonical path is what is verified and saved. In manifest mode the store then applies the same rules as
   `deja remember`.
 - Responses use the CLI's report redaction (workspace and home paths, fixture credentials, secret-like
-  keys), plus the values of key-like environment variables (8 or more characters; a short value made only of letters
-  and separators, like `dvorak-layout`, is treated as a word and left alone), `sk-…` keys and `Bearer` tokens of 20 or more
+  keys), plus the values of key-like environment variables (8 or more characters; a short all lower-case value of letters joined by `-`, `_` or `.`, like `dvorak-layout`, is treated as a word and
+  left alone, except in variables named like a password, secret, private key or credential), `sk-…` keys and `Bearer` tokens of 20 or more
   characters. This can still hide an ordinary word that looks like a key; hiding too much is the safe side, and artifact paths are relative to the workspace.
 - One writer per store: a second `deja_run`, `deja_remember` or `deja_explore` while one is running is
   refused at once with `error.code` `STORE_LOCKED`. `deja_list` and `deja_inspect` never take the lock.
