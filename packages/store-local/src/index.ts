@@ -3,6 +3,7 @@ import { lstatSync, realpathSync, statSync } from 'node:fs'
 import { mkdir, readFile, realpath, rename, stat, writeFile } from 'node:fs/promises'
 import { dirname, isAbsolute, relative, resolve, sep } from 'node:path'
 import {
+  ExpectedFlowChecksumMismatchError,
   normalizeGoal as normalizeGoalContract,
   type ExplorationDetails,
   type LookupHit,
@@ -229,8 +230,8 @@ function validateWalk(value: unknown, legacy = false): StoredWalk {
     throw new InvalidWalkMemoryError('lastValidation must equal the latest history entry for the stored flow')
   }
   if (value.origin !== undefined && value.origin !== 'remember' && value.origin !== 'explore' &&
-      value.origin !== 'repair') {
-    throw new InvalidWalkMemoryError('walk origin must be remember, explore, or repair')
+      value.origin !== 'repair' && value.origin !== 'replayed-on-new-build') {
+    throw new InvalidWalkMemoryError('walk origin must be remember, explore, repair, or replayed-on-new-build')
   }
   if (value.repairHistory !== undefined &&
       (!Array.isArray(value.repairHistory) || value.repairHistory.length === 0)) {
@@ -403,6 +404,9 @@ export class LocalWalkStore implements WalkStore {
     if (repair) readRepairProvenance(repair.repair)
     const candidateBytes = await readFile(candidate)
     const flowSha256 = sha256(candidateBytes)
+    if (options.expectedFlowSha256 !== undefined && options.expectedFlowSha256 !== flowSha256) {
+      throw new ExpectedFlowChecksumMismatchError(options.expectedFlowSha256, flowSha256)
+    }
     const platformSlug = flowSlug(normalizeGoal(identity.platform))
     const flowPath = `.deja/flows/${flowSlug(identity.goalKey)}/${platformSlug}-${flowSha256}.yaml`
     await this.atomicWrite(resolve(root, flowPath), candidateBytes)

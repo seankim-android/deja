@@ -207,7 +207,7 @@ type StoredWalk = {
     at: string
     flowSha256: string
   }>
-  origin?: 'remember' | 'explore' | 'repair'
+  origin?: 'remember' | 'explore' | 'repair' | 'replayed-on-new-build'
   exploration?: {
     explorationDurationMs: number | null
     verificationDurationMs: number | null
@@ -304,6 +304,21 @@ Web and iOS cold exploration return `exploration-rejected` with zero model calls
 operator to reviewed YAML plus `remember`. Neither has a repair plugin: a stale static/native build
 returns `repair-rejected`, never a blind Android repair or cold fallback. iOS support is limited to the
 real simulator `remember`/warm-replay/invalidation/regression behavior evidenced by WALK-011.
+
+WALK-021 adds one opt-in exception for iOS, `staleBuild: "replay-last-verified"` (core dependency
+`staleBuild`). On a stale-build miss with no repairer, core asks `lookupPreviousSuccessful` for the
+latest verified walk of the same goal/app/platform/schema/adapter/browser. The store re-checks its
+checksum, and core replays it once against the new build. A pass is stored for the new fingerprint
+through `persistVerifiedCandidate` with the same bytes and `origin: 'replayed-on-new-build'`, after a
+second checksum check. Core passes the replayed bytes' sha256 as `expectedFlowSha256`, and both stores
+refuse before writing anything if the file no longer matches. A pass **replaces the old build's
+entry** and **restarts its validation and repair history**; rolling back to the old build triggers
+another replay. Keeping history across builds is tracked as DEJA-12. A fail stores nothing for the new
+build and leaves the old build's walk verified, so each later run on that build replays again. The
+policy is iOS only: config rejects it elsewhere, and core returns the ordinary rejection for any
+other `identity.platform`. It never repairs or explores and
+never constructs a lazy factory. Both results carry `replayedOnNewBuild` with the previous build
+fingerprint, so a report always shows the walk ran on a build it was not verified on.
 
 ## Metrics and secrets
 
