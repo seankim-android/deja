@@ -308,6 +308,62 @@ function manifestOrchestrationTests(implementation: WalkStoreContractImplementat
       }
     })
 
+    test('with a flows folder, a new goal is explored once and the result is a new file in the tree', async () => {
+      const ctx = await setup()
+      try {
+        let explorers = 0
+        const store = implementation.createStore(ctx.workspaceRoot, undefined, 'explore', {
+          path: MANIFEST, flowsDir: '.maestro/flows/deja',
+        })
+        const deja = createDeja({
+          workspaceRoot: ctx.workspaceRoot,
+          app: { appId: 'dev.deja.fixture', buildPath: 'build.app' },
+          adapter, store, manifestPath: MANIFEST,
+          runner: { run: async () => passed('2026-11-22T00:00:00.000Z') },
+          reporter: { report: async () => ({ reportPath: '', latestPath: '' }) },
+          explorer: ({ identity }) => ({
+            explore: async () => {
+              explorers += 1
+              await mkdir(join(ctx.workspaceRoot, '.deja/attempts/explore'), { recursive: true })
+              await writeFile(join(ctx.workspaceRoot, '.deja/attempts/explore/candidate.yaml'), MAIN_YAML.replace('- runFlow: ../subflows/type.yaml\n', ''))
+              const persisted = await store.persistVerifiedCandidate({
+                identity, candidatePath: '.deja/attempts/explore/candidate.yaml', origin: 'explore',
+                validation: { passed: true, at: '2026-11-22T00:00:00.000Z' },
+              })
+              return {
+                passed: true, durationMs: 1, explorationDurationMs: 1, verificationDurationMs: 1, mcpCalls: 1,
+                modelCalls: 2, modelCallBasis: 'fixture', model: 'm', provider: 'p', assertions: 1,
+                flowPath: persisted.flowPath, flowSha256: persisted.flowSha256, failure: null,
+                artifacts: [], errors: [],
+              }
+            },
+          }),
+        })
+        try {
+          const cold = await deja.run('Brand new goal')
+          expect(summary(cold)).toMatchObject({ outcome: 'cold-recorded', passed: true })
+          expect(explorers).toBe(1)
+          expect(cold.yamlPath).toBe('.maestro/flows/deja/brand-new-goal.yaml')
+          expect((await ctx.manifest()).walks.map(walk => walk.flow)).toEqual(['.maestro/flows/deja/brand-new-goal.yaml'])
+          // The next run replays the new file, and a forced explore of a listed goal is refused up front.
+          expect(summary(await deja.run('Brand new goal'))).toMatchObject({ outcome: 'passed', cache: 'hit' })
+          expect(explorers).toBe(1)
+          const forced = await deja.explore('Brand new goal')
+          expect(forced).toMatchObject({ outcome: 'exploration-rejected', modelCalls: 0 })
+          expect(forced.errors[0]).toContain('already lists this goal')
+          expect(explorers).toBe(1)
+          // A changed flow still never reaches the explorer.
+          await ctx.write('.maestro/flows/deja/brand-new-goal.yaml', `${MAIN_YAML}# edited\n`)
+          expect(summary(await deja.run('Brand new goal'))).toMatchObject({ outcome: 'flow-changed' })
+          expect(explorers).toBe(1)
+        } finally {
+          await implementation.closeStore(store)
+        }
+      } finally {
+        await ctx.cleanup()
+      }
+    })
+
     test('a goal that only has an old walk is needs-migration', async () => {
       const ctx = await setup()
       try {

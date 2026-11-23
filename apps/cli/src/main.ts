@@ -33,7 +33,7 @@ import {
   type ProductionConfiguration,
 } from './config.ts'
 import { prepareJunit, JunitReporter, writeErroredJunit } from './junit.ts'
-import { HELP, renderResult, renderSummary, renderWalks } from './output.ts'
+import { HELP, renderMigration, renderResult, renderSummary, renderWalks } from './output.ts'
 import { createRedactor, redactJson } from './redaction.ts'
 import { JsonRunReporter, readRunReport } from './reporter.ts'
 
@@ -54,6 +54,7 @@ type ParsedArguments = {
   help: boolean
   verify: boolean
   acceptAssertionChange: boolean
+  dryRun: boolean
 }
 
 function parseArguments(argv: string[]): ParsedArguments {
@@ -67,12 +68,14 @@ function parseArguments(argv: string[]): ParsedArguments {
   let help = false
   let verify = false
   let acceptAssertionChange = false
+  let dryRun = false
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index]
     if (argument === '--json') json = true
     else if (argument === '--summary') summary = true
     else if (argument === '--verify') verify = true
     else if (argument === '--accept-assertion-change') acceptAssertionChange = true
+    else if (argument === '--dry-run') dryRun = true
     else if (argument === '-h' || argument === '--help' || argument === 'help') help = true
     else if (argument === '--config' || argument === '--flow' || argument === '--junit' || argument === '--store') {
       const value = argv[index + 1]
@@ -101,6 +104,7 @@ function parseArguments(argv: string[]): ParsedArguments {
     help,
     verify,
     acceptAssertionChange,
+    dryRun,
   }
 }
 
@@ -129,6 +133,7 @@ function createOrchestration(
     ...(configuration.manifest ? {
       manifest: {
         path: configuration.manifest,
+        ...(configuration.flowsDir ? { flowsDir: configuration.flowsDir } : {}),
         // A fixture login must never end up in a file that gets committed.
         forbiddenValues: configuration.explore.fixtureCredentials.map(credential => credential.value),
       },
@@ -207,7 +212,7 @@ function createOrchestration(
       }),
     } : {}),
   })
-  return { store, orchestration }
+  return { store, orchestration, adapterId: executionAdapter.id }
 }
 
 export async function runCli(argv: string[], io: CliIo = {
@@ -231,7 +236,7 @@ export async function runCli(argv: string[], io: CliIo = {
       io.stdout(HELP)
       return parsed.command === '' && !parsed.help ? 2 : 0
     }
-    if (!['explore', 'run', 'remember', 'list', 'inspect'].includes(parsed.command)) {
+    if (!['explore', 'run', 'remember', 'list', 'inspect', 'migrate'].includes(parsed.command)) {
       throw new CliConfigurationError(`Unknown command: ${parsed.command}`)
     }
     if (parsed.command !== 'remember' && parsed.flow) {
@@ -240,6 +245,9 @@ export async function runCli(argv: string[], io: CliIo = {
     if (parsed.verify && parsed.command !== 'run') {
       throw new CliConfigurationError('--verify is valid only with run')
     }
+    if (parsed.dryRun && parsed.command !== 'migrate') {
+      throw new CliConfigurationError('--dry-run is valid only with migrate')
+    }
     if (parsed.acceptAssertionChange && parsed.command !== 'remember') {
       throw new CliConfigurationError('--accept-assertion-change is valid only with remember')
     }
@@ -247,13 +255,13 @@ export async function runCli(argv: string[], io: CliIo = {
     if (parsed.junit && !runsMaestro) {
       throw new CliConfigurationError('--junit is valid only with explore, run, or remember')
     }
-    if (parsed.summary && parsed.command === 'list') {
+    if (parsed.summary && (parsed.command === 'list' || parsed.command === 'migrate')) {
       throw new CliConfigurationError('--summary is valid only with explore, run, remember, or inspect')
     }
     if (parsed.junit) junitPath = resolve(process.cwd(), parsed.junit)
     const configuration = await loadProductionConfiguration(parsed.configPath)
-    if ((parsed.verify || parsed.acceptAssertionChange) && !configuration.manifest) {
-      throw new CliConfigurationError(`${parsed.verify ? '--verify' : '--accept-assertion-change'} needs a "manifest" in the config`)
+    if ((parsed.verify || parsed.acceptAssertionChange || parsed.command === 'migrate') && !configuration.manifest) {
+      throw new CliConfigurationError(`${parsed.command === 'migrate' ? 'migrate' : parsed.verify ? '--verify' : '--accept-assertion-change'} needs a "manifest" in the config`)
     }
     redact = createRedactor(
       configuration.workspaceRoot,
@@ -281,7 +289,7 @@ export async function runCli(argv: string[], io: CliIo = {
     const reporter = junitPath
       ? new JunitReporter(jsonReporter, junitPath, configuration.workspaceRoot, redact)
       : jsonReporter
-    const { store, orchestration } = createOrchestration(
+    const { store, orchestration, adapterId } = createOrchestration(
       configuration, reporter, runsMaestro ? junitPath : undefined, parsed.store,
     )
     openedStore = store
@@ -291,6 +299,16 @@ export async function runCli(argv: string[], io: CliIo = {
       io.stdout(parsed.json
         ? `${JSON.stringify(redactJson({ walks }, redact), null, 2)}\n`
         : renderWalks(walks, redact))
+      return 0
+    }
+
+    if (parsed.command === 'migrate') {
+      if (parsed.positionals.length > 0) throw new CliConfigurationError('migrate accepts no positional arguments')
+      // A real migration takes the writer lock itself; a dry run only reads.
+      const report = await store.migrateToManifest({ dryRun: parsed.dryRun, adapter: adapterId })
+      io.stdout(parsed.json
+        ? `${JSON.stringify(redactJson({ migration: report }, redact), null, 2)}\n`
+        : renderMigration(report, redact))
       return 0
     }
 

@@ -297,8 +297,12 @@ its closure; the runner runs that path, and the store re-hashes the closure befo
 (`expectedClosureSha256`) or records a validation (`FlowChangedError`). That is the check against
 a change between verify and save. A save writes memory first and the manifest last, under
 `.deja/manifest.lock`, so a failed manifest write leaves history no entry matches (`not-validated`).
-Repair persistence and cold exploration are refused in manifest mode until their output goes to
-reviewable files in the consumer's tree.
+Repair persistence is refused in manifest mode until a repair becomes a diff against the consumer's
+file (DEJA-6). Cold exploration is allowed when the store has a flows folder: a verified candidate
+under `.deja/attempts` is written once into the tree (`planMaterialize` then `writeMaterialized`,
+each file created with a hard link so an existing name is never replaced, then re-read against the
+verified bytes) before memory and the manifest are written. `deja migrate` is the same step for old
+walks, with the stored copy as the source; its order is files, manifest, backup, store.
 
 ## Atomic writes and artifact boundaries
 

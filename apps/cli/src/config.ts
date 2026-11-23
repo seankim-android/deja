@@ -7,7 +7,7 @@ import {
   type MaestroExecutionAdapter,
 } from '@deja-qa/maestro'
 import type { CheckoutRepairPolicy } from '@deja-qa/repair'
-import { checkManifestPath } from '@deja-qa/store-local'
+import { checkFlowsDir, checkManifestPath } from '@deja-qa/store-local'
 
 export class CliConfigurationError extends Error {
   constructor(message: string, options?: ErrorOptions) {
@@ -61,6 +61,11 @@ export type ProductionConfiguration = {
    * the consumer's own flow files and the manifest names them; unset, it uses the stores' own copies.
    */
   manifest?: string
+  /**
+   * With a manifest: the folder where a verified explore result, or a migrated walk, is written as
+   * your own file (config `flowsDir`, default `.maestro/flows/deja`), relative to `workspaceRoot`.
+   */
+  flowsDir?: string
   /** WALK-021, iOS only: on a stale build, replay the last verified walk instead of rejecting. */
   staleBuild?: 'replay-last-verified'
 }
@@ -270,6 +275,18 @@ export async function loadProductionConfiguration(configPath: string): Promise<P
     }
   }
 
+  let flowsDir: string | undefined
+  if (raw.flowsDir !== undefined && manifest === undefined) {
+    throw new CliConfigurationError('flowsDir needs a manifest in the config')
+  }
+  if (manifest !== undefined) {
+    try {
+      flowsDir = checkFlowsDir(raw.flowsDir === undefined ? '.maestro/flows/deja' : text(raw.flowsDir, '', 'flowsDir'))
+    } catch (error) {
+      throw new CliConfigurationError(`flowsDir must be a relative folder inside workspaceRoot, outside .deja: ${(error as Error).message}`, { cause: error })
+    }
+  }
+
   let staleBuild: ProductionConfiguration['staleBuild']
   if (raw.staleBuild !== undefined) {
     if (explore.platform !== 'ios') {
@@ -324,6 +341,7 @@ export async function loadProductionConfiguration(configPath: string): Promise<P
     ...(repair ? { repair } : {}),
     ...(staleBuild ? { staleBuild } : {}),
     ...(manifest ? { manifest } : {}),
+    ...(flowsDir ? { flowsDir } : {}),
   }
 }
 

@@ -40,6 +40,7 @@ bun run deja -- --help
 | `explore <goal>` | Force Android cold exploration; independently verify and persist only a passing candidate. Web and iOS return `exploration-rejected` with zero model calls. |
 | `run <goal>` | Compute exact identity and check memory first. A hit replays YAML; a normal miss explores; eligible Android stale-build memory enters one bounded repair; iOS with `staleBuild: "replay-last-verified"` replays the last verified YAML instead. A failed hit is recorded and is not reusable. |
 | `remember <goal> --flow <candidate.yaml>` | Independently execute reviewed YAML and persist only after a complete pass. A bad product assertion remains a failure. |
+| `migrate [--dry-run]` | With a manifest: move the old store's walks (memory schema 3) into your own files plus manifest entries. See [Consumer-owned flows](#consumer-owned-flows-and-the-walk-manifest). |
 | `list` | List valid local walks; does not invoke a runner, explorer, or model. |
 | `inspect <report>` | Print a saved, redacted report. Inspecting a failed result returns its original failure class. |
 
@@ -72,6 +73,7 @@ workspaces.
 | iOS `adapter`, `.app` `buildPath`, simulator-UDID `device` | Exact native bundle-tree/adapter identity and explicit `--platform ios` execution on the dedicated simulator. No repair block is permitted. |
 | iOS-only optional `staleBuild` | WALK-021. Off by default (a stale build returns `repair-rejected`). `"replay-last-verified"` replays the latest verified walk's stored YAML on a new build fingerprint, after the store re-checks its checksum. A pass stores that same YAML for the new build, so the next run is an exact hit. That pass **replaces the old build's entry** (one entry per goal, app, platform, adapter and browser) and **restarts its validation and repair history** at one entry, so rolling back to the old build triggers another replay. Keeping history across builds is tracked as DEJA-12. The stored walk has `origin: "replayed-on-new-build"` (not `remember`), because only the automatic replay verified it on this build and no person reviewed it there. The store refuses the write, before storing anything, if the file's bytes differ from the replayed ones. A fail reports the real Maestro failure and stores nothing, so every later run on that build replays again (one Maestro run each); it never repairs or explores. Model calls are 0 either way, and the report's `replayedOnNewBuild` names the build the YAML was last verified on. No prior verified walk keeps `repair-rejected`. Any other value, or any other platform, is a configuration error, and core also refuses the policy when `identity.platform` is not `ios`. |
 | Optional `manifest` | DEJA-36. A relative `.json` path inside `workspaceRoot`, for example `"deja.walks.json"`. Turns on consumer-owned flows: see [Consumer-owned flows](#consumer-owned-flows-and-the-walk-manifest). Not allowed with `repair`. |
+| Optional `flowsDir` | With `manifest` only. A relative folder inside `workspaceRoot`, outside `.deja/` (default `".maestro/flows/deja"`). Where cold exploration and `deja migrate` write a flow as your own file. |
 
 When a corresponding JSON executable/timeout field is omitted, `DEJA_MAESTRO`,
 `DEJA_OPENCLAW`, and `DEJA_TIMEOUT_MS` supply defaults. `ANDROID_HOME`/
@@ -137,9 +139,26 @@ refused (exit 2). The CLI also refuses to write it if it would hold a `fixtureCr
   `.deja/manifest.lock` (all stores of one workspace share it), and re-checks the entry it read.
 - **New-build replay** (`staleBuild: "replay-last-verified"`) runs your file at its manifest sha and
   records the new build in history. It never changes the manifest.
-- **Not available with a manifest yet:** cold exploration (`explore`, and an unknown goal, give
-  `exploration-rejected`, exit 3) and repair. Both become reviewable files in your tree in a
-  follow-up. A goal that only has a schema 3 walk gives `needs-migration` (exit 6).
+- **Explore writes into your tree.** A new goal (no manifest entry, no old walk) is explored cold,
+  as before. The verified flow is written as a **new** file under `flowsDir` (`<goal>.yaml`, or a
+  `<goal>/` folder with its layout kept when it runs subflows), and a manifest entry is added.
+  Nothing is ever overwritten: a different file at that path stops the save, and a goal the
+  manifest already lists is not explored. Without a `flowsDir` (library hosts), explore gives
+  `exploration-rejected` before any model call.
+- **Repair is not available with a manifest yet** (config `repair` is refused). A repair that
+  proposes a diff or a draft PR against your flow is DEJA-6.
+- **Migration.** `deja migrate` (add `--dry-run` to preview, `--store <id>` for a device store):
+  for each goal it takes the newest walk that last passed and whose stored copy is intact, writes
+  that closure once into `flowsDir` (`<goal>/…` with its layout kept, or `<goal>.yaml`), adds the
+  manifest entry with fresh hashes, and rewrites the store as memory schema 4 with the history of
+  the bytes that moved. Order: files, manifest, backup, store. The old store file stays beside the
+  new one as `walks.json.schema3.bak` (`walks.sqlite.schema3.bak`), the first backup wins, and
+  `.deja/flows` is left alone. Safe to run again: files and entries already there are not touched,
+  and a crash before the store is rewritten is finished by the next run. A walk it cannot move
+  (never passed, copy missing or changed, subflows never stored, no adapter name, a different file
+  at the destination, a different manifest entry) stays in the store and is listed with the reason;
+  until then its goal gives `needs-migration` (exit 6). The adapter of a walk from before adapters
+  were recorded (the Android adapter) comes from the config. Review the new files, then commit.
 - Library: build the store with `manifest: { path }` and pass the same `manifestPath` to
   `createDeja`; a store without a manifest is refused. `run(goal, { verify })` and
   `remember(goal, path, { acceptAssertionChange })`.

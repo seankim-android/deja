@@ -17,6 +17,7 @@ export declare class SQLiteWalkStore implements WalkStore {
     private readonly replaceMetadata;
     private database;
     readonly manifestPath: string | undefined;
+    readonly manifestFlowsDir: string | undefined;
     private readonly consumer;
     constructor(options: SQLiteWalkStoreOptions);
     close(): void;
@@ -38,6 +39,7 @@ export declare class SQLiteWalkStore implements WalkStore {
     persistVerifiedCandidate(options: PersistVerifiedOptions): Promise<PersistedWalk>;
     persistVerifiedRepair(options: PersistVerifiedRepairOptions): Promise<PersistedWalk>;
     list(): Promise<StoredWalk[]>;
+    migrateToManifest(options?: MigrateOptions): Promise<MigrationReport>;
     lookup(identityInput: WalkIdentity): Promise<LookupHit | LookupMiss>;
     lookupPreviousSuccessful(identityInput: WalkIdentity): Promise<LookupHit | LookupMiss>;
     recordValidation(identityInput: WalkIdentity, validation: WalkValidation): Promise<StoredWalk>;
@@ -48,6 +50,7 @@ export type SQLiteWalkStoreOptions = {
     manifest?: {
         path: string;
         forbiddenValues?: string[];
+        flowsDir?: string;
     };
     renameFile?: (temporaryPath: string, destinationPath: string) => Promise<void>;
     replaceMetadata?: (walks: StoredWalk[]) => void;

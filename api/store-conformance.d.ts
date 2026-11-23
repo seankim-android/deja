@@ -21,6 +21,7 @@ export type WalkStoreContractImplementation = {
     createStore(workspaceRoot: string, failures?: StoreFailureInjection, storeId?: string, manifest?: {
         path: string;
         forbiddenValues?: string[];
+        flowsDir?: string;
     }): WalkStore;
     closeStore(store: WalkStore): void | Promise<void>;
     snapshotMetadata(workspaceRoot: string): Promise<Buffer>;

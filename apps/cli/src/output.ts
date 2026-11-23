@@ -1,4 +1,5 @@
 import type {
+  MigrationReport,
   ReportReceipt,
   RunResult,
   StoredWalk,
@@ -12,6 +13,7 @@ Usage:
   deja run <goal> [--verify] [--config <file>] [--json] [--junit <file>] [--summary]
   deja remember <goal> --flow <candidate.yaml> [--accept-assertion-change] [--config <file>] [--json] [--junit <file>] [--summary]
   deja list [--config <file>] [--json]
+  deja migrate [--dry-run] [--store <id>] [--config <file>] [--json]
   deja inspect <report> [--config <file>] [--json] [--summary]
   deja help
 
@@ -22,6 +24,8 @@ Commands:
             Other misses explore cold; stale-build memory enters only bounded selector repair,
             or, with iOS {"staleBuild":"replay-last-verified"}, replays the last verified YAML.
   remember  Independently verify an existing YAML candidate before storing it.
+  migrate   With a manifest: move walks from the old store (memory schema 3) into your own flow
+            files plus manifest entries. Writes new files and the manifest; never commits.
   list      List local walks without constructing an explorer or runner invocation.
   inspect   Summarize a saved run result, artifact paths, failures, and source diffs.
 
@@ -32,6 +36,7 @@ Options:
   --junit <file>   Write Maestro's own JUnit report to <file> (config field: "junit"). If Maestro
                    never ran or did not pass, a minimal report with one failed testcase is written,
                    so a missing file is never a pass. Listed as a junit artifact in the result.
+  --dry-run        migrate only: show what would be written, and write nothing.
   --verify         With a manifest: if the flow changed, or no build has validated it, re-run your
                    current file in place. A pass with unchanged assertions updates the manifest's sha.
                    Changed assertions fail (exit 6) and write nothing.
@@ -55,7 +60,9 @@ Manifest (config "manifest": "deja.walks.json", relative to workspaceRoot):
   The manifest is committed with your flows. It names each goal's flow file, a sha256 of the flow
   and every file it runs, and a hash of its assertions. Replay runs your file in place; .deja/
   keeps history only. A changed flow gives "flow-changed" and nothing is replayed. Déjà writes
-  the manifest and never commits it. Cold exploration and repair are not available with it yet.
+  the manifest and never commits it. Cold exploration writes its verified flow as a new file in
+  "flowsDir" (default .maestro/flows/deja) plus a manifest entry, and never overwrites a file.
+  Repair is not available with a manifest yet.
 
 Exit codes:
   0  Successful run/explore/remember, list, inspect, or help.
@@ -136,6 +143,27 @@ export function renderResult(
     }
   } else {
     lines.push('Source diffs: none')
+  }
+  return `${lines.join('\n')}\n`
+}
+
+export function renderMigration(report: MigrationReport, redact: Redactor) {
+  const lines = [`Migration${report.dryRun ? ' (dry run, nothing written)' : ''}: ${report.migrated.length} moved, ${report.skipped.length} left`]
+  for (const walk of report.migrated) {
+    lines.push(`- ${redact(walk.goal)} -> ${redact(walk.flow)}`)
+    lines.push(`  closure sha256 ${walk.closureSha256}`)
+    lines.push(`  assertions sha256 ${walk.assertionsSha256}`)
+    for (const file of walk.filesWritten) lines.push(`  ${report.dryRun ? 'would write' : 'wrote'} ${redact(file)}`)
+    for (const file of walk.filesUnchanged) lines.push(`  already there ${redact(file)}`)
+    lines.push(`  history entries kept: ${walk.historyEntries}${walk.olderWalksDropped ? `, older walks left in the backup: ${walk.olderWalksDropped}` : ''}`)
+  }
+  for (const walk of report.skipped) {
+    lines.push(`- ${redact(walk.goal)} left in the old store (${walk.reason}): ${redact(walk.detail)}`)
+  }
+  lines.push(`Manifest: ${redact(report.manifestPath)}${report.manifestChanged ? (report.dryRun ? ' (would change)' : ' (changed)') : ' (unchanged)'}`)
+  if (report.backupPath) lines.push(`Old store kept at ${redact(report.backupPath)}`)
+  if (!report.dryRun && report.migrated.length > 0) {
+    lines.push('Review the new files and the manifest, then commit them. Déjà never commits.')
   }
   return `${lines.join('\n')}\n`
 }

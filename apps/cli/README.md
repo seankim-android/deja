@@ -127,3 +127,7 @@ manifest is committed with them. `run --verify` re-checks a changed flow, `remem
 --accept-assertion-change` accepts changed assertions, and exit code 6 means the flow changed, was
 never validated, needs migration, or its assertions changed. See
 [docs/REFERENCE.md](../../docs/REFERENCE.md#consumer-owned-flows-and-the-walk-manifest).
+
+`deja migrate [--dry-run]` moves walks from the old store into your own files under `flowsDir`
+(default `.maestro/flows/deja`) plus manifest entries. Cold exploration writes its verified flow
+there too, as a new file. Déjà writes the files and never commits them.
