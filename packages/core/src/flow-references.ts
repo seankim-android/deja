@@ -1,3 +1,5 @@
+import { parseAllDocuments } from 'yaml'
+
 export type FlowReference = {
   /** `flow` is another Maestro YAML file; `script` is a JavaScript file run by `runScript`. */
   kind: 'flow' | 'script'
@@ -12,15 +14,21 @@ export class FlowReferenceError extends Error {
   }
 }
 
-/** Returns null when the text is not valid YAML. */
-function parseDocuments(contents: string): unknown {
-  const yaml = (globalThis as { Bun?: { YAML?: { parse(text: string): unknown } } }).Bun?.YAML
-  if (!yaml) throw new FlowReferenceError('Reading flow references needs a runtime with a YAML parser (Bun 1.4+)')
+function parseDocuments(contents: string): unknown[] {
+  let documents
   try {
-    return yaml.parse(contents)
-  } catch {
-    return null
+    documents = parseAllDocuments(contents)
+  } catch (error) {
+    throw new FlowReferenceError('Flow is not valid YAML', { cause: error })
   }
+  return documents.map(document => {
+    if (document.errors.length > 0) {
+      throw new FlowReferenceError(`Flow is not valid YAML: ${document.errors[0].message}`, {
+        cause: document.errors[0],
+      })
+    }
+    return document.toJS()
+  })
 }
 
 function referencePath(kind: string, value: unknown): string {
@@ -59,11 +67,6 @@ export function findFlowReferences(contents: string): FlowReference[] {
       visit(value)
     }
   }
-  const parsed = parseDocuments(contents)
-  if (parsed === null && /\b(?:runFlow|runScript)\s*:/.test(contents)) {
-    // Not YAML this parser can read, but it seems to run files. Never guess which ones.
-    throw new FlowReferenceError('Flow runs other files but is not valid YAML')
-  }
-  visit(parsed)
+  visit(parseDocuments(contents))
   return found
 }

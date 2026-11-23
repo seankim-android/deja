@@ -57,7 +57,10 @@ export type StoredWalk = WalkIdentity & {
   goalKey: string
   flowPath: string
   flowSha256: string
-  /** Files the flow runs, absent for a flow with no `runFlow` or `runScript`. */
+  /**
+   * Files the flow runs (empty when it runs none). Always present from memory schema 3; absent only
+   * on walks read from schema 1 or 2, which stored the main flow alone.
+   */
   subflowFiles?: StoredFlowFile[]
   lastValidation: WalkValidation
   validationHistory: StoredValidation[]
@@ -87,6 +90,11 @@ export type PersistVerifiedOptions = {
   validation: WalkValidation
   origin: 'remember' | 'explore'
   exploration?: ExplorationDetails
+  /**
+   * Checksum of the closure a store's `snapshotCandidate` returned. When set, persistence refuses
+   * if the candidate and every file it runs no longer hash to it.
+   */
+  expectedClosureSha256?: string
 }
 
 export type PersistVerifiedRepairOptions = Omit<PersistVerifiedOptions, 'origin' | 'exploration'> & {
@@ -105,9 +113,21 @@ export type PersistedWalk = {
   atomicWrite: true
 }
 
+export type CandidateSnapshot = {
+  /** Workspace-relative path of the copied main flow. */
+  candidatePath: string
+  closureSha256: string
+}
+
 export interface WalkStore {
   lookup(identity: WalkIdentity): Promise<LookupHit | LookupMiss>
   lookupPreviousSuccessful(identity: WalkIdentity): Promise<LookupHit | LookupMiss>
+  /**
+   * Copy a candidate and every file it runs into `directory`, so the bytes that get verified are
+   * the bytes that get stored. Returns the copy's main flow and its closure checksum, to pass back
+   * as `expectedClosureSha256`. Stores without it are verified in place.
+   */
+  snapshotCandidate?(candidatePath: string, directory: string): Promise<CandidateSnapshot>
   persistVerifiedCandidate(options: PersistVerifiedOptions): Promise<PersistedWalk>
   persistVerifiedRepair(options: PersistVerifiedRepairOptions): Promise<PersistedWalk>
   recordValidation(identity: WalkIdentity, validation: WalkValidation): Promise<StoredWalk>

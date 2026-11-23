@@ -52,10 +52,10 @@ function cloneFirstWalk(database: Database, invalid = false) {
   const inserted = database.query(`
     INSERT INTO walks (
       goal, goal_key, app_id, platform, flow_schema_version, build_fingerprint,
-      adapter, browser, flow_path, flow_sha256, last_passed, last_at, origin, exploration_json
+      adapter, browser, flow_path, flow_sha256, last_passed, last_at, origin, exploration_json, has_files
     )
     SELECT goal, ?, app_id, platform, flow_schema_version, build_fingerprint,
-      adapter, browser, flow_path, ?, last_passed, last_at, origin, exploration_json
+      adapter, browser, flow_path, ?, last_passed, last_at, origin, exploration_json, has_files
     FROM walks ORDER BY id LIMIT 1 RETURNING id
   `).get(
     invalid ? 'broken' : original.goal_key,
@@ -81,6 +81,21 @@ async function tamperSQLiteMetadata(workspaceRoot: string, kind: MetadataTamper)
   })
 }
 
+function editSQLiteSubflowMetadata(workspaceRoot: string, kind: 'strip' | 'empty') {
+  editDatabase(workspaceRoot, database => {
+    database.query('DELETE FROM walk_files WHERE walk_id = (SELECT id FROM walks ORDER BY id LIMIT 1)').run()
+    if (kind === 'strip') database.query('UPDATE walks SET has_files = 0 WHERE id = (SELECT id FROM walks ORDER BY id LIMIT 1)').run()
+  })
+  return Promise.resolve()
+}
+
+function downgradeSQLiteToSchema2(workspaceRoot: string) {
+  editDatabase(workspaceRoot, database => {
+    database.exec('DELETE FROM walk_files; UPDATE walks SET has_files = 0; PRAGMA user_version = 2')
+  })
+  return Promise.resolve()
+}
+
 export const sqliteStoreContract: WalkStoreContractImplementation = {
   name: 'SQLiteWalkStore (Bun SQLite + YAML)',
   metadataPath: databasePath,
@@ -88,6 +103,8 @@ export const sqliteStoreContract: WalkStoreContractImplementation = {
   closeStore: (store: WalkStore) => (store as SQLiteWalkStore).close(),
   snapshotMetadata: workspaceRoot => readFile(databasePath(workspaceRoot)),
   tamperMetadata: tamperSQLiteMetadata,
+  editSubflowMetadata: editSQLiteSubflowMetadata,
+  downgradeToSchema2: downgradeSQLiteToSchema2,
   setFirstFlowPath: async (workspaceRoot, flowPath) => {
     editDatabase(workspaceRoot, database => {
       database.query('UPDATE walks SET flow_path = ? WHERE id = (SELECT MIN(id) FROM walks)').run(flowPath)

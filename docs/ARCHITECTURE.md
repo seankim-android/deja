@@ -91,13 +91,25 @@ mismatches, or path escapes raise `InvalidWalkMemoryError`; entries are not sile
 manufacture a hit.
 
 A flow that runs other files (`runFlow`, `runScript`, in any document or nested block) is stored with
-all of them (DEJA-2). At remember time both stores read the references with Bun's YAML parser, copy the
-whole closure into `.deja/flows/<goal>/<platform>-<closure sha>/` keeping the relative layout, and
-record each extra file as `subflowFiles` (`path`, `sha256`). Absolute paths, variables, cycles, and
-references outside the workspace (by path or through a symlink) reject the flow. A changed subflow
-is a different closure folder. Lookup checks every stored file: a changed one is refused like a
-changed main flow, and a missing one is `missing-flow`. A flow that runs nothing keeps the one-file
-layout. The memory schema stays 2; `subflowFiles` is optional (SQLite: the `walk_files` table).
+all of them (DEJA-2). `remember` asks the store for a snapshot of the candidate and everything it
+runs, verifies that copy, and persists exactly those bytes; persistence refuses if the closure no
+longer matches the snapshot's checksum (`expectedClosureSha256`). References are read with the `yaml`
+package. A flow that is not valid YAML, an absolute path, a variable, a NUL byte, a cycle, a hidden
+file (`.env*`), a key file (`*.pem`, `*.key`, ...), two spellings that differ only in case, and any
+reference outside the workspace (by path or through a symlink) reject the flow, and nothing is
+written. Other scripts are copied verbatim, so keep secrets out of them. The closure goes to
+`.deja/flows/<goal>/<platform>-<closure sha>/` with its relative layout, and each extra file is
+recorded in `subflowFiles` (`path`, `sha256`). A changed subflow is a different closure folder.
+Lookup checks every stored file: a changed one is refused like a changed main flow, a missing one
+is `missing-flow`, and the references are read again from the stored flows, so metadata that lost
+a file cannot hide it. A flow that runs nothing keeps the one-file layout and records `[]`.
+Nested references resolve lexically (`dir-symlink/../x` collapses `..` before the OS would), and the
+files are hashed just before Maestro reads them, the same window the main flow has.
+
+Memory schema 3 requires `subflowFiles` on every walk (SQLite: `walks.has_files` and the
+`walk_files` table). Schemas 1 and 2 still load, with no file list and no subflow check; the next
+write rewrites them as schema 3 with an empty list, so a legacy flow that runs files then refuses
+until it is remembered again. An older binary refuses a schema 3 store.
 
 `lookupPreviousSuccessful` is diagnostic-only. It can locate the earlier successful build/flow for
 bounded repair but is not a warm hit and does not authorize persistence by itself.

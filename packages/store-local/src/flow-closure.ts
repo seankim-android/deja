@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
-import { realpath, readFile, stat } from 'node:fs/promises'
-import { dirname, isAbsolute, relative, resolve, sep } from 'node:path'
+import { mkdir, readFile, realpath, stat, writeFile } from 'node:fs/promises'
+import { basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path'
 import { findFlowReferences, FlowReferenceError, type StoredFlowFile } from '@deja-qa/core'
 
 /** A flow's references cannot be stored safely, so the flow is not remembered. */
@@ -37,6 +37,13 @@ function sha256(contents: Buffer | string) {
 
 function inside(root: string, candidate: string) {
   return candidate !== root && candidate.startsWith(`${root}${sep}`)
+}
+
+/** Dotfiles (`.env*`) and common key files are never copied into storage. */
+function secretLooking(path: string) {
+  const name = basename(path)
+  return name.startsWith('.') || /\.(?:pem|key|p12|pfx|jks|keystore)$/i.test(name) ||
+    /^(?:id_rsa|id_ed25519|id_ecdsa|credentials)/i.test(name)
 }
 
 function posix(path: string) {
@@ -89,6 +96,14 @@ export async function collectFlowClosure(root: string, main: string): Promise<Fl
     }
     if (stack.length >= MAX_DEPTH) throw new FlowClosureError(`flows are nested more than ${MAX_DEPTH} deep`)
     if (found.has(path)) return
+    // Spellings that differ only in case name one file on a case-insensitive disk, but two on a
+    // case-sensitive one, where the stored copy would break. Ask for one spelling.
+    const sameName = [...found.keys()].find(other => other.toLowerCase() === path.toLowerCase())
+    if (sameName) {
+      throw new FlowClosureError(
+        `one file is spelled two ways, differing only in case: ${posix(relative(root, sameName))} and ${posix(relative(root, path))}`,
+      )
+    }
     const bytes = await read(path)
     found.set(path, bytes)
     if (found.size > MAX_FILES) throw new FlowClosureError(`flow runs more than ${MAX_FILES} files`)
@@ -103,6 +118,14 @@ export async function collectFlowClosure(root: string, main: string): Promise<Fl
       throw error
     }
     for (const reference of references) {
+      if (reference.path.includes('\0')) {
+        throw new FlowClosureError('reference contains a NUL byte')
+      }
+      if (secretLooking(reference.path)) {
+        throw new FlowClosureError(
+          `reference looks like a secret or hidden file and would be copied into .deja/flows: ${reference.path}`,
+        )
+      }
       if (reference.path.includes('$') || reference.path.includes('{')) {
         throw new FlowClosureError(`reference uses a variable, so its file cannot be known: ${reference.path}`)
       }
@@ -136,8 +159,8 @@ export type StoredClosurePlan = {
   flowSha256: string
   /** Every file to write, workspace-relative, the main flow included. */
   writes: { path: string; bytes: Buffer }[]
-  /** Metadata for the files other than the main flow. Absent when the flow runs nothing. */
-  subflowFiles?: StoredFlowFile[]
+  /** Metadata for the files other than the main flow. Empty when the flow runs nothing. */
+  subflowFiles: StoredFlowFile[]
 }
 
 /**
@@ -153,7 +176,9 @@ export function planStoredClosure(
   const main = closure.files.find(file => file.path === closure.main)!
   if (closure.files.length === 1) {
     const flowPath = `.deja/flows/${goalSlug}/${platformSlug}-${main.sha256}.yaml`
-    return { flowPath, flowSha256: main.sha256, writes: [{ path: flowPath, bytes: main.bytes }] }
+    return {
+      flowPath, flowSha256: main.sha256, writes: [{ path: flowPath, bytes: main.bytes }], subflowFiles: [],
+    }
   }
   const folder = `.deja/flows/${goalSlug}/${platformSlug}-${closure.sha256}`
   const stored = closure.files.map(file => ({
@@ -171,7 +196,7 @@ export function planStoredClosure(
 
 /** Read `subflowFiles` metadata. Returns null when it is malformed. */
 export function readStoredFlowFiles(value: unknown): StoredFlowFile[] | null {
-  if (!Array.isArray(value) || value.length === 0) return null
+  if (!Array.isArray(value)) return null
   const files: StoredFlowFile[] = []
   for (const entry of value) {
     if (typeof entry !== 'object' || entry === null) return null
@@ -191,9 +216,15 @@ export type StoredClosureCheck =
   | { status: 'missing'; path: string }
   | { status: 'invalid'; message: string }
 
-/** Check that every file a stored walk runs is present, under `.deja/flows`, and unchanged. */
+/**
+ * Check that every file a stored walk runs is present, under `.deja/flows`, and unchanged, and that
+ * the metadata lists everything the stored flows run. The last part re-reads the references from
+ * the stored bytes, so metadata that was stripped or cut short cannot hide a file. `subflowFiles`
+ * is undefined only for a walk from before memory schema 3, which is not checked.
+ */
 export async function checkStoredSubflows(
   root: string,
+  flowPath: string,
   subflowFiles: StoredFlowFile[] | undefined,
 ): Promise<StoredClosureCheck> {
   if (!subflowFiles) return { status: 'ok' }
@@ -218,5 +249,57 @@ export async function checkStoredSubflows(
       return { status: 'invalid', message: `stored subflow checksum does not match ${file.path}` }
     }
   }
+  const listed = new Set(subflowFiles.map(file => file.path))
+  for (const path of [flowPath, ...listed].filter(item => /\.ya?ml$/i.test(item))) {
+    const absolute = resolve(root, path)
+    let references
+    try {
+      references = findFlowReferences((await readFile(absolute)).toString('utf8'))
+    } catch (error) {
+      if (error instanceof FlowReferenceError) {
+        return { status: 'invalid', message: `stored flow ${path} cannot be read for references: ${error.message}` }
+      }
+      throw error
+    }
+    for (const reference of references) {
+      const target = posix(relative(root, resolve(dirname(absolute), reference.path)))
+      if (!listed.has(target)) {
+        return {
+          status: 'invalid',
+          message: `stored flow ${path} runs ${reference.path}, which the walk metadata does not list`,
+        }
+      }
+    }
+  }
   return { status: 'ok' }
+}
+
+export type CandidateClosureSnapshot = {
+  /** Path of the copied main flow, relative to `root`. */
+  candidatePath: string
+  closureSha256: string
+}
+
+/** Copy a candidate's whole closure under `directory` (inside `root`), keeping its layout. */
+export async function snapshotFlowClosure(
+  root: string,
+  candidate: string,
+  directory: string,
+): Promise<CandidateClosureSnapshot> {
+  const closure = await collectFlowClosure(root, candidate)
+  const target = resolve(root, directory)
+  if (!inside(root, target)) throw new FlowClosureError(`snapshot folder escapes the workspace: ${directory}`)
+  await mkdir(target, { recursive: true })
+  if (!inside(root, await realpath(target))) {
+    throw new FlowClosureError(`snapshot folder escapes the workspace: ${directory}`)
+  }
+  for (const file of closure.files) {
+    const destination = resolve(target, file.path)
+    await mkdir(dirname(destination), { recursive: true })
+    await writeFile(destination, file.bytes)
+  }
+  return {
+    candidatePath: posix(relative(root, resolve(target, closure.main))),
+    closureSha256: closure.sha256,
+  }
 }

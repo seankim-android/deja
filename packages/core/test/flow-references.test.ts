@@ -45,11 +45,16 @@ describe('findFlowReferences', () => {
     ])
   })
 
+  test('finds quoted keys and flow-style spellings', () => {
+    expect(findFlowReferences('- "runFlow": a.yaml\n- { runScript: { file: "b.js" } }\n- {"runFlow": {"file": "c.yaml"}}\n')
+      .map(reference => reference.path)).toEqual(['a.yaml', 'b.js', 'c.yaml'])
+  })
+
   test('finds nothing in a flow that runs no file, and rejects broken input', () => {
     expect(findFlowReferences('appId: app\n---\n- tapOn: Save\n')).toEqual([])
     expect(() => findFlowReferences('- runFlow:\n')).toThrow(FlowReferenceError)
     expect(() => findFlowReferences('- runScript:\n    env: {}\n')).toThrow(FlowReferenceError)
-    expect(findFlowReferences('appId: app\n- assertVisible: Done\n')).toEqual([])
+    expect(() => findFlowReferences('appId: app\n- assertVisible: Done\n')).toThrow(FlowReferenceError)
     expect(() => findFlowReferences('- runFlow: [unclosed')).toThrow(FlowReferenceError)
   })
 })

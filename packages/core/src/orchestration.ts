@@ -219,9 +219,12 @@ export class Deja {
 
   async remember(identity: WalkIdentity, candidatePath: string): Promise<RunResult> {
     const start = this.base(identity, 'remember', 'not-checked')
+    const attempt = `.deja/attempts/${this.artifactId('remember')}`
+    // Verify a private copy of the flow and everything it runs, then store exactly those bytes.
+    const snapshot = await this.dependencies.store.snapshotCandidate?.(candidatePath, `${attempt}/candidate`)
     const execution = await this.dependencies.runner.run({
-      flowPath: candidatePath,
-      artifactDirectory: `.deja/attempts/${this.artifactId('remember')}`,
+      flowPath: snapshot?.candidatePath ?? candidatePath,
+      artifactDirectory: attempt,
     })
     if (!execution.passed) {
       return this.finish(start, {
@@ -234,7 +237,9 @@ export class Deja {
       })
     }
     const persisted = await this.dependencies.store.persistVerifiedCandidate({
-      identity, candidatePath, validation: { passed: true, at: execution.endedAt }, origin: 'remember',
+      identity, candidatePath: snapshot?.candidatePath ?? candidatePath,
+      validation: { passed: true, at: execution.endedAt }, origin: 'remember',
+      ...(snapshot ? { expectedClosureSha256: snapshot.closureSha256 } : {}),
     })
     return this.finish(start, {
       outcome: 'remembered', passed: true, modelCalls: 0,
