@@ -1,4 +1,4 @@
-# Vendor-neutral WalkCache contracts and orchestration
+# Vendor-neutral Déjà contracts and orchestration
 
 `src/contracts.ts` defines goals, exact walk identity/storage records, run results, failures,
 artifacts/diffs, exploration/verification metrics, and the plugin interfaces. It imports no runtime,
@@ -14,7 +14,7 @@ UI, framework, platform, or storage implementation. The interfaces are:
 - `GoalEmbeddingProvider`: lazy one-goal embeddings for the opt-in WALK-016 proof. Embedding calls
   are reported separately from exploration/model calls.
 
-`WalkCache` receives runner/store/reporter instances plus **lazy** explorer and repairer factories.
+`Deja` receives runner/store/reporter instances plus **lazy** explorer and repairer factories.
 The model client belongs to the explorer implementation, so the explorer factory is also its
 construction boundary. `run` performs `store.lookup` before either factory can be called. Only a
 normal miss constructs the explorer; only eligible selector staleness constructs the repairer.
@@ -34,7 +34,7 @@ replay/exploration fallback. Neither orchestration nor `WalkStore` calls this mo
 cannot broaden cache identity or the P0 execution path. See
 [`docs/ROUTE_GRAPH.md`](../../docs/ROUTE_GRAPH.md).
 
-`src/subflow.ts` similarly remains outside `WalkCache.run`: it defines exact-identity reusable segment
+`src/subflow.ts` similarly remains outside `Deja.run`: it defines exact-identity reusable segment
 contracts with typed input descriptors (not values), outputs, conditions, counts, and provenance.
 `VerifiedSubflowStore` is not another goal cache and never does semantic selection. The Maestro edge
 owns independent segment verification, explicit reference-based composition, and complete-journey

@@ -1,6 +1,6 @@
 # Déjà reference
 
-Long reference material moved from the README. The CLI command is still `walkcache`.
+Long reference material moved from the README.
 
 ## Verified support and limitations
 
@@ -11,9 +11,9 @@ Long reference material moved from the README. The CLI command is still `walkcac
 | iPhone 17 simulator, iOS 27.0, Xcode 27.2, Maestro 2.12.0 | Independently reviewed YAML via `remember`, exact warm replay, native `.app` build invalidation, and product-regression handling | **Cold exploration and repair are unsupported.** Physical devices, other runtimes/models, and other Maestro versions are not claimed |
 
 Shared Maestro YAML does not establish cross-platform support. See the
-[Android evidence](../spikes/001-android-walkcache/README.md),
-[Chromium fixture and command boundary](../spikes/002-web-walkcache/README.md),
-[native iOS fixture and command boundary](../spikes/003-ios-walkcache/README.md), and
+[Android evidence](../spikes/001-android-deja/README.md),
+[Chromium fixture and command boundary](../spikes/002-web-deja/README.md),
+[native iOS fixture and command boundary](../spikes/003-ios-deja/README.md), and
 [WALK-010](../tickets/WALK-010-verified-web-proof.md)/[WALK-011](../tickets/WALK-011-verified-ios-proof.md)
 for the evidence behind this matrix. The post-WALK-011 Android compatibility attempt was blocked
 before boot by insufficient emulator disk space; its exact limit is linked from WALK-011.
@@ -24,15 +24,15 @@ cold commands at 96.5–97.0 seconds and warm commands at 24.3–25.9 seconds, w
 runner ranges overlapped. Those historical spike measurements are not a current end-to-end CLI
 benchmark or a performance guarantee. Current reports record per-run durations and metric scope;
 compare like-for-like lifecycles before drawing timing conclusions. See
-[the historical comparison](../spikes/001-android-walkcache/evidence/walk005-comparison.md).
+[the historical comparison](../spikes/001-android-deja/evidence/walk005-comparison.md).
 
 ## CLI
 
-From a configured fixture directory, use `bun ../../apps/cli/walkcache.ts …`; from the repository
-root, use `bun run walkcache -- … --config <path>`. Help works without configuration:
+From a configured fixture directory, use `bun ../../apps/cli/deja.ts …`; from the repository
+root, use `bun run deja -- … --config <path>`. Help works without configuration:
 
 ```sh
-bun run walkcache -- --help
+bun run deja -- --help
 ```
 
 | Command | Behavior |
@@ -43,20 +43,20 @@ bun run walkcache -- --help
 | `list` | List valid local walks; does not invoke a runner, explorer, or model. |
 | `inspect <report>` | Print a saved, redacted report. Inspecting a failed result returns its original failure class. |
 
-Global options are `--config <file>` (default `./walkcache.config.json`), `--json`, and
+Global options are `--config <file>` (default `./deja.config.json`), `--json`, and
 `-h`/`--help`. `--flow` is valid only with `remember`. Goals may contain multiple words; quote them
 as one shell argument.
 
 ### Configuration
 
-The checked-in [Android config](../spikes/001-android-walkcache/walkcache.config.json) and
-[Chromium config](../spikes/002-web-walkcache/walkcache.config.json) are complete fixture examples.
+The checked-in [Android config](../spikes/001-android-deja/deja.config.json) and
+[Chromium config](../spikes/002-web-deja/deja.config.json) are complete fixture examples.
 Paths are resolved from the config/workspace as described below; use separate configs for separate
 workspaces.
 
 | Field | Meaning |
 | --- | --- |
-| `workspaceRoot` | Canonical workspace boundary, relative to the config file. `.walkcache/` lives here. |
+| `workspaceRoot` | Canonical workspace boundary, relative to the config file. `.deja/` lives here. |
 | `appId`, `platform`, `buildPath`, `device` | App/platform identity, APK or static tree to fingerprint, and execution target. |
 | `openClawModel`, `openClawBaseUrl`, `explorationTimeoutSeconds` | Android cold-exploration model/provider and bound. |
 | `verificationTimeoutMs`, `maestro.timeoutMs` | Independent verification and Maestro execution limits in milliseconds. |
@@ -67,8 +67,8 @@ workspaces.
 | Web-only `adapter`, `browser`, `headless`, `screenSize` | Exact execution/cache identity and Chromium launch settings. Only loopback `appId` URLs and `browser: chromium` are accepted. |
 | iOS `adapter`, `.app` `buildPath`, simulator-UDID `device` | Exact native bundle-tree/adapter identity and explicit `--platform ios` execution on the dedicated simulator. No repair block is permitted. |
 
-When a corresponding JSON executable/timeout field is omitted, `WALKCACHE_MAESTRO`,
-`WALKCACHE_OPENCLAW`, and `WALKCACHE_TIMEOUT_MS` supply defaults. `ANDROID_HOME`/
+When a corresponding JSON executable/timeout field is omitted, `DEJA_MAESTRO`,
+`DEJA_OPENCLAW`, and `DEJA_TIMEOUT_MS` supply defaults. `ANDROID_HOME`/
 `ANDROID_SDK_ROOT` and `JAVA_HOME` come from the environment and are not serialized into reports.
 The spike also recognizes its more specific repair override; the production config's documented
 budget is `repair.timeBudgetMs`.
@@ -122,10 +122,10 @@ tests before relying on a goal outside those examples.
 
 ### Artifacts and clean-state recovery
 
-All runtime state is generated beneath the configured workspace's ignored `.walkcache/`:
+All runtime state is generated beneath the configured workspace's ignored `.deja/`:
 
 ```text
-.walkcache/
+.deja/
   flows/<goal>/<platform>-<flow-sha256>.yaml  # content-addressed verified flows
   memory/walks.json                           # schema-2 exact identities and validation history
   attempts/                                   # cold/remember candidates and bounded raw logs
@@ -135,7 +135,7 @@ All runtime state is generated beneath the configured workspace's ignored `.walk
   reports/<run-id>/                           # runner stdout/stderr/combined output
 ```
 
-`.walkcache/` is local state, not release evidence. Preserve it for diagnosis or move the whole
+`.deja/` is local state, not release evidence. Preserve it for diagnosis or move the whole
 directory aside as shown in the quick start; do not edit a checksum-invalid flow into a hit. If
 metadata is malformed or unsafe, the CLI exits `4` without launching Maestro. Quarantine the entire
 ignored directory, then run verified cold exploration. Never delete curated files under
@@ -152,7 +152,7 @@ belong in committed evidence.
   roots, with permitted extensions and exact expected content. It has one attempt and one shared
   deadline. Failed patch/build/install/verification restores original source bytes.
 - **No auto-commit:** repair prints and preserves its exact proposed diff. Successful source changes
-  remain visible for human review; WalkCache never runs Git, commits, or opens a pull request.
+  remain visible for human review; Déjà never runs Git, commits, or opens a pull request.
 - **Product regression rule:** a meaningful product assertion failure is a potential product
   regression, not stale-selector evidence. Do not weaken or rewrite the assertion, patch source, or
   save a candidate to make it pass. Product, unknown, timeout, navigation, runner, and ambiguous
@@ -164,7 +164,7 @@ failure classification, and atomic-write ordering.
 
 ## Demo
 
-[`demo/walkcache-demo.mp4`](../demo/walkcache-demo.mp4) is a **58-second, 1080p captioned fallback**
+[`demo/deja-demo.mp4`](../demo/deja-demo.mp4) is a **58-second, 1080p captioned fallback**
 built from committed real-run evidence. It covers Android cold exploration, verified YAML, exact
 zero-model warm replay, bounded repair, the product-regression guard, and the explicit Chromium
 support boundary. It does not claim instant replay. [`demo/SCRIPT.md`](../demo/SCRIPT.md) links every
@@ -187,7 +187,7 @@ bun scripts/validate-release-artifacts.ts  # run in a committed, clean tree
 clean-checkout commands and artifact scans, and why real Android/Chromium flows remain separately
 evident local integration gates. CI makes no device, model, or iOS claim.
 
-The Vite app is an **optional read-only local viewer**, not the WalkCache runtime. It cannot start
+The Vite app is an **optional read-only local viewer**, not the Déjà runtime. It cannot start
 runs or repair and is unnecessary for headless use. See [viewer/README.md](../viewer/README.md).
 The package scripts also include `preview` for the built viewer.
 
@@ -199,13 +199,13 @@ The package scripts also include `preview` for the built viewer.
 - [`docs/SUBFLOW_COMPOSITION.md`](SUBFLOW_COMPOSITION.md) — WALK-018 typed verified login reuse,
   clean-state composed/exact replay, byte-preservation evidence, and narrow composition limits.
 - [`apps/cli/README.md`](../apps/cli/README.md) — CLI adapter details and Web boundary.
-- [`spikes/001-android-walkcache/`](../spikes/001-android-walkcache/README.md) — preserved Android fixture/evidence.
-- [`spikes/002-web-walkcache/`](../spikes/002-web-walkcache/README.md) — bounded Chromium fixture/evidence.
-- [`spikes/003-ios-walkcache/`](../spikes/003-ios-walkcache/README.md) — bounded native iOS simulator fixture/evidence.
+- [`spikes/001-android-deja/`](../spikes/001-android-deja/README.md) — preserved Android fixture/evidence.
+- [`spikes/002-web-deja/`](../spikes/002-web-deja/README.md) — bounded Chromium fixture/evidence.
+- [`spikes/003-ios-deja/`](../spikes/003-ios-deja/README.md) — bounded native iOS simulator fixture/evidence.
 - [`TODO.md`](../TODO.md) and [`tickets/README.md`](../tickets/README.md) — repo-local backlog, status, and dependencies.
 - [`docs/PROJECT_PLAN.md`](PROJECT_PLAN.md) — historical hackathon scope and plan; current verified behavior is defined by ticket evidence, not aspirations.
 
-WalkCache uses repo-local `WALK-` tickets, not Linear objects. A ticket becomes `done` only when
+Déjà uses repo-local `WALK-` tickets, not Linear objects. A ticket becomes `done` only when
 all acceptance criteria link reproducible commands and secret-free evidence; its ticket checklist,
 evidence links, and `TODO.md` state change together. Record exact commands and measured values, use
 `unknown` when instrumentation is unavailable, and preserve prior evidence. Completing a repository

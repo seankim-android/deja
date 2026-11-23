@@ -56,26 +56,26 @@ Android emulators, OpenClaw/Kimi provider credentials, and Maestro's experimenta
 not available to this portable job. CI does **not** relabel fake runner tests as real Android/Web runs.
 The actual local executions remain separately curated:
 
-- Android: [`WALK-010 compatibility replay`](../spikes/001-android-walkcache/evidence/walk010-android-warm.txt)
-  and [`README quick-start review`](../spikes/001-android-walkcache/evidence/walk012-readme-review.txt).
-- Chromium: [`warm replay`](../spikes/002-web-walkcache/evidence/walk010-warm.txt),
-  [`independent remember`](../spikes/002-web-walkcache/evidence/walk010-remember.txt), and
-  [`regression`](../spikes/002-web-walkcache/evidence/walk010-product-regression.txt).
-- iOS: [`WALK-011 warm replay`](../spikes/003-ios-walkcache/evidence/walk011-warm.txt) and
-  [`independent remember`](../spikes/003-ios-walkcache/evidence/walk011-remember.txt) are local
+- Android: [`WALK-010 compatibility replay`](../spikes/001-android-deja/evidence/walk010-android-warm.txt)
+  and [`README quick-start review`](../spikes/001-android-deja/evidence/walk012-readme-review.txt).
+- Chromium: [`warm replay`](../spikes/002-web-deja/evidence/walk010-warm.txt),
+  [`independent remember`](../spikes/002-web-deja/evidence/walk010-remember.txt), and
+  [`regression`](../spikes/002-web-deja/evidence/walk010-product-regression.txt).
+- iOS: [`WALK-011 warm replay`](../spikes/003-ios-deja/evidence/walk011-warm.txt) and
+  [`independent remember`](../spikes/003-ios-deja/evidence/walk011-remember.txt) are local
   simulator evidence, not a portable CI/integration job or physical-device claim.
 
-To verify that stored Android YAML is standalone Maestro rather than WalkCache-dependent syntax,
+To verify that stored Android YAML is standalone Maestro rather than Déjà-dependent syntax,
 start the deterministic Android fixture as described in the root README, then from its directory run:
 
 ```sh
 . ./scripts/env.sh
 sh scripts/fixture-mode.sh stable
-maestro --no-ansi --device emulator-5554 test evidence/repaired-checkout.yaml
+maestro --no-ansi --device emulator-5554 test flows/repaired-checkout.yaml
 ```
 
 For the Web standalone command and its fixture server, see
-[`spikes/002-web-walkcache/README.md`](../spikes/002-web-walkcache/README.md). Maestro 2.12.0 labels
+[`spikes/002-web-deja/README.md`](../spikes/002-web-deja/README.md). Maestro 2.12.0 labels
 Web Beta/Experimental; `--device chromium` and a `url:` flow declaration are required. Cold Web
 exploration and Web repair are intentionally unsupported. No platform command needs a viewer, and
 `remember`/warm replay need no model access.

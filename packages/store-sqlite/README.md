@@ -19,7 +19,7 @@ Inject the store through the existing `WalkStore` boundary:
 import { SQLiteWalkStore } from './packages/store-sqlite/src/index.ts'
 
 const store = new SQLiteWalkStore({ workspaceRoot: '/path/to/local/workspace' })
-// Pass store to WalkCache, explorer, or repair wiring normally.
+// Pass store to Deja, explorer, or repair wiring normally.
 store.close()
 ```
 
@@ -30,7 +30,7 @@ convert existing JSON memory, or claim that arbitrary external stores are suppor
 ## On-disk representation
 
 ```text
-.walkcache/
+.deja/
   memory/walks.sqlite
   flows/<normalized-goal-slug>/<platform>-<flow-sha256>.yaml
 ```
@@ -42,7 +42,7 @@ The SQLite database has `PRAGMA user_version = 2` and three tables:
 - `validation_history`: ordered, append-only validation entries keyed to a walk; and
 - `repair_history`: ordered repair provenance keyed to a walk.
 
-YAML remains a canonical regular file under `.walkcache/flows`; every hit resolves the path,
+YAML remains a canonical regular file under `.deja/flows`; every hit resolves the path,
 enforces the workspace/flow-directory boundary, reads the bytes, and recomputes SHA-256. Missing
 YAML is a miss, while changed YAML, malformed metadata, unsupported schema versions, invalid or
 duplicate identities, unsafe paths, and inconsistent history fail closed. Database schema 2 is the
@@ -55,7 +55,7 @@ the remaining path without walking above the workspace. Existing targets must be
 existing ancestors for pending paths must be directories. A symlink or path escape outside the
 workspace, a dangling/unresolvable link, or non-directory traversal raises `InvalidWalkMemoryError`.
 Consequently an external database cannot be read, created, replaced, or deleted through
-`.walkcache/memory`; the shared regression also proves an already valid external database remains
+`.deja/memory`; the shared regression also proves an already valid external database remains
 byte-identical with no new journal/sidecar files after rejected lookup and persistence.
 
 ## Persistence, durability, and replacement
@@ -111,7 +111,7 @@ bun test packages/store-conformance/test/conformance.test.ts \
   packages/store-sqlite/test/sqlite-store.test.ts --timeout=10000 --check
 ```
 
-The identical exported suite runs 20 tests against each store, plus one actual `WalkCache` warm
+The identical exported suite runs 20 tests against each store, plus one actual `Deja` warm
 orchestration per store through production `MaestroWalkRunner` and `JsonRunReporter`. The runner
 executes its existing deterministic local child-process fixture, not a mocked `WalkRunner`; this
 proves runner/store orchestration and zero model construction, not an Android/Web/iOS device result.

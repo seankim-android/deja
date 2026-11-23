@@ -16,5 +16,5 @@ Tickets WALK-001 to WALK-014 and WALK-016 to WALK-020 are complete. History and 
 
 - Never save an unverified candidate or weaken a product assertion.
 - Never auto-commit a repair or hide a real product regression behind a selector or source patch.
-- Keep `.walkcache/`, build, temporary, credential, and personal data out of Git.
+- Keep `.deja/`, build, temporary, credential, and personal data out of Git.
 - Make no speedup claim without new raw evidence from equivalent full lifecycles.

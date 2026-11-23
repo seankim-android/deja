@@ -20,14 +20,14 @@ every differently worded candidate must pass this same exact `lookup` under its 
 before its embedding is ranked. App/platform/schema/build, adapter/browser, canonical path, latest
 pass, and checksum therefore remain hard gates.
 
-Stored flow paths must remain under `.walkcache/flows` after symlink resolution. Temporary files,
+Stored flow paths must remain under `.deja/flows` after symlink resolution. Temporary files,
 unreferenced flows, stale builds, wrong app/platform/schema identities, missing flows, and walks whose
 latest validation failed are never hits. A checksum mismatch, malformed JSON, unsupported schema,
 invalid entry, duplicate exact identity, or path escape raises `InvalidWalkMemoryError`; entries are
 never silently filtered to manufacture a hit.
 
 Metadata reads and writes use the same canonical workspace containment rule as YAML. Each operation
-canonicalizes the nearest existing ancestor of `.walkcache/memory/walks.json`, validates any existing
+canonicalizes the nearest existing ancestor of `.deja/memory/walks.json`, validates any existing
 target as a regular file and pending-path ancestors as directories, and rejects an external symlink or
 non-directory traversal before reading, creating, or replacing metadata. The check applies even when
 the metadata file does not exist yet.
@@ -43,7 +43,7 @@ invalid.
 Verified candidates are written to a content-addressed path:
 
 ```text
-.walkcache/flows/<normalized-goal-slug>/<platform>-<flow-sha256>.yaml
+.deja/flows/<normalized-goal-slug>/<platform>-<flow-sha256>.yaml
 ```
 
 The flow is renamed before the metadata, so a failed metadata replacement leaves the previous
@@ -78,20 +78,20 @@ Corruption is not a cache hit and is not silently repaired into a pass:
    Malformed memory or an unsafe/checksum-mismatched flow reports `InvalidWalkMemoryError` and exits
    nonzero without launching Maestro.
 2. Preserve the ignored artifacts for diagnosis. If metadata itself is invalid, quarantine the ignored
-   `.walkcache/` directory rather than editing a flow or deleting individual entries to force a hit:
+   `.deja/` directory rather than editing a flow or deleting individual entries to force a hit:
 
    ```sh
-   cd spikes/001-android-walkcache
+   cd spikes/001-android-deja
    mkdir -p .tmp
-   mv .walkcache ".tmp/invalid-walkcache-$(date +%s)"
+   mv .deja ".tmp/invalid-deja-$(date +%s)"
    ```
 
 3. Run the WALK-003 cold lifecycle to explore and independently verify a replacement:
 
    ```sh
    . ./scripts/env.sh
-   WALKCACHE_OPENCLAW="$(command -v openclaw)" \
-     bun scripts/walkcache.ts explore checkout --config explore.config.json
+   DEJA_OPENCLAW="$(command -v openclaw)" \
+     bun scripts/deja.ts explore checkout --config explore.config.json
    ```
 
 The store deliberately rejects invalid existing metadata during persistence instead of discarding it.
@@ -101,7 +101,7 @@ recovery procedure, not a claim that exploration or a warm replay passed.
 ## Verified reusable segments (WALK-018)
 
 `LocalVerifiedSubflowStore` is separate from `WalkStore`: it holds typed login contracts and actual
-checksummed YAML under `.walkcache/segments`, never goal hits. An index entry is accepted only with
+checksummed YAML under `.deja/segments`, never goal hits. An index entry is accepted only with
 `passed: true` and a canonical UTC validation timestamp. The composer supplies that validation only
 after an independent runner pass and candidate/contract checks. Exact app/platform/schema/build plus
 adapter/browser identity, canonical paths, and SHA-256 recomputation govern every lookup; malformed

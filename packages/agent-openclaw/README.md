@@ -30,7 +30,7 @@ Injected parent hooks clear the app before exploration and again before verifica
 - `modelCalls`: OpenClaw `assistantTurns`, meaning completed assistant/provider round trips. It is not a claim about physical HTTP retries, token counts, or cost. Missing instrumentation produces `null`/`unknown`.
 - Overall `durationMs`: the full cold lifecycle, including clean-state setup, exploration, verification, and persistence. This is not a warm-replay comparison or speedup claim.
 
-Raw prompt, model response, YAML-bearing subprocess output, screenshots, and state artifacts stay under ignored `.walkcache/attempts/`. Curate only the candidate with deterministic public fixture data, redacted MCP/activity logs, structured reports, and model-metric summaries. Never put real credentials in `fixtureCredentials` or committed evidence.
+Raw prompt, model response, YAML-bearing subprocess output, screenshots, and state artifacts stay under ignored `.deja/attempts/`. Curate only the candidate with deterministic public fixture data, redacted MCP/activity logs, structured reports, and model-metric summaries. Never put real credentials in `fixtureCredentials` or committed evidence.
 
 Run focused tests from the repository root:
 

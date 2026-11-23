@@ -24,7 +24,7 @@ The demo must prove three things with observable evidence:
 ## MVP contract
 
 The primary journey is **login -> add item -> checkout**. The feasibility PoC comes first in a
-dependency-free native Android app under `spikes/001-android-walkcache`, per Sean's Android-first
+dependency-free native Android app under `spikes/001-android-deja`, per Sean's Android-first
 direction. Expo/React Native is deferred until the Android cold/warm loop is validated. The future
 architecture supports iOS, Android, and web through platform adapters; later platforms must not
 slow down or weaken the first working Android proof.
@@ -69,7 +69,7 @@ packages/
   store-local/         Atomic filesystem walk memory and attempt logs
   repair/              Bounded selector diagnosis and source-patch interface
 spikes/
-  001-android-walkcache/ Minimal native Android feasibility proof
+  001-android-deja/ Minimal native Android feasibility proof
 examples/
   checkout-demo/       Later Expo app targeting iOS, Android, and web
   flows/               Small checked-in, secret-free example Maestro flows
