@@ -253,6 +253,20 @@ export function runConsumerFlowContractTests(implementation: WalkStoreContractIm
           await expect(ctx.persist(store, { origin: 'verify' })).rejects.toBeInstanceOf(AssertionHashChangedError)
         }
         await ctx.write(MAIN, MAIN_YAML)
+        // The values an assertion depends on count too: env, and how often a repeat runs.
+        for (const edit of [
+          MAIN_YAML.replace('TEXT: "Popcorn"', 'TEXT: "Other"'),
+          MAIN_YAML.replace('---\n', 'env:\n  NAME: x\n---\n'),
+        ]) {
+          await ctx.write(MAIN, edit)
+          await expect(ctx.persist(store, { origin: 'verify' })).rejects.toBeInstanceOf(AssertionHashChangedError)
+        }
+        await ctx.write(MAIN, `${MAIN_YAML}- repeat:\n    times: 2\n    commands:\n      - tapOn: more\n`)
+        await ctx.persist(store, { assertionChange: 'accept' })
+        await ctx.write(MAIN, `${MAIN_YAML}- repeat:\n    times: 0\n    commands:\n      - tapOn: more\n`)
+        await expect(ctx.persist(store, { origin: 'verify' })).rejects.toBeInstanceOf(AssertionHashChangedError)
+        await ctx.write(MAIN, MAIN_YAML)
+        await ctx.persist(store, { assertionChange: 'accept' })
         // A script's bytes count: assertTrue can read what it sets.
         await ctx.write('.maestro/subflows/s.js', 'output.ok = true\n')
         await ctx.write(MAIN, `${MAIN_YAML}- runScript: ../subflows/s.js\n`)
@@ -517,7 +531,9 @@ export function runConsumerFlowContractTests(implementation: WalkStoreContractIm
         })
         try {
           await expect(ctx.persist(store)).rejects.toBeInstanceOf(InvalidWalkManifestError)
+          // Refused before anything was written: neither the manifest nor the store exists.
           expect(existsSync(join(ctx.workspaceRoot, MANIFEST))).toBe(false)
+          expect(existsSync(implementation.metadataPath(ctx.workspaceRoot))).toBe(false)
         } finally {
           await implementation.closeStore(store)
         }
@@ -536,8 +552,14 @@ export function runConsumerFlowContractTests(implementation: WalkStoreContractIm
       const ctx = await context()
       await ctx.write(SMOKE, SMOKE_YAML)
       const stores: WalkStore[] = []
-      const openFlows = (storeId?: string, failures?: Parameters<typeof implementation.createStore>[1]) => {
-        const store = implementation.createStore(ctx.workspaceRoot, failures, storeId, { path: MANIFEST, flowsDir: FLOWS })
+      const openFlows = (
+        storeId?: string,
+        failures?: Parameters<typeof implementation.createStore>[1],
+        forbiddenValues?: string[],
+      ) => {
+        const store = implementation.createStore(ctx.workspaceRoot, failures, storeId, {
+          path: MANIFEST, flowsDir: FLOWS, ...(forbiddenValues ? { forbiddenValues } : {}),
+        })
         stores.push(store)
         return store
       }
@@ -615,6 +637,56 @@ export function runConsumerFlowContractTests(implementation: WalkStoreContractIm
         // An edit to the new subflow is a flow-changed, like any consumer file.
         await ctx.write(`${FLOWS}/today/subflows/type.yaml`, `${SUB_YAML}# edited\n`)
         expect(await store.lookup(identity())).toMatchObject({ status: 'miss', reason: 'flow-changed' })
+      } finally {
+        await ctx.cleanup()
+      }
+    })
+
+    test('explore output with a fixture value, or a goal named by one, is refused before anything is written', async () => {
+      const ctx = await withFlows()
+      try {
+        const store = ctx.openFlows(undefined, undefined, ['hunter2-fixture'])
+        await mkdir(join(ctx.workspaceRoot, '.deja/attempts/x'), { recursive: true })
+        await ctx.write('.deja/attempts/x/candidate.yaml', `${SMOKE_YAML}- inputText: hunter2-fixture\n`)
+        const absolute = join(ctx.workspaceRoot, '.deja/attempts/x/candidate.yaml')
+        await expect(ctx.persist(store, { identity: identity({ goal: 'Login' }), candidatePath: absolute, origin: 'explore' }))
+          .rejects.toThrow(/fixture credential value/)
+        await ctx.write('.deja/attempts/x/clean.yaml', SMOKE_YAML)
+        await expect(ctx.persist(store, {
+          identity: identity({ goal: 'hunter2-fixture' }), candidatePath: '.deja/attempts/x/clean.yaml', origin: 'explore',
+        })).rejects.toBeInstanceOf(InvalidWalkManifestError)
+        for (const path of [FLOWS, MANIFEST]) expect(existsSync(join(ctx.workspaceRoot, path))).toBe(false)
+        expect(existsSync(implementation.metadataPath(ctx.workspaceRoot))).toBe(false)
+        // The same flow without the value is kept, from an absolute path as the explorer gives it.
+        const clean = await ctx.persist(store, {
+          identity: identity({ goal: 'Login' }), candidatePath: join(ctx.workspaceRoot, '.deja/attempts/x/clean.yaml'),
+          origin: 'explore',
+        })
+        expect(clean.flowPath).toBe(`${FLOWS}/login.yaml`)
+      } finally {
+        await ctx.cleanup()
+      }
+    })
+
+    test('migrate does not copy a flow that holds a fixture value, and a goal named by one stops the run', async () => {
+      const ctx = await withFlows()
+      try {
+        await ctx.write('.maestro/flows/login.yaml', `${SMOKE_YAML}- inputText: hunter2-fixture\n`)
+        await ctx.legacy('dev', [{ goal: 'Login', path: '.maestro/flows/login.yaml' }, { goal: 'Smoke', path: SMOKE }])
+        const store = ctx.openFlows('dev', undefined, ['hunter2-fixture'])
+        for (const dryRun of [true, false]) {
+          const report = await store.migrateToManifest!({ dryRun })
+          expect(report.skipped.map(item => [item.goal, item.reason])).toEqual([['Login', 'holds-fixture-value']])
+          expect(JSON.stringify(report)).not.toContain('hunter2-fixture')
+          expect(existsSync(join(ctx.workspaceRoot, FLOWS, 'login.yaml'))).toBe(false)
+          if (dryRun) expect(existsSync(join(ctx.workspaceRoot, MANIFEST))).toBe(false)
+        }
+        expect(await readFile(join(ctx.workspaceRoot, MANIFEST), 'utf8')).not.toContain('hunter2-fixture')
+        await ctx.legacy('named', [{ goal: 'hunter2-fixture', path: SMOKE }])
+        const named = ctx.openFlows('named', undefined, ['hunter2-fixture'])
+        await expect(named.migrateToManifest!({})).rejects.toBeInstanceOf(InvalidWalkManifestError)
+        expect(existsSync(join(ctx.workspaceRoot, FLOWS, 'hunter2-fixture.yaml'))).toBe(false)
+        expect((await named.list()).every(walk => walk.closureSha256 === undefined)).toBe(true)
       } finally {
         await ctx.cleanup()
       }

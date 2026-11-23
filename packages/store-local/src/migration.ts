@@ -111,6 +111,10 @@ export async function runMigration(context: MigrationContext): Promise<Migration
       }
       throw error
     }
+    if (plan.secrets.length > 0) {
+      skip('holds-fixture-value', 'the stored flow holds a fixture credential value, so it is not copied into your tree; remove the value, then remember it again')
+      continue
+    }
     if (plan.conflicts.length > 0) {
       skip('would-overwrite', `${plan.conflicts.join(', ')} already exist with different bytes; move or remove them, then run again`)
       continue
@@ -149,6 +153,14 @@ export async function runMigration(context: MigrationContext): Promise<Migration
   }
 
   const manifestChanged = converted.some(item => !item.existing)
+  if (converted.length > 0) {
+    // A goal name that is a fixture value stops the whole run, before any file is written.
+    const keys = new Set(converted.map(item => manifestWalkKey(item.entry)))
+    consumer.checkManifest({
+      ...manifest,
+      walks: [...manifest.walks.filter(entry => !keys.has(manifestWalkKey(entry))), ...converted.map(item => item.entry)],
+    })
+  }
   let backupPath: string | null = null
   if (!dryRun && converted.length > 0) {
     for (const item of converted) await consumer.writeMaterialized(item.plan)

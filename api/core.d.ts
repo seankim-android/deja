@@ -501,7 +501,7 @@ export type SemanticSelectedWalk = {
 export declare function serializeWalkManifest(manifest: WalkManifest): string;
 export type SkippedWalk = {
     goal: string;
-    reason: 'not-passing' | 'subflows-not-stored' | 'copy-missing' | 'copy-changed' | 'adapter-unknown' | 'would-overwrite' | 'manifest-differs' | 'closure-error';
+    reason: 'not-passing' | 'subflows-not-stored' | 'copy-missing' | 'copy-changed' | 'adapter-unknown' | 'would-overwrite' | 'manifest-differs' | 'closure-error' | 'holds-fixture-value';
     detail: string;
 };
 export type SourceDiff = {

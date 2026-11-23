@@ -131,10 +131,20 @@ refused (exit 2). The CLI also refuses to write it if it would hold a `fixtureCr
   Without the flag, `remember` refuses a flow whose assertions differ from the manifest's.
 - **Assertion hash, version 1.** A sorted list that keeps repeats, over every YAML file in the
   closure: each mapping key starting with `assert`, with its whole command mapping (canonical
-  JSON, sorted keys) and the keys it sits under; each `runFlow` call's `when` condition; and the
-  sha256 of every `runScript` file, because `assertTrue` can read script output. Adding
-  `optional: true`, wrapping an assertion in a condition, or editing a script changes it. Moving an
-  assertion between files does not. Golden vectors in `packages/store-local/test/consumer-flow.test.ts`.
+  JSON, sorted keys) and the keys it sits under; the parameters of each `runFlow`, `repeat` and
+  `retry` (`when`, `times`, `while`, `maxRetries`, so `times: 0` or a new condition changes it);
+  every `env` mapping, where it sits (an assertion that reads `${VAR}` is only as strong as the
+  value passed in); and the sha256 of every `runScript` file, because `assertTrue` can read script
+  output. Adding `optional: true`, wrapping an assertion in a condition, or editing a script changes
+  it. Moving an assertion between files does not, and neither does a `label`. `extendedWaitUntil`
+  is a wait, not a product assertion, so it is not in the hash. Golden vectors are in
+  `packages/core/test/flow-assertions.test.ts` and `packages/store-local/test/consumer-flow.test.ts`.
+- **Stateless CI.** A checkout with an empty `.deja/` has no validation history, so each run says
+  `not-validated` until `--verify` runs. `--verify` also accepts a changed flow, so a CI job that
+  always passes `--verify` does not see `flow-changed`. Keep `.deja/` between runs, or run
+  `--verify` only on the first run of a build.
+- **An edit that is undone** before the save is not seen: the check is the closure hash before and
+  after the run, not a copy of the files.
 - **Déjà writes files and never commits.** A write to the manifest is atomic, under
   `.deja/manifest.lock` (all stores of one workspace share it), and re-checks the entry it read.
 - **New-build replay** (`staleBuild: "replay-last-verified"`) runs your file at its manifest sha and
@@ -142,7 +152,8 @@ refused (exit 2). The CLI also refuses to write it if it would hold a `fixtureCr
 - **Explore writes into your tree.** A new goal (no manifest entry, no old walk) is explored cold,
   as before. The verified flow is written as a **new** file under `flowsDir` (`<goal>.yaml`, or a
   `<goal>/` folder with its layout kept when it runs subflows), and a manifest entry is added.
-  Nothing is ever overwritten: a different file at that path stops the save, and a goal the
+  Nothing is ever overwritten: a different file at that path stops the save, a flow that holds a
+  `fixtureCredentials` value is never written into your tree, and a goal the
   manifest already lists is not explored. Without a `flowsDir` (library hosts), explore gives
   `exploration-rejected` before any model call.
 - **Repair is not available with a manifest yet** (config `repair` is refused). A repair that
@@ -156,7 +167,7 @@ refused (exit 2). The CLI also refuses to write it if it would hold a `fixtureCr
   `.deja/flows` is left alone. Safe to run again: files and entries already there are not touched,
   and a crash before the store is rewritten is finished by the next run. A walk it cannot move
   (never passed, copy missing or changed, subflows never stored, no adapter name, a different file
-  at the destination, a different manifest entry) stays in the store and is listed with the reason;
+  at the destination, a different manifest entry, a fixture credential value in the flow) stays in the store and is listed with the reason;
   until then its goal gives `needs-migration` (exit 6). The adapter of a walk from before adapters
   were recorded (the Android adapter) comes from the config. Review the new files, then commit.
 - Library: build the store with `manifest: { path }` and pass the same `manifestPath` to

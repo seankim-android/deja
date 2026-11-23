@@ -28,7 +28,9 @@ export declare class ConsumerFlows {
     plan(walks: StoredWalk[], identity: NormalizedIdentity, options: PersistVerifiedOptions): Promise<ConsumerPlan>;
     private isUnderDeja;
     planMaterialize(sourceMain: string, goalKey: string): Promise<MaterializePlan>;
+    private holdsForbiddenValue;
     writeMaterialized(plan: MaterializePlan): Promise<string[]>;
+    checkManifest(manifest: WalkManifest): string;
     writeManifest(manifest: WalkManifest): Promise<void>;
 }
 export type ConsumerFlowsOptions = {
@@ -147,6 +149,7 @@ export type MaterializePlan = {
         exists: boolean;
     }[];
     conflicts: string[];
+    secrets: string[];
 };
 export type MigrationContext = {
     root: string;

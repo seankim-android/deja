@@ -7,7 +7,7 @@ export const ASSERTION_HASH_VERSION = 1
 export type FlowAssertion = {
   /** The line that goes into the assertion hash. */
   entry: string
-  /** `assertVisible`, `assertTrue` and so on, or `runFlow` for a call's condition. */
+  /** `assertVisible`, `assertTrue` and so on, or `runFlow`, `repeat`, `retry` or `env` for what controls them. */
   command: string
   /** The `id` selector of an assert command, when it has one. */
   id: string | null
@@ -23,14 +23,24 @@ function canonicalJson(value: unknown): string {
   return JSON.stringify(value === undefined ? null : value)
 }
 
+/** Parameters that decide whether, how often or with what values a command's children run. */
+function parameters(value: unknown): Record<string, unknown> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return {}
+  const { commands: _commands, file: _file, env: _env, label: _label, ...rest } = value as Record<string, unknown>
+  return rest
+}
+
 /**
  * The product assertions of one Maestro YAML file, in hash form version 1.
  *
  * - Every mapping key that starts with `assert` counts, with its whole command mapping, so adding
  *   `optional: true` or `enabled:` changes the entry. Each entry also names the keys it sits
  *   under (`repeat>commands`, `when`, ...), so moving an assertion under a condition changes it.
- * - Every `runFlow` call counts with its `when` condition, so a condition added around a subflow
- *   call changes the entry. The subflow's own assertions are found in the subflow's file.
+ * - A `runFlow`, `repeat` or `retry` counts with its parameters (`when`, `times`, `while`,
+ *   `maxRetries`), so a condition added around a call, or `times: 0`, changes the entry. The
+ *   subflow's own assertions are found in the subflow's file.
+ * - Every `env` mapping counts, where it sits: an assertion that reads `${VAR}` is only as strong
+ *   as the value that is passed in.
  */
 export function findFlowAssertions(contents: string): FlowAssertion[] {
   const parsed = parseYamlDocuments(contents)
@@ -51,10 +61,12 @@ export function findFlowAssertions(contents: string): FlowAssertion[] {
         found.push({ entry: `${where}|${key}|${canonicalJson(value)}`, command: key, id })
         continue
       }
-      if (key === 'runFlow') {
-        const when = typeof value === 'object' && value !== null && !Array.isArray(value)
-          ? (value as Record<string, unknown>).when : undefined
-        found.push({ entry: `${where}|runFlow|when=${canonicalJson(when)}`, command: 'runFlow', id: null })
+      if (key === 'env') {
+        found.push({ entry: `${where}|env|${canonicalJson(value)}`, command: 'env', id: null })
+        continue
+      }
+      if (key === 'runFlow' || key === 'repeat' || key === 'retry') {
+        found.push({ entry: `${where}|${key}|params=${canonicalJson(parameters(value))}`, command: key, id: null })
       }
       visit(value, [...ancestors, key])
     }

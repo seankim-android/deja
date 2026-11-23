@@ -158,6 +158,8 @@ export type MaterializePlan = {
   files: { path: string; bytes: Buffer; sha256: string; exists: boolean }[]
   /** Destinations that already hold different bytes (or are not plain files). Never overwritten. */
   conflicts: string[]
+  /** Files that hold a fixture value (a login, a token). They are never written into the tree. */
+  secrets: string[]
 }
 
 function flowSlug(goalKey: string) {
@@ -384,6 +386,19 @@ export class ConsumerFlows {
       if (materialize.conflicts.length > 0) {
         throw new ConsumerFlowError(`would overwrite a different file: ${materialize.conflicts.join(', ')}; nothing was written`)
       }
+      // Everything that can refuse does so before the first file is written.
+      if (materialize.secrets.length > 0) {
+        throw new ConsumerFlowError(`${materialize.secrets.join(', ')} would hold a fixture credential value; nothing was written`)
+      }
+      this.checkManifest({
+        ...manifest,
+        walks: [...manifest.walks, {
+          goal: identity.goal, appId: identity.appId, platform: identity.platform, adapter: identity.adapter,
+          ...(identity.browser !== undefined ? { browser: identity.browser } : {}),
+          flow: materialize.flow, closureSha256: materialize.closureSha256,
+          assertionsSha256: materialize.assertionsSha256,
+        }],
+      })
       filesWritten = await this.writeMaterialized(materialize)
       candidatePath = materialize.flow
     }
@@ -432,6 +447,8 @@ export class ConsumerFlows {
     }
     const changed = !existing || serializeWalkManifest({ ...manifest, walks: [existing] }) !==
       serializeWalkManifest({ ...manifest, walks: [next] })
+    // Refuse before memory or the manifest is written, not after.
+    if (changed) this.checkManifest({ ...manifest, walks: [...manifest.walks.filter(item => manifestWalkKey(item) !== key), next] })
 
     const previous = walks.find(walk => sameLogical(walk, identity) && walk.closureSha256 === closure.sha256)
     const entry = { passed: true as const, at: options.validation.at, flowSha256: mainSha }
@@ -495,6 +512,7 @@ export class ConsumerFlows {
     checkManifestFlowPath(main.path, 'flow')
     const files: MaterializePlan['files'] = []
     const conflicts: string[] = []
+    const secrets = placed.filter(item => this.holdsForbiddenValue(item.file.bytes)).map(item => item.path)
     for (const item of placed) {
       let exists = false
       try {
@@ -515,11 +533,20 @@ export class ConsumerFlows {
       sourceClosureSha256: source.sha256,
       files,
       conflicts,
+      secrets,
     }
+  }
+
+  private holdsForbiddenValue(bytes: Buffer) {
+    const text = bytes.toString('utf8')
+    return this.forbiddenValues.some(value => text.includes(value))
   }
 
   /** Write the files that are not there yet. Each is created exclusively: nothing is overwritten. */
   async writeMaterialized(plan: MaterializePlan): Promise<string[]> {
+    if (plan.secrets.length > 0) {
+      throw new ConsumerFlowError(`${plan.secrets.join(', ')} would hold a fixture credential value; nothing was written`)
+    }
     if (plan.conflicts.length > 0) {
       throw new ConsumerFlowError(`would overwrite a different file: ${plan.conflicts.join(', ')}; nothing was written`)
     }
@@ -555,14 +582,20 @@ export class ConsumerFlows {
     return written
   }
 
-  /** Write the manifest atomically, as Déjà's fixed bytes. Call under `withLock`. */
-  async writeManifest(manifest: WalkManifest) {
+  /** Throws if the manifest's bytes would hold a fixture value. Never names the value. */
+  checkManifest(manifest: WalkManifest) {
     const text = serializeWalkManifest(manifest)
     for (const value of this.forbiddenValues) {
       if (text.includes(value)) {
         throw new InvalidWalkManifestError('the manifest would hold a fixture credential value; nothing was written')
       }
     }
+    return text
+  }
+
+  /** Write the manifest atomically, as Déjà's fixed bytes. Call under `withLock`. */
+  async writeManifest(manifest: WalkManifest) {
+    const text = this.checkManifest(manifest)
     const { root, target } = await this.manifestFile()
     await mkdir(dirname(target), { recursive: true })
     const parent = await realpath(dirname(target))

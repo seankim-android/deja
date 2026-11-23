@@ -233,7 +233,7 @@ export type MigratedWalk = {
 export type SkippedWalk = {
   goal: string
   reason: 'not-passing' | 'subflows-not-stored' | 'copy-missing' | 'copy-changed' | 'adapter-unknown' |
-    'would-overwrite' | 'manifest-differs' | 'closure-error'
+    'would-overwrite' | 'manifest-differs' | 'closure-error' | 'holds-fixture-value'
   detail: string
 }
 
@@ -264,7 +264,9 @@ export interface WalkStore {
   /**
    * Copy a candidate and every file it runs into `directory`, so the bytes that get verified are
    * the bytes that get stored. Returns the copy's main flow and its closure checksum, to pass back
-   * as `expectedClosureSha256`. Stores without it are verified in place.
+   * as `expectedClosureSha256`. Stores without it are verified in place. In manifest mode nothing
+   * is copied: it returns the consumer's own path and the closure checksum, the flow runs in place,
+   * and the store re-hashes before it writes. An edit that is undone before the save is not seen.
    */
   snapshotCandidate?(candidatePath: string, directory: string): Promise<CandidateSnapshot>
   persistVerifiedCandidate(options: PersistVerifiedOptions): Promise<PersistedWalk>

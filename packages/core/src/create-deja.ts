@@ -130,7 +130,7 @@ export function createDeja(options: CreateDejaOptions): DejaClient {
       ...cache,
       // A manifest entry names its adapter. The Android adapter leaves it out of the cache identity so
       // that old stored walks still match; in manifest mode there are none, so name it.
-      ...(options.manifestPath !== undefined && cache.adapter === undefined
+      ...((options.manifestPath !== undefined || options.store.manifestPath !== undefined) && cache.adapter === undefined
         ? { adapter: options.adapter.id } : {}),
     }
   }
