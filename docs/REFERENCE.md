@@ -38,14 +38,14 @@ bun run deja -- --help
 | Command | Behavior |
 | --- | --- |
 | `explore <goal>` | Force Android cold exploration; independently verify and persist only a passing candidate. Web and iOS return `exploration-rejected` with zero model calls. |
-| `run <goal>` | Compute exact identity and check memory first. A hit replays YAML; a normal miss explores; eligible Android stale-build memory enters one bounded repair; iOS with `staleBuild: "replay-last-verified"` replays the last verified YAML instead. A failed hit is recorded and is not reusable. |
+| `run <goal> [--rerun-failed]` | Compute exact identity and check memory first. A hit replays YAML; a normal miss explores; eligible Android stale-build memory enters one bounded repair; iOS with `staleBuild: "replay-last-verified"` replays the last verified YAML instead. A failed hit is recorded and is not reusable. |
 | `remember <goal> --flow <candidate.yaml>` | Independently execute reviewed YAML and persist only after a complete pass. A bad product assertion remains a failure. |
 | `migrate [--dry-run]` | With a manifest: move the old store's walks (memory schema 3) into your own files plus manifest entries. See [Consumer-owned flows](#consumer-owned-flows-and-the-walk-manifest). |
 | `list` | List valid local walks; does not invoke a runner, explorer, or model. |
 | `inspect <report>` | Print a saved, redacted report. Inspecting a failed result returns its original failure class. |
 
 Global options are `--config <file>` (default `./deja.config.json`), `--json`, and
-`-h`/`--help`. `--verify` (`run`) and `--accept-assertion-change` (`remember`) need a manifest. `--store <id>` keeps this run's history in its own store (see
+`-h`/`--help`. `--verify` (`run`) and `--accept-assertion-change` (`remember`) need a manifest. `--rerun-failed` (`run`) is described in [Rerun a failed walk](#rerun-a-failed-walk-flaky-and-crash-results). `--store <id>` keeps this run's history in its own store (see
 [One store per device](#one-store-per-device)). `--flow` is valid only with `remember`. `--junit <file>` (`explore`, `run`,
 `remember`) and `--summary` (those three and `inspect`) are described in
 [JUnit and summary output](#junit-and-summary-output-for-ci-hosts). Goals may contain multiple words; quote them
@@ -263,6 +263,67 @@ coverage, non-English understanding, and complete adversarial detection are not 
 [`packages/semantic-local/README.md`](../packages/semantic-local/README.md) and the deterministic WALK-016
 tests before relying on a goal outside those examples.
 
+### Rerun a failed walk: flaky and crash results
+
+`deja run <goal> --rerun-failed` is off by default. When a replay fails, Déjà replays the same stored
+YAML once more, on the same build, under the same timeout, and reports both attempts. The rerun makes
+no model call, never explores, never repairs, never changes the YAML and never weakens an assertion.
+It also applies to the iOS stale-build replay and to `--verify`.
+
+| First attempt | Second attempt | Outcome | Exit |
+| --- | --- | --- | --- |
+| failed | failed, same label and same failing step | the failure as today (`failed` or `product-regression`), with both attempts | `1` |
+| failed | passed | `flaky` | `7` |
+| failed | failed, different label or step | `flaky` | `7` |
+| failed | the flow's files changed between the attempts (manifest mode) | `flow-changed`, not rerun | `6` |
+
+- `flaky` is an outcome, never a pass, and the host decides what to do with exit `7`. The first
+  failure is recorded in the walk's history as a failure. A rerun pass is never recorded, so a flaky
+  run is never a passing validation. In manifest mode the closure is re-hashed before and after the
+  rerun, so the rerun only ever replays the same bytes.
+- `RunResult.attempts` (optional, additive) lists both attempts in order, each with `passed`, its
+  `failure` (label, failing step, raw output path, crash signal) and its artifacts. For a `flaky`
+  result, `failure` is the first attempt's.
+- `app_crash` and `flaky` are never repair-eligible, and a crash is never sent to repair. Labels stay
+  advisory.
+
+**`app_crash`** is set only from explicit signals, and wins over `selector` and `navigation`. A
+timeout or a runner error still wins over it. Two signals count:
+
+1. A whole line of Maestro's own output: `App crashed`, `App crashed (SIGxxx)`,
+   `App crashed (signal N)`, `App crashed (unknown cause)`, or `<text> (pid N) was terminated by
+   SIGxxx.` These strings are constants in the Maestro 2.12.0 jars (`maestro-client`,
+   `maestro-ios-driver`). Maestro's text "The app is not running. It may have crashed or been closed."
+   is not a signal. A crash-like message without a signal keeps its label.
+2. iOS only: a new `.ips` crash report in `~/Library/Logs/DiagnosticReports` (a seam for tests and
+   hosts: `crashReportDirectory`), written during the failed run, whose header names the app ID
+   (`bundleID` or `CFBundleIdentifier`). Déjà reads a bounded head of the file to match the app ID
+   and keeps only its file name and process name (`failure.crash.reportFile`, `.process`). It never
+   copies the contents, which can hold personal data.
+
+Limits of the labels, which stay advisory:
+
+- A crash report can land a few seconds after the process dies, so after a failed iOS attempt that
+  Déjà labels `selector`, `navigation` or `unknown` it waits up to 10 s for the report before the
+  next attempt starts. The wait applies to every such failed iOS run, with or without
+  `--rerun-failed`, and costs the full 10 s when there is no crash. A timeout, a runner error and a
+  failed assertion never wait. Set the config field `crashReportGraceMs` (integer, default `10000`,
+  `0` turns the wait off, maximum `120000`). The wait is outside `maestro.timeoutMs` and nothing
+  can abort it, so one attempt can take the timeout plus the grace period. A report is attributed
+  to the attempt whose window it falls in.
+- A crash followed by a failed assertion can still be labeled `product_assertion`: the report is
+  still being written when Maestro prints the assertion, and no wait happens. The first-launch
+  fixture run must check which step fails after the crash.
+- The `.ips` match is by app ID and time only. Parallel runs of the same app ID on one Mac (several
+  simulators, several worktrees) can give a run a false `app_crash` from another run's crash. A
+  report does not name the simulator, so this cannot be checked. Symlinks are skipped (the file is opened with `O_NOFOLLOW`) and so are files over 8 MB.
+- The 2.12.0 sources show no prefix or format on those lines that a flow cannot produce (not seen in live output). A flow whose own
+  output (for example `echo`) is exactly one of those lines can spoof the label. The cost is a wrong
+  advisory label, never a repair.
+
+Not yet recorded on a real simulator: see `spikes/003-ios-deja/README.md` for the first-launch crash
+mode that will produce the evidence.
+
 ### JUnit and summary output for CI hosts
 
 Both are opt-in. Without them, nothing changes. Exit codes are unchanged.
@@ -279,6 +340,10 @@ failure.** Déjà keeps that rule easy:
 1. It deletes any file at that path before the command starts and creates its folder.
 2. After the run, if Maestro wrote a report and either the result passed or the report shows a
    failure, Maestro's file is kept, with Déjà's redaction applied (below).
+   After a `--rerun-failed` rerun the file would hold only the second attempt, so Déjà writes its own
+   report with one `<testcase>` per attempt (`<goal> (attempt 1)` and `(attempt 2)`). A failed attempt
+   has `status="ERROR"` and a `<failure>` with the label, failing step and output path. A `flaky` run
+   always has at least one failed case.
 3. Otherwise Déjà writes a minimal report. This happens when Maestro never ran (cache miss
    refused, stale build with no repairer, rejected goal, invalid memory, usage or config error
    after the command was parsed), when Maestro could not launch or was killed before writing, and
@@ -319,14 +384,19 @@ Grammar (one physical line, fields in this order, single spaces between them):
 
 ```text
 line        = "deja-summary v=1 outcome=" outcome " cache=" cache " fingerprint=" fingerprint
-              " engine=" engine " model_calls=" calls " failure=" failure " goal=" goal
+              " engine=" engine " model_calls=" calls " failure=" failure [rerun] " goal=" goal
 outcome     = 1*( %x61-7A / "-" )              ; a run outcome, or "error" when no result exists
 cache       = "hit" / "miss" / "not-checked" / "unknown"
 fingerprint = 12LOWHEX / "unknown"             ; first 12 hex characters of the build fingerprint
 engine      = 1*DIGIT "." 1*DIGIT "." 1*DIGIT / "unknown"   ; the Maestro that ran the flows
 calls       = 1*DIGIT / "unknown"
 failure     = 1*( %x61-7A / "_" )              ; selector, navigation, product_assertion, runner,
-                                               ; timeout, unknown, unclassified, none, or error
+                                               ; timeout, app_crash, unknown, unclassified, none, or error
+rerun       = " attempts=2 attempt1=" label " attempt2=" label
+              [" attempt1_step=" enc] [" attempt1_artifact=" enc]
+              [" attempt2_step=" enc] [" attempt2_artifact=" enc]   ; only after a --rerun-failed rerun
+label       = 1*32( %x61-7A / "_" )            ; that attempt's failure label, or "none" if it passed
+enc         = *( ALPHA / DIGIT / "." / "_" / "~" / "-" / "%" 2HEXDIG )   ; redacted, at most 200 chars
 goal        = *( ALPHA / DIGIT / "." / "_" / "~" / "-" / "%" 2HEXDIG )
 ```
 
@@ -343,6 +413,11 @@ m = re.fullmatch(r"deja-summary v=1 outcome=([a-z-]+) cache=([a-z-]+) fingerprin
 outcome, goal = m[1], urllib.parse.unquote(m[7])
 ```
 
+The `rerun` keys appear only when a rerun happened, so every other line is unchanged. A step or
+path is redacted, cut to 200 characters and percent-encoded like `goal`, and a label that is not
+`[a-z_]{1,32}` prints as `unclassified`. A flaky run reads
+`outcome=flaky ... failure=app_crash attempts=2 attempt1=app_crash attempt2=none ... goal=checkout`.
+
 `v=1` changes only if a field is renamed, removed or its charset changes. New keys may be added
 before `goal`, which stays last, so parse by key (or with the whole grammar) and ignore keys you do
 not know. `engine` was added this way. It is `unknown` for a run without an engine record, such as
@@ -358,6 +433,7 @@ fails with exit 2 or 4 after it was parsed, the line still prints, with `outcome
 | `2` | Usage, configuration, engine (not installed, checksum mismatch, untested version), report-inspection, or direct I/O error; also no command |
 | `3` | Cold exploration was rejected or failed to produce a verified reusable walk |
 | `4` | Invalid/corrupt local memory; quarantine it and recover through verified cold exploration |
+| `7` | Flaky (`--rerun-failed`): the replay failed, then passed or failed differently on a rerun of the same YAML. Not a pass; the first failure is recorded |
 | `6` | Manifest mode: `flow-changed`, `not-validated`, `needs-migration` or `assertions-changed`. Nothing was replayed or written. Run with `--verify`, or review the change and run `remember` |
 | `5` | The store is locked by another run (`STORE_LOCKED`), two runs collided taking over a stale lock (`STORE_LOCK_CONTENTION`), or the filesystem cannot hold the lock (`STORE_LOCK_UNAVAILABLE`). Use a different `--store <id>` per device; for contention, run again |
 

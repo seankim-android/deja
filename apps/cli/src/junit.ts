@@ -1,6 +1,6 @@
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { dirname, relative, sep } from 'node:path'
-import type { ReportReceipt, RunReporter, RunResult } from '@deja-qa/core'
+import type { ReportReceipt, RunAttempt, RunReporter, RunResult } from '@deja-qa/core'
 import type { Redactor } from './redaction.ts'
 
 /**
@@ -43,6 +43,51 @@ export function synthesizedJunit(input: {
       <property name="source" value="deja-synthesized"/>
     </properties>
     ${testcase}
+  </testsuite>
+</testsuites>
+`
+}
+
+/**
+ * Two attempts (opt-in rerun): one testcase per attempt, so a host sees both. An attempt that
+ * failed carries its label, failing step and output path. A flaky run always has a failed testcase,
+ * so a host that reads only this file never sees a pass.
+ */
+export function synthesizedAttemptsJunit(input: {
+  goal: string
+  outcome: string
+  attempts: RunAttempt[]
+  durationMs: number
+}) {
+  const goal = escapeXml(input.goal)
+  const failures = input.attempts.filter(attempt => !attempt.passed).length
+  const cases = input.attempts.map(attempt => {
+    const name = `${goal} (attempt ${attempt.attempt})`
+    const seconds = (attempt.durationMs / 1000).toFixed(3)
+    if (attempt.passed) {
+      return `<testcase id="${name}" name="${name}" classname="${goal}" time="${seconds}" status="SUCCESS"/>`
+    }
+    const failure = attempt.failure
+    const detail = [
+      `outcome: ${input.outcome}`,
+      `label: ${failure?.category ?? 'unclassified'}`,
+      ...(failure?.failingStep ? [`step: ${failure.failingStep}`] : []),
+      ...(failure?.rawArtifactPath ? [`artifact: ${failure.rawArtifactPath}`] : []),
+      ...(failure?.crash ? [`crash signal: ${failure.crash.source}${failure.crash.reportFile ? ` ${failure.crash.reportFile}` : ''}`] : []),
+    ].join('; ')
+    return `<testcase id="${name}" name="${name}" classname="${goal}" time="${seconds}" status="ERROR">
+      <failure message="${escapeXml(detail.replace(/\s+/g, ' ').slice(0, 300))}">${escapeXml(detail)}</failure>
+    </testcase>`
+  })
+  const seconds = (input.durationMs / 1000).toFixed(3)
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<testsuites>
+  <testsuite name="Test Suite" tests="${input.attempts.length}" failures="${failures}" time="${seconds}">
+    <properties>
+      <property name="source" value="deja-synthesized"/>
+      <property name="outcome" value="${escapeXml(input.outcome)}"/>
+    </properties>
+    ${cases.join('\n    ')}
   </testsuite>
 </testsuites>
 `
@@ -155,8 +200,14 @@ export class JunitReporter implements RunReporter {
     } catch {
       // Maestro never ran, or did not get as far as writing a report.
     }
-    const keep = maestroReport !== null && (result.passed || reportsFailure(maestroReport))
-    if (keep) {
+    // A rerun overwrote Maestro's file with the second attempt only, so write both attempts.
+    const rerun = result.attempts !== undefined && result.attempts.length === 2
+    const keep = !rerun && maestroReport !== null && (result.passed || reportsFailure(maestroReport))
+    if (rerun) {
+      await atomicWrite(this.path, redactJunit(synthesizedAttemptsJunit({
+        goal: result.goalKey, outcome: result.outcome, attempts: result.attempts!, durationMs: result.durationMs,
+      }), this.redact))
+    } else if (keep) {
       const redacted = redactJunit(maestroReport!, this.redact)
       if (redacted !== maestroReport) await atomicWrite(this.path, redacted)
     } else {

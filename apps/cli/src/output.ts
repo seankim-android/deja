@@ -10,7 +10,7 @@ export const HELP = `Déjà — explore once, replay without a model, repair onl
 
 Usage:
   deja explore <goal> [--config <file>] [--json] [--junit <file>] [--summary]
-  deja run <goal> [--verify] [--config <file>] [--json] [--junit <file>] [--summary]
+  deja run <goal> [--verify] [--rerun-failed] [--config <file>] [--json] [--junit <file>] [--summary]
   deja remember <goal> --flow <candidate.yaml> [--accept-assertion-change] [--config <file>] [--json] [--junit <file>] [--summary]
   deja list [--config <file>] [--json]
   deja migrate [--dry-run] [--store <id>] [--config <file>] [--json]
@@ -50,6 +50,12 @@ Options:
   --verify         With a manifest: if the flow changed, or no build has validated it, re-run your
                    current file in place. A pass with unchanged assertions updates the manifest's sha.
                    Changed assertions fail (exit 6) and write nothing.
+  --rerun-failed   run only. If the replay fails, replay the same YAML once more, under the same
+                   timeout, with no model call, no repair and no exploration. Failed twice with the
+                   same label and step is a steady failure, reported as before. Failed then passed,
+                   or failed twice with a different label or step, is "flaky" (exit 7), never a
+                   pass. The report lists both attempts. With a manifest, a flow that changed
+                   between the attempts gives flow-changed and is not rerun. Off by default.
   --accept-assertion-change
                    With a manifest, remember only: let this reviewed run change the manifest's
                    assertion hash. Review the flow's assertions in the diff first.
@@ -57,7 +63,8 @@ Options:
                    Run one deja per device in parallel, each with its own id. A second writer on
                    one store is refused (exit 5). Flows are shared; history is not.
   --summary        Print one line: deja-summary v=1 outcome cache fingerprint engine model_calls
-                   failure goal (goal last, percent-encoded). Last stdout line, or stderr with --json.
+                   failure [attempts attempt1 attempt2 ...] goal (goal last, percent-encoded). The
+                   attempt keys appear only when --rerun-failed reran. Last stdout line, or stderr with --json.
   -v, --version    Print the version, git commit and contract version.
   -h, --help       Show help without loading configuration or constructing plugins.
 
@@ -91,6 +98,8 @@ Exit codes:
   5  Store locked: another run is writing the same store. Use a different --store <id>.
   6  Manifest: flow-changed, not-validated, needs-migration or assertions-changed. Nothing was
      replayed or written. Run with --verify, or review the change and run remember.
+  7  Flaky (--rerun-failed): the replay failed, then passed or failed differently on a rerun of
+     the same YAML. Not a pass. The first failure is recorded in history. The host decides.
 
 YAML verification and replay always invoke standalone Maestro flows. No YAML depends on
 Déjà or an LLM after it has been written.
@@ -150,6 +159,22 @@ export function renderResult(
     if (result.failure.failingStep) {
       lines.push(`${result.passed ? 'Resolved step' : 'Failing step'}: ${result.failure.failingStep}`)
     }
+  }
+  if (result.attempts) {
+    for (const attempt of result.attempts) {
+      const failure = attempt.failure
+      lines.push(`Attempt ${attempt.attempt}: ${attempt.passed ? 'passed' : `failed (${failure?.category ?? 'unclassified'})`}`)
+      if (failure?.failingStep) lines.push(`Attempt ${attempt.attempt} failing step: ${failure.failingStep}`)
+      if (failure?.rawArtifactPath) lines.push(`Attempt ${attempt.attempt} output: ${failure.rawArtifactPath}`)
+      if (failure?.crash) {
+        const crash = failure.crash
+        lines.push(`Attempt ${attempt.attempt} crash signal: ${crash.source}${crash.reportFile ? ` (${crash.reportFile}${crash.process ? `, process ${crash.process}` : ''})` : ''}`)
+      }
+    }
+  }
+  if (result.failure?.crash && !result.attempts) {
+    const crash = result.failure.crash
+    lines.push(`Crash signal: ${crash.source}${crash.reportFile ? ` (${crash.reportFile}${crash.process ? `, process ${crash.process}` : ''})` : ''}`)
   }
   for (const error of result.errors) lines.push(`Error: ${error}`)
   if (receipt) {
@@ -226,13 +251,19 @@ export function encodeSummaryGoal(goal: string) {
  * One stable, parseable line per run, for CI host reports. Grammar (single physical line):
  *
  *   line        = "deja-summary v=1 outcome=" outcome " cache=" cache " fingerprint=" fingerprint
- *                 " engine=" engine " model_calls=" calls " failure=" failure " goal=" goal
+ *                 " engine=" engine " model_calls=" calls " failure=" failure [rerun] " goal=" goal
  *   outcome     = 1*( "a-z" / "-" )                    ; a run outcome, or "error"
  *   cache       = "hit" / "miss" / "not-checked" / "unknown"
  *   fingerprint = 12 lower-case hex / "unknown"
  *   engine      = 1*DIGIT "." 1*DIGIT "." 1*DIGIT / "unknown"  ; the Maestro that ran the flows
  *   calls       = 1*DIGIT / "unknown"
  *   failure     = 1*( "a-z" / "_" )                    ; category, "unclassified", "none" or "error"
+ *   rerun       = " attempts=2 attempt1=" label " attempt2=" label
+ *                 [" attempt1_step=" enc] [" attempt1_artifact=" enc]
+ *                 [" attempt2_step=" enc] [" attempt2_artifact=" enc]
+ *                                                        ; only after an opt-in rerun, between failure and goal
+ *   label       = 1*32( "a-z" / "_" )                  ; the attempt's failure label, "none" if it passed
+ *   enc         = *( [A-Za-z0-9._~-] / "%" 2HEXDIG )   ; redacted, percent-encoded, at most 200 bytes
  *   goal        = *( [A-Za-z0-9._~-] / "%" 2HEXDIG )   ; percent-encoded UTF-8, always last
  *
  * Every field before `goal` has a fixed charset, and `goal` cannot contain a space, `=`, quote or
@@ -245,6 +276,31 @@ function summaryEngine(result: RunResult) {
   return typeof version === 'string' && /^\d{1,6}\.\d{1,6}\.\d{1,6}$/.test(version) ? version : 'unknown'
 }
 
+const LABEL = /^[a-z_]{1,32}$/
+
+/** Redacts, cuts to 200 characters, then percent-encodes, so a step or path cannot add a field. */
+function summaryText(value: string, redact: Redactor) {
+  return encodeSummaryGoal(redact(value).slice(0, 200))
+}
+
+/** Extra keys for a run that reran. Labels are checked here: a hand-edited report cannot add fields. */
+function summaryAttempts(result: RunResult, redact: Redactor) {
+  const attempts = result.attempts
+  if (!Array.isArray(attempts) || attempts.length !== 2) return []
+  const parts = ['attempts=2']
+  attempts.forEach((attempt, index) => {
+    const label = attempt?.passed === true ? 'none' : attempt?.failure?.category
+    parts.push(`attempt${index + 1}=${typeof label === 'string' && LABEL.test(label) ? label : 'unclassified'}`)
+  })
+  attempts.forEach((attempt, index) => {
+    const step = attempt?.failure?.failingStep
+    const artifact = attempt?.failure?.rawArtifactPath
+    if (typeof step === 'string' && step) parts.push(`attempt${index + 1}_step=${summaryText(step, redact)}`)
+    if (typeof artifact === 'string' && artifact) parts.push(`attempt${index + 1}_artifact=${summaryText(artifact, redact)}`)
+  })
+  return parts
+}
+
 export function renderSummary(result: RunResult | null, goalText: string, redact: Redactor) {
   const goal = encodeSummaryGoal(redact(result?.goalKey ?? goalText))
   if (!result) {
@@ -253,15 +309,19 @@ export function renderSummary(result: RunResult | null, goalText: string, redact
   const fingerprint = /^[0-9a-f]{12,}$/.test(result.identity.buildFingerprint)
     ? result.identity.buildFingerprint.slice(0, 12)
     : 'unknown'
-  const failure = result.failure?.category ?? (result.passed ? 'none' : 'unclassified')
+  const category = result.failure?.category
+  const failure = category === undefined || category === null
+    ? (result.passed ? 'none' : 'unclassified')
+    : LABEL.test(category) ? category : 'unclassified'
   return [
     'deja-summary v=1',
-    `outcome=${result.outcome}`,
+    `outcome=${/^[a-z-]{1,32}$/.test(result.outcome) ? result.outcome : 'unknown'}`,
     `cache=${result.cacheStatus}`,
     `fingerprint=${fingerprint}`,
     `engine=${summaryEngine(result)}`,
     `model_calls=${result.modelCalls ?? 'unknown'}`,
     `failure=${failure}`,
+    ...summaryAttempts(result, redact),
     `goal=${goal}`,
   ].join(' ')
 }

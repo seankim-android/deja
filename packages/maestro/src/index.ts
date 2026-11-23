@@ -95,6 +95,14 @@ export {
 } from './platform-adapter.ts'
 
 export {
+  defaultCrashReportDirectory,
+  detectCrashInOutput,
+  findCrashReport,
+  type FindCrashReportOptions,
+  type MaestroCrashSignal,
+} from './crash-signals.ts'
+
+export {
   classifyMaestroFailure,
   type MaestroFailureCategory,
   type MaestroFailureClassification,
