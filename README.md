@@ -1,4 +1,4 @@
-<h1 align="center">Déjà</h1>
+<h1 align="center"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/brand/deja-logo-dark.svg"><img alt="Déjà" src="docs/brand/deja-logo.svg" width="280"></picture></h1>
 
 <p align="center">
 Explore an app once with an AI model. Replay the test later with no model at all.<br>
