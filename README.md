@@ -16,7 +16,7 @@ Déjà (formerly WalkCache) turns one verified run into a Maestro test that you 
 
 <p align="center"><img src="demo/deja-preview.gif" width="80%"/></p>
 
-<p align="center">Narrated demo, 55 s. Built for the Cerebras x Kimi K3.1 Pro x OpenClaw hackathon (Nov 2026).</p>
+<p align="center">All four steps, sped up 1.5x and silent. The full narrated demo is 55 s (link below). Built for the Cerebras x Kimi K3.1 Pro x OpenClaw hackathon (Nov 2026).</p>
 
 <p align="center">Watch the full demo: <a href="demo/deja-demo.mp4">demo/deja-demo.mp4</a> · <a href="https://x.com/kssc0112/status/2124667198837059953">X post</a> · <a href="https://www.reddit.com/r/Cerebras/comments/1y34xuv/i_made_kimi_k31_pro_on_cerebras_test_my_app_once/">r/cerebras post</a> · <a href="https://discord.com/channels/1085960591052644463/1574227471706886236">Discord post</a></p>
 
