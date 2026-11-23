@@ -14,8 +14,8 @@ import { buildPackages, publishedDirectories, repo } from './build-packages.ts'
  * Tarballs come from `bun pm pack`: `npm pack` leaves `workspace:*` ranges in the manifest, which
  * npm cannot install. Publish the same way (never with a bare `npm publish` from a package folder).
  *
- * Known gap (DEJA-14): `bun:sqlite`, `bun:test` and `Bun.*` do not exist on Node. A Node import
- * that fails for that reason is reported, not failed. Any other Node failure fails the check.
+ * Every export must import on Node (DEJA-14), and the packed `store-sqlite` must open a real
+ * database and round-trip a walk on Node as well as on Bun (`node:sqlite` there).
  */
 
 type Manifest = {
@@ -158,17 +158,14 @@ try {
   if (!bunConditionCheck.ok) failures.push('type-check (bundler with customConditions bun)')
 
   const importScript = (specifier: string) => `await import(${JSON.stringify(specifier)})`
-  const nodeGaps: string[] = []
   console.log('\npackage / export                                installs  tsc  bun   node')
   for (const { manifest, specifiers: own } of packages) {
     for (const specifier of own) {
       const onBun = run('bun', ['-e', importScript(specifier)], project)
       const onNode = run('node', ['--input-type=module', '-e', importScript(specifier)], project)
-      const bunOnly = !onNode.ok && /bun:|\bBun\b/.test(onNode.output)
       if (!onBun.ok) failures.push(`bun import ${specifier}: ${onBun.output}`)
-      if (!onNode.ok && !bunOnly) failures.push(`node import ${specifier}: ${onNode.output}`)
-      if (bunOnly) nodeGaps.push(`${specifier}: ${onNode.output.split('\n').find(line => /bun/i.test(line)) ?? onNode.output.split('\n')[0]}`)
-      console.log(`${specifier.padEnd(46)}  yes       ${typecheck.ok ? 'ok ' : 'ERR'}  ${onBun.ok ? 'ok ' : 'ERR'}  ${onNode.ok ? 'ok' : bunOnly ? 'bun-only (DEJA-14)' : 'ERR'}`)
+      if (!onNode.ok) failures.push(`node import ${specifier}: ${onNode.output}`)
+      console.log(`${specifier.padEnd(46)}  yes       ${typecheck.ok ? 'ok ' : 'ERR'}  ${onBun.ok ? 'ok ' : 'ERR'}  ${onNode.ok ? 'ok' : 'ERR'}`)
     }
     const bin = manifest.bin?.deja
     if (bin) {
@@ -177,7 +174,32 @@ try {
       if (!help.ok || !/deja/i.test(help.output)) failures.push(`bin deja --help failed or printed no usage: ${help.output}`)
     }
   }
-  if (nodeGaps.length) console.log(`\nNode import gaps from Bun-only APIs (tracked in DEJA-14):\n${nodeGaps.map(line => `  ${line}`).join('\n')}`)
+
+  // The packed store-sqlite opens a real database on each runtime and round-trips a walk.
+  await writeFile(join(project, 'sqlite-roundtrip.mjs'), [
+    "import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'",
+    "import { tmpdir } from 'node:os'",
+    "import { join } from 'node:path'",
+    "import { SQLiteWalkStore, sqliteRuntime } from '@deja-qa/store-sqlite'",
+    "const root = await mkdtemp(join(tmpdir(), 'deja-pack-sqlite-'))",
+    "try {",
+    "  await mkdir(join(root, 'flows'))",
+    "  await writeFile(join(root, 'flows/a.yaml'), 'appId: a\\n---\\n- assertVisible: x\\n')",
+    "  const store = new SQLiteWalkStore({ workspaceRoot: root })",
+    "  const identity = { goal: 'Pack', appId: 'a', platform: 'ios', flowSchemaVersion: 'maestro/v1', buildFingerprint: 'a'.repeat(64) }",
+    "  await store.persistVerifiedCandidate({ identity, candidatePath: 'flows/a.yaml', validation: { passed: true, at: '2026-11-22T00:00:00.000Z' }, origin: 'remember' })",
+    "  const hit = await store.lookup(identity)",
+    "  store.close()",
+    "  if (hit.status !== 'hit') throw new Error(`expected a hit, got ${hit.status}`)",
+    "  console.log(sqliteRuntime)",
+    "} finally { await rm(root, { recursive: true, force: true }) }",
+  ].join('\n'))
+  for (const [runtime, expected] of [['bun', 'bun'], ['node', 'node']] as const) {
+    const roundTrip = run(runtime, ['sqlite-roundtrip.mjs'], project)
+    const ok = roundTrip.ok && roundTrip.output.split('\n').pop() === expected
+    console.log(`packed store-sqlite round trip on ${runtime}: ${ok ? 'ok' : 'FAILED'}`)
+    if (!ok) failures.push(`packed store-sqlite round trip on ${runtime}: ${roundTrip.output}`)
+  }
   if (failures.length) {
     console.error(`\npack-check FAILED:\n${failures.join('\n')}`)
     process.exitCode = 1

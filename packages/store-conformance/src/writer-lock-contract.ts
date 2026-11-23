@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test'
+import { resolveHarness, type ContractHarness } from './harness.ts'
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises'
@@ -17,7 +17,7 @@ async function temporaryFilesUnder(root: string): Promise<string[]> {
   return found
 }
 
-const writerProcess = resolve(import.meta.dir, '../test/fixtures/writer-process.ts')
+const writerProcess = resolve(import.meta.dirname, '../test/fixtures/writer-process.mjs')
 
 type Child = {
   process: ChildProcessWithoutNullStreams
@@ -76,7 +76,8 @@ function lockPathOf(implementation: WalkStoreContractImplementation, root: strin
   return `${implementation.metadataPath(root, storeId)}.lock`
 }
 
-export function runWriterLockContractTests(implementation: WalkStoreContractImplementation) {
+export function runWriterLockContractTests(implementation: WalkStoreContractImplementation, harness?: ContractHarness) {
+  const { describe, test, expect } = resolveHarness(harness)
   describe(`${implementation.name}: one writer per store, one store per device`, () => {
     test('a second writer in the same process is refused with a typed error, and reads still work', async () => {
       const { temporary, workspaceRoot } = await workspace()
@@ -175,27 +176,29 @@ export function runWriterLockContractTests(implementation: WalkStoreContractImpl
       }
     })
 
-    test.each(['SIGINT', 'SIGTERM'] as const)('%s releases the lock and still ends the process', async name => {
-      const { temporary, workspaceRoot } = await workspace()
-      try {
-        const child = startWriter(implementation, workspaceRoot, undefined)
-        expect(await child.first).toBe('ACQUIRED')
-        const lockPath = lockPathOf(implementation, workspaceRoot)
-        expect(existsSync(lockPath)).toBe(true)
-        child.process.kill(name)
-        await child.exited
-        expect(await child.signal).toBe(name)
-        expect(existsSync(lockPath)).toBe(false)
-        const store = implementation.createStore(workspaceRoot)
+    for (const name of ['SIGINT', 'SIGTERM'] as const) {
+      test(`${name} releases the lock and still ends the process`, async () => {
+        const { temporary, workspaceRoot } = await workspace()
         try {
-          await persist(store, 'After signal')
+          const child = startWriter(implementation, workspaceRoot, undefined)
+          expect(await child.first).toBe('ACQUIRED')
+          const lockPath = lockPathOf(implementation, workspaceRoot)
+          expect(existsSync(lockPath)).toBe(true)
+          child.process.kill(name)
+          await child.exited
+          expect(await child.signal).toBe(name)
+          expect(existsSync(lockPath)).toBe(false)
+          const store = implementation.createStore(workspaceRoot)
+          try {
+            await persist(store, 'After signal')
+          } finally {
+            await implementation.closeStore(store)
+          }
         } finally {
-          await implementation.closeStore(store)
+          await rm(temporary, { recursive: true, force: true })
         }
-      } finally {
-        await rm(temporary, { recursive: true, force: true })
-      }
-    })
+      })
+    }
 
     test('stores with different ids in one process write the same flow in parallel without errors or torn reads', async () => {
       for (let round = 0; round < 8; round += 1) {

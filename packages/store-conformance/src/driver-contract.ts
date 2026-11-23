@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test'
+import { resolveHarness, type ContractHarness } from './harness.ts'
 import {
   MAX_OBSERVED_ELEMENTS,
   fingerprintScreenV2,
@@ -42,7 +42,8 @@ export type ExplorationDriverContractImplementation = {
  * Shared behavioural suite for every `ExplorationDriver` (iOS now; Android reuses it in DEJA-20's
  * parity work). Every assertion is the same for every platform.
  */
-export function runExplorationDriverContractTests(implementation: ExplorationDriverContractImplementation) {
+export function runExplorationDriverContractTests(implementation: ExplorationDriverContractImplementation, harness?: ContractHarness) {
+  const { describe, test, expect } = resolveHarness(harness)
   const base: ContractScene = { ids: ['screen.today', 'today.answer', 'today.save', 'tab.feed'], labels: ['Hello'] }
   const fingerprintOf = async (scene: ContractScene) => {
     const { driver } = implementation.create(scene)

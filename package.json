@@ -41,6 +41,7 @@
     "preview": "vite preview",
     "build:packages": "bun scripts/build-packages.ts",
     "pack-check": "bun scripts/pack-check.ts",
+    "test:node": "bun scripts/node-conformance.ts",
     "deja": "bun apps/cli/deja.ts"
   },
   "dependencies": {
