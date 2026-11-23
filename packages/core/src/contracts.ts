@@ -209,7 +209,7 @@ export type CandidateSnapshot = {
 export type MigrateOptions = {
   /** Report what would be written, and write nothing. */
   dryRun?: boolean
-  /** The adapter id to give a walk from before adapters were recorded (the Android adapter's id). */
+  /** The adapter id to give a walk from before adapters were recorded. */
   adapter?: string
 }
 
