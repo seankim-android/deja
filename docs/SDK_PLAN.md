@@ -4,7 +4,7 @@ Status: proposal. Nothing in this document is built yet unless it says "today".
 
 ## Goal
 
-Today Déjà is a Bun monorepo with one product surface: the `walkcache` CLI in `apps/cli`.
+Today Déjà is a Bun monorepo with one product surface: the `deja` CLI in `apps/cli`.
 The packages under `packages/` have no `package.json` files. They import each other by relative
 paths such as `../../core/src/index.ts`. Nobody outside this repo can install them.
 
@@ -42,18 +42,18 @@ const result = await deja.run('checkout')   // RunResult, schema 1
 
 - build the `WalkIdentity` from the goal, `appId`, platform, `maestro/v1` and the adapter's build
   fingerprint, so callers do not compute SHA-256 hashes themselves;
-- pass the explorer and repairer as lazy factories, which `WalkCache` already requires
+- pass the explorer and repairer as lazy factories, which `Deja` already requires
   (`createExplorer`, `createRepairer?`), so a warm hit never builds a model client;
 - default the `RunReporter` to a no-op, and offer the CLI's `JsonRunReporter` as an option.
 
-`WalkCache` itself stays exported for callers who want full control.
+`Deja` itself stays exported for callers who want full control.
 
 ### Seams that exist today
 
 | Seam | Where | Shape |
 | --- | --- | --- |
-| Orchestrator | `packages/core/src/orchestration.ts` | `new WalkCache(deps)` with `run(identity)`, `explore(identity)`, `remember(identity, candidatePath)` |
-| Dependencies | same file | `WalkCacheDependencies`: `store`, `runner`, `reporter`, `createExplorer`, `createRepairer?`, `semantic?`, `now?`, `artifactId?` |
+| Orchestrator | `packages/core/src/orchestration.ts` | `new Deja(deps)` with `run(identity)`, `explore(identity)`, `remember(identity, candidatePath)` |
+| Dependencies | same file | `DejaDependencies`: `store`, `runner`, `reporter`, `createExplorer`, `createRepairer?`, `semantic?`, `now?`, `artifactId?` |
 | Store | `packages/core/src/contracts.ts` | `WalkStore`: `lookup`, `lookupPreviousSuccessful`, `persistVerifiedCandidate`, `persistVerifiedRepair`, `recordValidation`, `list` |
 | Runner | same | `WalkRunner.run({ flowPath, artifactDirectory, timeoutMs? })` returns `ExecutionResult` |
 | Explorer | same | `WalkExplorer.explore({ identity })` returns `ExplorationResult` |
@@ -65,12 +65,12 @@ const result = await deja.run('checkout')   // RunResult, schema 1
 
 ## Package layout
 
-All packages publish under one scope. `@deja` is used below as a placeholder; see Risks for the
+All packages publish under the `@deja` scope. See Risks for the
 name check.
 
 | Package | Today's folder | Exports | Depends on |
 | --- | --- | --- | --- |
-| `@deja/core` | `packages/core` | `WalkCache`, `createDeja` (new), all contracts, `normalizeGoal`, result schema, semantic and subflow types | nothing |
+| `@deja/core` | `packages/core` | `Deja`, `createDeja` (new), all contracts, `normalizeGoal`, result schema, semantic and subflow types | nothing |
 | `@deja/maestro` | `packages/maestro` | `MaestroWalkRunner`, Android/Web/iOS adapters, `classifyMaestroFailure`, subflow composer | core |
 | `@deja/store-local` | `packages/store-local` | `LocalWalkStore`, `InvalidWalkMemoryError` | core |
 | `@deja/store-sqlite` | `packages/store-sqlite` | `SQLiteWalkStore` | core |
@@ -78,7 +78,7 @@ name check.
 | `@deja/explorer-openclaw` | `packages/agent-openclaw` | `OpenClawWalkExplorer` | core, maestro |
 | `@deja/repair` | `packages/repair` | `BoundedSelectorRepairer`, `CheckoutRepairPolicy` | core, maestro, store-local (to remove) |
 | `@deja/semantic-local` | `packages/semantic-local` | `LocalLexicalEmbeddingProvider` | core |
-| `@deja/cli` (bin `deja`) | `apps/cli` | the CLI; `walkcache` stays as a bin alias for one minor version | all of the above |
+| `@deja/cli` (bin `deja`) | `apps/cli` | the `deja` CLI | all of the above |
 
 Not published: `packages/metrics` (internal cold/warm analysis), `viewer/` and `src/` (the
 optional local viewer), `spikes/`, `demo/`.
@@ -152,10 +152,10 @@ are not negotiable in the engine, not the policy: product assertion failures are
   split the conformance suite into runner-neutral cases plus thin Bun and Vitest/Node bindings.
 - **Format.** ESM only, `"type": "module"`, `exports` maps, `.d.ts` files. Build with tsup.
   Relative cross-package imports become package imports through Bun workspaces.
-- **CLI.** `npx @deja/cli run checkout` (or `npx deja` if the name is available). Config file stays
-  `walkcache.config.json` with `deja.config.json` accepted as the new name.
+- **CLI.** `npx @deja/cli run checkout`. The config file is `deja.config.json`, runtime state lives
+  in `.deja/`, and environment defaults use `DEJA_*` variables (for example `DEJA_MAESTRO`).
 - **GitHub Action.** `deja-action`: install Maestro at a pinned version, run `deja run <goal>` for a
-  list of goals, upload `.walkcache/reports/` as an artifact, and fail on exit codes 1, 3 and 4.
+  list of goals, upload `.deja/reports/` as an artifact, and fail on exit codes 1, 3 and 4.
   Replay only by default; cold exploration in CI needs an explicit input and a provider key secret.
   It must run on a runner that has an emulator or simulator; the Action does not provide devices.
 - **MCP server.** `@deja/mcp` exposing `deja.run`, `deja.remember`, `deja.list` and `deja.inspect`.
@@ -174,7 +174,6 @@ Sizes: S is under a day, M is a few days, L is a week or more.
 | Remove `repair` -> `store-local` edge; explorer takes `WalkRunner` | S | a test fails on a forbidden import |
 | tsup build per package, ESM and `.d.ts` | S | `npm pack` of each package installs into an empty Node 20 project and type-checks |
 | Remove `Bun.file`; sqlite driver seam | M | the store conformance suite passes on Node 20 and Bun 1.4 |
-| Rename CLI bin to `deja`, keep `walkcache` alias | S | both bins print the same `--help` |
 | Publish 0.1.0 under the chosen scope with provenance | S | `npm view @<scope>/core version` prints 0.1.0 |
 
 ### Phase 1: stable API and CI
@@ -204,7 +203,7 @@ Sizes: S is under a day, M is a few days, L is a week or more.
   - `deja` is taken (v0.1.12, a dotfiles CLI by another maintainer, last changed 2022).
   - `@deja/core` returns 404, and a registry search for `scope:deja` finds no packages. Whether
     someone owns the `deja` scope cannot be confirmed without logging in; try `npm org create deja`.
-  - `deja-cli`, `deja-action`, `dejaqa`, `deja-qa` and `walkcache` all return 404 (free as names).
+  - `deja-cli`, `deja-action`, `dejaqa` and `deja-qa` all return 404 (free as names).
   - Fallback scope if `@deja` is owned: `@deja-qa`.
 - **Maestro version pinning.** All evidence is on Maestro 2.12.0, and Maestro Web is beta. The
   runner should read `maestro --version` and refuse or warn outside a tested range. The Action pins
@@ -219,8 +218,8 @@ Sizes: S is under a day, M is a few days, L is a week or more.
   one Checkout repair on an API 34 emulator; Web and iOS replay of reviewed YAML only; no measured
   speedup. Package READMEs, the docs site and the npm description must not say more. A new
   platform claim needs linked run evidence first.
-- **Open:** keep the `walkcache` names in the `.walkcache/` folder and config file, or migrate?
-  Recommendation: keep the folder for 0.x and read both config names.
+- **Open:** `deja` on npm belongs to someone else, so `npx deja` will not work. Recommendation:
+  document `npx @deja/cli` and install the bin as `deja`.
 
 ## Next 5 steps
 
