@@ -52,6 +52,7 @@ describe('findFlowReferences', () => {
     // Maestro 2.12 takes a list or a `files` list, not a bare path.
     expect(() => findFlowReferences('- addMedia: one.png\n')).toThrow(FlowFileCommandError)
     expect(() => findFlowReferences('- addMedia:\n    file: one.png\n')).toThrow(FlowFileCommandError)
+    expect(() => findFlowReferences('- retry: again.yaml\n')).toThrow(FlowFileCommandError)
     expect(() => findFlowReferences('- assertScreenshot: home.png\n')).toThrow(/reference image/)
     expect(() => findFlowReferences('- repeat:\n    commands:\n      - assertScreenshot: home\n')).toThrow(FlowReferenceError)
   })

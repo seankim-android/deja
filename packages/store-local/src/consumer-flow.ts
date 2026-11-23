@@ -366,7 +366,9 @@ export class ConsumerFlows {
     if (history.length === 0) return { status: 'miss', reason: 'not-validated', flowPath }
     const walk = history.find(item => item.buildFingerprint === identity.buildFingerprint)
     if (!walk) return { status: 'miss', reason: 'stale-build', flowPath }
-    if (!walk.lastValidation.passed) return { status: 'miss', reason: 'failed-validation', flowPath }
+    if (!walk.lastValidation.passed) {
+      return { status: 'miss', reason: 'failed-validation', flowPath, closureSha256: entry.closureSha256 }
+    }
     return { status: 'hit', walk: asConsumerWalk(walk), flowPath }
   }
 

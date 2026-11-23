@@ -93,6 +93,9 @@ export function findFlowReferences(contents: string): FlowReference[] {
           if (file !== undefined || key === 'runScript') {
             found.push({ kind, command: key, path: referencePath(key, file) })
           }
+        } else if (key === 'retry') {
+          // Maestro 2.12 has no scalar shorthand for retry; its own reader rejects the flow.
+          throw new FlowFileCommandError('retry takes a mapping with a file or commands, not a bare value')
         } else {
           found.push({ kind, command: key, path: referencePath(key, value) })
         }

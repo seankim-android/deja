@@ -1,14 +1,9 @@
 import { readFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import {
-  createDeja,
   InvalidWalkManifestError,
-  UnsupportedPlatformExplorer,
-  type EngineReport,
-  type RunReporter,
   type RunResult,
 } from '@deja-qa/core'
-import { OpenClawWalkExplorer } from '@deja-qa/explorer-openclaw'
 import {
   ConsumerFlowError,
   InvalidWalkMemoryError,
@@ -17,25 +12,11 @@ import {
   StoreLockedError,
   StoreLockUnavailableError,
 } from '@deja-qa/store-local'
+import { dejaHome, type InstallEngineOptions } from '@deja-qa/maestro'
 import {
-  dejaHome,
-  MaestroWalkRunner,
-  type InstallEngineOptions,
-  androidMaestroAdapter,
-  iosMaestroAdapter,
-  webMaestroAdapter,
-} from '@deja-qa/maestro'
-import { BoundedSelectorRepairer } from '@deja-qa/repair'
-import {
-  LOCAL_LEXICAL_EMBEDDING_PROVIDER,
-  LocalLexicalEmbeddingProvider,
-} from '@deja-qa/semantic-local'
-import {
-  buildFingerprint,
   CliConfigurationError,
   defaultConfigPath,
   loadProductionConfiguration,
-  type ProductionConfiguration,
 } from './config.ts'
 import { prepareJunit, JunitReporter, writeErroredJunit } from './junit.ts'
 import { HELP, renderMigration, renderResult, renderSummary, renderWalks } from './output.ts'
@@ -43,6 +24,8 @@ import { createRedactor, redactJson } from './redaction.ts'
 import { JsonRunReporter, readRunReport } from './reporter.ts'
 import { renderDoctor, runDoctor, type DoctorProbe } from './doctor.ts'
 import { installEngineCommand, selectEngine } from './engine.ts'
+import { runGate } from './gate.ts'
+import { createExecutionAdapter, createOrchestration, createStore, EngineRunReporter } from './orchestration.ts'
 import { isCompiledBinary, versionLine } from './version.ts'
 
 export type CliIo = {
@@ -59,21 +42,6 @@ export type CliDependencies = {
   crashReportDirectory?: string
   /** Overrides compiled-binary detection, so a test can exercise the explore refusal. */
   compiledBinary?: boolean
-}
-
-/** Adds the engine to every report, so the JSON report, the text output and the summary agree. */
-class EngineRunReporter implements RunReporter {
-  private readonly inner: RunReporter
-  private readonly engine: EngineReport
-  constructor(inner: RunReporter, engine: EngineReport) {
-    this.inner = inner
-    this.engine = engine
-  }
-  report(result: RunResult) {
-    // The JUnit reporter adds its artifact to this same object, so do not copy it.
-    result.engine = this.engine
-    return this.inner.report(result)
-  }
 }
 
 async function configuredOverride(configPath: string) {
@@ -97,6 +65,10 @@ type ParsedArguments = {
   flow?: string
   junit?: string
   store?: string
+  goals?: string
+  build?: string
+  label?: string
+  evidence?: string
   json: boolean
   summary: boolean
   help: boolean
@@ -113,6 +85,10 @@ function parseArguments(argv: string[]): ParsedArguments {
   let flow: string | undefined
   let junit: string | undefined
   let store: string | undefined
+  let goals: string | undefined
+  let build: string | undefined
+  let label: string | undefined
+  let evidence: string | undefined
   let json = false
   let summary = false
   let help = false
@@ -131,13 +107,17 @@ function parseArguments(argv: string[]): ParsedArguments {
     else if (argument === '--accept-assertion-change') acceptAssertionChange = true
     else if (argument === '--dry-run') dryRun = true
     else if (argument === '-h' || argument === '--help' || argument === 'help') help = true
-    else if (argument === '--config' || argument === '--flow' || argument === '--junit' || argument === '--store') {
+    else if (['--config', '--flow', '--junit', '--store', '--goals', '--build', '--label', '--evidence'].includes(argument)) {
       const value = argv[index + 1]
       if (!value || value.startsWith('--')) {
-        throw new CliConfigurationError(`${argument} requires ${argument === '--store' ? 'a store id' : 'a file path'}`)
+        throw new CliConfigurationError(`${argument} requires ${argument === '--store' ? 'a store id' : argument === '--label' ? 'a label' : 'a file path'}`)
       }
       index += 1
       if (argument === '--config') configPath = value
+      else if (argument === '--goals') goals = value
+      else if (argument === '--build') build = value
+      else if (argument === '--label') label = value
+      else if (argument === '--evidence') evidence = value
       else if (argument === '--junit') junit = value
       else if (argument === '--store') store = value
       else flow = value
@@ -153,6 +133,10 @@ function parseArguments(argv: string[]): ParsedArguments {
     ...(flow ? { flow } : {}),
     ...(junit ? { junit } : {}),
     ...(store ? { store } : {}),
+    ...(goals ? { goals } : {}),
+    ...(build ? { build } : {}),
+    ...(label ? { label } : {}),
+    ...(evidence ? { evidence } : {}),
     json,
     summary,
     help,
@@ -177,110 +161,6 @@ function resultExitCode(result: RunResult) {
   if (['flow-changed', 'not-validated', 'needs-migration', 'assertions-changed'].includes(result.outcome)) return 6
   if (result.outcome === 'flaky') return 7
   return 1
-}
-
-function createOrchestration(
-  configuration: ProductionConfiguration,
-  reporter: RunReporter,
-  junitPath: string | undefined,
-  storeId: string | undefined,
-  executable: string,
-  crashReportDirectory: string | undefined,
-  compiledBinary: boolean,
-) {
-  const store = new LocalWalkStore({
-    workspaceRoot: configuration.workspaceRoot,
-    ...(storeId ? { storeId } : {}),
-    ...(configuration.manifest ? {
-      manifest: {
-        path: configuration.manifest,
-        ...(configuration.flowsDir ? { flowsDir: configuration.flowsDir } : {}),
-        // A fixture login must never end up in a file that gets committed.
-        forbiddenValues: configuration.explore.fixtureCredentials.map(credential => credential.value),
-      },
-    } : {}),
-  })
-  const executionAdapter = configuration.explore.platform === 'web'
-    ? webMaestroAdapter({
-      adapterId: configuration.explore.adapter,
-      headless: configuration.explore.headless,
-      screenSize: configuration.explore.screenSize,
-    })
-    : configuration.explore.platform === 'ios'
-      ? iosMaestroAdapter({
-        device: configuration.explore.device,
-        adapterId: configuration.explore.adapter,
-      })
-    : androidMaestroAdapter({ device: configuration.explore.device })
-  const runner = new MaestroWalkRunner({
-    workspaceRoot: configuration.workspaceRoot,
-    executable,
-    device: executionAdapter.device,
-    adapter: executionAdapter,
-    timeoutMs: configuration.maestro.timeoutMs,
-    appId: configuration.explore.appId,
-    ...(crashReportDirectory ? { crashReportDirectory } : {}),
-    crashReportGraceMs: configuration.crashReportGraceMs,
-    ...(junitPath ? { junitPath } : {}),
-    ...(process.env.ANDROID_HOME || process.env.ANDROID_SDK_ROOT
-      ? { androidSdkRoot: process.env.ANDROID_HOME ?? process.env.ANDROID_SDK_ROOT }
-      : {}),
-    ...(process.env.JAVA_HOME ? { javaHome: process.env.JAVA_HOME } : {}),
-  })
-  const orchestration = createDeja({
-    workspaceRoot: configuration.workspaceRoot,
-    app: { appId: configuration.explore.appId, buildPath: configuration.explore.buildPath },
-    adapter: executionAdapter,
-    store,
-    ...(configuration.manifest ? { manifestPath: configuration.manifest } : {}),
-    runner,
-    reporter,
-    ...(configuration.semantic ? {
-      semantic: {
-        createProvider: () => configuration.semantic!.provider === LOCAL_LEXICAL_EMBEDDING_PROVIDER
-          ? new LocalLexicalEmbeddingProvider()
-          : null,
-        minimumSimilarity: configuration.semantic!.minimumSimilarity,
-        minimumMargin: configuration.semantic!.minimumMargin,
-      },
-    } : {}),
-    ...(configuration.staleBuild ? { staleBuild: configuration.staleBuild } : {}),
-    explorer: ({ identity }) => {
-      // OpenClaw starts its MCP proxy with process.execPath, which in a compiled binary is deja, not Bun.
-      if (compiledBinary) {
-        throw new CliConfigurationError('explore needs the Bun runtime; use the npm packages. The standalone binary replays stored walks only.')
-      }
-      if (configuration.explore.platform !== 'android') {
-        return new UnsupportedPlatformExplorer(configuration.explore.platform)
-      }
-      return new OpenClawWalkExplorer({
-        configuration: configuration.explore,
-        buildFingerprint: identity.buildFingerprint,
-        openClawExecutable: configuration.openClaw!.executable,
-        maestroMcpProxy: configuration.openClaw!.mcpProxy,
-        runner,
-        store,
-      })
-    },
-    ...(configuration.repair && configuration.explore.platform === 'android' && !configuration.manifest ? {
-      repairer: () => new BoundedSelectorRepairer({
-        workspaceRoot: configuration.workspaceRoot,
-        policy: configuration.repair!.policy,
-        timeoutMs: configuration.repair!.timeBudgetMs,
-        apkPath: resolve(configuration.workspaceRoot, configuration.explore.buildPath),
-        device: configuration.explore.device,
-        store,
-        memoryPath: store.relativeMemoryPath,
-        runner,
-        fingerprint: () => buildFingerprint(configuration, executionAdapter),
-        ...(process.env.ANDROID_HOME || process.env.ANDROID_SDK_ROOT
-          ? { androidSdkRoot: process.env.ANDROID_HOME ?? process.env.ANDROID_SDK_ROOT }
-          : {}),
-        ...(process.env.JAVA_HOME ? { javaHome: process.env.JAVA_HOME } : {}),
-      }),
-    } : {}),
-  })
-  return { store, orchestration, adapterId: executionAdapter.id }
 }
 
 export async function runCli(argv: string[], io: CliIo = {
@@ -309,8 +189,21 @@ export async function runCli(argv: string[], io: CliIo = {
       io.stdout(HELP)
       return parsed.command === '' && !parsed.help ? 2 : 0
     }
-    if (!['explore', 'run', 'remember', 'list', 'inspect', 'migrate', 'engine', 'doctor'].includes(parsed.command)) {
+    if (!['explore', 'run', 'remember', 'list', 'inspect', 'migrate', 'gate', 'engine', 'doctor', 'mcp'].includes(parsed.command)) {
       throw new CliConfigurationError(`Unknown command: ${parsed.command}`)
+    }
+    if (parsed.command === 'mcp') {
+      if (parsed.positionals.length > 0 || parsed.junit || parsed.flow || parsed.summary || parsed.json ||
+          parsed.verify || parsed.rerunFailed || parsed.acceptAssertionChange || parsed.dryRun ||
+          parsed.goals || parsed.build || parsed.label || parsed.evidence) {
+        throw new CliConfigurationError('mcp accepts only --config and --store')
+      }
+      const { runMcpServer } = await import('./mcp.ts')
+      await runMcpServer(
+        ['--config', parsed.configPath, ...(parsed.store ? ['--store', parsed.store] : [])],
+        { env, ...(dependencies.crashReportDirectory ? { crashReportDirectory: dependencies.crashReportDirectory } : {}), ...(dependencies.compiledBinary !== undefined ? { compiledBinary: dependencies.compiledBinary } : {}) },
+      )
+      return 0
     }
     if (parsed.command === 'engine') {
       if (parsed.positionals.length !== 1 || parsed.positionals[0] !== 'install') {
@@ -346,6 +239,16 @@ export async function runCli(argv: string[], io: CliIo = {
     }
     if (parsed.verify && parsed.command !== 'run') {
       throw new CliConfigurationError('--verify is valid only with run')
+    }
+    if (parsed.command !== 'gate' && (parsed.goals || parsed.build || parsed.label || parsed.evidence)) {
+      throw new CliConfigurationError('--goals, --build, --label and --evidence are valid only with gate')
+    }
+    if (parsed.command === 'gate') {
+      if (!parsed.goals) throw new CliConfigurationError('gate requires --goals <file>')
+      if (parsed.positionals.length > 0) throw new CliConfigurationError('gate accepts no positional arguments')
+      if (parsed.verify || parsed.dryRun || parsed.acceptAssertionChange || parsed.summary) {
+        throw new CliConfigurationError('gate accepts only --goals, --build, --label, --evidence, --store, --config and --json')
+      }
     }
     if (parsed.rerunFailed && parsed.command !== 'run') {
       throw new CliConfigurationError('--rerun-failed is valid only with run')
@@ -387,6 +290,24 @@ export async function runCli(argv: string[], io: CliIo = {
         : renderResult(report, null, redact))
       summarize(report, report.goalKey)
       return resultExitCode(report)
+    }
+
+    if (parsed.command === 'gate') {
+      // Read-only: no engine, no runner, no writer lock. The store is only listed and looked up.
+      return await runGate({
+        configuration,
+        store: createStore(configuration, parsed.store),
+        adapter: createExecutionAdapter(configuration),
+        options: {
+          goalsPath: parsed.goals!,
+          ...(parsed.build ? { buildPath: parsed.build } : {}),
+          ...(parsed.label ? { label: parsed.label } : {}),
+          ...(parsed.evidence ? { evidencePath: parsed.evidence } : {}),
+        },
+        redact,
+        json: parsed.json,
+        io,
+      })
     }
 
     const jsonReporter = new JsonRunReporter(configuration.workspaceRoot, redact)

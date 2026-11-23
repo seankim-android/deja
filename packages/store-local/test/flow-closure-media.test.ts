@@ -43,6 +43,20 @@ describe('closure with media files (DEJA-32)', () => {
     }
   })
 
+  test('media that adds up to more than 32 MiB is refused, though each file is under its cap', async () => {
+    const files: Record<string, string | Buffer> = {
+      '.maestro/flows/main.yaml': `- addMedia: [${[1, 2, 3, 4, 5].map(n => `../media/${n}.mp4`).join(', ')}]\n`,
+    }
+    for (const n of [1, 2, 3, 4, 5]) files[`.maestro/media/${n}.mp4`] = Buffer.alloc(7 * 1024 * 1024, n)
+    const ctx = await workspace(files)
+    try {
+      await expect(collectFlowClosure(ctx.root, join(ctx.root, '.maestro/flows/main.yaml')))
+        .rejects.toThrow(/add up to more than 32 MiB/)
+    } finally {
+      await ctx.cleanup()
+    }
+  })
+
   test('two Unicode spellings of one path are refused, whatever the disk does with them', async () => {
     const ctx = await workspace({
       '.maestro/flows/main.yaml': '- addMedia: [../media/caf\u00e9.png]\n- addMedia: [../media/cafe\u0301.png]\n',

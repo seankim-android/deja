@@ -46,11 +46,13 @@
     "prepublishOnly": "bun ../../scripts/publish-guard.ts"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
     "@deja-qa/core": "workspace:*",
     "@deja-qa/maestro": "workspace:*",
     "@deja-qa/store-local": "workspace:*",
     "@deja-qa/explorer-openclaw": "workspace:*",
     "@deja-qa/repair": "workspace:*",
-    "@deja-qa/semantic-local": "workspace:*"
+    "@deja-qa/semantic-local": "workspace:*",
+    "yaml": "^2.9.1"
   }
 }

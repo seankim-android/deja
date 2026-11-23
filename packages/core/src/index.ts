@@ -1,4 +1,5 @@
 export * from './contracts.ts'
+export * from './gate.ts'
 export * from './semantic.ts'
 export * from './route-graph.ts'
 export * from './subflow.ts'

@@ -24,6 +24,8 @@ const MAX_DEPTH = 16
 const MAX_FILE_BYTES = 1024 * 1024
 /** `addMedia` files are images and short videos. They are hashed and copied as bytes. */
 const MAX_MEDIA_BYTES = 8 * 1024 * 1024
+/** All media of one closure together. Each replay copies the closure again. */
+const MAX_TOTAL_MEDIA_BYTES = 32 * 1024 * 1024
 
 export type ClosureFile = {
   /** Path from the closure root, with `/` separators. */
@@ -103,6 +105,7 @@ function commonDirectory(directories: string[]) {
  */
 export async function collectFlowClosure(root: string, main: string): Promise<FlowClosure> {
   const found = new Map<string, { bytes: Buffer; kind: ClosureFile['kind'] }>()
+  let mediaBytes = 0
   const allowedHidden = new Set(
     posix(relative(root, main)).split('/').slice(0, -1).filter(segment => segment.startsWith('.')),
   )
@@ -159,6 +162,12 @@ export async function collectFlowClosure(root: string, main: string): Promise<Fl
     }
     const bytes = await read(path, kind)
     found.set(path, { bytes, kind })
+    if (kind === 'media') {
+      mediaBytes += bytes.length
+      if (mediaBytes > MAX_TOTAL_MEDIA_BYTES) {
+        throw new FlowClosureError(`media files add up to more than ${MAX_TOTAL_MEDIA_BYTES / 1024 / 1024} MiB`)
+      }
+    }
     if (found.size > MAX_FILES) throw new FlowClosureError(`flow runs more than ${MAX_FILES} files`)
     // A script is not YAML, and media is binary: neither is read for references.
     if (kind !== 'flow') return

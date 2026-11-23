@@ -41,8 +41,10 @@ bun run deja -- --help
 | `run <goal> [--rerun-failed]` | Compute exact identity and check memory first. A hit replays YAML; a normal miss explores; eligible Android stale-build memory enters one bounded repair; iOS with `staleBuild: "replay-last-verified"` replays the last verified YAML instead. A failed hit is recorded and is not reusable. |
 | `remember <goal> --flow <candidate.yaml>` | Independently execute reviewed YAML and persist only after a complete pass. A bad product assertion remains a failure. |
 | `migrate [--dry-run]` | With a manifest: move the old store's walks (memory schema 3) into your own files plus manifest entries. See [Consumer-owned flows](#consumer-owned-flows-and-the-walk-manifest). |
+| `gate --goals <file>` | Read-only release gate: did every listed goal pass on this exact build? See [Release gate](#release-gate). |
 | `list` | List valid local walks; does not invoke a runner, explorer, or model. |
 | `inspect <report>` | Print a saved, redacted report. Inspecting a failed result returns its original failure class. |
+| `mcp [--store <id>]` | Serve saved walks to a coding agent over MCP on stdio. See [MCP server](#mcp-server). |
 
 Global options are `--config <file>` (default `./deja.config.json`), `--json`, and
 `-h`/`--help`. `--verify` (`run`) and `--accept-assertion-change` (`remember`) need a manifest. `--rerun-failed` (`run`) is described in [Rerun a failed walk](#rerun-a-failed-walk-flaky-and-crash-results). `--store <id>` keeps this run's history in its own store (see
@@ -111,6 +113,7 @@ workspaces.
 | iOS `adapter`, `.app` `buildPath`, simulator-UDID `device` | Exact native bundle-tree/adapter identity and explicit `--platform ios` execution on the dedicated simulator. No repair block is permitted. |
 | iOS-only optional `staleBuild` | WALK-021. Off by default (a stale build returns `repair-rejected`). `"replay-last-verified"` replays the latest verified walk's stored YAML on a new build fingerprint, after the store re-checks its checksum. A pass stores that same YAML for the new build, so the next run is an exact hit. That pass **replaces the old build's entry** (one entry per goal, app, platform, adapter and browser) and **restarts its validation and repair history** at one entry, so rolling back to the old build triggers another replay. Keeping history across builds is tracked as DEJA-12. The stored walk has `origin: "replayed-on-new-build"` (not `remember`), because only the automatic replay verified it on this build and no person reviewed it there. The store refuses the write, before storing anything, if the file's bytes differ from the replayed ones. A fail reports the real Maestro failure and stores nothing, so every later run on that build replays again (one Maestro run each); it never repairs or explores. Model calls are 0 either way, and the report's `replayedOnNewBuild` names the build the YAML was last verified on. No prior verified walk keeps `repair-rejected`. Any other value, or any other platform, is a configuration error, and core also refuses the policy when `identity.platform` is not `ios`. |
 | Optional `manifest` | DEJA-36. A relative `.json` path inside `workspaceRoot`, for example `"deja.walks.json"`. Turns on consumer-owned flows: see [Consumer-owned flows](#consumer-owned-flows-and-the-walk-manifest). Not allowed with `repair`. |
+| Optional `mcp.explore` | DEJA-9. `true` registers the `deja_explore` tool in `deja mcp`. Default `false`: the server is replay only. See [MCP server](#mcp-server). |
 | Optional `flowsDir` | With `manifest` only. A relative folder inside `workspaceRoot`, outside `.deja/` (default `".maestro/flows/deja"`). Where cold exploration and `deja migrate` write a flow as your own file. |
 
 When a corresponding JSON executable/timeout field is omitted, `DEJA_OPENCLAW` and
@@ -445,6 +448,145 @@ Files a flow reads are `runFlow` and `retry` files, `runScript` files and `addMe
 reads a reference image Déjà does not store, so it is refused. `takeScreenshot` and `startRecording`
 write their paths and are not part of the closure.
 
+Media files are hashed and copied as bytes, up to 8 MiB each and 32 MiB in total per closure; more is a
+closure error. The fixture-value scan of a media file matches the raw byte spellings of each value
+only. It cannot see text that is compressed or UTF-16, or text drawn in the pixels of an image, so
+keep credentials out of media. Fixture values apply in manifest mode, where Déjà writes explore output
+into your tree; a classic store has no fixture values to check.
+
+#### Behavior changes (DEJA-32)
+
+- `run` now returns a `closure-error` result where it used to throw `FlowClosureError` (and the
+  related closure and manifest errors). A host that caught the error around `run` must read the
+  outcome instead. `RunOutcome` has a new member, so an exhaustive `switch` needs a case for it.
+- `findFlowReferences` now throws `FlowFileCommandError` (a `FlowReferenceError`) for `assertScreenshot`,
+  a malformed `addMedia`, and `retry` with a bare value. `retry` takes a mapping, as in Maestro.
+- `FlowReference` has a new `command` field, and its `kind` can be `media`.
+- `CandidateSnapshot` has an optional `files` list.
+
+### Release gate
+
+`deja gate` answers one question for a host (for example a TestFlight upload step): did every goal on
+my list pass on **this exact build**? It only reads. It never runs Maestro, explores, repairs, calls a
+model, writes the store or takes the writer lock, so it can run while another `deja` is writing.
+
+```sh
+deja gate --goals goals.txt --build build/Dev.app --label "$(git rev-parse HEAD)" --evidence out/gate.json
+```
+
+| Option | Meaning |
+| --- | --- |
+| `--goals <file>` | Required. A plain list (one goal per line, `#` comments), a JSON array of goals, or the walk manifest itself (`deja.walks.json`, whose entries name the goals). A missing file or an empty list is exit 2. |
+| `--build <path>` | The build to fingerprint. Default: the config's `buildPath`. The fingerprint is a hash of the build files, so a simulator build and a store archive of one commit differ. |
+| `--label <text>` | Recorded in the evidence as given, for example a commit SHA. The gate never checks it. Control characters, line breaks and format characters (bidi controls, zero-width characters) are refused (exit 2), as they are in goals, so the text table cannot be forged or reordered. |
+| `--evidence <file>` | Evidence JSON path (default `.deja/gate/evidence.json`). A text table is written beside it (`.txt`). An older file is deleted first, so a stale pass is never read as this run's. Only a previous gate evidence file is ever replaced (`"kind": "deja-gate-evidence"`; the text file only when the JSON beside it is valid evidence and the text is exactly its table). Files are written through a random temporary name created with O_EXCL, so a planted symlink is never followed, and a file that changed between the check and the delete (a different inode, a symlink) is not deleted. What remains: a local user who can write that folder could still swap a file inside the microseconds between the final check and the unlink or rename. Any other existing file, a symlink, the goals file, the manifest, or a path in `.deja/` outside `.deja/gate/` is refused with exit 2 and nothing is deleted. |
+| `--store <id>` | Read this store, as for other commands. |
+
+There is no option to allow a failure or skip a goal. To check fewer goals, edit the goals file.
+
+Per goal, the latest validation on this fingerprint decides:
+
+| Outcome | Meaning |
+| --- | --- |
+| `passed` | The latest validation on this fingerprint is a pass. |
+| `failed` | The latest validation on this fingerprint is a failure. |
+| `flaky` | That failure came from a run that passed on a rerun or failed differently (`--rerun-failed`). See below. |
+| `not-run` | No validation on this fingerprint, even if older builds passed, or the goal is not in the store. |
+| `flow-changed` | Manifest mode: the flow or a file it runs no longer matches the manifest's closure sha, so an earlier pass does not speak for the file on disk. |
+| `invalid` | The stored walk or its flow file cannot be read or trusted (checksum mismatch, missing file). The gate could not decide this goal: exit 11, not 10. |
+
+"Latest" is the store's own `lastValidation` for the one walk on this fingerprint: the last one written. Timestamps are recorded but never compared, so equal timestamps and clock skew cannot reorder a pass and a failure. In manifest mode only the walk of the manifest's current closure counts.
+
+The gate exits 0 only when every goal is `passed`. A store that cannot be read, a corrupt walk and a
+build that cannot be fingerprinted never pass: exit 11 with `"verdict": "error"` in the evidence.
+
+`flaky`: a flaky run records its first failure as an ordinary failed validation and never records the
+rerun pass, so the store alone cannot tell it from `failed`. The gate reads `flaky` from the run
+report (outcome `flaky` whose first attempt ended at the failed validation's time, on this
+fingerprint). Without that report it reads `failed`. Both close the gate.
+
+The evidence JSON (`schemaVersion` 1) holds `verdict` (`passed`, `closed` or `error`), the build
+fingerprint, the host's `label`, and per goal: `outcome`, `validatedAt` (the run time), `flowSha256`,
+`closureSha256` (manifest mode), `detail` and `reportPath` (the run report that recorded the
+validation, when it is still in `.deja/reports`). It goes through the same redaction as run reports.
+
+### MCP server
+
+`deja mcp [--config <file>] [--store <id>]` (DEJA-9) is a stdio MCP server, so a coding agent in a
+worktree can run the loop: edit the app, build, call `deja_run`, read a structured result. It is
+part of the CLI (`@deja-qa/cli`) rather than a separate `@deja-qa/mcp` package. It reuses the CLI's
+config loader, engine pick, store and runner assembly and report redaction, and a subcommand avoids
+widening the CLI's public exports. A separate package with its own `deja-mcp` bin stays possible.
+Stdout carries the protocol and nothing else; warnings go to stderr. It exits when the host closes stdin.
+
+The device, app ID, workspace and store come from the host's config and flags. No tool can name
+another workspace, device or store. Tool names use underscores because the Claude API rejects dots.
+
+| Tool | Input (strict: an unknown field is an error) | Result |
+| --- | --- | --- |
+| `deja_list` | none | `{ manifest?, walks: [{ goal, goalKey, appId, platform, adapter?, buildFingerprint, flowPath, lastValidation: { passed, at }, origin }] }` |
+| `deja_run` | `goal` | The schema-1 `RunResult` plus `report` (the saved report's paths). Replay only. |
+| `deja_inspect` | `report?` (under `.deja/reports/`, default `latest.json`) | A saved, redacted `RunResult`. |
+| `deja_remember` | `goal`, `flow` (workspace-relative `.yaml` or `.yml`) | The `RunResult`. Saved only on a full pass. |
+| `deja_explore` | `goal` | The `RunResult`. Registered only with `"mcp": { "explore": true }` in the config. Spends model calls. |
+
+What the server will not do, whatever a tool call says:
+
+- `deja_run` never explores and never repairs. A goal with no saved walk returns `exploration-rejected`
+  with `cacheMissReason: "not-found"` and `modelCalls: 0`. A stale selector is reported, not patched.
+  `staleBuild` from the config still applies (iOS), because it replays an already verified flow.
+- No tool takes `verify`, `rerunFailed` or `acceptAssertionChange`. A `flaky` outcome and `attempts` appear in a
+  `deja_run` result only if the result carries them; they are results, never `isError`. `deja_remember` keeps the CLI rule: a failing
+  candidate is never saved, and a flow whose assertions changed returns `assertions-changed`. Accepting
+  that change stays a person's decision on the CLI (`deja remember --accept-assertion-change`).
+- `deja_remember` resolves `flow` with `realpath`. It refuses an absolute path, a path outside the
+  workspace (a symlink that leaves it included), anything under `.deja/` (also through a symlink),
+  a file whose name or symlink target is not `.yaml` or `.yml`, a file with more than one hard link, and a
+  flow whose config document (the first YAML document, parsed with `yaml`) does not have a plain-string `appId`
+  equal to the configured app ID (a web flow: a `url` on the configured origin). It fails closed: a flow that
+  does not parse, repeats a key, or has no such header is refused. Only the header is checked: per-command
+  app IDs such as `launchApp: {appId}` are not (DEJA-41). The canonical path is what is verified and saved. In manifest mode the store then applies the same rules as
+  `deja remember`.
+- Responses use the CLI's report redaction (workspace and home paths, fixture credentials, secret-like
+  keys), plus the values of key-like environment variables (8 or more characters; a short value made only of letters
+  and separators, like `dvorak-layout`, is treated as a word and left alone), `sk-…` keys and `Bearer` tokens of 20 or more
+  characters. This can still hide an ordinary word that looks like a key; hiding too much is the safe side, and artifact paths are relative to the workspace.
+- One writer per store: a second `deja_run`, `deja_remember` or `deja_explore` while one is running is
+  refused at once with `error.code` `STORE_LOCKED`. `deja_list` and `deja_inspect` never take the lock.
+  Run one `deja mcp --store <id>` per device.
+- The server never edits app source, commits or opens a PR. The MCP request's abort signal is passed to
+  the call; as in the facade, a Maestro flow that already started is not interrupted, so a cancelled
+  call can keep the device and the store lock until that flow ends (at most `maestro.timeoutMs`).
+
+Errors that stop a tool (a locked store, a bad path, bad configuration) come back with `isError: true` and
+`{ "error": { "code", "message" } }`. A failing replay is not an error: it is a result with its failure
+label and failing step. A bad argument is a JSON-RPC invalid-params error.
+
+Claude Code, in the project's `.mcp.json`, from a source checkout (the packages are not on npm yet):
+
+```json
+{
+  "mcpServers": {
+    "deja": {
+      "command": "bun",
+      "args": ["/path/to/deja/apps/cli/deja.ts", "mcp", "--config", "/path/to/project/deja.config.json"]
+    }
+  }
+}
+```
+
+Codex, in `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.deja]
+command = "bun"
+args = ["/path/to/deja/apps/cli/deja.ts", "mcp", "--config", "/path/to/project/deja.config.json"]
+```
+
+After the packages are published, use `bunx @deja-qa/cli mcp --config deja.config.json` instead. The
+agent then sees `mcp__deja__deja_run` and its siblings. The server starts in the client's working
+directory, so give an absolute `--config` path unless the client starts in the project.
+
 ### Exit codes
 
 | Code | Meaning |
@@ -456,6 +598,8 @@ write their paths and are not part of the closure.
 | `4` | Invalid/corrupt local memory; quarantine it and recover through verified cold exploration |
 | `7` | Flaky (`--rerun-failed`): the replay failed, then passed or failed differently on a rerun of the same YAML. Not a pass; the first failure is recorded |
 | `6` | Manifest mode: `flow-changed`, `not-validated`, `needs-migration` or `assertions-changed`. Nothing was replayed or written. Run with `--verify`, or review the change and run `remember` |
+| `10` | `gate`: the gate is closed. At least one goal is `failed`, `flaky`, `not-run` or `flow-changed` |
+| `11` | `gate`: it could not decide. The store, a stored walk or flow, or the build could not be read or trusted (`invalid`), or the evidence file could not be written |
 | `5` | The store is locked by another run (`STORE_LOCKED`), two runs collided taking over a stale lock (`STORE_LOCK_CONTENTION`), or the filesystem cannot hold the lock (`STORE_LOCK_UNAVAILABLE`). Use a different `--store <id>` per device; for contention, run again |
 
 ### One store per device
