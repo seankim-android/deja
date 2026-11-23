@@ -146,9 +146,9 @@ function exportsOf(file: string, files: Map<string, string>, cache: Map<string, 
 
 function entryFiles(packageDirectory: string): { key: string; source: string }[] {
   const manifest = JSON.parse(readFileSync(join(repo, packageDirectory, 'package.json'), 'utf8'))
-  return Object.entries(manifest.exports as Record<string, unknown>)
-    .filter((entry): entry is [string, string] => typeof entry[1] === 'string')
-    .map(([key, source]) => ({ key, source }))
+  // An export is a source path, or a conditions object whose `bun` condition is the source path.
+  return Object.entries(manifest.exports as Record<string, string | { bun: string }>)
+    .map(([key, target]) => ({ key, source: typeof target === 'string' ? target : target.bun }))
 }
 
 export function emitSnapshot(packageDirectory: string): string {

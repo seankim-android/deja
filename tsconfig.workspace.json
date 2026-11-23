@@ -1,0 +1,17 @@
+{
+  "compilerOptions": {
+    "paths": {
+      "@deja-qa/core": ["./packages/core/src/index.ts"],
+      "@deja-qa/maestro": ["./packages/maestro/src/index.ts"],
+      "@deja-qa/store-local": ["./packages/store-local/src/index.ts"],
+      "@deja-qa/store-sqlite": ["./packages/store-sqlite/src/index.ts"],
+      "@deja-qa/store-conformance": ["./packages/store-conformance/src/index.ts"],
+      "@deja-qa/explorer-openclaw": ["./packages/agent-openclaw/src/index.ts"],
+      "@deja-qa/repair": ["./packages/repair/src/index.ts"],
+      "@deja-qa/semantic-local": ["./packages/semantic-local/src/index.ts"],
+      "@deja-qa/metrics": ["./packages/metrics/src/index.ts"],
+      "@deja-qa/cli/reporter": ["./apps/cli/src/reporter.ts"],
+      "@deja-qa/cli/redaction": ["./apps/cli/src/redaction.ts"]
+    }
+  }
+}
