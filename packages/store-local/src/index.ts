@@ -20,6 +20,10 @@ import {
   type WalkValidation,
 } from '@deja-qa/core'
 import {
+  ConsumerFlows,
+  readConsumerWalkFields,
+} from './consumer-flow.ts'
+import {
   checkStoredSubflows,
   collectFlowClosure,
   planStoredClosure,
@@ -44,11 +48,13 @@ export {
 } from '@deja-qa/core'
 
 export const LOCAL_MEMORY_SCHEMA_VERSION = 3
+/** Written only when a walk replays the consumer's own file (manifest mode). */
+export const LOCAL_MEMORY_CONSUMER_SCHEMA_VERSION = 4
 export const MAESTRO_FLOW_SCHEMA_VERSION = 'maestro/v1'
 export const LOCAL_MEMORY_PATH = '.deja/memory/walks.json'
 
 export type WalkMemory = {
-  schemaVersion: typeof LOCAL_MEMORY_SCHEMA_VERSION
+  schemaVersion: typeof LOCAL_MEMORY_SCHEMA_VERSION | typeof LOCAL_MEMORY_CONSUMER_SCHEMA_VERSION
   walks: StoredWalk[]
 }
 
@@ -59,6 +65,16 @@ export type LocalWalkStoreOptions = {
    * store is the workspace's single store. One writer per store: a second one gets StoreLockedError.
    */
   storeId?: string
+  /**
+   * Replay the consumer's own files through this committed manifest (path relative to the
+   * workspace, for example `deja.walks.json`). The store then keeps history only: no copy of a flow
+   * is made or read. Without it the store works as before, on its own copies under `.deja/flows`.
+   */
+  manifest?: {
+    path: string
+    /** Fixture values that must never be written into the manifest. */
+    forbiddenValues?: string[]
+  }
   /** Injectable only to model filesystem failures deterministically; production uses fs.rename. */
   renameFile?: (temporaryPath: string, destinationPath: string) => Promise<void>
 }
@@ -247,17 +263,25 @@ function validateWalk(value: unknown, legacy = false, schemaVersion = LOCAL_MEMO
     throw new InvalidWalkMemoryError('lastValidation must equal the latest history entry for the stored flow')
   }
   if (value.origin !== undefined && value.origin !== 'remember' && value.origin !== 'explore' &&
-      value.origin !== 'repair' && value.origin !== 'replayed-on-new-build') {
-    throw new InvalidWalkMemoryError('walk origin must be remember, explore, repair, or replayed-on-new-build')
+      value.origin !== 'repair' && value.origin !== 'replayed-on-new-build' && value.origin !== 'verify') {
+    throw new InvalidWalkMemoryError('walk origin must be remember, explore, repair, replayed-on-new-build, or verify')
   }
   if (value.repairHistory !== undefined &&
       (!Array.isArray(value.repairHistory) || value.repairHistory.length === 0)) {
     throw new InvalidWalkMemoryError('walk repairHistory must be a non-empty array when present')
   }
   const repairHistory = value.repairHistory?.map(readRepairProvenance)
+  if (value.closureSha256 !== undefined) {
+    // A walk that replays the consumer's own file: history only, no copy and no file list.
+    if (schemaVersion < 4 || value.subflowFiles !== undefined || value.legacyClosure !== undefined) {
+      throw new InvalidWalkMemoryError('closureSha256 needs memory schema 4 and excludes subflowFiles')
+    }
+    const problem = readConsumerWalkFields({ flowPath: value.flowPath, closureSha256: value.closureSha256 })
+    if (problem) throw new InvalidWalkMemoryError(`walk closure is invalid: ${problem}`)
+  }
   // Schema 3 records the files a flow runs, even when there are none. A walk that lost the list
   // would replay its subflows unchecked, so it is refused. Earlier schemas stored the main flow only.
-  if ((schemaVersion >= 3) !== (value.subflowFiles !== undefined)) {
+  else if ((schemaVersion >= 3) !== (value.subflowFiles !== undefined)) {
     throw new InvalidWalkMemoryError(schemaVersion >= 3
       ? 'walk is missing subflowFiles, which memory schema 3 requires'
       : 'subflowFiles needs memory schema 3')
@@ -280,6 +304,7 @@ function validateWalk(value: unknown, legacy = false, schemaVersion = LOCAL_MEMO
     flowSha256: value.flowSha256,
     ...(subflowFiles ? { subflowFiles } : {}),
     ...(value.legacyClosure ? { legacyClosure: true as const } : {}),
+    ...(value.closureSha256 !== undefined ? { closureSha256: value.closureSha256 as string } : {}),
     lastValidation,
     validationHistory: history,
     ...(value.origin ? { origin: value.origin } : {}),
@@ -298,7 +323,9 @@ function parseMemory(contents: string): WalkMemory {
   if (!object(parsed) || !Array.isArray(parsed.walks)) {
     throw new InvalidWalkMemoryError('walks.json requires a schemaVersion and walks array')
   }
-  if (parsed.schemaVersion !== 1 && parsed.schemaVersion !== 2 && parsed.schemaVersion !== LOCAL_MEMORY_SCHEMA_VERSION) {
+  if (parsed.schemaVersion !== 1 && parsed.schemaVersion !== 2 &&
+      parsed.schemaVersion !== LOCAL_MEMORY_SCHEMA_VERSION &&
+      parsed.schemaVersion !== LOCAL_MEMORY_CONSUMER_SCHEMA_VERSION) {
     throw new InvalidWalkMemoryError(`unsupported memory schemaVersion: ${String(parsed.schemaVersion)}`)
   }
   const legacy = parsed.schemaVersion === 1
@@ -312,7 +339,11 @@ function parseMemory(contents: string): WalkMemory {
     if (identities.has(identity)) throw new InvalidWalkMemoryError('duplicate exact walk identities are ambiguous')
     identities.add(identity)
   }
-  return { schemaVersion: LOCAL_MEMORY_SCHEMA_VERSION, walks }
+  return {
+    schemaVersion: walks.some(walk => walk.closureSha256 !== undefined)
+      ? LOCAL_MEMORY_CONSUMER_SCHEMA_VERSION : LOCAL_MEMORY_SCHEMA_VERSION,
+    walks,
+  }
 }
 
 function flowSlug(goalKey: string) {
@@ -327,10 +358,21 @@ export class LocalWalkStore implements WalkStore {
   /** The metadata path relative to the workspace. */
   readonly relativeMemoryPath: string
   private readonly renameFile: (temporaryPath: string, destinationPath: string) => Promise<void>
+  /** The manifest's workspace-relative path, when this store replays the consumer's own files. */
+  readonly manifestPath: string | undefined
+  private readonly consumer: ConsumerFlows | null
   private writerLock: WriterLock | null = null
 
   constructor(options: LocalWalkStoreOptions) {
     this.workspaceRoot = resolve(options.workspaceRoot)
+    this.consumer = options.manifest
+      ? new ConsumerFlows({
+        workspaceRoot: this.workspaceRoot,
+        manifestPath: options.manifest.path,
+        ...(options.manifest.forbiddenValues ? { forbiddenValues: options.manifest.forbiddenValues } : {}),
+      })
+      : null
+    this.manifestPath = this.consumer?.manifestPath
     this.relativeMemoryPath = storeMetadataPath(LOCAL_MEMORY_PATH, options.storeId)
     this.memoryPath = resolve(this.workspaceRoot, this.relativeMemoryPath)
     this.renameFile = options.renameFile ?? rename
@@ -427,9 +469,11 @@ export class LocalWalkStore implements WalkStore {
     this.acquireWriter() // Still the holder? A lost lock stops the write before it commits.
     const metadata = canonicalMetadataTarget(this.workspaceRoot, this.memoryPath)
     // A walk from before schema 3 has no stored subflows: mark it so lookup misses instead of guessing.
-    const walks = memory.walks.map(walk => walk.subflowFiles
+    const walks = memory.walks.map(walk => walk.subflowFiles || walk.closureSha256 !== undefined
       ? walk : { ...walk, subflowFiles: [], legacyClosure: true as const })
-    await this.atomicWrite(metadata.path, `${JSON.stringify({ ...memory, walks }, null, 2)}\n`)
+    const schemaVersion = walks.some(walk => walk.closureSha256 !== undefined)
+      ? LOCAL_MEMORY_CONSUMER_SCHEMA_VERSION : LOCAL_MEMORY_SCHEMA_VERSION
+    await this.atomicWrite(metadata.path, `${JSON.stringify({ schemaVersion, walks }, null, 2)}\n`)
   }
 
   private async persistVerified(
@@ -444,6 +488,7 @@ export class LocalWalkStore implements WalkStore {
     }
     const identity = normalizeIdentity(options.identity)
     this.acquireWriter()
+    if (this.consumer) return this.persistConsumer(this.consumer, identity, options, repair)
     const root = await this.canonicalRoot()
     const candidate = await this.existingFile(root, options.candidatePath, true)
     if (!candidate) throw new Error(`Verified candidate flow does not exist: ${options.candidatePath}`)
@@ -508,7 +553,41 @@ export class LocalWalkStore implements WalkStore {
     }
   }
 
+  /**
+   * Manifest mode: keep history for the consumer's own file and, if its entry changed, write the
+   * manifest. Memory is written first, so a failed manifest write leaves history that no entry matches.
+   */
+  private async persistConsumer(
+    consumer: ConsumerFlows,
+    identity: ReturnType<typeof normalizeIdentity>,
+    options: PersistVerifiedOptions,
+    repair: PersistVerifiedRepairOptions | undefined,
+  ): Promise<PersistedWalk> {
+    if (repair) {
+      throw new Error('Repair is not supported with a manifest yet: it would edit a copy, not the consumer\'s file (DEJA-6)')
+    }
+    return consumer.withLock(async () => {
+      // Validate all existing entries first: corrupt memory is never silently replaced.
+      const memory = await this.loadMemory()
+      const plan = await consumer.plan(memory.walks, identity, options)
+      await this.writeMemory({
+        schemaVersion: LOCAL_MEMORY_CONSUMER_SCHEMA_VERSION, walks: [...plan.remaining, plan.walk],
+      })
+      const changed = await plan.commit()
+      return {
+        walk: plan.walk,
+        flowPath: plan.flowPath,
+        flowSha256: plan.flowSha256,
+        storedMetadataPath: this.relativeMemoryPath,
+        atomicWrite: true,
+        manifest: { path: consumer.manifestPath, changed },
+      }
+    })
+  }
+
   async snapshotCandidate(candidatePath: string, directory: string): Promise<CandidateSnapshot> {
+    // Manifest mode hashes the consumer's files and copies nothing: they run in place.
+    if (this.consumer) return this.consumer.snapshot(candidatePath)
     const root = await this.canonicalRoot()
     const candidate = await this.existingFile(root, candidatePath, true)
     if (!candidate) throw new Error(`Verified candidate flow does not exist: ${candidatePath}`)
@@ -530,6 +609,7 @@ export class LocalWalkStore implements WalkStore {
   async lookup(identityInput: WalkIdentity): Promise<LookupHit | LookupMiss> {
     const identity = normalizeIdentity(identityInput)
     const memory = await this.loadMemory()
+    if (this.consumer) return this.consumer.lookup(memory.walks, identity)
     const sameGoal = memory.walks.filter(item => item.goalKey === identity.goalKey)
     if (sameGoal.length === 0) return { status: 'miss', reason: 'not-found' }
     const sameApp = sameGoal.filter(item => item.appId === identity.appId)
@@ -566,6 +646,7 @@ export class LocalWalkStore implements WalkStore {
   async lookupPreviousSuccessful(identityInput: WalkIdentity): Promise<LookupHit | LookupMiss> {
     const identity = normalizeIdentity(identityInput)
     const memory = await this.loadMemory()
+    if (this.consumer) return this.consumer.lookup(memory.walks, identity, true)
     const candidates = memory.walks.filter(item =>
       item.goalKey === identity.goalKey && item.appId === identity.appId &&
       item.platform === identity.platform && item.flowSchemaVersion === identity.flowSchemaVersion &&
@@ -592,6 +673,8 @@ export class LocalWalkStore implements WalkStore {
     if (!timestamp(validation.at)) throw new TypeError('Validation requires a valid timestamp')
     const identity = normalizeIdentity(identityInput)
     this.acquireWriter()
+    // Manifest mode: a flow that changed since it was looked up must not be recorded as validated.
+    if (this.consumer) await this.consumer.assertUnchanged((await this.loadMemory()).walks, identity)
     const hit = await this.lookup(identity)
     if (hit.status !== 'hit') {
       throw new InvalidWalkMemoryError(`cannot validate a flow that is not a usable hit: ${hit.reason}`)
@@ -658,3 +741,16 @@ export {
   planStoredClosure,
   readStoredFlowFiles,
 } from './flow-closure.ts'
+
+export {
+  ConsumerFlowError,
+  ConsumerFlows,
+  ManifestChangedError,
+  assertionsSha256,
+  checkManifestPath,
+  closureAssertions,
+  readConsumerWalkFields,
+  type ConsumerFlowsOptions,
+  type ConsumerPlan,
+} from './consumer-flow.ts'
+export { MissingFlowFileError } from './flow-closure.ts'

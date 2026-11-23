@@ -23,7 +23,9 @@ import {
 } from '@deja-qa/core'
 import {
   checkStoredSubflows,
+  ConsumerFlows,
   collectFlowClosure,
+  readConsumerWalkFields,
   planStoredClosure,
   readStoredFlowFiles,
   snapshotFlowClosure,
@@ -55,6 +57,8 @@ export {
 } from '@deja-qa/store-local'
 
 export const SQLITE_MEMORY_SCHEMA_VERSION = 3
+/** Written only when a walk replays the consumer's own file (manifest mode). */
+export const SQLITE_MEMORY_CONSUMER_SCHEMA_VERSION = 4
 export const MAESTRO_FLOW_SCHEMA_VERSION = 'maestro/v1'
 export const SQLITE_MEMORY_PATH = '.deja/memory/walks.sqlite'
 
@@ -65,6 +69,16 @@ export type SQLiteWalkStoreOptions = {
    * store is the workspace's single store. One writer per store: a second one gets StoreLockedError.
    */
   storeId?: string
+  /**
+   * Replay the consumer's own files through this committed manifest (path relative to the
+   * workspace, for example `deja.walks.json`). The store then keeps history only: no copy of a flow
+   * is made or read. Without it the store works as before, on its own copies under `.deja/flows`.
+   */
+  manifest?: {
+    path: string
+    /** Fixture values that must never be written into the manifest. */
+    forbiddenValues?: string[]
+  }
   /** Test-only deterministic filesystem failure injection; production uses fs.rename. */
   renameFile?: (temporaryPath: string, destinationPath: string) => Promise<void>
   /** Test-only transaction failure injection; production uses one IMMEDIATE SQLite transaction. */
@@ -233,9 +247,20 @@ export class SQLiteWalkStore implements WalkStore {
   private readonly renameFile: (temporaryPath: string, destinationPath: string) => Promise<void>
   private readonly replaceMetadata: Commit
   private database: Database | null = null
+  /** The manifest's workspace-relative path, when this store replays the consumer's own files. */
+  readonly manifestPath: string | undefined
+  private readonly consumer: ConsumerFlows | null
 
   constructor(options: SQLiteWalkStoreOptions) {
     this.workspaceRoot = resolve(options.workspaceRoot)
+    this.consumer = options.manifest
+      ? new ConsumerFlows({
+        workspaceRoot: this.workspaceRoot,
+        manifestPath: options.manifest.path,
+        ...(options.manifest.forbiddenValues ? { forbiddenValues: options.manifest.forbiddenValues } : {}),
+      })
+      : null
+    this.manifestPath = this.consumer?.manifestPath
     this.relativeMemoryPath = storeMetadataPath(SQLITE_MEMORY_PATH, options.storeId)
     this.memoryPath = resolve(this.workspaceRoot, this.relativeMemoryPath)
     this.renameFile = options.renameFile ?? rename
@@ -305,7 +330,8 @@ export class SQLiteWalkStore implements WalkStore {
           origin TEXT,
           exploration_json TEXT,
           has_files INTEGER NOT NULL DEFAULT 0,
-          legacy_closure INTEGER NOT NULL DEFAULT 0
+          legacy_closure INTEGER NOT NULL DEFAULT 0,
+          closure_sha256 TEXT
         );
         CREATE TABLE IF NOT EXISTS validation_history (
           walk_id INTEGER NOT NULL REFERENCES walks(id) ON DELETE CASCADE,
@@ -340,6 +366,9 @@ export class SQLiteWalkStore implements WalkStore {
       if (!columns.some(column => column.name === 'legacy_closure')) {
         this.database.exec('ALTER TABLE walks ADD COLUMN legacy_closure INTEGER NOT NULL DEFAULT 0')
       }
+      if (!columns.some(column => column.name === 'closure_sha256')) {
+        this.database.exec('ALTER TABLE walks ADD COLUMN closure_sha256 TEXT')
+      }
       // A new database is schema 3 at once. An older one is bumped in the transaction that rewrites it.
       if (prior === 0) this.database.exec(`PRAGMA user_version = ${SQLITE_MEMORY_SCHEMA_VERSION}`)
       return this.database
@@ -355,7 +384,8 @@ export class SQLiteWalkStore implements WalkStore {
     try {
       database = this.openExisting(metadata.path)
       const schema = database.query('PRAGMA user_version').get() as { user_version: number }
-      if (schema.user_version !== 2 && schema.user_version !== SQLITE_MEMORY_SCHEMA_VERSION) {
+      if (schema.user_version !== 2 && schema.user_version !== SQLITE_MEMORY_SCHEMA_VERSION &&
+          schema.user_version !== SQLITE_MEMORY_CONSUMER_SCHEMA_VERSION) {
         throw new InvalidWalkMemoryError(`unsupported memory schemaVersion: ${schema.user_version}`)
       }
       const rows = database.query('SELECT * FROM walks ORDER BY id').all() as WalkRow[]
@@ -404,8 +434,8 @@ export class SQLiteWalkStore implements WalkStore {
       throw new InvalidWalkMemoryError('lastValidation must equal the latest history entry for the stored flow')
     }
     if (row.origin !== null && row.origin !== 'remember' && row.origin !== 'explore' &&
-        row.origin !== 'repair' && row.origin !== 'replayed-on-new-build') {
-      throw new InvalidWalkMemoryError('walk origin must be remember, explore, repair, or replayed-on-new-build')
+        row.origin !== 'repair' && row.origin !== 'replayed-on-new-build' && row.origin !== 'verify') {
+      throw new InvalidWalkMemoryError('walk origin must be remember, explore, repair, replayed-on-new-build, or verify')
     }
     let exploration: ExplorationDetails | undefined
     if (row.exploration_json !== null) {
@@ -432,7 +462,16 @@ export class SQLiteWalkStore implements WalkStore {
     // Schema 3 records the files a flow runs, even when there are none. A walk that lost the flag
     // would replay its subflows unchecked, so it is refused. Schema 2 stored the main flow only.
     let subflowFiles: StoredFlowFile[] | undefined
-    if (schemaVersion >= 3) {
+    const closureSha256 = row.closure_sha256 === null || row.closure_sha256 === undefined
+      ? undefined : row.closure_sha256
+    if (closureSha256 !== undefined) {
+      // A walk that replays the consumer's own file: history only, no copy and no file list.
+      if (schemaVersion < 4 || row.has_files !== 0 || row.legacy_closure === 1) {
+        throw new InvalidWalkMemoryError('closureSha256 needs memory schema 4 and excludes subflowFiles')
+      }
+      const problem = readConsumerWalkFields({ flowPath: row.flow_path, closureSha256 })
+      if (problem) throw new InvalidWalkMemoryError(`walk closure is invalid: ${problem}`)
+    } else if (schemaVersion >= 3) {
       if (row.has_files !== 1) {
         throw new InvalidWalkMemoryError('walk is missing subflowFiles, which memory schema 3 requires')
       }
@@ -458,6 +497,7 @@ export class SQLiteWalkStore implements WalkStore {
       flowSha256: row.flow_sha256,
       ...(subflowFiles ? { subflowFiles } : {}),
       ...(row.legacy_closure === 1 ? { legacyClosure: true as const } : {}),
+      ...(closureSha256 !== undefined ? { closureSha256: closureSha256 as string } : {}),
       lastValidation,
       validationHistory,
       ...(row.origin !== null ? { origin: row.origin as StoredWalk['origin'] } : {}),
@@ -489,7 +529,8 @@ export class SQLiteWalkStore implements WalkStore {
     try {
       database.query('DELETE FROM walks').run()
       for (const walk of walks) this.insertWalk(database, walk)
-      database.exec(`PRAGMA user_version = ${SQLITE_MEMORY_SCHEMA_VERSION}`)
+      database.exec(`PRAGMA user_version = ${walks.some(walk => walk.closureSha256 !== undefined)
+        ? SQLITE_MEMORY_CONSUMER_SCHEMA_VERSION : SQLITE_MEMORY_SCHEMA_VERSION}`)
       database.exec('COMMIT')
     } catch (error) {
       try {
@@ -505,14 +546,17 @@ export class SQLiteWalkStore implements WalkStore {
     const result = database.query(`
       INSERT INTO walks (
         goal, goal_key, app_id, platform, flow_schema_version, build_fingerprint,
-        adapter, browser, flow_path, flow_sha256, last_passed, last_at, origin, exploration_json, has_files, legacy_closure
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?) RETURNING id
+        adapter, browser, flow_path, flow_sha256, last_passed, last_at, origin, exploration_json, has_files, legacy_closure,
+        closure_sha256
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id
     `).get(
       walk.goal, walk.goalKey, walk.appId, walk.platform, walk.flowSchemaVersion,
       walk.buildFingerprint, walk.adapter ?? null, walk.browser ?? null, walk.flowPath,
       walk.flowSha256, walk.lastValidation.passed ? 1 : 0, walk.lastValidation.at,
       walk.origin ?? null, walk.exploration ? JSON.stringify(walk.exploration) : null,
-      walk.legacyClosure || !walk.subflowFiles ? 1 : 0,
+      walk.closureSha256 !== undefined ? 0 : 1,
+      walk.closureSha256 === undefined && (walk.legacyClosure || !walk.subflowFiles) ? 1 : 0,
+      walk.closureSha256 ?? null,
     ) as { id: number }
     for (const [position, validation] of walk.validationHistory.entries()) {
       database.query(
@@ -599,6 +643,7 @@ export class SQLiteWalkStore implements WalkStore {
     }
     const identity = normalizeIdentity(options.identity)
     this.acquireWriter()
+    if (this.consumer) return this.persistConsumer(this.consumer, identity, options, repair)
     const root = await this.canonicalRoot()
     const candidate = await this.existingFile(root, options.candidatePath, true)
     if (!candidate) throw new Error(`Verified candidate flow does not exist: ${options.candidatePath}`)
@@ -660,7 +705,39 @@ export class SQLiteWalkStore implements WalkStore {
     }
   }
 
+  /**
+   * Manifest mode: keep history for the consumer's own file and, if its entry changed, write the
+   * manifest. Memory is written first, so a failed manifest write leaves history that no entry matches.
+   */
+  private async persistConsumer(
+    consumer: ConsumerFlows,
+    identity: ReturnType<typeof normalizeIdentity>,
+    options: PersistVerifiedOptions,
+    repair: PersistVerifiedRepairOptions | undefined,
+  ): Promise<PersistedWalk> {
+    if (repair) {
+      throw new Error('Repair is not supported with a manifest yet: it would edit a copy, not the consumer\'s file (DEJA-6)')
+    }
+    return consumer.withLock(async () => {
+      const memory = this.loadMemory()
+      this.validateUniqueIdentities(memory)
+      const plan = await consumer.plan(memory, identity, options)
+      this.replaceMetadata([...plan.remaining, plan.walk])
+      const changed = await plan.commit()
+      return {
+        walk: plan.walk,
+        flowPath: plan.flowPath,
+        flowSha256: plan.flowSha256,
+        storedMetadataPath: this.relativeMemoryPath,
+        atomicWrite: true,
+        manifest: { path: consumer.manifestPath, changed },
+      }
+    })
+  }
+
   async snapshotCandidate(candidatePath: string, directory: string): Promise<CandidateSnapshot> {
+    // Manifest mode hashes the consumer's files and copies nothing: they run in place.
+    if (this.consumer) return this.consumer.snapshot(candidatePath)
     const root = await this.canonicalRoot()
     const candidate = await this.existingFile(root, candidatePath, true)
     if (!candidate) throw new Error(`Verified candidate flow does not exist: ${candidatePath}`)
@@ -685,6 +762,7 @@ export class SQLiteWalkStore implements WalkStore {
     const identity = normalizeIdentity(identityInput)
     const memory = this.loadMemory()
     this.validateUniqueIdentities(memory)
+    if (this.consumer) return this.consumer.lookup(memory, identity)
     const sameGoal = memory.filter(item => item.goalKey === identity.goalKey)
     if (sameGoal.length === 0) return { status: 'miss', reason: 'not-found' }
     const sameApp = sameGoal.filter(item => item.appId === identity.appId)
@@ -718,6 +796,7 @@ export class SQLiteWalkStore implements WalkStore {
     const identity = normalizeIdentity(identityInput)
     const memory = this.loadMemory()
     this.validateUniqueIdentities(memory)
+    if (this.consumer) return this.consumer.lookup(memory, identity, true)
     const candidates = memory.filter(item =>
       item.goalKey === identity.goalKey && item.appId === identity.appId &&
       item.platform === identity.platform && item.flowSchemaVersion === identity.flowSchemaVersion &&
@@ -744,6 +823,8 @@ export class SQLiteWalkStore implements WalkStore {
     if (!timestamp(validation.at)) throw new TypeError('Validation requires a valid timestamp')
     const identity = normalizeIdentity(identityInput)
     this.acquireWriter()
+    // Manifest mode: a flow that changed since it was looked up must not be recorded as validated.
+    if (this.consumer) await this.consumer.assertUnchanged(this.loadMemory(), identity)
     const hit = await this.lookup(identity)
     if (hit.status !== 'hit') {
       throw new InvalidWalkMemoryError(`cannot validate a flow that is not a usable hit: ${hit.reason}`)

@@ -10,3 +10,4 @@ export {
 export { localStoreContract } from './local-adapter.ts'
 export { sqliteStoreContract } from './sqlite-adapter.ts'
 export { runWriterLockContractTests } from './writer-lock-contract.ts'
+export { runConsumerFlowContractTests } from './consumer-flow-contract.ts'
