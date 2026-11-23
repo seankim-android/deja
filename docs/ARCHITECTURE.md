@@ -342,6 +342,6 @@ spikes/003-.../           Native iOS simulator fixture and reviewed-YAML/replay 
 TODO.md                   Standing rules; the backlog is in Linear (team DEJA)
 ```
 
-Platform support is established only by real execution evidence linked from the corresponding ticket,
+Platform support is established only by real execution evidence in this repo (`spikes/*/evidence/`),
 never inferred from these interfaces. See the root [README](../README.md) for reproduction,
 support, CLI, and cleanup instructions.
