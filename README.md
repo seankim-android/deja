@@ -146,7 +146,7 @@ The full plan is in [docs/SDK_PLAN.md](docs/SDK_PLAN.md).
 
 ## Contributing
 
-Outside contributions require a signed [CLA](CLA.md) (see [CONTRIBUTING.md](CONTRIBUTING.md)).
+Outside contributions will require accepting the [CLA](CLA.md) (draft; see [CONTRIBUTING.md](CONTRIBUTING.md)).
 
 ## License
 
