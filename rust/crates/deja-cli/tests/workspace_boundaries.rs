@@ -17,6 +17,35 @@ const EXPECTED_CRATES: &[&str] = &[
 
 const DRIVER_CRATES: &[&str] = &["deja-driver-ios", "deja-driver-android", "deja-driver-web"];
 
+/// Closed-world allowlist of direct external normal/build dependencies for `deja-core`.
+/// Any HTTP, subprocess, SQLite, async runtime, or driver crate added to `deja-core`
+/// fails closed here without needing to enumerate every ecosystem crate name.
+const ALLOWED_CORE_DIRECT_DEPS: &[&str] = &[
+    "hex",
+    "regex",
+    "saphyr",
+    "saphyr-parser",
+    "serde",
+    "serde_json",
+    "sha2",
+    "thiserror",
+    "unicode-normalization",
+];
+
+/// Closed-world allowlist of direct external dev-dependencies for `deja-core`.
+const ALLOWED_CORE_DIRECT_DEV_DEPS: &[&str] = &[
+    "hex",
+    "regex",
+    "saphyr",
+    "saphyr-parser",
+    "serde",
+    "serde_json",
+    "sha2",
+    "tempfile",
+    "thiserror",
+    "unicode-normalization",
+];
+
 const GLOBAL_FORBIDDEN_EXTERNAL: &[&str] = &[
     "openssl",
     "openssl-sys",
@@ -40,6 +69,7 @@ struct CrateDeps {
     direct_normal_and_build: BTreeSet<String>,
     direct_dev: BTreeSet<String>,
     transitive_normal_and_build: BTreeSet<String>,
+    transitive_dev: BTreeSet<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -213,6 +243,11 @@ fn validate_workspace_boundaries(snapshot: &WorkspaceSnapshot) -> Result<(), Vec
                 internal_checks.push(("transitive", dep));
             }
         }
+        for dep in &deps.transitive_dev {
+            if actual.contains(dep.as_str()) {
+                internal_checks.push(("transitive-dev", dep));
+            }
+        }
 
         for (edge_kind, target) in internal_checks {
             if target == crate_name {
@@ -243,10 +278,32 @@ fn validate_workspace_boundaries(snapshot: &WorkspaceSnapshot) -> Result<(), Vec
             }
         }
 
+        if crate_name == "deja-core" {
+            for dep in &deps.direct_normal_and_build {
+                if !actual.contains(dep.as_str())
+                    && !ALLOWED_CORE_DIRECT_DEPS.contains(&dep.as_str())
+                {
+                    violations.push(format!(
+                        "deja-core directly depends on unapproved external crate `{dep}` (not in core allowlist)"
+                    ));
+                }
+            }
+            for dep in &deps.direct_dev {
+                if !actual.contains(dep.as_str())
+                    && !ALLOWED_CORE_DIRECT_DEV_DEPS.contains(&dep.as_str())
+                {
+                    violations.push(format!(
+                        "deja-core has unapproved external dev-dependency `{dep}` (not in core dev allowlist)"
+                    ));
+                }
+            }
+        }
+
         for forbidden in GLOBAL_FORBIDDEN_EXTERNAL {
             if deps.direct_normal_and_build.contains(*forbidden)
                 || deps.direct_dev.contains(*forbidden)
                 || deps.transitive_normal_and_build.contains(*forbidden)
+                || deps.transitive_dev.contains(*forbidden)
             {
                 violations.push(format!(
                     "{crate_name} pulls globally forbidden TLS/OpenSSL crate `{forbidden}`"
@@ -282,6 +339,11 @@ fn validate_workspace_boundaries(snapshot: &WorkspaceSnapshot) -> Result<(), Vec
             if deps.transitive_normal_and_build.contains(*forbidden) {
                 violations.push(format!(
                     "{crate_name} transitively depends on forbidden external crate `{forbidden}`"
+                ));
+            }
+            if deps.transitive_dev.contains(*forbidden) {
+                violations.push(format!(
+                    "{crate_name} transitively dev-depends on forbidden external crate `{forbidden}`"
                 ));
             }
         }
@@ -352,12 +414,67 @@ fn host_target_triple() -> String {
         .to_string()
 }
 
+fn has_non_dev_edge(dep: &ResolveDep) -> bool {
+    dep.dep_kinds.is_empty()
+        || dep
+            .dep_kinds
+            .iter()
+            .any(|info| info.kind.as_deref() != Some("dev"))
+}
+
+fn has_dev_edge(dep: &ResolveDep) -> bool {
+    dep.dep_kinds
+        .iter()
+        .any(|info| info.kind.as_deref() == Some("dev"))
+}
+
+fn collect_non_dev_closure<'a>(
+    roots: impl IntoIterator<Item = &'a str>,
+    skip_id: &'a str,
+    node_by_id: &HashMap<&'a str, &'a ResolveNode>,
+    id_to_name: &HashMap<&'a str, &'a str>,
+) -> BTreeSet<String> {
+    let mut result = BTreeSet::new();
+    let mut visited: BTreeSet<&str> = BTreeSet::new();
+    let mut queue: VecDeque<&str> = VecDeque::new();
+    visited.insert(skip_id);
+
+    for root in roots {
+        if visited.insert(root) {
+            if let Some(name) = id_to_name.get(root) {
+                result.insert((*name).to_string());
+            }
+            queue.push_back(root);
+        }
+    }
+
+    while let Some(current_id) = queue.pop_front() {
+        let Some(node) = node_by_id.get(current_id) else {
+            continue;
+        };
+        for dep in &node.deps {
+            if !has_non_dev_edge(dep) {
+                continue;
+            }
+            if visited.insert(dep.pkg.as_str()) {
+                if let Some(dep_name) = id_to_name.get(dep.pkg.as_str()) {
+                    result.insert((*dep_name).to_string());
+                }
+                queue.push_back(dep.pkg.as_str());
+            }
+        }
+    }
+
+    result
+}
+
 fn load_live_workspace_snapshot() -> WorkspaceSnapshot {
     let no_deps = run_cargo_metadata(&["--no-deps", "--format-version", "1"]);
     let host = host_target_triple();
     let resolved = run_cargo_metadata(&[
         "--format-version",
         "1",
+        "--all-features",
         "--locked",
         "--offline",
         "--filter-platform",
@@ -402,33 +519,33 @@ fn load_live_workspace_snapshot() -> WorkspaceSnapshot {
             }
         }
 
-        let mut transitive_normal_and_build = BTreeSet::new();
-        let mut visited: BTreeSet<&str> = BTreeSet::new();
-        let mut queue: VecDeque<&str> = VecDeque::new();
-        visited.insert(pkg.id.as_str());
-        queue.push_back(pkg.id.as_str());
+        let (direct_non_dev_ids, direct_dev_ids): (Vec<&str>, Vec<&str>) = node_by_id
+            .get(pkg.id.as_str())
+            .map(|node| {
+                let non_dev = node
+                    .deps
+                    .iter()
+                    .filter(|dep| has_non_dev_edge(dep))
+                    .map(|dep| dep.pkg.as_str())
+                    .collect();
+                let dev = node
+                    .deps
+                    .iter()
+                    .filter(|dep| has_dev_edge(dep))
+                    .map(|dep| dep.pkg.as_str())
+                    .collect();
+                (non_dev, dev)
+            })
+            .unwrap_or_default();
 
-        while let Some(current_id) = queue.pop_front() {
-            let Some(node) = node_by_id.get(current_id) else {
-                continue;
-            };
-            for dep in &node.deps {
-                let is_non_dev = dep.dep_kinds.is_empty()
-                    || dep
-                        .dep_kinds
-                        .iter()
-                        .any(|info| info.kind.as_deref() != Some("dev"));
-                if !is_non_dev {
-                    continue;
-                }
-                if visited.insert(dep.pkg.as_str()) {
-                    if let Some(dep_name) = id_to_name.get(dep.pkg.as_str()) {
-                        transitive_normal_and_build.insert((*dep_name).to_string());
-                    }
-                    queue.push_back(dep.pkg.as_str());
-                }
-            }
-        }
+        let transitive_normal_and_build = collect_non_dev_closure(
+            direct_non_dev_ids,
+            pkg.id.as_str(),
+            &node_by_id,
+            &id_to_name,
+        );
+        let transitive_dev =
+            collect_non_dev_closure(direct_dev_ids, pkg.id.as_str(), &node_by_id, &id_to_name);
 
         crates.insert(
             pkg.name.clone(),
@@ -436,6 +553,7 @@ fn load_live_workspace_snapshot() -> WorkspaceSnapshot {
                 direct_normal_and_build,
                 direct_dev,
                 transitive_normal_and_build,
+                transitive_dev,
             },
         );
     }
@@ -556,6 +674,7 @@ fn valid_baseline_snapshot() -> WorkspaceSnapshot {
                 direct_normal_and_build: set_of(direct),
                 direct_dev: BTreeSet::new(),
                 transitive_normal_and_build: set_of(transitive),
+                transitive_dev: BTreeSet::new(),
             },
         );
     }
@@ -687,6 +806,55 @@ fn rejects_core_reqwest_and_tokio() {
 }
 
 #[test]
+fn rejects_core_unapproved_process_or_http_crates() {
+    for unapproved in ["subprocess", "duct", "ureq"] {
+        let mut direct = valid_baseline_snapshot();
+        direct
+            .crates
+            .get_mut("deja-core")
+            .unwrap()
+            .direct_normal_and_build
+            .insert(unapproved.to_string());
+        assert_rejected(&direct, "not in core allowlist");
+
+        let mut dev = valid_baseline_snapshot();
+        dev.crates
+            .get_mut("deja-core")
+            .unwrap()
+            .direct_dev
+            .insert(unapproved.to_string());
+        assert_rejected(&dev, "not in core dev allowlist");
+    }
+}
+
+#[test]
+fn rejects_transitive_dev_dep_pulling_forbidden_tls() {
+    let mut snapshot = valid_baseline_snapshot();
+    snapshot
+        .crates
+        .get_mut("deja-cli")
+        .unwrap()
+        .direct_dev
+        .insert("mock-http-helper".to_string());
+    snapshot
+        .crates
+        .get_mut("deja-cli")
+        .unwrap()
+        .transitive_dev
+        .insert("native-tls".to_string());
+    assert_rejected(&snapshot, "native-tls");
+
+    let mut core_dev = valid_baseline_snapshot();
+    core_dev
+        .crates
+        .get_mut("deja-core")
+        .unwrap()
+        .transitive_dev
+        .insert("reqwest".to_string());
+    assert_rejected(&core_dev, "reqwest");
+}
+
+#[test]
 fn rejects_explore_depending_on_concrete_drivers() {
     for driver in DRIVER_CRATES {
         let mut snapshot = valid_baseline_snapshot();
@@ -778,6 +946,7 @@ fn rejects_undocumented_workspace_crate() {
             direct_normal_and_build: BTreeSet::new(),
             direct_dev: BTreeSet::new(),
             transitive_normal_and_build: BTreeSet::new(),
+            transitive_dev: BTreeSet::new(),
         },
     );
     assert_rejected(&snapshot, "undocumented workspace crate: deja-rogue");
