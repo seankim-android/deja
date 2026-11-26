@@ -1,0 +1,16 @@
+[package]
+name = "deja-flow"
+description = "Platform-neutral maestro/v1 YAML interpreter, PlatformDriver trait, selector matching, failure classification, and JUnit XML"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+deja-core.workspace = true

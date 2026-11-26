@@ -1,0 +1,17 @@
+[package]
+name = "deja-driver-ios"
+description = "Native iOS simulator driver backed by xcrun simctl, DejaXCTestRunner, and .ips crash detection"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+deja-core.workspace = true
+deja-flow.workspace = true

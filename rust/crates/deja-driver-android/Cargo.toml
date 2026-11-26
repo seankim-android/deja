@@ -1,0 +1,17 @@
+[package]
+name = "deja-driver-android"
+description = "Native Android driver backed by adb and the prebuilt UiAutomator2 instrumentation APK"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+deja-core.workspace = true
+deja-flow.workspace = true

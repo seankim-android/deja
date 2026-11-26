@@ -1,0 +1,49 @@
+name: Rust checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    name: ${{ matrix.os }} / Rust workspace
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - name: Checkout exact commit
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            rust -> target
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Fetch locked dependencies for all targets
+        run: cargo fetch --locked
+      - name: Clippy
+        run: cargo clippy --locked --offline --workspace --all-targets --all-features -- -D warnings
+      - name: Test workspace
+        run: cargo test --locked --offline --workspace --all-features
+      - name: Verify workspace boundaries (all targets)
+        env:
+          DEJA_BOUNDARIES_ALL_TARGETS: "1"
+        run: cargo test --locked --offline -p deja-cli --test workspace_boundaries --all-features

@@ -1,0 +1,19 @@
+[package]
+name = "deja-mcp"
+description = "Stdio JSON-RPC 2.0 MCP server for Déjà with cancellation and workspace confinement"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+deja-core.workspace = true
+deja-explore.workspace = true
+deja-flow.workspace = true
+deja-store.workspace = true
