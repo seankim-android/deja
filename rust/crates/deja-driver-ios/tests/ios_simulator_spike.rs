@@ -30,6 +30,11 @@ impl TempDirGuard {
             std::process::id()
         ));
         std::fs::create_dir_all(&path).expect("create temp dir");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700));
+        }
         Self { path }
     }
 
@@ -604,7 +609,19 @@ async fn spike_sigterm_child_helper() {
         xcodebuild_pid: session.xcodebuild_pid(),
     };
     let tmp_path = PathBuf::from(&ready_path).with_extension("tmp");
-    std::fs::write(&tmp_path, serde_json::to_vec(&payload).unwrap()).expect("write tmp ready");
+    {
+        use std::io::Write;
+        let mut opts = std::fs::OpenOptions::new();
+        opts.create(true).write(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let mut file = opts.open(&tmp_path).expect("create private tmp ready file");
+        file.write_all(&serde_json::to_vec(&payload).unwrap())
+            .expect("write tmp ready");
+    }
     std::fs::rename(&tmp_path, &ready_path).expect("rename ready");
 
     #[cfg(unix)]

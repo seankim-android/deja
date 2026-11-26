@@ -141,23 +141,34 @@ impl Drop for BuildGuard {
 }
 
 /// Resolves the Déjà home directory: explicit override -> `$DEJA_HOME` -> `~/.deja`.
+/// Always returns an absolute path by joining relative paths onto `std::env::current_dir()`.
 pub fn resolve_deja_home(override_home: Option<&Path>) -> Result<PathBuf> {
-    if let Some(dir) = override_home {
-        return Ok(dir.to_path_buf());
-    }
-    if let Some(env_home) = std::env::var_os("DEJA_HOME")
+    let raw = if let Some(dir) = override_home {
+        dir.to_path_buf()
+    } else if let Some(env_home) = std::env::var_os("DEJA_HOME")
         && !env_home.is_empty()
     {
-        return Ok(PathBuf::from(env_home));
-    }
-    let home = std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .ok_or_else(|| {
-            IosDriverError::InvalidPath(
-                "neither DEJA_HOME nor HOME is set in the environment".to_string(),
-            )
+        PathBuf::from(env_home)
+    } else {
+        let home = std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .ok_or_else(|| {
+                IosDriverError::InvalidPath(
+                    "neither DEJA_HOME nor HOME is set in the environment".to_string(),
+                )
+            })?;
+        PathBuf::from(home).join(".deja")
+    };
+
+    if raw.is_absolute() {
+        Ok(raw)
+    } else {
+        let cwd = std::env::current_dir().map_err(|source| IosDriverError::Io {
+            context: "resolve current working directory for relative DEJA_HOME".to_string(),
+            source,
         })?;
-    Ok(PathBuf::from(home).join(".deja"))
+        Ok(cwd.join(raw))
+    }
 }
 
 /// Computes the deterministic runner cache key `<xcode-build>-<ios-sdk>-<arch>-<source-sha256>`.
@@ -410,7 +421,10 @@ pub async fn ensure_runner_built(
     if cancel.is_cancelled() {
         return Err(IosDriverError::Cancelled);
     }
-    let toolchain = detect_toolchain(env).await?;
+    let toolchain = tokio::select! {
+        _ = cancel.cancelled() => return Err(IosDriverError::Cancelled),
+        res = detect_toolchain(env) => res?,
+    };
     let source_sha256 = embed::source_sha256();
     let arch = native_simulator_arch();
     let cache_key = build_cache_key(
@@ -440,7 +454,7 @@ pub async fn ensure_runner_built(
     })?;
 
     let lock_path = locks_dir.join(format!("{cache_key}.lock"));
-    // Declared BEFORE `build_into_staging` so that on cancellation/drop, `BuildGuard` inside
+    // Declared BEFORE `tokio::select!` so that on cancellation/drop, `BuildGuard` inside
     // `build_into_staging` ALWAYS terminates the child group and removes staging BEFORE `_lock_file`
     // releases the advisory lock.
     let _lock_file = acquire_advisory_lock_cancellable(&lock_path, cancel).await?;
@@ -461,16 +475,18 @@ pub async fn ensure_runner_built(
         std::process::id()
     ));
 
-    build_into_staging(
-        &staging_dir,
-        &cache_dir,
-        &cache_key,
-        arch,
-        &toolchain,
-        &source_sha256,
-        env,
-    )
-    .await
+    tokio::select! {
+        _ = cancel.cancelled() => Err(IosDriverError::Cancelled),
+        res = build_into_staging(
+            &staging_dir,
+            &cache_dir,
+            &cache_key,
+            arch,
+            &toolchain,
+            &source_sha256,
+            env,
+        ) => res,
+    }
 }
 
 async fn build_into_staging(
@@ -744,12 +760,29 @@ fn tail_str(input: &str, max_bytes: usize) -> &str {
 mod tests {
     use super::{
         BuildGuard, acquire_advisory_lock_cancellable, build_cache_key, parse_sdk_version,
-        parse_xcodebuild_version, rewrite_xctestrun_xml,
+        parse_xcodebuild_version, resolve_deja_home, rewrite_xctestrun_xml,
     };
     use crate::error::IosDriverError;
     use std::fs::OpenOptions;
+    use std::path::Path;
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
     use tokio_util::sync::CancellationToken;
+
+    #[test]
+    fn resolve_deja_home_joins_relative_path_onto_cwd() {
+        let resolved =
+            resolve_deja_home(Some(Path::new(".deja-relative-test"))).expect("resolve relative");
+        assert!(
+            resolved.is_absolute(),
+            "expected absolute path: {resolved:?}"
+        );
+        assert_eq!(
+            resolved,
+            std::env::current_dir()
+                .expect("cwd")
+                .join(".deja-relative-test")
+        );
+    }
 
     const SAMPLE_XCTESTRUN: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -950,6 +983,81 @@ mod tests {
         );
 
         drop(holder);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancelling_build_inside_lock_scope_returns_cancelled_and_cleans_before_unlock() {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "deja-lock-scoped-cancel-{}-{nanos}",
+            std::process::id()
+        ));
+        let staging_dir = root.join("staging");
+        let lock_path = root.join("build.lock");
+        let pid_file = root.join("cmd.pid");
+        std::fs::create_dir_all(&staging_dir).expect("create staging");
+
+        let cancel = CancellationToken::new();
+        let cancel_trigger = cancel.clone();
+        let pid_file_wait = pid_file.clone();
+        tokio::spawn(async move {
+            for _ in 0..100 {
+                if std::fs::read_to_string(&pid_file_wait)
+                    .ok()
+                    .and_then(|s| s.trim().parse::<u32>().ok())
+                    .is_some()
+                {
+                    cancel_trigger.cancel();
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        });
+
+        let res: crate::error::Result<()> = async {
+            let _lock = acquire_advisory_lock_cancellable(&lock_path, &cancel).await?;
+            let script = format!("printf '%s' \"$$\" > '{}'; sleep 30", pid_file.display());
+            tokio::select! {
+                _ = cancel.cancelled() => Err(IosDriverError::Cancelled),
+                run_res = async {
+                    let mut guard = BuildGuard::new(staging_dir.clone());
+                    let mut cmd = tokio::process::Command::new("sh");
+                    cmd.args(["-c", &script]);
+                    let _ = guard.run_command(cmd, "sh").await?;
+                    Ok(())
+                } => run_res,
+            }
+        }
+        .await;
+
+        assert!(
+            matches!(res, Err(IosDriverError::Cancelled)),
+            "expected Cancelled, got {res:?}"
+        );
+        let child_pid: u32 = std::fs::read_to_string(&pid_file)
+            .expect("pid file written")
+            .trim()
+            .parse()
+            .expect("valid pid");
+        assert!(
+            !crate::process::unix_signals::is_pid_alive(child_pid),
+            "child pid {child_pid} must be terminated on cancellation"
+        );
+        assert!(
+            !staging_dir.exists(),
+            "staging_dir must be removed before lock release"
+        );
+        // Lock must now be cleanly re-acquirable.
+        let fresh_cancel = CancellationToken::new();
+        let _reacquired = acquire_advisory_lock_cancellable(&lock_path, &fresh_cancel)
+            .await
+            .expect("lock should be released after cancellation");
+
         let _ = std::fs::remove_dir_all(&root);
     }
 }

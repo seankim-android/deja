@@ -133,12 +133,10 @@ impl IosRunnerSession {
         }
 
         let deja_home = cache::resolve_deja_home(config.deja_home.as_deref())?;
-        // Acquire exclusive per-simulator ownership before touching runner state or spawning.
-        let sim_lock = acquire_simulator_lock(&deja_home, &udid)?;
-        let build_artifact = tokio::select! {
-            _ = cancel.cancelled() => return Err(IosDriverError::Cancelled),
-            res = cache::ensure_runner_built(&deja_home, &config.env, &cancel) => res?,
-        };
+        // Acquire exclusive per-user simulator ownership (independent of DEJA_HOME) before
+        // touching runner state or spawning.
+        let sim_lock = acquire_simulator_lock(&udid)?;
+        let build_artifact = cache::ensure_runner_built(&deja_home, &config.env, &cancel).await?;
 
         let attach_started = Instant::now();
         let token = generate_agent_token()?;

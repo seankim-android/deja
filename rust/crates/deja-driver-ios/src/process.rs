@@ -66,15 +66,62 @@ impl Drop for SimulatorLockGuard {
     }
 }
 
-/// Non-blockingly acquires an exclusive advisory lock at `<deja_home>/runs/ios/<udid>.lock`.
+/// Resolves the per-user simulator locks directory independent of `$DEJA_HOME`:
+/// `$HOME/.deja/locks/ios` (or `$TMPDIR/deja-ios-locks-<uid>` if `HOME` is unset).
+pub fn resolve_simulator_locks_dir() -> Result<PathBuf> {
+    if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))
+        && !home.is_empty()
+    {
+        let home_path = PathBuf::from(home);
+        let base = if home_path.is_absolute() {
+            home_path
+        } else {
+            std::env::current_dir()
+                .map_err(|source| IosDriverError::Io {
+                    context: "resolve current working directory for HOME".to_string(),
+                    source,
+                })?
+                .join(home_path)
+        };
+        return Ok(base.join(".deja").join("locks").join("ios"));
+    }
+
+    Ok(std::env::temp_dir().join(format!("deja-ios-locks-{}", current_uid_suffix())))
+}
+
+fn current_uid_suffix() -> String {
+    #[cfg(unix)]
+    {
+        unix_signals::current_euid().to_string()
+    }
+    #[cfg(not(unix))]
+    {
+        "user".to_string()
+    }
+}
+
+/// Non-blockingly acquires an exclusive per-user advisory lock for `udid` under
+/// `resolve_simulator_locks_dir()` (independent of `$DEJA_HOME`).
 /// Returns `IosDriverError::SimulatorBusy { udid }` if another session already owns the simulator.
-pub fn acquire_simulator_lock(deja_home: &Path, udid: &str) -> Result<SimulatorLockGuard> {
+pub fn acquire_simulator_lock(udid: &str) -> Result<SimulatorLockGuard> {
+    let locks_dir = resolve_simulator_locks_dir()?;
+    acquire_simulator_lock_in_dir(&locks_dir, udid)
+}
+
+/// Non-blockingly acquires an exclusive advisory lock at `<locks_dir>/<udid>.lock` with mode
+/// `0o700` on `locks_dir` (Unix).
+pub fn acquire_simulator_lock_in_dir(locks_dir: &Path, udid: &str) -> Result<SimulatorLockGuard> {
     let canonical = validate_udid(udid)?;
-    let locks_dir = deja_home.join("runs").join("ios");
-    std::fs::create_dir_all(&locks_dir).map_err(|source| IosDriverError::Io {
+    std::fs::create_dir_all(locks_dir).map_err(|source| IosDriverError::Io {
         context: format!("create simulator locks dir {}", locks_dir.display()),
         source,
     })?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(locks_dir, std::fs::Permissions::from_mode(0o700));
+    }
 
     let lock_path = locks_dir.join(format!("{canonical}.lock"));
     let file = OpenOptions::new()
@@ -200,6 +247,11 @@ pub(crate) mod unix_signals {
             return true;
         }
         io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    }
+
+    pub(crate) fn current_euid() -> u32 {
+        // SAFETY: `libc::geteuid` takes no arguments, has no preconditions, and always succeeds.
+        unsafe { libc::geteuid() }
     }
 
     pub(crate) const SIGTERM: i32 = libc::SIGTERM;
@@ -786,10 +838,12 @@ impl Drop for ManagedXcodebuild {
 #[cfg(test)]
 mod tests {
     use super::{
-        ManagedXcodebuild, acquire_simulator_lock, configure_process_group,
-        parse_ps_matching_xcodebuild_pids, run_async_command_bounded, run_sync_command_bounded,
-        terminate_child_group_sync, validate_udid,
+        ManagedXcodebuild, acquire_simulator_lock, acquire_simulator_lock_in_dir,
+        configure_process_group, parse_ps_matching_xcodebuild_pids, resolve_simulator_locks_dir,
+        run_async_command_bounded, run_sync_command_bounded, terminate_child_group_sync,
+        validate_udid,
     };
+    use crate::cache::resolve_deja_home;
     use crate::error::IosDriverError;
     use std::ffi::OsString;
     use std::path::Path;
@@ -798,6 +852,7 @@ mod tests {
 
     const TARGET_UDID: &str = "BA555783-AC7E-46E3-B749-34F9499B2C2B";
     const OTHER_UDID: &str = "DA910389-DF0B-4254-BB78-7164E0E27609";
+    const SYNTHETIC_CROSS_HOME_UDID: &str = "11111111-2222-4333-8444-555555555555";
 
     #[test]
     fn validate_udid_accepts_and_uppercases_valid_uuid() {
@@ -829,31 +884,67 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("clock")
             .as_nanos();
-        let deja_home =
+        let locks_dir =
             std::env::temp_dir().join(format!("deja-sim-lock-test-{}-{nanos}", std::process::id()));
 
-        let owner = acquire_simulator_lock(&deja_home, TARGET_UDID).expect("first lock succeeds");
+        let owner =
+            acquire_simulator_lock_in_dir(&locks_dir, TARGET_UDID).expect("first lock succeeds");
         assert_eq!(owner.udid(), TARGET_UDID);
         assert!(owner.lock_path().is_file());
 
         // Second attempt on the same simulator UDID must fail with SimulatorBusy.
-        match acquire_simulator_lock(&deja_home, &TARGET_UDID.to_ascii_lowercase()) {
+        match acquire_simulator_lock_in_dir(&locks_dir, &TARGET_UDID.to_ascii_lowercase()) {
             Err(IosDriverError::SimulatorBusy { udid }) => assert_eq!(udid, TARGET_UDID),
             other => panic!("expected SimulatorBusy for {TARGET_UDID}, got {other:?}"),
         }
 
         // A different simulator UDID remains unaffected and lockable concurrently.
-        let other_owner = acquire_simulator_lock(&deja_home, OTHER_UDID)
+        let other_owner = acquire_simulator_lock_in_dir(&locks_dir, OTHER_UDID)
             .expect("different simulator should lock independently");
         drop(other_owner);
 
         // After releasing owner, the target simulator can be locked again.
         drop(owner);
-        let reacquired =
-            acquire_simulator_lock(&deja_home, TARGET_UDID).expect("reacquire after release");
+        let reacquired = acquire_simulator_lock_in_dir(&locks_dir, TARGET_UDID)
+            .expect("reacquire after release");
         drop(reacquired);
 
-        let _ = std::fs::remove_dir_all(&deja_home);
+        let _ = std::fs::remove_dir_all(&locks_dir);
+    }
+
+    #[test]
+    fn simulator_lock_contends_across_different_deja_homes() {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let home_a = resolve_deja_home(Some(Path::new(&format!("deja-home-a-{nanos}"))))
+            .expect("resolve home a");
+        let home_b = resolve_deja_home(Some(Path::new(&format!("deja-home-b-{nanos}"))))
+            .expect("resolve home b");
+        assert_ne!(home_a, home_b);
+
+        let per_user_locks = resolve_simulator_locks_dir().expect("per-user locks dir");
+        assert!(
+            !per_user_locks.starts_with(&home_a) && !per_user_locks.starts_with(&home_b),
+            "simulator locks dir must be independent of DEJA_HOME"
+        );
+
+        let owner = acquire_simulator_lock(SYNTHETIC_CROSS_HOME_UDID)
+            .expect("first per-user simulator lock succeeds");
+        let lock_file = owner.lock_path().to_path_buf();
+        assert!(lock_file.starts_with(&per_user_locks));
+
+        // Second session targeting the same UDID contends regardless of DEJA_HOME.
+        match acquire_simulator_lock(SYNTHETIC_CROSS_HOME_UDID) {
+            Err(IosDriverError::SimulatorBusy { udid }) => {
+                assert_eq!(udid, SYNTHETIC_CROSS_HOME_UDID);
+            }
+            other => panic!("expected SimulatorBusy across different DEJA_HOMEs, got {other:?}"),
+        }
+
+        drop(owner);
+        let _ = std::fs::remove_file(&lock_file);
     }
 
     #[test]
@@ -961,7 +1052,8 @@ mod tests {
         std::fs::create_dir_all(&run_dir).expect("create run_dir");
         let xctestrun_path = run_dir.join(format!("{TARGET_UDID}.xctestrun"));
         std::fs::write(&xctestrun_path, b"dummy").expect("write dummy xctestrun");
-        let sim_lock = acquire_simulator_lock(&deja_home, TARGET_UDID).expect("lock sim");
+        let locks_dir = deja_home.join("locks");
+        let sim_lock = acquire_simulator_lock_in_dir(&locks_dir, TARGET_UDID).expect("lock sim");
 
         // Spawn a process that ignores SIGTERM so `shutdown()` stays parked in its 1500ms wait.
         let mut cmd = tokio::process::Command::new("sh");
@@ -996,7 +1088,7 @@ mod tests {
         );
         // Simulator lock must STILL be held while `managed` has not finished shutting down.
         assert!(matches!(
-            acquire_simulator_lock(&deja_home, TARGET_UDID),
+            acquire_simulator_lock_in_dir(&locks_dir, TARGET_UDID),
             Err(IosDriverError::SimulatorBusy { .. })
         ));
 
@@ -1011,7 +1103,7 @@ mod tests {
             !super::unix_signals::is_pid_alive(child_pid),
             "Drop must kill child pid {child_pid} after an aborted shutdown()"
         );
-        acquire_simulator_lock(&deja_home, TARGET_UDID)
+        acquire_simulator_lock_in_dir(&locks_dir, TARGET_UDID)
             .expect("simulator lock must be released after Drop completes");
 
         let _ = std::fs::remove_dir_all(&deja_home);

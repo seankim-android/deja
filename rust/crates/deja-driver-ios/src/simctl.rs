@@ -206,37 +206,8 @@ impl Simctl {
 
     pub async fn ensure_booted(&self, udid: &str) -> Result<()> {
         let canonical = validate_udid(udid)?;
-        let devices = self.list_devices().await?;
-        let device = devices
-            .iter()
-            .find(|d| d.udid.eq_ignore_ascii_case(&canonical))
-            .ok_or_else(|| {
-                IosDriverError::InvalidUdid(format!("{canonical} (not found in simctl devices)"))
-            })?;
-
-        if !device.state.eq_ignore_ascii_case("Booted") {
-            let mut cmd = self.command();
-            cmd.args(["boot", &canonical]);
-            let output = cmd
-                .output()
-                .await
-                .map_err(|source| IosDriverError::CommandSpawn {
-                    program: "xcrun".to_string(),
-                    source,
-                })?;
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                if !stderr.contains("Unable to boot device in current state: Booted") {
-                    return Err(IosDriverError::CommandFailed {
-                        program: "xcrun simctl".to_string(),
-                        args: format!("boot {canonical}"),
-                        status: output.status.code(),
-                        stderr: stderr.trim().to_string(),
-                    });
-                }
-            }
-        }
-
+        // `simctl bootstatus <udid> -b` boots the simulator if Shutdown and waits cleanly
+        // until ready if already Booting or Booted, avoiding any check-then-boot race.
         self.run_simctl(&["bootstatus", &canonical, "-b"]).await?;
         Ok(())
     }

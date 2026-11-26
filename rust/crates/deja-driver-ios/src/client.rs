@@ -173,6 +173,7 @@ impl AgentClient {
 
         let http = reqwest::Client::builder()
             .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
             .default_headers(headers)
             .timeout(timeout)
             .build()
@@ -315,7 +316,12 @@ async fn parse_response<T: for<'de> Deserialize<'de>>(
 #[cfg(test)]
 mod tests {
     use super::{AgentClient, ElementFrame, HierarchyNode, HierarchyResponse};
+    use crate::error::IosDriverError;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
 
     #[test]
     fn agent_client_debug_redacts_secret_token() {
@@ -332,6 +338,64 @@ mod tests {
             "Debug output should show [REDACTED]: {formatted}"
         );
         assert!(formatted.contains("http://127.0.0.1:51234"));
+    }
+
+    #[tokio::test]
+    async fn agent_client_does_not_follow_http_redirects() {
+        let target_listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind target listener");
+        let target_port = target_listener.local_addr().expect("target addr").port();
+        let target_hit = Arc::new(AtomicBool::new(false));
+        let target_hit_clone = Arc::clone(&target_hit);
+        let target_task = tokio::spawn(async move {
+            if let Ok((mut stream, _)) = target_listener.accept().await {
+                target_hit_clone.store(true, Ordering::SeqCst);
+                let _ = stream
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}")
+                    .await;
+            }
+        });
+
+        let redirect_listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind redirect listener");
+        let redirect_port = redirect_listener
+            .local_addr()
+            .expect("redirect addr")
+            .port();
+        let redirect_task = tokio::spawn(async move {
+            if let Ok((mut stream, _)) = redirect_listener.accept().await {
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf).await;
+                let resp = format!(
+                    "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{target_port}/health\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                );
+                let _ = stream.write_all(resp.as_bytes()).await;
+            }
+        });
+
+        let client = AgentClient::new(
+            redirect_port,
+            "secret-agent-token".to_string(),
+            Duration::from_secs(5),
+        )
+        .expect("build agent client");
+
+        match client.health().await {
+            Err(IosDriverError::AgentHttpStatus { status: 302, .. }) => {}
+            other => panic!("expected 302 without following redirect, got {other:?}"),
+        }
+
+        // Brief settle to ensure no background redirect request reaches the second listener.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            !target_hit.load(Ordering::SeqCst),
+            "AgentClient must never follow HTTP redirects"
+        );
+
+        redirect_task.abort();
+        target_task.abort();
     }
 
     #[test]

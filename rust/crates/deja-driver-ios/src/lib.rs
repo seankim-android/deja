@@ -17,9 +17,9 @@ pub use client::{
 pub use error::{IosDriverError, Result};
 pub use process::{
     ManagedXcodebuild, RUNNER_BUNDLE_ID, RUNNER_HOST_BUNDLE_ID, RUNNER_XCTRUNNER_BUNDLE_ID,
-    SimulatorLockGuard, acquire_simulator_lock, find_xcodebuild_test_pids_for_session,
-    find_xcodebuild_test_pids_for_udid, send_sigterm_to_pid, sweep_xcodebuild_for_session,
-    validate_udid,
+    SimulatorLockGuard, acquire_simulator_lock, acquire_simulator_lock_in_dir,
+    find_xcodebuild_test_pids_for_session, find_xcodebuild_test_pids_for_udid,
+    resolve_simulator_locks_dir, send_sigterm_to_pid, sweep_xcodebuild_for_session, validate_udid,
 };
 pub use runner::{IosRunnerConfig, IosRunnerSession};
 pub use simctl::{SimDevice, SimRuntime, Simctl, SimctlEnv, normalize_runtime_identifier};
