@@ -30,7 +30,7 @@ Déjà is an Apache-2.0 memory layer and native runner for `maestro/v1` app test
 
 - Open every PR as a draft against `main`: `gh pr create --draft --base main` (note the authoring agent in the PR body and link `Closes DEJA-<N>` when applicable).
 - Run independent cross-review from a detached checkout of the pushed head (`git worktree add --detach <review-path> origin/<branch>`):
-  - **Antigravity / Claude Code PRs** are reviewed by Codex (`codex review --base origin/main --title "<PR title>"`), capturing stdout, stderr, and exit status before posting verbatim to the PR.
+  - **Antigravity / Claude Code PRs** are reviewed by Codex (`codex review --base origin/main --title "<PR title>"`), capturing stdout, stderr, and exit status locally; keep raw diagnostic transcripts local and post the findings verbatim (never rewritten or summarized) after replacing local checkout paths with repository-relative paths and checking against the no-leak rule above.
   - **Codex PRs** are reviewed by Claude Code / Antigravity in a restricted read-only review pass on a detached checkout.
   - **Fallback on confirmed rate limit/outage only:** If `codex review` exits non-zero with a confirmed usage/rate limit or outage in captured stderr, run a fresh-context read-only self-review subagent (`pro` tier) on the detached checkout, post findings verbatim prefixed with `Self-review fallback (Codex limit/unavailable: <exact error>)`, and apply the same review gate.
 - **Answer every finding** on the PR with the fix commit SHA or a linked `DEJA-` ticket for out-of-scope follow-ups, re-test, push, and re-run review on the new head.

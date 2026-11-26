@@ -40,13 +40,13 @@ flowchart LR
 
 ## Architecture & Rust migration
 
-Déjà is actively migrating from the frozen TypeScript/Bun prototype to a standalone **pure-Rust single binary** under [`rust/`](rust/Cargo.toml) with native platform drivers (zero JVM, zero Maestro runtime dependency, full `maestro/v1` YAML compatibility):
+Today's runnable CLI uses the frozen TypeScript/Bun packages with a pinned Maestro runner (see Quick start below). Under [`rust/`](rust/Cargo.toml), Déjà is migrating toward a standalone **pure-Rust single binary** with planned native platform drivers (zero JVM, zero Maestro runtime dependency, targeting full `maestro/v1` YAML compatibility; currently at workspace scaffolding on `main`):
 
-1. **iOS (Tier 1):** `xcrun simctl` + minimal public-API Swift `DejaXCTestRunner` companion agent + `.ips` crash detection.
-2. **Android (Tier 2):** `adb` + bundled UiAutomator2 instrumentation APK (zero host JDK at runtime).
-3. **Web (Tier 3):** Direct Chromium Chrome DevTools Protocol (CDP) over WebSocket (zero Node/Playwright).
+1. **iOS (Tier 1, planned):** `xcrun simctl` + minimal public-API Swift `DejaXCTestRunner` companion agent + `.ips` crash detection.
+2. **Android (Tier 2, planned):** `adb` + bundled UiAutomator2 instrumentation APK (zero host JDK at runtime).
+3. **Web (Tier 3, planned):** Direct Chromium Chrome DevTools Protocol (CDP) over WebSocket (zero Node/Playwright).
 
-Déjà executes standard `maestro/v1` YAML flows and references the open-source [Maestro](https://github.com/mobile-dev-inc/Maestro) (Apache-2.0) specification and driver model for command and selector parity. Until the Rust single binary reaches full cutover, existing TypeScript CLI consumers continue running on the frozen Bun CLI below.
+Déjà executes standard `maestro/v1` YAML flows and references the open-source [Maestro](https://github.com/mobile-dev-inc/Maestro) (Apache-2.0) specification and driver model for command and selector parity. Until the Rust binary reaches full cutover, use the TypeScript/Bun CLI below.
 
 ## Quick start (current TypeScript CLI)
 
@@ -173,9 +173,9 @@ deja run checkout
 
 | Capability | Status |
 | --- | --- |
-| Verify and save existing `maestro/v1` YAML (`remember`, `deja.walks.json` v1 manifest) | iOS simulator, Android emulator, Chromium |
-| Zero-model warm replay (`run`) + flaky rerun (`--rerun-failed`) + crash attribution | iOS simulator, Android emulator, Chromium |
-| Release gate (`gate`) & static manifest check (`manifest check`) | iOS simulator, Android emulator, Chromium |
+| Verify and save existing `maestro/v1` YAML (`remember`, `deja.walks.json` v1 manifest) | iOS simulator, Android emulator, Chromium (beta, loopback URLs only) |
+| Zero-model warm replay (`run`) + flaky rerun (`--rerun-failed`) + crash attribution | iOS simulator, Android emulator, Chromium (beta, loopback URLs only) |
+| Release gate (`gate`) & static manifest check (`manifest check`) | iOS simulator, Android emulator, Chromium (beta, loopback URLs only) |
 | Coding-agent MCP server (`deja mcp`) | Local stdio JSON-RPC |
 | Build-bound validation history & failure classification (`selector`, `navigation`, `product_assertion`, `app_crash`, `timeout`, `runner`) | All three |
 | Bounded selector repair & cold exploration (`explore`) | Android fixture (generalizing to iOS, Android, and Web in `rust/crates/deja-explore`) |
