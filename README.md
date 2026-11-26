@@ -1,7 +1,7 @@
 <h1 align="center"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/brand/deja-logo-dark.svg"><img alt="Déjà" src="docs/brand/deja-logo.svg" width="280"></picture></h1>
 
 <p align="center">
-Déjà is a memory layer and native runner for Maestro-compatible app tests across iOS, Android, and Web. Learn a test once, then replay it with zero model calls.
+Déjà is a verified memory layer for Maestro-compatible app tests across iOS, Android, and Web, with a native Rust runner in development. Learn a test once, then replay it with zero model calls.
 </p>
 
 <p align="center">
@@ -18,13 +18,13 @@ Déjà is a memory layer and native runner for Maestro-compatible app tests acro
 
 - **Zero model calls on replay:** Once verified, replays run without a model or API key.
 - **Verified saves only:** A test is saved only after it passes its own clean verification run.
-- **Honest failures:** A renamed selector can get a bounded repair proposal, while a product regression stays failed.
+- **Honest failures:** A renamed selector gets one scoped repair (applying and verifying the patch on the supported Android policy, rolling back on failure), while a product regression stays failed.
 - **Plain `maestro/v1` YAML:** Flows live in your repo as standard [Maestro](https://github.com/mobile-dev-inc/Maestro)-compatible YAML that your team reviews in pull requests.
 - **Agent-ready:** Coding agents can replay your saved tests after each edit via `deja mcp` (`0` model calls).
 
 ## How it works
 
-An AI model explores the app once and writes the test as YAML, or you bring existing Maestro YAML flows. Déjà runs the test cleanly on its own and saves it only if every assertion passes. Later runs replay the saved test with zero model calls. If a selector changes, Déjà proposes one scoped repair; if a real product assertion fails, the run stays failed.
+An AI model explores the app once and writes the test as YAML, or you bring existing Maestro YAML flows. Déjà runs the test cleanly on its own and saves it only if every assertion passes. Later runs replay the saved test with zero model calls. If a selector changes on a supported repair policy, Déjà applies a scoped two-file patch, rebuilds and verifies it (leaving the verified edit in place for review, or rolling back on failure); if a real product assertion fails, the run stays failed.
 
 ```mermaid
 flowchart LR
@@ -202,7 +202,7 @@ Warm replay eliminates model calls; execution time comes from the underlying dev
 | Command | What it does |
 | --- | --- |
 | `remember <goal> --flow <file>` | Verify your YAML and save it to the store (and write `deja.walks.json` when `manifest` is configured) only if every assertion passes. |
-| `run <goal>` | Replay a saved test with zero model calls on a cache hit. On a miss in non-manifest Android configs, explores with the configured model; proposes one bounded repair on stale selectors. Supports `--verify`, `--rerun-failed`, `--junit`, `--summary`. |
+| `run <goal>` | Replay a saved test with zero model calls on a cache hit. On Android, a brand-new goal with no manifest entry or saved walk can invoke cold exploration (changed or unvalidated manifest entries never explore); on a stale selector with repair enabled, applies a scoped source patch, verifies it, and keeps the edit on pass (rolls back on failure). Supports `--verify`, `--rerun-failed`, `--junit`, `--summary`. |
 | `gate --goals <file>` | Check that every required goal passed on the current build and write release-gate evidence. |
 | `manifest check` | Statically verify flow closures and assertion hashes against `deja.walks.json` without a device. |
 | `list` | List saved walks. |
@@ -212,7 +212,7 @@ Warm replay eliminates model calls; execution time comes from the underlying dev
 
 ## Bring your own model
 
-Only cold exploration (`explore`, or a cache miss in non-manifest Android `run`) calls a model. Remembering, replaying cache hits, gating, and static manifest checks never require a model or API key. In the current TypeScript CLI, exploration runs through OpenClaw and requires an `https://` OpenAI-compatible chat endpoint that supports tool calls; see [docs/REFERENCE.md](docs/REFERENCE.md#bring-your-own-model) for configuration details.
+Only cold exploration (`explore`, or `run` on Android for a brand-new goal with no manifest entry or saved walk; changed or unvalidated manifest entries never explore) calls a model. Remembering, replaying cache hits, gating, and static manifest checks never require a model or API key. In the current TypeScript CLI, exploration runs through OpenClaw and requires an `https://` OpenAI-compatible chat endpoint that supports tool calls; see [docs/REFERENCE.md](docs/REFERENCE.md#bring-your-own-model) for configuration details.
 
 ## Roadmap
 
