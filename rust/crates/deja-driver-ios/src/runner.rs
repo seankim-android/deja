@@ -1,7 +1,9 @@
 use crate::cache::{self, RunnerBuildArtifact};
 use crate::client::AgentClient;
 use crate::error::{IosDriverError, Result};
-use crate::process::{ManagedXcodebuild, configure_process_group, validate_udid};
+use crate::process::{
+    ManagedXcodebuild, acquire_simulator_lock, configure_process_group, validate_udid,
+};
 use crate::simctl::SimctlEnv;
 use serde::Deserialize;
 use std::io::Read;
@@ -131,9 +133,11 @@ impl IosRunnerSession {
         }
 
         let deja_home = cache::resolve_deja_home(config.deja_home.as_deref())?;
+        // Acquire exclusive per-simulator ownership before touching runner state or spawning.
+        let sim_lock = acquire_simulator_lock(&deja_home, &udid)?;
         let build_artifact = tokio::select! {
             _ = cancel.cancelled() => return Err(IosDriverError::Cancelled),
-            res = cache::ensure_runner_built(&deja_home, &config.env) => res?,
+            res = cache::ensure_runner_built(&deja_home, &config.env, &cancel) => res?,
         };
 
         let attach_started = Instant::now();
@@ -181,6 +185,7 @@ impl IosRunnerSession {
             xctestrun_path,
             config.env.env_path.clone(),
             config.env.developer_dir.clone(),
+            Some(sim_lock),
         );
 
         let output_tail = Arc::new(Mutex::new(OutputTail::default()));

@@ -3,13 +3,14 @@ use crate::error::{IosDriverError, Result};
 use crate::process::{configure_process_group, terminate_child_group_sync};
 use crate::simctl::SimctlEnv;
 use serde::Serialize;
-use std::fs::OpenOptions;
+use std::fs::{File, OpenOptions, TryLockError};
 use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::io::AsyncReadExt;
 use tokio::process::{Child, Command};
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
 
 static STAGING_NONCE: AtomicU64 = AtomicU64::new(0);
@@ -347,12 +348,68 @@ fn check_cached_build(
     })
 }
 
+#[derive(Debug)]
+struct AdvisoryFileLock(File);
+
+impl Drop for AdvisoryFileLock {
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
+}
+
+/// Acquires an exclusive advisory file lock on `lock_path` using non-blocking `File::try_lock()`
+/// polling so cancellation via `cancel` returns `IosDriverError::Cancelled` promptly without
+/// leaving a blocked thread behind.
+async fn acquire_advisory_lock_cancellable(
+    lock_path: &Path,
+    cancel: &CancellationToken,
+) -> Result<AdvisoryFileLock> {
+    let file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(lock_path)
+        .map_err(|source| IosDriverError::Io {
+            context: format!("open runner build lock {}", lock_path.display()),
+            source,
+        })?;
+
+    loop {
+        if cancel.is_cancelled() {
+            return Err(IosDriverError::Cancelled);
+        }
+        match file.try_lock() {
+            Ok(()) => return Ok(AdvisoryFileLock(file)),
+            Err(TryLockError::WouldBlock) => {
+                tokio::select! {
+                    _ = cancel.cancelled() => return Err(IosDriverError::Cancelled),
+                    _ = tokio::time::sleep(Duration::from_millis(25)) => {}
+                }
+            }
+            Err(TryLockError::Error(source)) => {
+                return Err(IosDriverError::Io {
+                    context: format!("acquire runner build lock {}", lock_path.display()),
+                    source,
+                });
+            }
+        }
+    }
+}
+
 /// Ensures `DejaXCTestRunner` is built and cached under `<deja_home>/ios-runner/builds/<key>`.
 ///
-/// Uses an exclusive `std::fs::File::lock()` advisory lock inside `spawn_blocking`, builds into
+/// Uses a cancellable exclusive `std::fs::File::try_lock()` advisory lock, builds into
 /// a private staging directory protected by a cancellation-safe `BuildGuard`, writes
 /// `ready.marker`, and atomically renames into place.
-pub async fn ensure_runner_built(deja_home: &Path, env: &SimctlEnv) -> Result<RunnerBuildArtifact> {
+pub async fn ensure_runner_built(
+    deja_home: &Path,
+    env: &SimctlEnv,
+    cancel: &CancellationToken,
+) -> Result<RunnerBuildArtifact> {
+    if cancel.is_cancelled() {
+        return Err(IosDriverError::Cancelled);
+    }
     let toolchain = detect_toolchain(env).await?;
     let source_sha256 = embed::source_sha256();
     let arch = native_simulator_arch();
@@ -386,25 +443,7 @@ pub async fn ensure_runner_built(deja_home: &Path, env: &SimctlEnv) -> Result<Ru
     // Declared BEFORE `build_into_staging` so that on cancellation/drop, `BuildGuard` inside
     // `build_into_staging` ALWAYS terminates the child group and removes staging BEFORE `_lock_file`
     // releases the advisory lock.
-    let _lock_file = tokio::task::spawn_blocking(move || -> Result<std::fs::File> {
-        let file = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .truncate(false)
-            .open(&lock_path)
-            .map_err(|source| IosDriverError::Io {
-                context: format!("open runner build lock {}", lock_path.display()),
-                source,
-            })?;
-        file.lock().map_err(|source| IosDriverError::Io {
-            context: format!("acquire runner build lock {}", lock_path.display()),
-            source,
-        })?;
-        Ok(file)
-    })
-    .await
-    .map_err(|err| IosDriverError::Toolchain(format!("lock task failed: {err}")))??;
+    let _lock_file = acquire_advisory_lock_cancellable(&lock_path, cancel).await?;
 
     // Re-check under the exclusive lock so concurrent builders reuse the freshly completed build.
     if let Some(hit) = check_cached_build(&cache_key, &cache_dir, &toolchain, &source_sha256) {
@@ -448,10 +487,9 @@ async fn build_into_staging(
     let source_dir = staging_dir.join("source");
     let derived_dir = staging_dir.join("derived");
 
-    let source_dir_clone = source_dir.clone();
-    tokio::task::spawn_blocking(move || embed::materialize_project(&source_dir_clone))
-        .await
-        .map_err(|err| IosDriverError::Toolchain(format!("materialize task failed: {err}")))??;
+    // Materialize the 8 small embedded project files synchronously so no background task can
+    // outlive cancellation/drop of `BuildGuard`.
+    embed::materialize_project(&source_dir)?;
 
     let project_path = source_dir.join("DejaXCTestRunner.xcodeproj");
     let arch_setting = format!("ARCHS={arch}");
@@ -705,10 +743,13 @@ fn tail_str(input: &str, max_bytes: usize) -> &str {
 #[cfg(test)]
 mod tests {
     use super::{
-        BuildGuard, build_cache_key, parse_sdk_version, parse_xcodebuild_version,
-        rewrite_xctestrun_xml,
+        BuildGuard, acquire_advisory_lock_cancellable, build_cache_key, parse_sdk_version,
+        parse_xcodebuild_version, rewrite_xctestrun_xml,
     };
-    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    use crate::error::IosDriverError;
+    use std::fs::OpenOptions;
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+    use tokio_util::sync::CancellationToken;
 
     const SAMPLE_XCTESTRUN: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -863,6 +904,52 @@ mod tests {
             );
         }
 
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn cancelling_while_waiting_for_cache_lock_returns_cancelled_promptly() {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "deja-cache-lock-cancel-{}-{nanos}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).expect("create root");
+        let lock_path = root.join("runner.lock");
+
+        let holder = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(&lock_path)
+            .expect("open lock holder");
+        holder.lock().expect("acquire holder lock");
+
+        let cancel = CancellationToken::new();
+        let cancel_clone = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(80)).await;
+            cancel_clone.cancel();
+        });
+
+        let started = Instant::now();
+        let res = acquire_advisory_lock_cancellable(&lock_path, &cancel).await;
+        let elapsed = started.elapsed();
+
+        assert!(
+            matches!(res, Err(IosDriverError::Cancelled)),
+            "expected Cancelled while waiting for contended cache lock, got {res:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "lock cancellation took too long: {elapsed:?}"
+        );
+
+        drop(holder);
         let _ = std::fs::remove_dir_all(&root);
     }
 }

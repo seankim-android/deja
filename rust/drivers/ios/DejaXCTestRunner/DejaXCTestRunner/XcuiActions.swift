@@ -210,26 +210,26 @@ final class XcuiActions {
 
         app.typeText(text)
 
-        // DEJA-58 post-type settle: wait until keyboard exists + frame.height is stable across two
-        // consecutive polls (~120ms apart), without assuming a Return/Done button exists.
+        // DEJA-58 post-type settle: wait until keyboard is visible with identical positive height
+        // across two consecutive polls (~120ms apart), without assuming a Return/Done button exists.
         if settleKeyboard && hadSoftwareKeyboard {
             let settleDeadline = Date().addingTimeInterval(2.5)
-            var previousSample: (Bool, Int)?
+            var previousHeight: Int?
             while Date() < settleDeadline {
                 let kb = app.keyboards.firstMatch
                 let exists = kb.exists
-                let height: Int
-                if exists {
-                    let h = kb.frame.height
-                    height = h.isFinite && h > 0 ? Int(h.rounded()) : 0
+                let rawHeight = exists ? kb.frame.height : 0
+                let height = (exists && rawHeight.isFinite && rawHeight > 0)
+                    ? Int(rawHeight.rounded())
+                    : 0
+                if exists && height > 0 {
+                    if previousHeight == height {
+                        break
+                    }
+                    previousHeight = height
                 } else {
-                    height = 0
+                    previousHeight = nil
                 }
-                let current = (exists, height)
-                if let prev = previousSample, prev == current {
-                    break
-                }
-                previousSample = current
                 RunLoop.current.run(until: Date().addingTimeInterval(0.12))
             }
         }

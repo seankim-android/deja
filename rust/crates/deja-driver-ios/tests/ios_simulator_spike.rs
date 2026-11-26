@@ -592,6 +592,11 @@ async fn spike_sigterm_child_helper() {
     let health = session.client().health().await.expect("child /health");
     assert_eq!(health.status, "ok");
 
+    // Register SIGTERM handler BEFORE publishing the ready file so parent cannot race ahead.
+    #[cfg(unix)]
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .expect("register SIGTERM handler");
+
     let payload = SigtermChildReady {
         port: session.port(),
         token: session.client().token().to_string(),
@@ -604,8 +609,6 @@ async fn spike_sigterm_child_helper() {
 
     #[cfg(unix)]
     {
-        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .expect("register SIGTERM handler");
         let _ = tokio::time::timeout(Duration::from_secs(30), sigterm.recv()).await;
     }
 

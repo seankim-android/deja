@@ -4,6 +4,9 @@ use thiserror::Error;
 /// Typed error surface for the native iOS simulator driver.
 #[derive(Debug, Error)]
 pub enum IosDriverError {
+    #[error("simulator `{udid}` is already locked by another active Déjà iOS runner session")]
+    SimulatorBusy { udid: String },
+
     #[error("invalid simulator UDID `{0}` (expected RFC 4122 UUID)")]
     InvalidUdid(String),
 
