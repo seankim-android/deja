@@ -1,0 +1,18 @@
+[package]
+name = "deja-explore"
+description = "Graph explorer, choosers, path memory, and bounded step repair over PlatformDriver"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+deja-core.workspace = true
+deja-flow.workspace = true
+deja-store.workspace = true

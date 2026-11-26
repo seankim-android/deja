@@ -1,0 +1,65 @@
+[workspace]
+resolver = "3"
+members = [
+  "crates/deja-core",
+  "crates/deja-store",
+  "crates/deja-flow",
+  "crates/deja-driver-ios",
+  "crates/deja-driver-android",
+  "crates/deja-driver-web",
+  "crates/deja-explore",
+  "crates/deja-mcp",
+  "crates/deja-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+license = "Apache-2.0"
+repository = "https://github.com/seankim-android/deja"
+homepage = "https://github.com/seankim-android/deja#readme"
+publish = false
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+
+[workspace.lints.cargo]
+# Phase 0 pre-pins shared workspace dependency versions ahead of Phases 1-5.
+unused_workspace_dependencies = "allow"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"
+
+[workspace.dependencies]
+# Internal workspace crates
+deja-core = { path = "crates/deja-core" }
+deja-store = { path = "crates/deja-store" }
+deja-flow = { path = "crates/deja-flow" }
+deja-driver-ios = { path = "crates/deja-driver-ios" }
+deja-driver-android = { path = "crates/deja-driver-android" }
+deja-driver-web = { path = "crates/deja-driver-web" }
+deja-explore = { path = "crates/deja-explore" }
+deja-mcp = { path = "crates/deja-mcp" }
+
+# Shared external crates
+saphyr = "0.4"
+saphyr-parser = "0.4"
+tokio = { version = "1.54", features = ["rt-multi-thread", "macros", "process", "io-std", "io-util", "net", "signal", "sync", "time", "fs"] }
+tokio-util = "0.7"
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "handshake"] }
+rusqlite = { version = "0.43", features = ["bundled"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
+clap = { version = "4.6", features = ["derive"] }
+sha2 = "0.11"
+hex = "0.4"
+unicode-normalization = "0.1"
+regex = "1.13"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
