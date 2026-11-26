@@ -150,10 +150,17 @@ fn forbidden_external_all(crate_name: &str) -> &'static [&'static str] {
             "sqlite-wasm-rs",
             "reqwest",
             "hyper",
+            "h2",
+            "ureq",
+            "surf",
+            "isahc",
             "tokio",
             "tokio-util",
             "tokio-tungstenite",
             "tungstenite",
+            "subprocess",
+            "duct",
+            "xshell",
             "clap",
             "tracing",
             "tracing-subscriber",
@@ -393,27 +400,6 @@ fn run_cargo_metadata(args: &[&str]) -> CargoMetadata {
         .unwrap_or_else(|err| panic!("failed to parse `cargo metadata {args:?}` JSON: {err}"))
 }
 
-fn host_target_triple() -> String {
-    let rustc = std::env::var("RUSTC").unwrap_or_else(|_| "rustc".to_string());
-    let output = Command::new(&rustc)
-        .arg("-vV")
-        .output()
-        .unwrap_or_else(|err| panic!("failed to run `{rustc} -vV`: {err}"));
-
-    assert!(
-        output.status.success(),
-        "`{rustc} -vV` failed with {}:\n{}",
-        output.status,
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .find_map(|line| line.strip_prefix("host: ").map(str::trim))
-        .expect("`rustc -vV` output should include a `host:` line")
-        .to_string()
-}
-
 fn has_non_dev_edge(dep: &ResolveDep) -> bool {
     dep.dep_kinds.is_empty()
         || dep
@@ -470,16 +456,7 @@ fn collect_non_dev_closure<'a>(
 
 fn load_live_workspace_snapshot() -> WorkspaceSnapshot {
     let no_deps = run_cargo_metadata(&["--no-deps", "--format-version", "1"]);
-    let host = host_target_triple();
-    let resolved = run_cargo_metadata(&[
-        "--format-version",
-        "1",
-        "--all-features",
-        "--locked",
-        "--offline",
-        "--filter-platform",
-        &host,
-    ]);
+    let resolved = run_cargo_metadata(&["--format-version", "1", "--all-features", "--locked"]);
 
     let member_ids: BTreeSet<&str> = no_deps
         .workspace_members
@@ -824,6 +801,30 @@ fn rejects_core_unapproved_process_or_http_crates() {
             .direct_dev
             .insert(unapproved.to_string());
         assert_rejected(&dev, "not in core dev allowlist");
+
+        let mut transitive = valid_baseline_snapshot();
+        transitive
+            .crates
+            .get_mut("deja-core")
+            .unwrap()
+            .transitive_normal_and_build
+            .insert(unapproved.to_string());
+        assert_rejected(
+            &transitive,
+            &format!("transitively depends on forbidden external crate `{unapproved}`"),
+        );
+
+        let mut transitive_dev = valid_baseline_snapshot();
+        transitive_dev
+            .crates
+            .get_mut("deja-core")
+            .unwrap()
+            .transitive_dev
+            .insert(unapproved.to_string());
+        assert_rejected(
+            &transitive_dev,
+            &format!("transitively dev-depends on forbidden external crate `{unapproved}`"),
+        );
     }
 }
 

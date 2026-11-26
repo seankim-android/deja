@@ -37,6 +37,8 @@ jobs:
             rust -> target
       - name: Check formatting
         run: cargo fmt --all -- --check
+      - name: Fetch locked dependencies for all targets
+        run: cargo fetch --locked
       - name: Clippy
         run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
       - name: Test workspace
