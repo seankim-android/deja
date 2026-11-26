@@ -145,20 +145,30 @@ pub struct ActionResponse {
 }
 
 /// Typed HTTP client for the loopback `DejaXCTestRunner` companion agent.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AgentClient {
     http: reqwest::Client,
     base_url: String,
     token: String,
 }
 
+impl std::fmt::Debug for AgentClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AgentClient")
+            .field("base_url", &self.base_url)
+            .field("token", &"[REDACTED]")
+            .finish_non_exhaustive()
+    }
+}
+
 impl AgentClient {
     pub fn new(port: u16, token: String, timeout: Duration) -> Result<Self> {
         let mut headers = HeaderMap::new();
         let header_name = HeaderName::from_static("x-deja-agent-token");
-        let header_val = HeaderValue::from_str(&token).map_err(|_| {
+        let mut header_val = HeaderValue::from_str(&token).map_err(|_| {
             IosDriverError::InvalidArgument("agent token contains invalid header characters".into())
         })?;
+        header_val.set_sensitive(true);
         headers.insert(header_name, header_val);
 
         let http = reqwest::Client::builder()
@@ -304,7 +314,25 @@ async fn parse_response<T: for<'de> Deserialize<'de>>(
 
 #[cfg(test)]
 mod tests {
-    use super::{ElementFrame, HierarchyNode, HierarchyResponse};
+    use super::{AgentClient, ElementFrame, HierarchyNode, HierarchyResponse};
+    use std::time::Duration;
+
+    #[test]
+    fn agent_client_debug_redacts_secret_token() {
+        let secret = "deadbeef-secret-agent-token-0123456789";
+        let client = AgentClient::new(51234, secret.to_string(), Duration::from_secs(5))
+            .expect("client init");
+        let formatted = format!("{client:?}");
+        assert!(
+            !formatted.contains(secret),
+            "Debug output leaked agent token: {formatted}"
+        );
+        assert!(
+            formatted.contains("[REDACTED]"),
+            "Debug output should show [REDACTED]: {formatted}"
+        );
+        assert!(formatted.contains("http://127.0.0.1:51234"));
+    }
 
     #[test]
     fn hierarchy_helpers_find_nodes_by_id_and_text() {

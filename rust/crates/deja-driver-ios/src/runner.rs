@@ -73,6 +73,41 @@ impl OutputTail {
     }
 }
 
+/// RAII guard that removes a freshly allocated per-run directory if startup fails before
+/// ownership transfers into `ManagedXcodebuild`.
+#[derive(Debug)]
+struct RunDirGuard {
+    path: Option<PathBuf>,
+}
+
+impl RunDirGuard {
+    fn new(path: PathBuf) -> Self {
+        Self { path: Some(path) }
+    }
+
+    fn path(&self) -> &Path {
+        self.path
+            .as_deref()
+            .expect("RunDirGuard path already transferred")
+    }
+
+    fn into_path(mut self) -> PathBuf {
+        self.path
+            .take()
+            .expect("RunDirGuard path already transferred")
+    }
+}
+
+impl Drop for RunDirGuard {
+    fn drop(&mut self) {
+        if let Some(ref path) = self.path
+            && path.exists()
+        {
+            let _ = std::fs::remove_dir_all(path);
+        }
+    }
+}
+
 /// Active `DejaXCTestRunner` session bound to a specific iOS Simulator UDID.
 #[derive(Debug)]
 pub struct IosRunnerSession {
@@ -103,10 +138,10 @@ impl IosRunnerSession {
 
         let attach_started = Instant::now();
         let token = generate_agent_token()?;
-        let run_dir = create_private_run_dir(&deja_home)?;
-        let xctestrun_path = run_dir.join("DejaXCTestRunner.xctestrun");
+        let run_dir_guard = RunDirGuard::new(create_private_run_dir(&deja_home)?);
+        let xctestrun_path = run_dir_guard.path().join(format!("{udid}.xctestrun"));
         cache::materialize_run_xctestrun(&build_artifact, &xctestrun_path)?;
-        let ready_file = run_dir.join("ready.json");
+        let ready_file = run_dir_guard.path().join("ready.json");
 
         let mut cmd = Command::new("xcodebuild");
         cmd.arg("test-without-building")
@@ -130,18 +165,20 @@ impl IosRunnerSession {
         }
         configure_process_group(&mut cmd);
 
-        debug!(udid = %udid, run_dir = %run_dir.display(), "spawning xcodebuild test-without-building");
+        debug!(udid = %udid, run_dir = %run_dir_guard.path().display(), "spawning xcodebuild test-without-building");
         let mut child = cmd.spawn().map_err(|source| IosDriverError::CommandSpawn {
             program: "xcodebuild".to_string(),
             source,
         })?;
 
+        let run_dir = run_dir_guard.into_path();
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
         let mut managed = ManagedXcodebuild::new(
             child,
             udid.clone(),
-            run_dir.clone(),
+            run_dir,
+            xctestrun_path,
             config.env.env_path.clone(),
             config.env.developer_dir.clone(),
         );
@@ -470,7 +507,11 @@ fn generate_agent_token() -> Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{generate_agent_token, parse_ready_sentinel_line};
+    use super::{
+        RunDirGuard, create_private_run_dir, generate_agent_token, parse_ready_sentinel_line,
+    };
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn parses_ready_sentinel_line() {
@@ -498,5 +539,47 @@ mod tests {
         assert_eq!(a.len(), 64);
         assert_eq!(b.len(), 64);
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn run_dir_guard_cleans_up_on_pre_spawn_error_and_transfers_on_success() {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let deja_home = std::env::temp_dir().join(format!(
+            "deja-rundir-guard-test-{}-{nanos}",
+            std::process::id()
+        ));
+
+        // 1. Pre-spawn error path: guard drops and removes the allocated run_dir.
+        let leaked_path: PathBuf = {
+            let guard = RunDirGuard::new(create_private_run_dir(&deja_home).expect("create run"));
+            let path = guard.path().to_path_buf();
+            std::fs::write(path.join("probe.txt"), b"temp").expect("write probe");
+            assert!(path.exists());
+            let failing_op = || -> Result<(), &'static str> {
+                let _held = guard;
+                Err("simulated pre-spawn failure")
+            };
+            assert!(failing_op().is_err());
+            path
+        };
+        assert!(
+            !leaked_path.exists(),
+            "RunDirGuard must delete run_dir on pre-spawn error"
+        );
+
+        // 2. Success path: transferring ownership via `into_path()` leaves run_dir intact.
+        let transferred = {
+            let guard = RunDirGuard::new(create_private_run_dir(&deja_home).expect("create run 2"));
+            guard.into_path()
+        };
+        assert!(
+            transferred.is_dir(),
+            "transferred run_dir must remain intact"
+        );
+
+        let _ = std::fs::remove_dir_all(&deja_home);
     }
 }

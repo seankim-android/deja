@@ -1,13 +1,15 @@
 use crate::embed;
 use crate::error::{IosDriverError, Result};
+use crate::process::{configure_process_group, terminate_child_group_sync};
 use crate::simctl::SimctlEnv;
 use serde::Serialize;
 use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
+use std::process::{ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
-use tokio::process::Command;
+use tokio::io::AsyncReadExt;
+use tokio::process::{Child, Command};
 use tracing::{debug, info};
 
 static STAGING_NONCE: AtomicU64 = AtomicU64::new(0);
@@ -36,8 +38,105 @@ pub struct RunnerBuildArtifact {
 #[serde(rename_all = "camelCase")]
 struct ReadyMarker {
     cache_key: String,
+    arch: String,
     toolchain: ToolchainInfo,
     source_sha256: String,
+}
+
+/// RAII cancellation guard for a staged build command and its staging directory.
+///
+/// Must always be scoped *inside* the build cache file lock so that if the build future is
+/// cancelled or dropped mid-flight, the isolated child process group is terminated/reaped and
+/// the staging directory is removed *before* the advisory lock is released.
+struct BuildGuard {
+    staging_dir: PathBuf,
+    child: Option<Child>,
+    pgid: Option<i32>,
+    disarmed: bool,
+}
+
+impl BuildGuard {
+    fn new(staging_dir: PathBuf) -> Self {
+        Self {
+            staging_dir,
+            child: None,
+            pgid: None,
+            disarmed: false,
+        }
+    }
+
+    async fn run_command(
+        &mut self,
+        mut cmd: Command,
+        program_label: &str,
+    ) -> Result<(ExitStatus, Vec<u8>, Vec<u8>)> {
+        cmd.stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        configure_process_group(&mut cmd);
+
+        let mut child = cmd.spawn().map_err(|source| IosDriverError::CommandSpawn {
+            program: program_label.to_string(),
+            source,
+        })?;
+        let stdout_pipe = child.stdout.take();
+        let stderr_pipe = child.stderr.take();
+        self.pgid = child.id().and_then(|id| i32::try_from(id).ok());
+        self.child = Some(child);
+
+        let read_stdout = async move {
+            let mut buf = Vec::new();
+            if let Some(mut out) = stdout_pipe {
+                let _ = out.read_to_end(&mut buf).await;
+            }
+            buf
+        };
+        let read_stderr = async move {
+            let mut buf = Vec::new();
+            if let Some(mut err) = stderr_pipe {
+                let _ = err.read_to_end(&mut buf).await;
+            }
+            buf
+        };
+        let wait_child = async {
+            self.child
+                .as_mut()
+                .expect("child attached to BuildGuard")
+                .wait()
+                .await
+        };
+
+        let (status_res, stdout_bytes, stderr_bytes) =
+            tokio::join!(wait_child, read_stdout, read_stderr);
+        self.child = None;
+        self.pgid = None;
+
+        let status = status_res.map_err(|source| IosDriverError::CommandSpawn {
+            program: program_label.to_string(),
+            source,
+        })?;
+        Ok((status, stdout_bytes, stderr_bytes))
+    }
+
+    fn disarm(&mut self) {
+        self.disarmed = true;
+    }
+}
+
+impl Drop for BuildGuard {
+    fn drop(&mut self) {
+        if self.disarmed {
+            return;
+        }
+        self.disarmed = true;
+
+        if let Some(mut child) = self.child.take() {
+            terminate_child_group_sync(&mut child, self.pgid);
+        }
+        if self.staging_dir.exists() {
+            let _ = std::fs::remove_dir_all(&self.staging_dir);
+        }
+    }
 }
 
 /// Resolves the Déjà home directory: explicit override -> `$DEJA_HOME` -> `~/.deja`.
@@ -60,12 +159,18 @@ pub fn resolve_deja_home(override_home: Option<&Path>) -> Result<PathBuf> {
     Ok(PathBuf::from(home).join(".deja"))
 }
 
-/// Computes the deterministic runner cache key `<xcode-build>-<ios-sdk>-<source-sha256>`.
-pub fn build_cache_key(xcode_build: &str, ios_sdk: &str, source_sha256: &str) -> String {
+/// Computes the deterministic runner cache key `<xcode-build>-<ios-sdk>-<arch>-<source-sha256>`.
+pub fn build_cache_key(
+    xcode_build: &str,
+    ios_sdk: &str,
+    arch: &str,
+    source_sha256: &str,
+) -> String {
     format!(
-        "{}-{}-{}",
+        "{}-{}-{}-{}",
         sanitize_key_part(xcode_build),
         sanitize_key_part(ios_sdk),
+        sanitize_key_part(arch),
         sanitize_key_part(source_sha256)
     )
 }
@@ -184,7 +289,7 @@ fn apply_env(cmd: &mut Command, env: &SimctlEnv) {
     }
 }
 
-fn native_simulator_arch() -> &'static str {
+pub fn native_simulator_arch() -> &'static str {
     #[cfg(target_arch = "aarch64")]
     {
         "arm64"
@@ -245,11 +350,18 @@ fn check_cached_build(
 /// Ensures `DejaXCTestRunner` is built and cached under `<deja_home>/ios-runner/builds/<key>`.
 ///
 /// Uses an exclusive `std::fs::File::lock()` advisory lock inside `spawn_blocking`, builds into
-/// a private staging directory, writes `ready.marker`, and atomically renames into place.
+/// a private staging directory protected by a cancellation-safe `BuildGuard`, writes
+/// `ready.marker`, and atomically renames into place.
 pub async fn ensure_runner_built(deja_home: &Path, env: &SimctlEnv) -> Result<RunnerBuildArtifact> {
     let toolchain = detect_toolchain(env).await?;
     let source_sha256 = embed::source_sha256();
-    let cache_key = build_cache_key(&toolchain.xcode_build, &toolchain.ios_sdk, &source_sha256);
+    let arch = native_simulator_arch();
+    let cache_key = build_cache_key(
+        &toolchain.xcode_build,
+        &toolchain.ios_sdk,
+        arch,
+        &source_sha256,
+    );
 
     let runner_root = deja_home.join("ios-runner");
     let builds_dir = runner_root.join("builds");
@@ -271,7 +383,10 @@ pub async fn ensure_runner_built(deja_home: &Path, env: &SimctlEnv) -> Result<Ru
     })?;
 
     let lock_path = locks_dir.join(format!("{cache_key}.lock"));
-    let lock_file = tokio::task::spawn_blocking(move || -> Result<std::fs::File> {
+    // Declared BEFORE `build_into_staging` so that on cancellation/drop, `BuildGuard` inside
+    // `build_into_staging` ALWAYS terminates the child group and removes staging BEFORE `_lock_file`
+    // releases the advisory lock.
+    let _lock_file = tokio::task::spawn_blocking(move || -> Result<std::fs::File> {
         let file = OpenOptions::new()
             .create(true)
             .read(true)
@@ -293,7 +408,6 @@ pub async fn ensure_runner_built(deja_home: &Path, env: &SimctlEnv) -> Result<Ru
 
     // Re-check under the exclusive lock so concurrent builders reuse the freshly completed build.
     if let Some(hit) = check_cached_build(&cache_key, &cache_dir, &toolchain, &source_sha256) {
-        drop(lock_file);
         debug!(cache_key = %cache_key, "DejaXCTestRunner cache hit after acquiring lock");
         return Ok(hit);
     }
@@ -308,32 +422,29 @@ pub async fn ensure_runner_built(deja_home: &Path, env: &SimctlEnv) -> Result<Ru
         std::process::id()
     ));
 
-    let build_result = build_into_staging(
+    build_into_staging(
         &staging_dir,
         &cache_dir,
         &cache_key,
+        arch,
         &toolchain,
         &source_sha256,
         env,
     )
-    .await;
-
-    if build_result.is_err() && staging_dir.exists() {
-        let _ = std::fs::remove_dir_all(&staging_dir);
-    }
-    drop(lock_file);
-    build_result
+    .await
 }
 
 async fn build_into_staging(
     staging_dir: &Path,
     cache_dir: &Path,
     cache_key: &str,
+    arch: &str,
     toolchain: &ToolchainInfo,
     source_sha256: &str,
     env: &SimctlEnv,
 ) -> Result<RunnerBuildArtifact> {
     let started = Instant::now();
+    let mut guard = BuildGuard::new(staging_dir.to_path_buf());
     let source_dir = staging_dir.join("source");
     let derived_dir = staging_dir.join("derived");
 
@@ -343,11 +454,11 @@ async fn build_into_staging(
         .map_err(|err| IosDriverError::Toolchain(format!("materialize task failed: {err}")))??;
 
     let project_path = source_dir.join("DejaXCTestRunner.xcodeproj");
-    let arch_setting = format!("ARCHS={}", native_simulator_arch());
+    let arch_setting = format!("ARCHS={arch}");
 
     info!(
         cache_key = %cache_key,
-        arch = native_simulator_arch(),
+        arch,
         "building DejaXCTestRunner via xcodebuild build-for-testing"
     );
 
@@ -360,21 +471,14 @@ async fn build_into_staging(
         .arg("-derivedDataPath")
         .arg(&derived_dir)
         .arg(&arch_setting)
-        .arg("ONLY_ACTIVE_ARCH=YES")
-        .stdin(Stdio::null());
+        .arg("ONLY_ACTIVE_ARCH=YES");
     apply_env(&mut cmd, env);
 
-    let output = cmd
-        .output()
-        .await
-        .map_err(|source| IosDriverError::CommandSpawn {
-            program: "xcodebuild".to_string(),
-            source,
-        })?;
+    let (status, stdout_bytes, stderr_bytes) = guard.run_command(cmd, "xcodebuild").await?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
+    if !status.success() {
+        let stderr = String::from_utf8_lossy(&stderr_bytes);
+        let stdout = String::from_utf8_lossy(&stdout_bytes);
         let combined = format!(
             "stderr:\n{}\nstdout tail:\n{}",
             tail_str(&stderr, 4_096),
@@ -383,7 +487,7 @@ async fn build_into_staging(
         return Err(IosDriverError::CommandFailed {
             program: "xcodebuild".to_string(),
             args: "build-for-testing -scheme DejaXCTestRunner".to_string(),
-            status: output.status.code(),
+            status: status.code(),
             stderr: combined,
         });
     }
@@ -393,6 +497,7 @@ async fn build_into_staging(
 
     let marker = ReadyMarker {
         cache_key: cache_key.to_string(),
+        arch: arch.to_string(),
         toolchain: toolchain.clone(),
         source_sha256: source_sha256.to_string(),
     };
@@ -419,6 +524,7 @@ async fn build_into_staging(
         ),
         source,
     })?;
+    guard.disarm();
 
     let products_dir = cache_dir.join("derived").join("Build").join("Products");
     let template_xctestrun = find_xctestrun_in_products(&products_dir)?;
@@ -599,8 +705,10 @@ fn tail_str(input: &str, max_bytes: usize) -> &str {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_cache_key, parse_sdk_version, parse_xcodebuild_version, rewrite_xctestrun_xml,
+        BuildGuard, build_cache_key, parse_sdk_version, parse_xcodebuild_version,
+        rewrite_xctestrun_xml,
     };
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     const SAMPLE_XCTESTRUN: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -634,9 +742,12 @@ mod tests {
     }
 
     #[test]
-    fn builds_clean_cache_key() {
-        let key = build_cache_key("27B52", "27.2", "abcdef0123456789");
-        assert_eq!(key, "27B52-27.2-abcdef0123456789");
+    fn builds_clean_cache_key_including_arch() {
+        let arm64 = build_cache_key("27B52", "27.2", "arm64", "abcdef0123456789");
+        let x86_64 = build_cache_key("27B52", "27.2", "x86_64", "abcdef0123456789");
+        assert_eq!(arm64, "27B52-27.2-arm64-abcdef0123456789");
+        assert_eq!(x86_64, "27B52-27.2-x86_64-abcdef0123456789");
+        assert_ne!(arm64, x86_64);
     }
 
     #[test]
@@ -683,5 +794,75 @@ mod tests {
         assert!(
             rewritten.contains("<key>UserAttachmentLifetime</key>\n\t\t<string>keepNever</string>")
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancelling_build_guard_terminates_process_group_and_removes_staging_dir() {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "deja-build-guard-test-{}-{nanos}",
+            std::process::id()
+        ));
+        let staging_dir = root.join("staging");
+        let pid_file = root.join("child.pid");
+        std::fs::create_dir_all(&staging_dir).expect("create staging dir");
+
+        let script = format!(
+            "sleep 30 & child=$!; printf '%s %s' \"$$\" \"$child\" > '{}'; wait",
+            pid_file.display()
+        );
+
+        let staging_for_fut = staging_dir.clone();
+        let build_fut = async move {
+            let mut guard = BuildGuard::new(staging_for_fut);
+            let mut cmd = tokio::process::Command::new("sh");
+            cmd.args(["-c", &script]);
+            let _ = guard.run_command(cmd, "sh").await;
+        };
+
+        let pid_file_for_wait = pid_file.clone();
+        let wait_ready = async move {
+            for _ in 0..100 {
+                if let Ok(contents) = std::fs::read_to_string(&pid_file_for_wait)
+                    && contents.split_whitespace().count() == 2
+                {
+                    return contents;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            panic!("timed out waiting for child pid file");
+        };
+
+        // Cancel `build_fut` as soon as both parent shell and grandchild `sleep` are running.
+        let pids_text = tokio::select! {
+            _ = build_fut => panic!("build_fut should not complete before cancellation"),
+            text = wait_ready => text,
+        };
+
+        let pids: Vec<u32> = pids_text
+            .split_whitespace()
+            .map(|s| s.parse::<u32>().expect("valid pid"))
+            .collect();
+        assert_eq!(pids.len(), 2);
+
+        // Give OS a brief tick to finalize process-group SIGTERM/SIGKILL teardown.
+        tokio::time::sleep(Duration::from_millis(80)).await;
+
+        assert!(
+            !staging_dir.exists(),
+            "BuildGuard::drop must remove staging_dir on cancellation"
+        );
+        for pid in pids {
+            assert!(
+                !crate::process::unix_signals::is_pid_alive(pid),
+                "BuildGuard::drop must terminate process-group member pid {pid}"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

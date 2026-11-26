@@ -2,7 +2,7 @@ use crate::error::{IosDriverError, Result};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::process::{Child, Command};
 use tracing::{debug, warn};
 
@@ -15,6 +15,7 @@ pub const RUNNER_HOST_BUNDLE_ID: &str = "dev.deja.ios.runner-host";
 
 const GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(1_500);
 const SWEEP_POLL_TIMEOUT: Duration = Duration::from_millis(500);
+const DROP_SIMCTL_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// Strictly validates a simulator UDID (RFC 4122 UUID `8-4-4-4-12` hex) and returns uppercase.
 pub fn validate_udid(udid: &str) -> Result<String> {
@@ -50,7 +51,7 @@ pub fn configure_process_group(cmd: &mut Command) {
 
 #[cfg(unix)]
 #[allow(unsafe_code)]
-mod unix_signals {
+pub(crate) mod unix_signals {
     use std::io;
 
     /// Sends `sig` to process group `pgid`.
@@ -104,8 +105,87 @@ mod unix_signals {
         Err(err)
     }
 
+    #[cfg(test)]
+    pub(crate) fn is_pid_alive(pid: u32) -> bool {
+        let Ok(pid_i32) = i32::try_from(pid) else {
+            return false;
+        };
+        if pid_i32 <= 1 {
+            return false;
+        }
+        // SAFETY: Signal 0 performs only existence/permission checking without delivering a signal.
+        let rc = unsafe { libc::kill(pid_i32, 0) };
+        if rc == 0 {
+            return true;
+        }
+        io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    }
+
     pub(crate) const SIGTERM: i32 = libc::SIGTERM;
     pub(crate) const SIGKILL: i32 = libc::SIGKILL;
+}
+
+/// Synchronously terminates an isolated child process group (`SIGTERM` -> short poll -> `SIGKILL`)
+/// and reaps the child with a bounded wait. Used by synchronous `Drop` guards.
+pub(crate) fn terminate_child_group_sync(child: &mut Child, pgid: Option<i32>) {
+    if child.try_wait().ok().flatten().is_some() {
+        return;
+    }
+
+    #[cfg(unix)]
+    if let Some(pgid) = pgid {
+        let _ = unix_signals::kill_process_group(pgid, unix_signals::SIGTERM);
+        for _ in 0..8 {
+            if child.try_wait().ok().flatten().is_some() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        let _ = unix_signals::kill_process_group(pgid, unix_signals::SIGKILL);
+    }
+
+    #[cfg(not(unix))]
+    let _ = pgid;
+
+    let _ = child.start_kill();
+    let reap_deadline = Instant::now() + Duration::from_millis(500);
+    while Instant::now() < reap_deadline {
+        if child.try_wait().ok().flatten().is_some() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(15));
+    }
+}
+
+/// Runs a synchronous `std::process::Command` with a hard wall-clock deadline, polling
+/// `try_wait()` and forcefully killing + reaping the child if it exceeds `timeout`.
+pub(crate) fn run_sync_command_bounded(
+    mut cmd: std::process::Command,
+    timeout: Duration,
+) -> Option<std::process::ExitStatus> {
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let mut child = cmd.spawn().ok()?;
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Some(status),
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return None;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
 }
 
 /// Sends `SIGTERM` to a single child process PID (Unix only).
@@ -131,16 +211,25 @@ pub fn send_sigterm_to_pid(pid: u32) -> Result<()> {
 }
 
 /// Parses `ps -e -o pid=,ppid=,args=` output and returns PIDs matching ONLY:
-/// - `xcodebuild` executable token, AND
+/// - executable `argv[0]` whose basename is `xcodebuild` (never `xcodebuild` merely appearing in
+///   another process's arguments), AND
 /// - `test-without-building` token, AND
-/// - exact case-insensitive `<udid>` token (standalone or `id=<udid>`).
+/// - exact case-insensitive `<udid>` token (standalone or `id=<udid>`), AND
+/// - when `xctestrun_path` is `Some`, the exact per-run `.xctestrun` path in `args` so concurrent
+///   sessions targeting the same simulator are never matched.
 ///
 /// Never matches `self_pid`, PID <= 1, unrelated simulators, or `build-for-testing`.
-pub fn parse_ps_matching_xcodebuild_pids(ps_output: &str, udid: &str, self_pid: u32) -> Vec<u32> {
+pub fn parse_ps_matching_xcodebuild_pids(
+    ps_output: &str,
+    udid: &str,
+    xctestrun_path: Option<&Path>,
+    self_pid: u32,
+) -> Vec<u32> {
     let Ok(canonical_udid) = validate_udid(udid) else {
         return Vec::new();
     };
     let udid_lower = canonical_udid.to_ascii_lowercase();
+    let xctestrun_candidates = build_path_candidates(xctestrun_path);
 
     let mut matched = Vec::new();
     for raw_line in ps_output.lines() {
@@ -148,39 +237,118 @@ pub fn parse_ps_matching_xcodebuild_pids(ps_output: &str, udid: &str, self_pid: 
         if line.is_empty() {
             continue;
         }
-        let mut parts = line.split_whitespace();
-        let Some(pid_str) = parts.next() else {
-            continue;
-        };
-        let Some(_ppid_str) = parts.next() else {
-            continue;
-        };
-        let Ok(pid) = pid_str.parse::<u32>() else {
+        let Some((pid, args_str)) = split_ps_pid_ppid_args(line) else {
             continue;
         };
         if pid <= 1 || pid == self_pid {
             continue;
         }
 
-        let tokens: Vec<&str> = parts.collect();
-        if tokens.is_empty() {
+        if !argv0_is_xcodebuild(args_str) {
             continue;
         }
 
-        let has_xcodebuild = tokens.iter().any(|tok| is_xcodebuild_token(tok));
+        let tokens: Vec<&str> = args_str.split_whitespace().collect();
         let has_test_without_building = tokens.contains(&"test-without-building");
         let has_exact_udid = tokens
             .iter()
             .any(|tok| token_matches_udid(tok, &udid_lower));
-
-        if has_xcodebuild && has_test_without_building && has_exact_udid {
-            matched.push(pid);
+        if !(has_test_without_building && has_exact_udid) {
+            continue;
         }
+
+        if let Some(ref candidates) = xctestrun_candidates
+            && !candidates
+                .iter()
+                .any(|needle| args_contain_path_token(args_str, needle))
+        {
+            continue;
+        }
+
+        matched.push(pid);
     }
     matched
 }
 
-fn is_xcodebuild_token(token: &str) -> bool {
+fn build_path_candidates(path: Option<&Path>) -> Option<Vec<String>> {
+    let path = path?;
+    let mut out = Vec::new();
+    if let Some(s) = path.to_str()
+        && !s.is_empty()
+    {
+        out.push(s.to_string());
+    }
+    if let Ok(canon) = std::fs::canonicalize(path)
+        && let Some(s) = canon.to_str()
+        && !out.iter().any(|existing| existing == s)
+    {
+        out.push(s.to_string());
+    }
+    Some(out)
+}
+
+fn split_ps_pid_ppid_args(line: &str) -> Option<(u32, &str)> {
+    let bytes = line.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+
+    while i < len && bytes[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    let pid_start = i;
+    while i < len && !bytes[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    let pid = line[pid_start..i].parse::<u32>().ok()?;
+
+    while i < len && bytes[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    let ppid_start = i;
+    while i < len && !bytes[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    if ppid_start == i {
+        return None;
+    }
+    let _ppid = line[ppid_start..i].parse::<u32>().ok()?;
+
+    while i < len && bytes[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    if i >= len {
+        return None;
+    }
+    Some((pid, &line[i..]))
+}
+
+fn argv0_is_xcodebuild(args_str: &str) -> bool {
+    let Some(first_token) = args_str.split_whitespace().next() else {
+        return false;
+    };
+    if is_xcodebuild_basename(first_token) {
+        return true;
+    }
+    // Support macOS Xcode app bundle paths containing spaces, e.g.
+    // `/Applications/Xcode 27.2.app/Contents/Developer/usr/bin/xcodebuild ...`
+    // while strictly checking only argv[0] before any CLI flags/subcommands.
+    if args_str.starts_with('/') {
+        let marker = ".app/Contents/Developer/usr/bin/xcodebuild";
+        if let Some(idx) = args_str.find(marker) {
+            let after_idx = idx + marker.len();
+            let boundary_ok =
+                after_idx == args_str.len() || args_str.as_bytes()[after_idx].is_ascii_whitespace();
+            let prefix = &args_str[..idx];
+            // Ensure no earlier flag or separate executable precedes the Xcode `.app` path.
+            if boundary_ok && !prefix.contains(" -") {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn is_xcodebuild_basename(token: &str) -> bool {
     if token == "xcodebuild" {
         return true;
     }
@@ -188,6 +356,29 @@ fn is_xcodebuild_token(token: &str) -> bool {
         .file_name()
         .and_then(|name| name.to_str())
         .is_some_and(|name| name == "xcodebuild")
+}
+
+fn args_contain_path_token(args_str: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return false;
+    }
+    let mut start = 0usize;
+    while let Some(rel) = args_str[start..].find(needle) {
+        let idx = start + rel;
+        let end = idx + needle.len();
+        let before_ok = idx == 0
+            || matches!(
+                args_str.as_bytes()[idx - 1],
+                b' ' | b'\t' | b'=' | b'"' | b'\''
+            );
+        let after_ok = end == args_str.len()
+            || matches!(args_str.as_bytes()[end], b' ' | b'\t' | b'"' | b'\'');
+        if before_ok && after_ok {
+            return true;
+        }
+        start = idx + 1;
+    }
+    false
 }
 
 fn token_matches_udid(token: &str, udid_lower: &str) -> bool {
@@ -205,9 +396,7 @@ fn token_matches_udid(token: &str, udid_lower: &str) -> bool {
     false
 }
 
-/// Lists all live `xcodebuild test-without-building` PIDs targeting `udid`.
-pub fn find_xcodebuild_test_pids_for_udid(udid: &str) -> Result<Vec<u32>> {
-    let canonical = validate_udid(udid)?;
+fn read_ps_output() -> Result<String> {
     let output = std::process::Command::new("ps")
         .args(["-e", "-o", "pid=,ppid=,args="])
         .stdin(Stdio::null())
@@ -224,19 +413,43 @@ pub fn find_xcodebuild_test_pids_for_udid(udid: &str) -> Result<Vec<u32>> {
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
         });
     }
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// Lists all live `xcodebuild test-without-building` PIDs targeting `udid`.
+pub fn find_xcodebuild_test_pids_for_udid(udid: &str) -> Result<Vec<u32>> {
+    let canonical = validate_udid(udid)?;
+    let stdout = read_ps_output()?;
     Ok(parse_ps_matching_xcodebuild_pids(
         &stdout,
         &canonical,
+        None,
         std::process::id(),
     ))
 }
 
-/// Sweeps any remaining `xcodebuild test-without-building` processes targeting `udid` (DEJA-54).
-/// Sends `SIGTERM`, polls briefly, then `SIGKILL`s any survivors.
-pub async fn sweep_xcodebuild_for_udid(udid: &str) -> Result<usize> {
+/// Lists live `xcodebuild test-without-building` PIDs targeting `udid` with a specific session's
+/// `.xctestrun` path.
+pub fn find_xcodebuild_test_pids_for_session(
+    udid: &str,
+    xctestrun_path: &Path,
+) -> Result<Vec<u32>> {
     let canonical = validate_udid(udid)?;
-    let pids = find_xcodebuild_test_pids_for_udid(&canonical)?;
+    let stdout = read_ps_output()?;
+    Ok(parse_ps_matching_xcodebuild_pids(
+        &stdout,
+        &canonical,
+        Some(xctestrun_path),
+        std::process::id(),
+    ))
+}
+
+/// Sweeps any remaining `xcodebuild test-without-building` processes belonging to this exact
+/// session (`udid` + unique per-run `xctestrun_path`) (DEJA-54).
+/// Sends `SIGTERM`, polls briefly, then `SIGKILL`s any survivors.
+pub async fn sweep_xcodebuild_for_session(udid: &str, xctestrun_path: &Path) -> Result<usize> {
+    let canonical = validate_udid(udid)?;
+    let pids = find_xcodebuild_test_pids_for_session(&canonical, xctestrun_path)?;
     if pids.is_empty() {
         return Ok(0);
     }
@@ -254,14 +467,14 @@ pub async fn sweep_xcodebuild_for_udid(udid: &str) -> Result<usize> {
 
         let deadline = tokio::time::Instant::now() + SWEEP_POLL_TIMEOUT;
         while tokio::time::Instant::now() < deadline {
-            let remaining = find_xcodebuild_test_pids_for_udid(&canonical)?;
+            let remaining = find_xcodebuild_test_pids_for_session(&canonical, xctestrun_path)?;
             if remaining.is_empty() {
                 return Ok(signaled);
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
 
-        let survivors = find_xcodebuild_test_pids_for_udid(&canonical)?;
+        let survivors = find_xcodebuild_test_pids_for_session(&canonical, xctestrun_path)?;
         for pid in survivors {
             if let Ok(pid_i32) = i32::try_from(pid) {
                 let _ = unix_signals::kill_pid(pid_i32, unix_signals::SIGKILL);
@@ -284,6 +497,7 @@ pub struct ManagedXcodebuild {
     pgid: Option<i32>,
     udid: String,
     run_dir: PathBuf,
+    xctestrun_path: PathBuf,
     env_path: Option<OsString>,
     developer_dir: Option<OsString>,
     shut_down: bool,
@@ -294,6 +508,7 @@ impl ManagedXcodebuild {
         child: Child,
         udid: String,
         run_dir: PathBuf,
+        xctestrun_path: PathBuf,
         env_path: Option<OsString>,
         developer_dir: Option<OsString>,
     ) -> Self {
@@ -303,6 +518,7 @@ impl ManagedXcodebuild {
             pgid,
             udid,
             run_dir,
+            xctestrun_path,
             env_path,
             developer_dir,
             shut_down: false,
@@ -318,15 +534,17 @@ impl ManagedXcodebuild {
     }
 
     /// Gracefully terminates the `xcodebuild` process group (`SIGTERM` -> 1500ms -> `SIGKILL`),
-    /// sweeps any leftover `xcodebuild test-without-building` processes for this UDID, terminates
-    /// the simulator runner bundle, and deletes the per-run directory.
+    /// sweeps any leftover `xcodebuild test-without-building` processes for this session,
+    /// terminates the simulator runner bundle, and deletes the per-run directory.
+    ///
+    /// Keeps `self.child` and `self.shut_down == false` armed across all `.await` points so that
+    /// cancelling/dropping `shutdown()` mid-flight still triggers full `Drop` escalation.
     pub async fn shutdown(&mut self) -> Result<()> {
         if self.shut_down {
             return Ok(());
         }
-        self.shut_down = true;
 
-        if let Some(mut child) = self.child.take() {
+        if let Some(child) = self.child.as_mut() {
             let already_exited = child.try_wait().ok().flatten().is_some();
             if !already_exited {
                 #[cfg(unix)]
@@ -355,9 +573,10 @@ impl ManagedXcodebuild {
                 }
             }
         }
+        self.child = None;
 
-        if let Err(err) = sweep_xcodebuild_for_udid(&self.udid).await {
-            warn!(udid = %self.udid, %err, "UDID xcodebuild sweep encountered error");
+        if let Err(err) = sweep_xcodebuild_for_session(&self.udid, &self.xctestrun_path).await {
+            warn!(udid = %self.udid, %err, "session xcodebuild sweep encountered error");
         }
 
         // Best-effort terminate the XCTRunner wrapper, test bundle, and host app in the simulator.
@@ -384,6 +603,7 @@ impl ManagedXcodebuild {
             let _ = tokio::fs::remove_dir_all(&self.run_dir).await;
         }
 
+        self.shut_down = true;
         Ok(())
     }
 }
@@ -396,27 +616,11 @@ impl Drop for ManagedXcodebuild {
         self.shut_down = true;
 
         if let Some(mut child) = self.child.take() {
-            let already_exited = child.try_wait().ok().flatten().is_some();
-            if !already_exited {
-                #[cfg(unix)]
-                if let Some(pgid) = self.pgid {
-                    let _ = unix_signals::kill_process_group(pgid, unix_signals::SIGTERM);
-                    for _ in 0..8 {
-                        if child.try_wait().ok().flatten().is_some() {
-                            break;
-                        }
-                        std::thread::sleep(Duration::from_millis(25));
-                    }
-                    if child.try_wait().ok().flatten().is_none() {
-                        let _ = unix_signals::kill_process_group(pgid, unix_signals::SIGKILL);
-                    }
-                }
-                let _ = child.start_kill();
-            }
+            terminate_child_group_sync(&mut child, self.pgid);
         }
 
         #[cfg(unix)]
-        if let Ok(pids) = find_xcodebuild_test_pids_for_udid(&self.udid) {
+        if let Ok(pids) = find_xcodebuild_test_pids_for_session(&self.udid, &self.xctestrun_path) {
             for pid in pids {
                 if let Ok(pid_i32) = i32::try_from(pid) {
                     let _ = unix_signals::kill_pid(pid_i32, unix_signals::SIGKILL);
@@ -430,17 +634,14 @@ impl Drop for ManagedXcodebuild {
             RUNNER_HOST_BUNDLE_ID,
         ] {
             let mut cmd = std::process::Command::new("xcrun");
-            cmd.args(["simctl", "terminate", &self.udid, bundle_id])
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null());
+            cmd.args(["simctl", "terminate", &self.udid, bundle_id]);
             if let Some(ref path) = self.env_path {
                 cmd.env("PATH", path);
             }
             if let Some(ref dev_dir) = self.developer_dir {
                 cmd.env("DEVELOPER_DIR", dev_dir);
             }
-            let _ = cmd.status();
+            let _ = run_sync_command_bounded(cmd, DROP_SIMCTL_TIMEOUT);
         }
 
         if self.run_dir.exists() {
@@ -451,7 +652,14 @@ impl Drop for ManagedXcodebuild {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_ps_matching_xcodebuild_pids, validate_udid};
+    use super::{
+        ManagedXcodebuild, configure_process_group, parse_ps_matching_xcodebuild_pids,
+        run_sync_command_bounded, validate_udid,
+    };
+    use std::ffi::OsString;
+    use std::path::Path;
+    use std::process::Stdio;
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     const TARGET_UDID: &str = "BA555783-AC7E-46E3-B749-34F9499B2C2B";
     const OTHER_UDID: &str = "DA910389-DF0B-4254-BB78-7164E0E27609";
@@ -481,22 +689,117 @@ mod tests {
     }
 
     #[test]
-    fn ps_parser_matches_only_target_udid_test_without_building() {
+    fn ps_parser_requires_argv0_xcodebuild_and_session_xctestrun_path() {
+        let session_xctestrun = format!("/tmp/deja/run-1/{TARGET_UDID}.xctestrun");
+        let other_xctestrun = format!("/tmp/deja/run-2/{TARGET_UDID}.xctestrun");
         let sample = format!(
             "\
     1     0 /sbin/launchd
- 1001     1 /usr/bin/xcodebuild test-without-building -xctestrun /tmp/a.xctestrun -destination id={TARGET_UDID}
- 1002  1001 xcodebuild test-without-building -destination platform=iOS Simulator,id={lower}
- 1003     1 /usr/bin/xcodebuild build-for-testing -destination id={TARGET_UDID}
- 1004     1 /usr/bin/xcodebuild test-without-building -destination id={OTHER_UDID}
- 1005     1 /usr/bin/python3 helper.py test-without-building id={TARGET_UDID}
- 1006     1 /usr/bin/xcodebuild test-without-building -destination id={TARGET_UDID}-extra
- 9999     1 /usr/bin/xcodebuild test-without-building -destination id={TARGET_UDID}
+ 1001     1 /usr/bin/xcodebuild test-without-building -xctestrun {session_xctestrun} -destination id={TARGET_UDID}
+ 1002  1001 xcodebuild test-without-building -xctestrun {session_xctestrun} -destination platform=iOS Simulator,id={lower}
+ 1003     1 /Applications/Xcode 27.2.app/Contents/Developer/usr/bin/xcodebuild test-without-building -xctestrun {session_xctestrun} -destination id={TARGET_UDID}
+ 1004     1 /usr/bin/xcodebuild test-without-building -xctestrun {other_xctestrun} -destination id={TARGET_UDID}
+ 1005     1 /usr/bin/xcodebuild test-without-building -xctestrun {session_xctestrun}.bak -destination id={TARGET_UDID}
+ 1006     1 /usr/bin/xcodebuild build-for-testing -xctestrun {session_xctestrun} -destination id={TARGET_UDID}
+ 1007     1 /usr/bin/xcodebuild test-without-building -xctestrun {session_xctestrun} -destination id={OTHER_UDID}
+ 1008     1 /usr/bin/python3 helper.py /usr/bin/xcodebuild test-without-building -xctestrun {session_xctestrun} id={TARGET_UDID}
+ 1009     1 /bin/sh -c /usr/bin/xcodebuild test-without-building -xctestrun {session_xctestrun} id={TARGET_UDID}
+ 1010     1 /usr/bin/env xcodebuild test-without-building -xctestrun {session_xctestrun} id={TARGET_UDID}
+ 1011     1 /usr/bin/xcodebuild test-without-building -xctestrun {session_xctestrun} -destination id={TARGET_UDID}-extra
+ 9999     1 /usr/bin/xcodebuild test-without-building -xctestrun {session_xctestrun} -destination id={TARGET_UDID}
 ",
             lower = TARGET_UDID.to_ascii_lowercase()
         );
 
-        let pids = parse_ps_matching_xcodebuild_pids(&sample, TARGET_UDID, 9999);
-        assert_eq!(pids, vec![1001, 1002]);
+        // Session-scoped query matches ONLY PIDs with argv[0]=xcodebuild, target UDID, and exact xctestrun path.
+        let session_pids = parse_ps_matching_xcodebuild_pids(
+            &sample,
+            TARGET_UDID,
+            Some(Path::new(&session_xctestrun)),
+            9999,
+        );
+        assert_eq!(session_pids, vec![1001, 1002, 1003]);
+
+        // UDID-wide query still excludes non-xcodebuild argv[0], build-for-testing, other UDIDs, and self_pid.
+        let udid_pids = parse_ps_matching_xcodebuild_pids(&sample, TARGET_UDID, None, 9999);
+        assert_eq!(udid_pids, vec![1001, 1002, 1003, 1004, 1005]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_sync_command_kills_sleeping_process_within_deadline() {
+        let mut cmd = std::process::Command::new("sleep");
+        cmd.arg("30");
+
+        let started = Instant::now();
+        let status = run_sync_command_bounded(cmd, Duration::from_millis(120));
+        let elapsed = started.elapsed();
+
+        assert!(
+            status.is_none(),
+            "expected None when bounded command times out"
+        );
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "bounded command took too long: {elapsed:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dropping_managed_xcodebuild_after_aborted_shutdown_still_escalates_and_cleans_run_dir()
+    {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let run_dir =
+            std::env::temp_dir().join(format!("deja-managed-abort-{}-{nanos}", std::process::id()));
+        std::fs::create_dir_all(&run_dir).expect("create run_dir");
+        let xctestrun_path = run_dir.join(format!("{TARGET_UDID}.xctestrun"));
+        std::fs::write(&xctestrun_path, b"dummy").expect("write dummy xctestrun");
+
+        // Spawn a process that ignores SIGTERM so `shutdown()` stays parked in its 1500ms wait.
+        let mut cmd = tokio::process::Command::new("sh");
+        cmd.args(["-c", "trap '' TERM; while true; do sleep 1; done"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        configure_process_group(&mut cmd);
+        let child = cmd.spawn().expect("spawn trap-ignoring child");
+        let child_pid = child.id().expect("child pid");
+
+        let mut managed = ManagedXcodebuild::new(
+            child,
+            TARGET_UDID.to_string(),
+            run_dir.clone(),
+            xctestrun_path,
+            Some(OsString::from("/nonexistent-empty-path")),
+            None,
+        );
+
+        // Give the shell a moment to install `trap '' TERM`, then cancel `shutdown()` mid-flight.
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        let timed_out = tokio::time::timeout(Duration::from_millis(150), managed.shutdown()).await;
+        assert!(
+            timed_out.is_err(),
+            "shutdown should still be awaiting graceful SIGTERM timeout when aborted"
+        );
+        assert!(
+            run_dir.exists(),
+            "run_dir should not yet be removed before shutdown finished"
+        );
+
+        // Dropping `managed` must still escalate to SIGKILL and remove `run_dir`.
+        drop(managed);
+
+        assert!(
+            !run_dir.exists(),
+            "Drop must delete run_dir even after an aborted shutdown()"
+        );
+        assert!(
+            !super::unix_signals::is_pid_alive(child_pid),
+            "Drop must kill child pid {child_pid} after an aborted shutdown()"
+        );
     }
 }

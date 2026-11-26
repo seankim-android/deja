@@ -12,20 +12,20 @@ SwiftUI app (`DejaFixture`) natively from Rust (`deja-driver-ios`) using only Ap
 - **iOS Simulator SDK**: `27.2`
 - **Dedicated Simulator**: `iPhone 17 (deja)` (`iOS 27.2`)
 - **Subprocess `PATH` during spike**: `/usr/bin:/bin:/usr/sbin:/sbin` (`which maestro` exits non-zero; no Maestro or JDK directories present)
-- **Runner cache key**: `27B52-27.2-1c26faacc508d014c170ac3f1526160fe0c3287981dca92954b604e2cc57f79b`
+- **Runner cache key**: `27B52-27.2-arm64-1c26faacc508d014c170ac3f1526160fe0c3287981dca92954b604e2cc57f79b`
 
 ## Measured Timings vs. Maestro 2.12 Baseline
 
 | Metric | Native `DejaXCTestRunner` (DEJA-60) | Maestro 2.12 Baseline (`WALK-011`) | Notes |
 | --- | ---: | ---: | --- |
-| Cold runner build (`xcodebuild build-for-testing`, `arm64`) | `14,767 ms` | N/A (external Java/Maestro install) | Cached once per `<xcode-build>-<ios-sdk>-<source-sha256>` under `$DEJA_HOME/ios-runner/builds/` |
-| Cold runner attach (`xcodebuild test-without-building` -> `/health` 200) | `9,813 ms` | — | First attach after cold build |
-| Warm runner attach (cache hit, `build_duration_ms = 0`) | `8,243 ms` | — | Reuses cached products via per-run `.xctestrun` |
-| Full `DejaFixture` checkout flow (attached session) | `9,642 ms` | — | `clear_state` + launch (`-DEJA_FIXTURE_ORDER WC-2026`) + login + catalog + cart + confirmation `#WC-2026` |
-| **Warm attach + full checkout flow (end-to-end)** | **`17,885 ms`** | **`29,067 ms`** (`remember`) / **`31,258 ms`** (`warm`) | Baseline from [walk011-remember.txt](../../../../spikes/003-ios-deja/evidence/walk011-remember.txt) and [walk011-warm.txt](../../../../spikes/003-ios-deja/evidence/walk011-warm.txt) |
-| `/hierarchy` latency (`n = 16` samples) | `min = 12.2 ms`, `median = 13.8 ms`, `p95 = 3,746.7 ms`, `max = 3,746.7 ms` | — | Steady-state snapshots run in ~12–14 ms; single `3,746.7 ms` max occurs on the very first accessibility snapshot immediately after `simctl launch` |
-| PNG screenshot capture (`simctl io screenshot --type=png`) | `115,915 bytes` | — | Valid 8-byte PNG header verified |
-| `SIGTERM` mid-run cleanup + process exit | `1,012 ms` | — | Live `xcodebuild test-without-building` process present before `SIGTERM`; `0` orphans after exit |
+| Cold runner build (`xcodebuild build-for-testing`, `arm64`) | `14,767 ms` – `40,625 ms` | N/A (external Java/Maestro install) | Cached once per `<xcode-build>-<ios-sdk>-<arch>-<source-sha256>` under `$DEJA_HOME/ios-runner/builds/` (varies with host CPU load) |
+| Cold runner attach (`xcodebuild test-without-building` -> `/health` 200) | `9,813 ms` – `13,625 ms` | — | First attach after cold build |
+| Warm runner attach (cache hit, `build_duration_ms = 0`) | `8,243 ms` – `9,231 ms` | — | Reuses cached products via per-run `<udid>.xctestrun` |
+| Full `DejaFixture` checkout flow (attached session) | `9,642 ms` – `9,997 ms` | — | `clear_state` + launch (`-DEJA_FIXTURE_ORDER WC-2026`) + login + catalog + cart + confirmation `#WC-2026` |
+| **Warm attach + full checkout flow (end-to-end)** | **`17,885 ms` – `19,228 ms`** | **`29,067 ms`** (`remember`) / **`31,258 ms`** (`warm`) | Baseline from [walk011-remember.txt](../../../../spikes/003-ios-deja/evidence/walk011-remember.txt) and [walk011-warm.txt](../../../../spikes/003-ios-deja/evidence/walk011-warm.txt) |
+| `/hierarchy` latency (`n = 16` samples, latest run) | `min = 11.7 ms`, `median = 13.9 ms`, `p95 = 3,579.9 ms`, `max = 3,579.9 ms` | — | Steady-state snapshots run in ~12–14 ms; single ~3.6 s max occurs on the very first accessibility snapshot immediately after `simctl launch` |
+| PNG screenshot capture (`simctl io screenshot --type=png`) | `116,825 bytes` | — | Valid 8-byte PNG header verified |
+| `SIGTERM` mid-run cleanup + process exit | `1,012 ms` – `1,247 ms` | — | Live `xcodebuild test-without-building` process present before `SIGTERM`; `0` orphans after exit |
 | Orphaned `xcodebuild test-without-building` PIDs after shutdown | `0` | — | Verified both after normal shutdown and after real `SIGTERM` |
 
 ## Verified Capabilities & Findings
