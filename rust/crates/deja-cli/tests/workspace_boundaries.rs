@@ -400,6 +400,36 @@ fn run_cargo_metadata(args: &[&str]) -> CargoMetadata {
         .unwrap_or_else(|err| panic!("failed to parse `cargo metadata {args:?}` JSON: {err}"))
 }
 
+fn host_target_triple() -> String {
+    let rustc = std::env::var("RUSTC").unwrap_or_else(|_| "rustc".to_string());
+    let output = Command::new(&rustc)
+        .arg("-vV")
+        .output()
+        .unwrap_or_else(|err| panic!("failed to run `{rustc} -vV`: {err}"));
+
+    assert!(
+        output.status.success(),
+        "`{rustc} -vV` failed with {}:\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .find_map(|line| line.strip_prefix("host: ").map(str::trim))
+        .expect("`rustc -vV` output should include a `host:` line")
+        .to_string()
+}
+
+fn check_all_targets_enabled() -> bool {
+    std::env::var("DEJA_BOUNDARIES_ALL_TARGETS")
+        .map(|val| val == "1" || val.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+        || std::env::var("CI")
+            .map(|val| val == "1" || val.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+}
+
 fn has_non_dev_edge(dep: &ResolveDep) -> bool {
     dep.dep_kinds.is_empty()
         || dep
@@ -456,7 +486,26 @@ fn collect_non_dev_closure<'a>(
 
 fn load_live_workspace_snapshot() -> WorkspaceSnapshot {
     let no_deps = run_cargo_metadata(&["--no-deps", "--format-version", "1"]);
-    let resolved = run_cargo_metadata(&["--format-version", "1", "--all-features", "--locked"]);
+    let resolved = if check_all_targets_enabled() {
+        run_cargo_metadata(&[
+            "--format-version",
+            "1",
+            "--all-features",
+            "--locked",
+            "--offline",
+        ])
+    } else {
+        let host = host_target_triple();
+        run_cargo_metadata(&[
+            "--format-version",
+            "1",
+            "--all-features",
+            "--locked",
+            "--offline",
+            "--filter-platform",
+            &host,
+        ])
+    };
 
     let member_ids: BTreeSet<&str> = no_deps
         .workspace_members
