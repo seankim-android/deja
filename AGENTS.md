@@ -17,7 +17,7 @@ Déjà is an Apache-2.0 memory layer and native runner for `maestro/v1` app test
 
 - For non-trivial tasks, plan first on Carbon (`pro` tier) and execute on Neon (`inherit`).
 - Always verify locally before pushing:
-  - Rust: `cargo fmt --all -- --check`, `cargo clippy --locked --offline --workspace --all-targets --all-features -- -D warnings`, `cargo test --locked --offline --workspace --all-features`, and `DEJA_BOUNDARIES_ALL_TARGETS=1 cargo test --locked --offline -p deja-cli --test workspace_boundaries --all-features`.
+  - Rust (from `rust/`): `cargo fmt --all -- --check`, `cargo fetch --locked`, `cargo clippy --locked --offline --workspace --all-targets --all-features -- -D warnings`, `cargo test --locked --offline --workspace --all-features`, and `DEJA_BOUNDARIES_ALL_TARGETS=1 cargo test --locked --offline -p deja-cli --test workspace_boundaries --all-features`.
   - Repo checks: `bun scripts/validate-release-artifacts.ts` (must pass on a clean committed tree; never leak local `/Users/...` home paths or secrets, and keep all local Markdown links valid).
 
 ## Required Worktree Workflow

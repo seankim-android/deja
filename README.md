@@ -149,7 +149,7 @@ deja run checkout
 <details>
 <summary>Run the Android demo app</summary>
 
-The Android fixture app lives in `spikes/001-android-deja`. It requires step 1, a running emulator, OpenJDK 21, and `adb`.
+The Android fixture app lives in `spikes/001-android-deja`. It requires step 1, a running API 34 emulator, OpenJDK 21, and `adb`. `scripts/env.sh` sets `JAVA_HOME` and `ANDROID_HOME` assuming Homebrew under `/opt/homebrew` (adjust those variables if your JDK or Android SDK live elsewhere).
 
 ```sh
 cd ~/deja/spikes/001-android-deja
@@ -201,9 +201,9 @@ Warm replay eliminates model calls; execution time comes from the underlying dev
 
 | Command | What it does |
 | --- | --- |
-| `remember <goal> --flow <file>` | Verify your YAML and save it to the store and `deja.walks.json` only if every assertion passes. |
-| `run <goal>` | Replay a saved test with zero model calls (supports `--verify`, `--rerun-failed`, `--junit`, `--summary`). |
-| `gate` | Check that every required goal passed on the current build and write release-gate evidence. |
+| `remember <goal> --flow <file>` | Verify your YAML and save it to the store (and write `deja.walks.json` when `manifest` is configured) only if every assertion passes. |
+| `run <goal>` | Replay a saved test with zero model calls on a cache hit. On a miss in non-manifest Android configs, explores with the configured model; proposes one bounded repair on stale selectors. Supports `--verify`, `--rerun-failed`, `--junit`, `--summary`. |
+| `gate --goals <file>` | Check that every required goal passed on the current build and write release-gate evidence. |
 | `manifest check` | Statically verify flow closures and assertion hashes against `deja.walks.json` without a device. |
 | `list` | List saved walks. |
 | `inspect <report>` | Print a saved, redacted run report. |
@@ -212,7 +212,7 @@ Warm replay eliminates model calls; execution time comes from the underlying dev
 
 ## Bring your own model
 
-Only cold exploration (`explore`) calls a model. Remembering, replaying, gating, and static manifest checks never require a model or API key. Any OpenAI-compatible chat endpoint works; see [docs/REFERENCE.md](docs/REFERENCE.md#bring-your-own-model) for configuration details.
+Only cold exploration (`explore`, or a cache miss in non-manifest Android `run`) calls a model. Remembering, replaying cache hits, gating, and static manifest checks never require a model or API key. In the current TypeScript CLI, exploration runs through OpenClaw and requires an `https://` OpenAI-compatible chat endpoint that supports tool calls; see [docs/REFERENCE.md](docs/REFERENCE.md#bring-your-own-model) for configuration details.
 
 ## Roadmap
 
