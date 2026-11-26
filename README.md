@@ -1,41 +1,34 @@
 <h1 align="center"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/brand/deja-logo-dark.svg"><img alt="Déjà" src="docs/brand/deja-logo.svg" width="280"></picture></h1>
 
 <p align="center">
-Déjà is a memory layer for app tests. Learn a test once, then replay it with no model at all.
+Déjà is a memory layer and native runner for Maestro-compatible app tests across iOS, Android, and Web. Learn a test once, then replay it with zero model calls.
 </p>
 
 <p align="center">
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/License-Apache%202.0-blue.svg"/></a>
+  <a href="https://github.com/seankim-android/deja/actions/workflows/rust-checks.yml"><img alt="Rust checks" src="https://github.com/seankim-android/deja/actions/workflows/rust-checks.yml/badge.svg"/></a>
   <a href="https://github.com/seankim-android/deja/actions/workflows/portable-checks.yml"><img alt="Portable checks" src="https://github.com/seankim-android/deja/actions/workflows/portable-checks.yml/badge.svg"/></a>
-</p>
-
-<p align="center">
-  <img alt="Kimi K3.1 Pro" src="https://img.shields.io/badge/Kimi-K3.1%20Pro-black.svg"/>
-  <img alt="Cerebras" src="https://img.shields.io/badge/Cerebras-inference-orange.svg"/>
-  <img alt="OpenClaw" src="https://img.shields.io/badge/OpenClaw-agent-red.svg"/>
 </p>
 
 <p align="center"><img src="demo/deja-preview.gif" width="80%"/></p>
 
-<p align="center">All four steps, sped up 1.5x and silent. The full narrated demo is 55 s (link below). Built for the Cerebras x Kimi K3.1 Pro x OpenClaw hackathon (Nov 2026).</p>
-
-<p align="center">Watch the full demo: <a href="demo/deja-demo.mp4">demo/deja-demo.mp4</a> · <a href="https://x.com/kssc0112/status/2124667198837059953">X post</a> · <a href="https://www.reddit.com/r/Cerebras/comments/1y34xuv/i_made_kimi_k31_pro_on_cerebras_test_my_app_once/">r/cerebras post</a> · <a href="https://discord.com/channels/1085960591052644463/1574227471706886236">Discord post</a></p>
+<p align="center">All four steps, sped up 1.5x and silent. Full 55 s narrated walkthrough: <a href="demo/deja-demo.mp4">demo/deja-demo.mp4</a>.</p>
 
 ## Why Déjà
 
-- Replays make zero model calls and need no provider key.
-- A test is saved only after it passes on its own run.
-- A renamed selector gets one scoped repair, and a real product bug still fails.
-- Tests are plain YAML files that your team owns and reviews in pull requests.
-- A coding agent can replay your saved tests after each edit, with 0 model calls (`deja mcp`; see [Roadmap](#roadmap) for its status).
+- **Zero model calls on replay:** Once verified, replays run without a model or API key.
+- **Verified saves only:** A test is saved only after it passes its own clean verification run.
+- **Honest failures:** A renamed selector can get a bounded repair proposal, while a product regression stays failed.
+- **Plain `maestro/v1` YAML:** Flows live in your repo as standard [Maestro](https://github.com/mobile-dev-inc/Maestro)-compatible YAML that your team reviews in pull requests.
+- **Agent-ready:** Coding agents can replay your saved tests after each edit via `deja mcp` (`0` model calls).
 
 ## How it works
 
-An AI model explores the app once and writes the test as YAML. You can also bring YAML you already have. Déjà runs the test again on its own and saves it only if every check passes. Later runs replay the saved test with no model. If a selector changed, Déjà tries one small, scoped repair. Remembering, replaying and repairing a test need no AI model.
+An AI model explores the app once and writes the test as YAML, or you bring existing Maestro YAML flows. Déjà runs the test cleanly on its own and saves it only if every assertion passes. Later runs replay the saved test with zero model calls. If a selector changes, Déjà proposes one scoped repair; if a real product assertion fails, the run stays failed.
 
 ```mermaid
 flowchart LR
-  A[Explore with an AI model] --> B[Test YAML]
+  A[Explore with a model or bring YAML] --> B[Test YAML]
   B --> C{Verify: all checks pass?}
   C -- no --> X[Reject]
   C -- yes --> D[Saved test]
@@ -45,11 +38,21 @@ flowchart LR
   E -- product bug --> G[Fail]
 ```
 
-## Quick start
+## Architecture & Rust migration
 
-Déjà is not on npm yet, so you run the CLI from a clone. These steps add Déjà to your own iOS app on a simulator. They need no AI model. You need a Mac with Xcode, Bun 1.4 or newer, and Java 17 or newer.
+Déjà is actively migrating from the frozen TypeScript/Bun prototype to a standalone **pure-Rust single binary** under [`rust/`](rust/Cargo.toml) with native platform drivers (zero JVM, zero Maestro runtime dependency, full `maestro/v1` YAML compatibility):
 
-**1. Install the CLI and its test runner.** Déjà downloads its own pinned Maestro and never touches another Maestro on your machine.
+1. **iOS (Tier 1):** `xcrun simctl` + minimal public-API Swift `DejaXCTestRunner` companion agent + `.ips` crash detection.
+2. **Android (Tier 2):** `adb` + bundled UiAutomator2 instrumentation APK (zero host JDK at runtime).
+3. **Web (Tier 3):** Direct Chromium Chrome DevTools Protocol (CDP) over WebSocket (zero Node/Playwright).
+
+Déjà executes standard `maestro/v1` YAML flows and references the open-source [Maestro](https://github.com/mobile-dev-inc/Maestro) (Apache-2.0) specification and driver model for command and selector parity. Until the Rust single binary reaches full cutover, existing TypeScript CLI consumers continue running on the frozen Bun CLI below.
+
+## Quick start (current TypeScript CLI)
+
+These steps add Déjà to an iOS app on a simulator with no AI model required. You need a Mac with Xcode, Bun 1.4 or newer, and Java 17 or newer (Java and Bun will no longer be needed once the native Rust binary cuts over).
+
+**1. Install the CLI and its pinned runner.**
 
 ```sh
 git clone https://github.com/seankim-android/deja.git ~/deja
@@ -62,7 +65,7 @@ deja engine install
 deja doctor
 ```
 
-**2. Set up a simulator and build your app.** Use a simulator only Déjà uses, so other work doesn't move it. Run these from your app's repo root. They build the app into `build/` there, then install it.
+**2. Set up a dedicated simulator and build your app.** Run these from your app's repo root.
 
 ```sh
 UDID=$(xcrun simctl create deja com.apple.CoreSimulator.SimDeviceType.iPhone-17)
@@ -74,9 +77,9 @@ xcrun simctl install "$UDID" build/Build/Products/Debug-iphonesimulator/MyApp.ap
 echo "$UDID"
 ```
 
-Use `-workspace MyApp.xcworkspace` instead of `-project` if your app has one. Déjà does not install the app for you. Install it again after each build.
+Use `-workspace MyApp.xcworkspace` instead of `-project` if your app uses a workspace. Reinstall after each new build.
 
-**3. Add `deja.config.json` to your app's repo.** Put the simulator ID from step 2 in `device`.
+**3. Add `deja.config.json` to your app's repo.** Put the simulator UDID from step 2 in `device`.
 
 ```json
 {
@@ -93,9 +96,9 @@ Use `-workspace MyApp.xcworkspace` instead of `-project` if your app has one. D�
 }
 ```
 
-Add `.deja/` and `build/` to your `.gitignore`. `.deja/` holds local run history and reports.
+Add `.deja/` and `build/` to `.gitignore`. `.deja/` holds local run history and reports.
 
-**4. Write a test, or bring one you have.** Tests are plain Maestro YAML, for example `.maestro/flows/deja/checkout.yaml`:
+**4. Write a test, or bring one you already have.** Tests are plain `maestro/v1` YAML, for example `.maestro/flows/deja/checkout.yaml`:
 
 ```yaml
 appId: com.example.myapp
@@ -105,7 +108,7 @@ appId: com.example.myapp
 - assertVisible: "Order placed"
 ```
 
-**5. Save it.** Déjà runs the test on its own and saves it only if every check passes. It also writes `deja.walks.json`. Commit that file with your tests.
+**5. Save it.** Déjà runs the test on its own, saves it only if every check passes, and writes `deja.walks.json`. Commit `deja.walks.json` alongside your flows.
 
 ```sh
 deja remember checkout --flow .maestro/flows/deja/checkout.yaml
@@ -117,12 +120,12 @@ deja remember checkout --flow .maestro/flows/deja/checkout.yaml
 deja run checkout
 ```
 
-On a new build, `deja run checkout --verify` checks the test again. To let a coding agent replay your saved tests after each edit, run `deja mcp` ([MCP server](docs/REFERENCE.md#mcp-server)). Android and Chromium configs are in [docs/REFERENCE.md](docs/REFERENCE.md#configuration). The reference also covers `explore`, where an AI model writes the test. It works on Android only.
+On a new build, `deja run checkout --verify` re-verifies the test. To let a coding agent replay saved tests after each edit, run `deja mcp` ([MCP server](docs/REFERENCE.md#mcp-server)). Android and Chromium configs are in [docs/REFERENCE.md](docs/REFERENCE.md#configuration).
 
 <details>
 <summary>Run the iOS demo app</summary>
 
-The demo app lives in `spikes/003-ios-deja`. It needs step 1 first.
+The iOS fixture app lives in `spikes/003-ios-deja` and requires step 1 above.
 
 ```sh
 cd ~/deja/spikes/003-ios-deja
@@ -134,7 +137,7 @@ xcodebuild -project DejaFixture.xcodeproj -scheme DejaFixture -configuration Deb
 xcrun simctl install "$UDID" build/Build/Products/Debug-iphonesimulator/DejaFixture.app
 ```
 
-In `deja.config.json` in that folder, replace the `device` value with `$UDID`. Its supported setup is Xcode 27.2 with iOS 27.0. Then:
+Replace `device` in `spikes/003-ios-deja/deja.config.json` with `$UDID`, then run:
 
 ```sh
 deja remember checkout --flow flows/checkout.yaml
@@ -144,9 +147,9 @@ deja run checkout
 </details>
 
 <details>
-<summary>Run the hackathon demo (Android fixture)</summary>
+<summary>Run the Android demo app</summary>
 
-The demo app lives in `spikes/001-android-deja`. It needs step 1, a running API 34 emulator, OpenJDK 21 and `adb`. `scripts/env.sh` sets `JAVA_HOME` and the Android SDK paths, and assumes Homebrew under `/opt/homebrew`.
+The Android fixture app lives in `spikes/001-android-deja`. It requires step 1, a running emulator, OpenJDK 21, and `adb`.
 
 ```sh
 cd ~/deja/spikes/001-android-deja
@@ -164,26 +167,24 @@ deja remember checkout --flow flows/repaired-checkout.yaml
 deja run checkout
 ```
 
-For cold exploration, set up OpenClaw with a Cerebras credential. Then run `explore checkout`. If you already have a `.deja` folder, move it aside first.
-
 </details>
 
 ## What works today
 
-| What you can do | Where it works |
+| Capability | Status |
 | --- | --- |
-| Verify test YAML you already have, and save it only if it passes (`remember`) | Android emulator, Chromium (beta), iOS simulator |
-| Replay a saved test with 0 model calls | Android emulator, Chromium (beta), iOS simulator |
-| Learn a new test with an AI model (`explore`) | Android emulator only |
-| Repair one changed selector, with a diff to review. A wrong price still fails. | Android Checkout fixture only |
-| Tie each saved test to one build, so a pass on an old build never counts for a new one | All three. A new iOS build fails by default. |
-| Label each failure as selector, navigation, product assertion, runner, timeout or unknown | All three |
+| Verify and save existing `maestro/v1` YAML (`remember`, `deja.walks.json` v1 manifest) | iOS simulator, Android emulator, Chromium |
+| Zero-model warm replay (`run`) + flaky rerun (`--rerun-failed`) + crash attribution | iOS simulator, Android emulator, Chromium |
+| Release gate (`gate`) & static manifest check (`manifest check`) | iOS simulator, Android emulator, Chromium |
+| Coding-agent MCP server (`deja mcp`) | Local stdio JSON-RPC |
+| Build-bound validation history & failure classification (`selector`, `navigation`, `product_assertion`, `app_crash`, `timeout`, `runner`) | All three |
+| Bounded selector repair & cold exploration (`explore`) | Android fixture (generalizing to iOS, Android, and Web in `rust/crates/deja-explore`) |
 
-Real devices, other Android versions, other browsers and repairs beyond that one selector policy are not supported. We do not claim a speedup. The full support matrix is in [docs/REFERENCE.md](docs/REFERENCE.md).
+Full command options, config fields, and exit codes are in [docs/REFERENCE.md](docs/REFERENCE.md).
 
 ## Results
 
-All numbers come from the saved run reports in `demo/live-evidence/`.
+Measured runs recorded in `demo/live-evidence/`:
 
 <p align="center"><img src="docs/results-chart.svg" alt="Bar charts of model calls and duration per run: Android cold explore 13 calls, 97.9 s; Android warm replay 0 calls, 26.1 s; Android stale selector repair 0 calls, 66.9 s; Chromium warm replay 0 calls, 36.6 s" width="100%"/></p>
 
@@ -194,44 +195,37 @@ All numbers come from the saved run reports in `demo/live-evidence/`.
 | Android stale selector repair | `android/stale-repair-run-report.json` | repaired (1 repair) | 0 | 12 | 66.9 s (repair step) |
 | Chromium warm replay | `chromium/run-run-report.json` | passed (cache hit) | 0 | 12 | 36.6 s |
 
-Warm replay removes model calls. The test runner itself still takes time.
+Warm replay eliminates model calls; execution time comes from the underlying device runner, which the native Rust drivers are designed to reduce further.
 
 ## CLI
 
 | Command | What it does |
 | --- | --- |
-| `explore <goal>` | Explore on Android, verify the result, and save it if it passes. |
-| `run <goal>` | Replay a saved test. Explore on a miss. Repair a stale selector once. |
-| `remember <goal> --flow <file>` | Verify your own YAML and save it if it passes. |
-| `list` | Show saved tests. No model is used. |
+| `remember <goal> --flow <file>` | Verify your YAML and save it to the store and `deja.walks.json` only if every assertion passes. |
+| `run <goal>` | Replay a saved test with zero model calls (supports `--verify`, `--rerun-failed`, `--junit`, `--summary`). |
+| `gate` | Check that every required goal passed on the current build and write release-gate evidence. |
+| `manifest check` | Statically verify flow closures and assertion hashes against `deja.walks.json` without a device. |
+| `list` | List saved walks. |
 | `inspect <report>` | Print a saved, redacted run report. |
-
-Options, config fields and exit codes are in [docs/REFERENCE.md](docs/REFERENCE.md).
+| `explore <goal>` | Cold-explore an app with an OpenAI-compatible model, verify the resulting YAML, and save if it passes. |
+| `mcp` | Start the local stdio MCP server for coding agents. |
 
 ## Bring your own model
 
-Only cold exploration uses a model. It runs through OpenClaw, and the default is Kimi K3.1 Pro on Cerebras. Déjà works without OpenClaw or any model for remember, replay and repair. To use another model with an OpenAI-compatible chat API and tool calls, set two fields in `deja.config.json`:
-
-```json
-{
-  "openClawModel": "cerebras/moonshotai-kimi-k3.1-pro-trial",
-  "openClawBaseUrl": "https://api.cerebras.ai/v1"
-}
-```
-
-OpenClaw reads the provider key from its own settings, so Déjà never stores it. We have only measured Kimi K3.1 Pro on Cerebras. Details are in [docs/REFERENCE.md](docs/REFERENCE.md#bring-your-own-model).
+Only cold exploration (`explore`) calls a model. Remembering, replaying, gating, and static manifest checks never require a model or API key. Any OpenAI-compatible chat endpoint works; see [docs/REFERENCE.md](docs/REFERENCE.md#bring-your-own-model) for configuration details.
 
 ## Roadmap
 
-- Publish the packages to npm, and add a GitHub Action for replay in CI.
-- Rerun a failed test once, and report flaky results and app crashes separately.
-- Open a draft PR that adds a missing accessibility ID to your app.
-- Check that every listed flow passed on the tested build, and write the evidence to a file.
-- An MCP server (`deja mcp`) so a coding agent can replay saved flows after an edit. Built and tested against a fake Maestro; a real iOS session is still to do. See [docs/REFERENCE.md](docs/REFERENCE.md#mcp-server).
-- Ship a pinned test runner, and read existing runner configuration so teams can adopt Déjà without rewriting tests.
-- Later: cold exploration on iOS and web, more repair policies, and a hosted cache.
+Core open-source product (in active development under [`rust/`](rust/Cargo.toml)):
 
-The full plan is in [docs/SDK_PLAN.md](docs/SDK_PLAN.md).
+- **Pure-Rust core & SQLite v5 store (`deja-core`, `deja-store`):** 100% `deja.walks.json` v1 hash parity, streaming build fingerprinting, multi-build/multi-runtime history, durable flaky tracking, and multi-store sharded release gates.
+- **Native `maestro/v1` interpreter (`deja-flow`):** Full `maestro/v1` YAML execution, selectors, structured failure classification, JUnit XML, JS scripting (`evalScript`/`runScript`/`assertTrue`), clipboard, random inputs, and `config.yaml`/tag filtering.
+- **Native platform drivers (iOS -> Android -> Web):**
+  - iOS (`deja-driver-ios` + `DejaXCTestRunner` Swift companion)
+  - Android (`deja-driver-android` + bundled UiAutomator2 APK, zero host JDK)
+  - Web (`deja-driver-web` via direct Chromium CDP, zero Playwright/Node)
+- **Single native CLI & MCP binary (`deja-cli`, `deja-mcp`):** Multi-goal batching, dynamic `--devices` sharding, `SIGINT`/`SIGTERM`/`$/cancelRequest` cancellation, and standalone `darwin-arm64` / `linux-x64` release binaries.
+- **Cross-platform graph explorer & path memory (`deja-explore`):** Cold exploration, reusable subflow composition, and bounded selector repair proposals across iOS, Android, and Web.
 
 ## Contributing
 
