@@ -53,7 +53,7 @@ jobs:
           else
             while IFS= read -r -d '' path; do
               case "$path" in
-                rust/*|.cargo/*|.cargo|rust-toolchain|rust-toolchain.toml|.github/workflows/rust-checks.yml)
+                rust/*|.cargo/*|.cargo|rust-toolchain|rust-toolchain.toml|clippy.toml|.clippy.toml|rustfmt.toml|.rustfmt.toml|.github/workflows/rust-checks.yml)
                   run=true
                   break
                   ;;
