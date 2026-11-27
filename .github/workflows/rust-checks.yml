@@ -3,11 +3,21 @@ name: Rust checks
 on:
   push:
     branches: [main]
+    paths:
+      - 'rust/**'
+      - '.github/workflows/rust-checks.yml'
   pull_request:
+    paths:
+      - 'rust/**'
+      - '.github/workflows/rust-checks.yml'
   workflow_dispatch:
 
 permissions:
   contents: read
+
+concurrency:
+  group: rust-checks-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || (github.event_name == 'push' && github.ref || github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   rust:
