@@ -8,7 +8,7 @@ pull request looks like, and the Contributor License Agreement (CLA).
 ## Setup
 
 You need [Bun](https://bun.sh) 1.4 or newer (`engines.bun` is `>=1.4.0`). In
-CI, `portable-checks.yml` pins Bun 1.4.4 and `ci.yml` uses the latest 1.4.x.
+CI, `portable-checks.yml` pins Bun 1.4.4.
 
 ```sh
 git clone https://github.com/seankim-android/deja.git
@@ -22,8 +22,7 @@ and [docs/REFERENCE.md](docs/REFERENCE.md).
 
 ## Checks
 
-These are the steps `.github/workflows/portable-checks.yml` runs
-(`.github/workflows/ci.yml` runs only lint and build). Run them before you
+These are the steps `.github/workflows/portable-checks.yml` runs. Run them before you
 open a pull request:
 
 ```sh
