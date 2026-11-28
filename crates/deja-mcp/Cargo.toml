@@ -17,3 +17,12 @@ deja-core.workspace = true
 deja-explore.workspace = true
 deja-flow.workspace = true
 deja-store.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true

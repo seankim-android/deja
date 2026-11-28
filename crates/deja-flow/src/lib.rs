@@ -48,9 +48,10 @@ pub use junit::{
 pub use parser::{
     AddMediaStep, AppTargetStep, AssertNotVisibleStep, AssertVisibleStep, Condition, EraseTextStep,
     ExtendedWaitUntilStep, FlowHeader, FlowParseError, FlowStep, InputTextStep, LaunchAppStep,
-    OpenLinkStep, ParsedFlow, PressKeyStep, RepeatStep, RetryStep, RunFlowStep, RunFlowTarget,
-    ScrollDirection, ScrollUntilVisibleStep, SwipeStep, TakeScreenshotStep, TapStep,
-    WaitForAnimationToEndStep, parse_flow, validate_flow_app_id_confinement,
+    MAX_PREFLIGHT_VISITS, OpenLinkStep, ParsedFlow, PressKeyStep, RepeatStep, RetryStep,
+    RunFlowStep, RunFlowTarget, ScrollDirection, ScrollUntilVisibleStep, SwipeStep,
+    TakeScreenshotStep, TapStep, WaitForAnimationToEndStep, parse_flow,
+    validate_closure_app_id_confinement, validate_flow_app_id_confinement,
 };
 pub use selector::{
     CompiledSelector, MAX_SELECTOR_DEPTH, MAX_SELECTOR_PATTERN_BYTES, PointCoord, PointSpec,

@@ -111,6 +111,9 @@ pub async fn run_cli(cli: Cli, deps: &CliDeps) -> u8 {
         }
         Some(Commands::Guide) => commands::guide::run(deps),
         Some(Commands::Engine(ref args)) => commands::engine::run(args, cli.json, deps),
+        Some(Commands::Mcp(ref args)) => {
+            commands::mcp::run(args, explicit_config, cli.json, deps).await
+        }
     }
 }
 
