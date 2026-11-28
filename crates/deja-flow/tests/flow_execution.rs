@@ -73,6 +73,7 @@ fn node(index: usize, parent: Option<usize>, id: &str, label: &str, frame: UiRec
         hittable: true,
         is_on_screen: true,
         frame,
+        visible_frame: None,
     }
 }
 
@@ -4595,5 +4596,244 @@ fn synthesized_batch_junit_totals_order_retries_cancellation_and_redaction() {
     assert!(
         redacted
             .contains(r#"<testsuites tests="4" failures="1" errors="1" skipped="1" time="1.600">"#)
+    );
+}
+
+
+#[tokio::test]
+async fn codex_r1_f2_clipped_node_taps_visible_frame_center_and_preserves_full_frame_fraction() {
+    let ws = TempDir::new("codex-r1-f2-visible-frame");
+    let driver = MockDriver::full();
+
+    // Button extends below the 390x844 viewport: full frame (0, 740, 200, 200) has center (100, 840)
+    // and only 104/200 = 52% visible inside the viewport; clipped visible_frame is (0, 740, 200, 104)
+    // with center (100, 792).
+    let mut clipped = node(
+        0,
+        None,
+        "clipped_btn",
+        "Continue",
+        UiRect::new(0.0, 740.0, 200.0, 200.0),
+    );
+    clipped.visible_frame = Some(UiRect::new(0.0, 740.0, 200.0, 104.0));
+    let viewport = UiSize::new(390.0, 844.0);
+    let vis_frac = clipped.frame.visible_fraction_in(viewport);
+    assert!(
+        (vis_frac - 0.52).abs() < 1e-6,
+        "full frame must preserve true 52% visibility fraction for scrollUntilVisible (got {vis_frac})"
+    );
+    assert_eq!(clipped.tap_point(), UiPoint::new(100.0, 792.0));
+
+    driver.set_screen(hierarchy_of(vec![clipped]));
+    let yaml = r#"
+appId: dev.deja.checkout
+---
+- tapOn:
+    id: clipped_btn
+- doubleTapOn:
+    id: clipped_btn
+- longPressOn:
+    id: clipped_btn
+"#;
+    let out = FlowExecutor::new(FlowExecutionConfig::new(ws.path().to_path_buf()))
+        .execute_yaml(&driver, yaml, &CancellationToken::new())
+        .await;
+    assert!(
+        out.passed,
+        "expected clipped taps to succeed: {:#?}",
+        out.failed_step
+    );
+
+    let events = driver.events();
+    assert!(
+        events.contains(&DriverEvent::Tap(100.0, 792.0)),
+        "tapOn must target visible_frame.center() (100,792), got events: {events:#?}"
+    );
+    assert!(
+        events.contains(&DriverEvent::DoubleTap(100.0, 792.0)),
+        "doubleTapOn must target visible_frame.center() (100,792), got events: {events:#?}"
+    );
+    assert!(
+        events.contains(&DriverEvent::LongPress(100.0, 792.0, None)),
+        "longPressOn must target visible_frame.center() (100,792), got events: {events:#?}"
+    );
+}
+
+#[tokio::test]
+async fn codex_r2_f2_scroll_until_visible_measures_overflow_clipped_visible_fraction() {
+    let ws = TempDir::new("codex-r2-f2-clipped-scroll");
+    let viewport = UiSize::new(390.0, 844.0);
+
+    // Element lies wholly inside the 390x844 viewport, but an overflow scroll container clips
+    // 90% of it (`visible_frame` height = 10px of 100px -> `visible_fraction == 0.10`).
+    let mut clipped_initial = node(
+        0,
+        None,
+        "overflow_item",
+        "Deep Row",
+        UiRect::new(20.0, 300.0, 200.0, 100.0),
+    );
+    clipped_initial.visible_frame = Some(UiRect::new(20.0, 300.0, 200.0, 10.0));
+    assert!(
+        (clipped_initial.frame.visible_fraction_in(viewport) - 1.0).abs() < 1e-6,
+        "unclipped frame is 100% inside viewport"
+    );
+    assert!(
+        (clipped_initial.visible_fraction(viewport) - 0.10).abs() < 1e-6,
+        "visible_fraction must reflect 10% clipped area, got {}",
+        clipped_initial.visible_fraction(viewport)
+    );
+
+    // After scrolling once, 90% of the element is visible inside the overflow container.
+    let mut revealed_after_scroll = node(
+        0,
+        None,
+        "overflow_item",
+        "Deep Row",
+        UiRect::new(20.0, 220.0, 200.0, 100.0),
+    );
+    revealed_after_scroll.visible_frame = Some(UiRect::new(20.0, 220.0, 200.0, 90.0));
+    assert!((revealed_after_scroll.visible_fraction(viewport) - 0.90).abs() < 1e-6);
+
+    let driver = MockDriver::full();
+    driver.set_screen(hierarchy_of(vec![clipped_initial]));
+    driver.push_swipe_screen(hierarchy_of(vec![revealed_after_scroll]));
+
+    let yaml = r#"
+appId: dev.deja.checkout
+---
+- scrollUntilVisible:
+    element:
+      id: overflow_item
+    direction: DOWN
+    timeout: 5000
+    visibilityPercentage: 80
+    centerElement: false
+"#;
+    let out = FlowExecutor::new(FlowExecutionConfig::new(ws.path().to_path_buf()))
+        .execute_yaml(&driver, yaml, &CancellationToken::new())
+        .await;
+    assert!(
+        out.passed,
+        "expected scrollUntilVisible to succeed: {:#?}",
+        out.failed_step
+    );
+    let swipes: Vec<_> = driver
+        .events()
+        .into_iter()
+        .filter(|e| matches!(e, DriverEvent::Swipe { .. }))
+        .collect();
+    assert_eq!(
+        swipes.len(),
+        1,
+        "scrollUntilVisible must keep scrolling when overflow clip leaves only 10% visible"
+    );
+}
+
+#[tokio::test]
+async fn codex_r3_f2_web_selector_tap_refuses_occluded_element_while_assert_and_point_tap_succeed()
+{
+    let ws = TempDir::new("codex-r3-f2-occluded-web-tap");
+    let web_caps = DriverCapabilities::with([
+        DriverCapability::AccessibilityTree,
+        DriverCapability::CompoundAct,
+    ]);
+
+    let make_occluded_screen = |hittable: bool| {
+        let mut btn = node(
+            0,
+            None,
+            "pay_btn",
+            "Pay now",
+            UiRect::new(100.0, 200.0, 180.0, 48.0),
+        );
+        btn.source = "web".to_string();
+        btn.is_on_screen = true;
+        btn.hittable = hittable;
+        hierarchy_of(vec![btn])
+    };
+
+    // 1. Occluded button (`hittable: false`) on `"web"`: `tapOn`, `doubleTapOn`, and `longPressOn`
+    // MUST fail without dispatching ANY tap event onto the obscuring overlay!
+    for tap_yaml in [
+        "appId: http://127.0.0.1:4174\n---\n- tapOn:\n    id: pay_btn\n",
+        "appId: http://127.0.0.1:4174\n---\n- doubleTapOn:\n    id: pay_btn\n",
+        "appId: http://127.0.0.1:4174\n---\n- longPressOn:\n    id: pay_btn\n",
+    ] {
+        let driver = MockDriver::with_caps("web", web_caps.clone());
+        driver.set_screen(make_occluded_screen(false));
+        let mut cfg = FlowExecutionConfig::new(ws.path().to_path_buf());
+        cfg.default_step_timeout = Duration::from_millis(200);
+        let out = FlowExecutor::new(cfg)
+            .execute_yaml(&driver, tap_yaml, &CancellationToken::new())
+            .await;
+        assert!(
+            !out.passed,
+            "web selector tap on occluded element must fail: {tap_yaml}"
+        );
+        let failed = out.failed_step.expect("failed_step present");
+        assert_eq!(failed.kind, StepFailureKind::SelectorNotFound);
+        assert!(
+            failed.message.contains("occluded"),
+            "failure message should mention occlusion: {}",
+            failed.message
+        );
+        let tap_events: Vec<_> = driver
+            .events()
+            .into_iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    DriverEvent::Tap(_, _)
+                        | DriverEvent::DoubleTap(_, _)
+                        | DriverEvent::LongPress(_, _, _)
+                )
+            })
+            .collect();
+        assert!(
+            tap_events.is_empty(),
+            "occluded selector tap must NEVER dispatch pointer events: {tap_events:?}"
+        );
+    }
+
+    // 2. `assertVisible` AND explicit coordinate `point:` taps STILL succeed on the same screen!
+    let driver_ok = MockDriver::with_caps("web", web_caps.clone());
+    driver_ok.set_screen(make_occluded_screen(false));
+    let ok_yaml = r#"
+appId: http://127.0.0.1:4174
+---
+- assertVisible:
+    id: pay_btn
+- tapOn:
+    point: "50, 50"
+"#;
+    let ok_out = FlowExecutor::new(FlowExecutionConfig::new(ws.path().to_path_buf()))
+        .execute_yaml(&driver_ok, ok_yaml, &CancellationToken::new())
+        .await;
+    assert!(
+        ok_out.passed,
+        "assertVisible and explicit point tap must still succeed: {:#?}",
+        ok_out.failed_step
+    );
+    assert!(driver_ok.events().contains(&DriverEvent::Tap(50.0, 50.0)));
+
+    // 3. When the overlay clears on poll #2 (`hittable: false` -> `hittable: true`), `tapOn`
+    // keeps polling and taps cleanly once unoccluded!
+    let driver_poll = MockDriver::with_caps("web", web_caps);
+    driver_poll.push_hierarchy(make_occluded_screen(false));
+    driver_poll.set_screen(make_occluded_screen(true));
+    let poll_yaml = "appId: http://127.0.0.1:4174\n---\n- tapOn:\n    id: pay_btn\n";
+    let poll_out = FlowExecutor::new(FlowExecutionConfig::new(ws.path().to_path_buf()))
+        .execute_yaml(&driver_poll, poll_yaml, &CancellationToken::new())
+        .await;
+    assert!(
+        poll_out.passed,
+        "tapOn must wait until overlay clears and succeed: {:#?}",
+        poll_out.failed_step
+    );
+    assert!(
+        driver_poll
+            .events()
+            .contains(&DriverEvent::Tap(190.0, 224.0))
     );
 }

@@ -1642,10 +1642,38 @@ impl FlowExecutor {
         state: &mut RuntimeState,
         cancel: &CancellationToken,
     ) -> Result<crate::driver::WaitSelectorOutcome, DriverError> {
+        self.wait_selector_with_options(
+            driver,
+            app_id,
+            selector,
+            not_visible,
+            false,
+            timeout,
+            fail_fast_on_settle_polls,
+            state,
+            cancel,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn wait_selector_with_options<D: PlatformDriver + ?Sized>(
+        &self,
+        driver: &D,
+        app_id: &str,
+        selector: Selector,
+        not_visible: bool,
+        require_hittable: bool,
+        timeout: Duration,
+        fail_fast_on_settle_polls: Option<usize>,
+        state: &mut RuntimeState,
+        cancel: &CancellationToken,
+    ) -> Result<crate::driver::WaitSelectorOutcome, DriverError> {
         let req = WaitSelectorRequest {
             app_id: app_id.to_string(),
             selector: selector.clone(),
             not_visible,
+            require_hittable,
             wait_stable: false,
             stable_polls: 2,
             fail_fast_on_settle_polls,
@@ -1657,10 +1685,12 @@ impl FlowExecutor {
             provider_redactor: Some(self.config.provider_redactor.clone()),
         };
 
-        // Regex, relational, indexed, and state-filtered selectors ALWAYS execute locally.
+        // Regex, relational, indexed, state-filtered, and hittable-required selectors ALWAYS
+        // execute locally.
         let outcome = if driver
             .capabilities()
             .supports(DriverCapability::ServerSideWait)
+            && !require_hittable
             && selector.is_simple_literal_for_server_wait()
         {
             driver.wait_for_selector(&req, cancel).await?
@@ -1796,12 +1826,14 @@ impl FlowExecutor {
                 label.clone(),
             )?;
 
+            let require_hittable = driver.platform() == "web";
             let wait = self
-                .wait_selector(
+                .wait_selector_with_options(
                     driver,
                     &app_id,
                     selector.clone(),
                     false,
+                    require_hittable,
                     self.config.default_step_timeout,
                     self.config.action_fail_fast_settle_polls,
                     state,
@@ -1818,16 +1850,32 @@ impl FlowExecutor {
                     debug!(command, selector = %self.scrub(&selector.describe()), "skipping optional tap miss");
                     return Ok((false, 0));
                 }
+                let occluded = require_hittable
+                    && wait.hierarchy.as_ref().is_some_and(|h| {
+                        CompiledSelector::compile(&selector)
+                            .ok()
+                            .and_then(|c| c.match_one(&h.nodes))
+                            .is_some_and(|n| !n.hittable)
+                    });
+                let detail_msg = if occluded {
+                    format!(
+                        "element is occluded / not hittable for {}: {}",
+                        selector.describe(),
+                        wait.visible_context.format_summary()
+                    )
+                } else {
+                    format!(
+                        "element not found for {}: {}",
+                        selector.describe(),
+                        wait.visible_context.format_summary()
+                    )
+                };
                 return Err(Box::new(FailedStepContext {
                     step_index,
                     command: command.to_string(),
                     label,
                     kind: StepFailureKind::SelectorNotFound,
-                    message: self.scrub(&format!(
-                        "element not found for {}: {}",
-                        selector.describe(),
-                        wait.visible_context.format_summary()
-                    )),
+                    message: self.scrub(&detail_msg),
                     failed_app_id: None,
                     visible_context: Some(wait.visible_context),
                     crash_signal: None,
@@ -1838,7 +1886,7 @@ impl FlowExecutor {
                 let offset = rel_point.resolve(UiSize::new(node.frame.width, node.frame.height));
                 UiPoint::new(node.frame.x + offset.x, node.frame.y + offset.y)
             } else {
-                node.frame.center()
+                node.tap_point()
             }
         } else if let Some(pt_spec) = selector.point {
             let viewport = if !pt_spec.uses_percent() {
@@ -2439,7 +2487,7 @@ impl FlowExecutor {
 
             let viewport = hierarchy.effective_viewport();
             if let Some(node) = compiled.match_one(&hierarchy.nodes) {
-                let vis_fraction = node.frame.visible_fraction_in(viewport);
+                let vis_fraction = node.visible_fraction(viewport);
                 if node.is_on_screen && vis_fraction + 1e-6 >= min_vis_fraction {
                     if step.center_element
                         && let Some((nudge_start, nudge_end)) =

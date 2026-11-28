@@ -9,6 +9,7 @@ use deja_core::{
     DEFAULT_FLOW_SCHEMA_VERSION, GateFlakyFailure, GateIdentity, GateOutcome, RunOutcome,
     fingerprint_file, fingerprint_tree,
 };
+use deja_driver_web::{ScreenSize, format_web_runtime_suffix};
 use deja_store::{
     ConsumerFlows, ConsumerFlowsOptions, SqliteStoreOptions, SqliteWalkStore, StoreGateGoalResult,
     StoreGateOptions, evaluate_gate, now_iso8601, store_gate_passed, validate_store_id,
@@ -353,8 +354,22 @@ pub fn run(args: &GateArgs, explicit_config: Option<&Path>, json_mode: bool, dep
                     browser: config.browser.clone(),
                 };
                 let store_refs: Vec<&SqliteWalkStore> = stores.iter().collect();
+                let web_runtime_suffix = if config.platform == "web" {
+                    let screen_size = config
+                        .screen_size
+                        .as_ref()
+                        .and_then(|v| ScreenSize::parse(v).ok())
+                        .unwrap_or_default();
+                    Some(format_web_runtime_suffix(
+                        screen_size,
+                        config.headless.unwrap_or(true),
+                    ))
+                } else {
+                    None
+                };
                 let gate_opts = StoreGateOptions {
                     runtime: args.runtime.as_deref(),
+                    runtime_suffix: web_runtime_suffix.as_deref(),
                     flaky_failures: &scanned.flaky_failures,
                     consumer: consumer.as_ref(),
                 };

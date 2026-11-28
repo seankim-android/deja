@@ -2007,6 +2007,8 @@ async fn regression_r1_f1_ios_bundle_validation_rejects_non_app_missing_plist_mi
         crash_report_grace_ms: 0,
         crash_report_dir: None,
         deja_home: None,
+        headless: None,
+        screen_size: None,
         timeout_ms: 5_000,
         env: BTreeMap::new(),
         staged_build: None,
@@ -3092,6 +3094,8 @@ async fn regression_r2_f1_ios_bundle_staging_binds_install_to_fingerprinted_buil
         crash_report_grace_ms: 0,
         crash_report_dir: None,
         deja_home: None,
+        headless: None,
+        screen_size: None,
         timeout_ms: 5_000,
         env: BTreeMap::new(),
         staged_build: None,
@@ -6314,6 +6318,8 @@ async fn batch_verify_serializes_manifest_commits_across_shards_and_real_factory
         crash_report_grace_ms: 0,
         crash_report_dir: None,
         deja_home: None,
+        headless: None,
+        screen_size: None,
         timeout_ms: 5_000,
         env: BTreeMap::new(),
         staged_build: None,
@@ -7530,4 +7536,484 @@ async fn regression_deja66_r2_f4_batch_build_fingerprint_cancellation_closes_sto
     let xml = fs::read_to_string(ws.path.join("out/fp-cancel.xml")).unwrap();
     assert!(deja_flow::reports_failure(&xml));
     assert!(xml.contains(r#"status="SKIPPED""#));
+}
+
+
+#[tokio::test]
+async fn web_real_driver_factory_runtime_create_install_doctor_and_invalid_device_exit_2() {
+    let ws = TempWs::new("web-factory");
+    fs::create_dir_all(ws.path.join("public")).unwrap();
+    let fake_chrome = ws.path.join("fake-chromium.sh");
+    fs::write(
+        &fake_chrome,
+        "#!/bin/sh\necho 'Google Chrome 145.0.7000.12'\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&fake_chrome, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    let mut env = BTreeMap::new();
+    env.insert(
+        "DEJA_CHROME".to_string(),
+        fake_chrome.to_string_lossy().into_owned(),
+    );
+
+    let make_web_ctx = |device: &str, screen_size: Option<Value>| DriverContext {
+        platform: "web".to_string(),
+        device: device.to_string(),
+        app_id: "http://127.0.0.1:4174".to_string(),
+        build_path: ws.path.join("public"),
+        expected_build_fingerprint: None,
+        workspace_root: ws.path.clone(),
+        disable_animations: true,
+        crash_report_grace_ms: 0,
+        crash_report_dir: None,
+        deja_home: None,
+        headless: Some(true),
+        screen_size,
+        timeout_ms: 30_000,
+        env: env.clone(),
+        staged_build: None,
+    };
+
+    let cancel = CancellationToken::new();
+    let factory = RealDriverFactory;
+
+    // 1. `resolve_runtime` returns `chromium-<version>@<W>x<H>` (and `-headed` when `headless == false`) via `DEJA_CHROME`.
+    let valid_ctx = make_web_ctx("chromium", Some(json!("1280x800")));
+    let rt = factory
+        .resolve_runtime(&valid_ctx, &cancel)
+        .await
+        .expect("resolve_runtime should succeed");
+    assert_eq!(rt.as_deref(), Some("chromium-145.0.7000.12@1280x800"));
+
+    let mut headed_ctx = make_web_ctx("chromium", Some(json!("1280x800")));
+    headed_ctx.headless = Some(false);
+    let rt_headed = factory
+        .resolve_runtime(&headed_ctx, &cancel)
+        .await
+        .expect("headed resolve_runtime should succeed");
+    assert_eq!(
+        rt_headed.as_deref(),
+        Some("chromium-145.0.7000.12@1280x800-headed")
+    );
+
+    let default_sz_ctx = make_web_ctx("chromium", None);
+    let rt_default = factory
+        .resolve_runtime(&default_sz_ctx, &cancel)
+        .await
+        .expect("default screenSize resolve_runtime should succeed");
+    assert_eq!(
+        rt_default.as_deref(),
+        Some("chromium-145.0.7000.12@1280x720")
+    );
+
+    // 2. `create` constructs a native `WebDriver` with `"web"` platform and `DisableAnimations`.
+    let driver = factory
+        .create(&valid_ctx, &cancel)
+        .await
+        .expect("create should construct WebDriver");
+    assert_eq!(driver.platform(), "web");
+    assert!(
+        driver
+            .capabilities()
+            .supports(DriverCapability::DisableAnimations)
+    );
+    assert!(
+        driver
+            .capabilities()
+            .supports(DriverCapability::CompoundAct)
+    );
+    driver.shutdown().await.unwrap();
+
+    // 3. `install_app` is a clean no-op (`Ok(())`) on web.
+    factory
+        .install_app(&valid_ctx, &cancel)
+        .await
+        .expect("install_app must be Ok(()) on web");
+
+    // 4. Non-`chromium` device fails closed with exit 2 on both `resolve_runtime` and `create`.
+    let bad_dev_ctx = make_web_ctx("firefox", None);
+    let err_rt = factory
+        .resolve_runtime(&bad_dev_ctx, &cancel)
+        .await
+        .expect_err("non-chromium device must fail resolve_runtime");
+    assert_eq!(err_rt.exit_code(), 2);
+    let err_create = factory
+        .create(&bad_dev_ctx, &cancel)
+        .await
+        .err()
+        .expect("non-chromium device must fail create");
+    assert_eq!(err_create.exit_code(), 2);
+
+    // 5. Invalid `screenSize` fails closed with exit 2 on both `resolve_runtime` and `create`.
+    let bad_sz_ctx = make_web_ctx("chromium", Some(json!("99x50")));
+    let err_rt_sz = factory
+        .resolve_runtime(&bad_sz_ctx, &cancel)
+        .await
+        .expect_err("invalid screenSize must fail resolve_runtime");
+    assert_eq!(err_rt_sz.exit_code(), 2);
+    let err_sz = factory
+        .create(&bad_sz_ctx, &cancel)
+        .await
+        .err()
+        .expect("invalid screenSize must fail create");
+    assert_eq!(err_sz.exit_code(), 2);
+
+    // 6. `RealDoctorProbes` delegates to `deja_driver_web::{discover_chromium, probe_chromium_version}`
+    // honoring `DEJA_CHROME`.
+    let probes = deja_cli::driver_factory::RealDoctorProbes;
+    let checks = probes
+        .probe(&DoctorProbeRequest {
+            platform: Some("web".to_string()),
+            device: Some("chromium".to_string()),
+            env: env.clone(),
+            deja_home: None,
+        })
+        .await;
+    let web_check = checks
+        .iter()
+        .find(|c| c.name == "web-chromium")
+        .expect("web-chromium check must be present");
+    assert_eq!(web_check.status, DoctorCheckStatus::Ready);
+    assert!(web_check.required);
+    assert!(
+        web_check.detail.contains("145.0.7000.12"),
+        "expected version from DEJA_CHROME, got: {}",
+        web_check.detail
+    );
+
+    // 7. CLI `deja remember --device firefox` on web config exits with code 2.
+    ws.write(
+        "deja.config.json",
+        &json!({
+            "workspaceRoot": ".",
+            "platform": "web",
+            "appId": "http://127.0.0.1:4174",
+            "adapter": "maestro-web@2.12.0",
+            "browser": "chromium",
+            "device": "chromium",
+            "buildPath": "public",
+            "screenSize": "1280x800"
+        })
+        .to_string(),
+    );
+    ws.write(
+        "flows/checkout.yaml",
+        "url: http://127.0.0.1:4174\n---\n- openLink: http://127.0.0.1:4174\n- assertVisible: Shop\n",
+    );
+    let (deps, _) = make_deps(
+        &ws.path,
+        Arc::new(RealDriverFactory),
+        default_probes(),
+        CancellationToken::new(),
+    );
+    let exit = run_cli_from_args(
+        [
+            "deja",
+            "remember",
+            "checkout",
+            "--flow",
+            "flows/checkout.yaml",
+            "--device",
+            "firefox",
+        ],
+        &deps,
+    )
+    .await;
+    assert_eq!(exit, 2, "invalid non-chromium web device must exit 2");
+}
+
+#[tokio::test]
+async fn codex_r2_f1_web_gate_enforces_configured_viewport_and_headless_mode() {
+    let ws = TempWs::new("web-gate-viewport");
+    ws.write("public/index.html", "<!doctype html><h1>Shop</h1>");
+    ws.write(
+        "flows/checkout.yaml",
+        "url: http://127.0.0.1:4174\n---\n- openLink: http://127.0.0.1:4174\n- assertVisible: Shop\n",
+    );
+    ws.write("goals.txt", "complete checkout\n");
+
+    let write_web_config = |screen_size: &str, headless: bool| {
+        ws.write(
+            "deja.config.json",
+            &json!({
+                "workspaceRoot": ".",
+                "platform": "web",
+                "appId": "http://127.0.0.1:4174",
+                "adapter": "maestro-web@2.12.0",
+                "browser": "chromium",
+                "device": "chromium",
+                "buildPath": "public",
+                "screenSize": screen_size,
+                "headless": headless
+            })
+            .to_string(),
+        );
+    };
+
+    // 1. Record a passing validation at desktop `1280x800` (headless).
+    write_web_config("1280x800", true);
+    let ok_tree = hierarchy_with_nodes(
+        "http://127.0.0.1:4174",
+        vec![node_with_label("heading", "Shop")],
+    );
+    let desktop_rt = "chromium-145.0.7000.12@1280x800";
+    let factory = Arc::new(MockFactory::new(
+        Some(desktop_rt),
+        MockDriver::new(vec![ok_tree]),
+    ));
+    let (deps_rem, _) = make_deps(
+        &ws.path,
+        factory.clone(),
+        default_probes(),
+        CancellationToken::new(),
+    );
+    let rem_code = run_cli_from_args(
+        [
+            "deja",
+            "remember",
+            "complete checkout",
+            "--flow",
+            "flows/checkout.yaml",
+        ],
+        &deps_rem,
+    )
+    .await;
+    assert_eq!(rem_code, 0);
+
+    // 2. With matching `1280x800` config, BOTH `deja gate` (without `--runtime`) AND
+    // `deja gate --runtime chromium-145.0.7000.12@1280x800` pass.
+    let (deps_g1, cap_g1) = make_deps(
+        &ws.path,
+        factory.clone(),
+        default_probes(),
+        CancellationToken::new(),
+    );
+    assert_eq!(
+        run_cli_from_args(["deja", "gate", "--goals", "goals.txt", "--json"], &deps_g1).await,
+        0
+    );
+    let g1: Value = serde_json::from_str(&cap_g1.lock().unwrap().stdout).unwrap();
+    assert_eq!(g1["verdict"], "passed");
+
+    let (deps_g2, cap_g2) = make_deps(
+        &ws.path,
+        factory.clone(),
+        default_probes(),
+        CancellationToken::new(),
+    );
+    assert_eq!(
+        run_cli_from_args(
+            [
+                "deja",
+                "gate",
+                "--goals",
+                "goals.txt",
+                "--runtime",
+                desktop_rt,
+                "--json",
+            ],
+            &deps_g2,
+        )
+        .await,
+        0
+    );
+    let g2: Value = serde_json::from_str(&cap_g2.lock().unwrap().stdout).unwrap();
+    assert_eq!(g2["verdict"], "passed");
+
+    // Passing `--runtime` without the normalized viewport suffix MUST NOT match.
+    let (deps_g_bare, cap_g_bare) = make_deps(
+        &ws.path,
+        factory.clone(),
+        default_probes(),
+        CancellationToken::new(),
+    );
+    assert_eq!(
+        run_cli_from_args(
+            [
+                "deja",
+                "gate",
+                "--goals",
+                "goals.txt",
+                "--runtime",
+                "chromium-145.0.7000.12",
+                "--json",
+            ],
+            &deps_g_bare,
+        )
+        .await,
+        10
+    );
+    let g_bare: Value = serde_json::from_str(&cap_g_bare.lock().unwrap().stdout).unwrap();
+    assert_eq!(g_bare["verdict"], "closed");
+    assert_eq!(g_bare["goals"][0]["outcome"], "not-run");
+
+    // 3. Change ONLY `screenSize` to mobile `"390x844"` (same `buildPath`!):
+    // BOTH `deja gate` (omitting `--runtime`) AND `deja gate --runtime <desktop_rt>` MUST close!
+    write_web_config("390x844", true);
+
+    let (deps_m1, cap_m1) = make_deps(
+        &ws.path,
+        factory.clone(),
+        default_probes(),
+        CancellationToken::new(),
+    );
+    assert_eq!(
+        run_cli_from_args(["deja", "gate", "--goals", "goals.txt", "--json"], &deps_m1).await,
+        10,
+        "desktop 1280x800 pass must NEVER approve a 390x844 web config when --runtime is omitted"
+    );
+    let m1: Value = serde_json::from_str(&cap_m1.lock().unwrap().stdout).unwrap();
+    assert_eq!(m1["verdict"], "closed");
+    assert_eq!(m1["goals"][0]["outcome"], "not-run");
+
+    let (deps_m2, cap_m2) = make_deps(
+        &ws.path,
+        factory.clone(),
+        default_probes(),
+        CancellationToken::new(),
+    );
+    assert_eq!(
+        run_cli_from_args(
+            [
+                "deja",
+                "gate",
+                "--goals",
+                "goals.txt",
+                "--runtime",
+                desktop_rt,
+                "--json",
+            ],
+            &deps_m2,
+        )
+        .await,
+        10,
+        "desktop 1280x800 --runtime must NEVER approve a 390x844 web config"
+    );
+    let m2: Value = serde_json::from_str(&cap_m2.lock().unwrap().stdout).unwrap();
+    assert_eq!(m2["verdict"], "closed");
+    assert_eq!(m2["goals"][0]["outcome"], "not-run");
+
+    // 4. Switching `headless: false` at `1280x800` also isolates against headless evidence.
+    write_web_config("1280x800", false);
+    let (deps_h, cap_h) = make_deps(
+        &ws.path,
+        factory,
+        default_probes(),
+        CancellationToken::new(),
+    );
+    assert_eq!(
+        run_cli_from_args(["deja", "gate", "--goals", "goals.txt", "--json"], &deps_h).await,
+        10
+    );
+    let h_json: Value = serde_json::from_str(&cap_h.lock().unwrap().stdout).unwrap();
+    assert_eq!(h_json["verdict"], "closed");
+    assert_eq!(h_json["goals"][0]["outcome"], "not-run");
+}
+
+#[tokio::test]
+async fn codex_r3_f3_doctor_and_runtime_skip_broken_path_chromium_candidate() {
+    let ws = TempWs::new("web-skip-broken");
+    let bin_dir = ws.path.join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    let broken_chromium = bin_dir.join("chromium");
+    let working_chrome = bin_dir.join("google-chrome");
+    fs::write(
+        &broken_chromium,
+        "#!/bin/sh\necho 'broken stub' >&2\nexit 1\n",
+    )
+    .unwrap();
+    fs::write(
+        &working_chrome,
+        "#!/bin/sh\necho 'Google Chrome 147.0.1.2'\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&broken_chromium, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::set_permissions(&working_chrome, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    let mut env = BTreeMap::new();
+    env.insert("PATH".to_string(), bin_dir.to_string_lossy().into_owned());
+
+    // 1. `RealDoctorProbes` skips broken `chromium` and reports ready with working `google-chrome`.
+    let probes = deja_cli::driver_factory::RealDoctorProbes;
+    let checks = probes
+        .probe(&DoctorProbeRequest {
+            platform: Some("web".to_string()),
+            device: Some("chromium".to_string()),
+            env: env.clone(),
+            deja_home: None,
+        })
+        .await;
+    let web_check = checks
+        .iter()
+        .find(|c| c.name == "web-chromium")
+        .expect("web-chromium check");
+    assert_eq!(web_check.status, DoctorCheckStatus::Ready);
+    assert!(
+        web_check.detail.contains("147.0.1.2"),
+        "expected doctor to skip broken chromium and find 147.0.1.2, got {}",
+        web_check.detail
+    );
+
+    // 2. `RealDriverFactory::resolve_runtime` also skips broken `chromium` and uses `google-chrome`.
+    let ctx = DriverContext {
+        platform: "web".to_string(),
+        device: "chromium".to_string(),
+        app_id: "http://127.0.0.1:4174".to_string(),
+        build_path: ws.path.clone(),
+        expected_build_fingerprint: None,
+        workspace_root: ws.path.clone(),
+        disable_animations: true,
+        crash_report_grace_ms: 0,
+        crash_report_dir: None,
+        deja_home: None,
+        headless: Some(true),
+        screen_size: Some(json!("1280x800")),
+        timeout_ms: 30_000,
+        env: env.clone(),
+        staged_build: None,
+    };
+    let cancel = CancellationToken::new();
+    let rt = RealDriverFactory
+        .resolve_runtime(&ctx, &cancel)
+        .await
+        .expect("resolve_runtime must skip broken PATH candidate");
+    assert_eq!(rt.as_deref(), Some("chromium-147.0.1.2@1280x800"));
+
+    // 3. Explicit broken `DEJA_CHROME` fails closed in BOTH doctor and `resolve_runtime`.
+    env.insert(
+        "DEJA_CHROME".to_string(),
+        broken_chromium.to_string_lossy().into_owned(),
+    );
+    let broken_checks = probes
+        .probe(&DoctorProbeRequest {
+            platform: Some("web".to_string()),
+            device: Some("chromium".to_string()),
+            env: env.clone(),
+            deja_home: None,
+        })
+        .await;
+    let broken_web = broken_checks
+        .iter()
+        .find(|c| c.name == "web-chromium")
+        .expect("web-chromium check");
+    assert_eq!(broken_web.status, DoctorCheckStatus::NotReady);
+
+    let mut broken_ctx = ctx;
+    broken_ctx.env = env;
+    assert!(
+        RealDriverFactory
+            .resolve_runtime(&broken_ctx, &cancel)
+            .await
+            .is_err(),
+        "explicit broken DEJA_CHROME must fail closed"
+    );
 }
