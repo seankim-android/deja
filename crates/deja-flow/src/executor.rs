@@ -280,14 +280,13 @@ impl FlowExecutionConfig {
         }
     }
 
-    /// Populate an immutable in-memory flow snapshot from a preflight [`deja_core::FlowClosure`].
+    /// Populate an immutable in-memory snapshot of every file (flows, subflows, and media) from
+    /// a preflight [`deja_core::FlowClosure`].
     #[must_use]
     pub fn with_closure_snapshot(mut self, closure: &deja_core::FlowClosure) -> Self {
         let mut map = BTreeMap::new();
         for file in &closure.files {
-            if file.kind == deja_core::FlowReferenceKind::Flow {
-                map.insert(file.source.clone(), file.bytes.clone());
-            }
+            map.insert(file.source.clone(), file.bytes.clone());
         }
         self.closure_snapshot = Some(map);
         self
@@ -1418,6 +1417,47 @@ impl FlowExecutor {
         cancel: &CancellationToken,
     ) -> StepResult {
         let label = format!("Add media ({} file(s))", step.files.len());
+        if let Some(ref snapshot) = self.config.closure_snapshot {
+            let staging = create_media_staging_dir().map_err(|err| FailedStepContext {
+                step_index,
+                command: "addMedia".to_string(),
+                label: label.clone(),
+                kind: StepFailureKind::ParseOrConfinement,
+                message: self.scrub(&format!("failed to create media staging directory: {err}")),
+                failed_app_id: None,
+                visible_context: None,
+                crash_signal: None,
+            })?;
+            let mut resolved = Vec::with_capacity(step.files.len());
+            for (idx, raw_path) in step.files.iter().enumerate() {
+                let staged_path = stage_snapshot_media_file(
+                    &staging,
+                    idx,
+                    &state.canonical_workspace,
+                    flow_dir,
+                    raw_path,
+                    snapshot,
+                )
+                .map_err(|err| FailedStepContext {
+                    step_index,
+                    command: "addMedia".to_string(),
+                    label: label.clone(),
+                    kind: StepFailureKind::ParseOrConfinement,
+                    message: self.scrub(&err.to_string()),
+                    failed_app_id: None,
+                    visible_context: None,
+                    crash_signal: None,
+                })?;
+                resolved.push(staged_path);
+            }
+            let res = driver
+                .add_media(&resolved, cancel)
+                .await
+                .map_err(|err| self.driver_err_to_failed_step(step_index, "addMedia", label, err));
+            drop(staging);
+            return res;
+        }
+
         let mut resolved = Vec::with_capacity(step.files.len());
         for raw_path in &step.files {
             let confined = confine_relative_read_path(
@@ -3145,7 +3185,7 @@ impl FlowExecutor {
                         | StepFailureKind::AppCrash
                 )
             {
-                debug!(error = %err.message, "ignoring failure of optional runFlow");
+                debug!(error = %self.scrub(&err.message), "ignoring failure of optional runFlow");
                 return Ok(());
             }
             return Err(err);
@@ -3548,7 +3588,7 @@ impl FlowExecutor {
                     debug!(
                         attempt = attempt + 1,
                         total_attempts,
-                        error = %err.message,
+                        error = %self.scrub(&err.message),
                         "retry attempt failed"
                     );
                     last_err = Some(err);
@@ -3843,6 +3883,92 @@ fn confine_write_path(
         )));
     }
     Ok(lexical)
+}
+
+static MEDIA_STAGING_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+struct MediaStagingDir {
+    dir: PathBuf,
+}
+
+impl Drop for MediaStagingDir {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.dir);
+    }
+}
+
+fn create_media_staging_dir() -> Result<MediaStagingDir, std::io::Error> {
+    let seq = MEDIA_STAGING_SEQ.fetch_add(1, Ordering::Relaxed);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let dir =
+        std::env::temp_dir().join(format!("deja-media-{}-{seq}-{nanos:x}", std::process::id()));
+    let mut builder = fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(&dir)?;
+    Ok(MediaStagingDir { dir })
+}
+
+fn stage_snapshot_media_file(
+    staging: &MediaStagingDir,
+    idx: usize,
+    canonical_workspace: &Path,
+    flow_dir: &Path,
+    raw_path: &str,
+    snapshot: &BTreeMap<String, Vec<u8>>,
+) -> Result<PathBuf, FlowExecutionError> {
+    validate_relative_path_syntax(raw_path, "media")?;
+    let lexical = lexical_normalize(&flow_dir.join(raw_path));
+    if lexical == canonical_workspace || !lexical.starts_with(canonical_workspace) {
+        return Err(FlowExecutionError::PathConfinement(format!(
+            "media file escapes workspace: {raw_path}"
+        )));
+    }
+    let rel_key = lexical
+        .strip_prefix(canonical_workspace)
+        .map(|rel| rel.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_default();
+    let Some(bytes) = snapshot.get(&rel_key) else {
+        return Err(FlowExecutionError::PathConfinement(format!(
+            "media file missing from preflight closure snapshot: {rel_key}"
+        )));
+    };
+    if (bytes.len() as u64) > MAX_MEDIA_BYTES {
+        return Err(FlowExecutionError::PathConfinement(format!(
+            "media file exceeds maximum size of {MAX_MEDIA_BYTES} bytes: {rel_key}"
+        )));
+    }
+    let file_name = lexical.file_name().ok_or_else(|| {
+        FlowExecutionError::PathConfinement(format!("media file has no filename: {raw_path}"))
+    })?;
+    let slot_dir = staging.dir.join(idx.to_string());
+    fs::create_dir(&slot_dir).map_err(|err| {
+        FlowExecutionError::PathConfinement(format!("failed to create media staging slot: {err}"))
+    })?;
+    let dest = slot_dir.join(file_name);
+    let mut opts = fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut file = opts.open(&dest).map_err(|err| {
+        FlowExecutionError::PathConfinement(format!("failed to create staged media file: {err}"))
+    })?;
+    std::io::Write::write_all(&mut file, bytes).map_err(|err| {
+        FlowExecutionError::PathConfinement(format!("failed to write staged media file: {err}"))
+    })?;
+    file.sync_all().map_err(|err| {
+        FlowExecutionError::PathConfinement(format!("failed to sync staged media file: {err}"))
+    })?;
+    Ok(dest)
 }
 
 fn read_bounded_file(path: &Path, limit: u64) -> Result<Vec<u8>, FlowExecutionError> {

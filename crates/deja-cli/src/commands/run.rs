@@ -7,9 +7,10 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use deja_core::{
-    ArtifactKind, CacheMissReason, CacheStatus, CoreError, FailureCategory, LookupResult,
-    NewBuildReplayReport, RunArtifact, RunAttempt, RunCommand, RunOutcome, StaleBuildPolicy,
-    WalkOrigin, assertions_sha256, check_owner_rules, closure_assertions, collect_flow_closure,
+    ArtifactKind, CacheMissReason, CacheStatus, CoreError, FailureCategory, FlowClosure,
+    LookupResult, NewBuildReplayReport, RunArtifact, RunAttempt, RunCommand, RunOutcome,
+    StaleBuildPolicy, StoredWalk, WalkOrigin, assertions_sha256, check_owner_rules,
+    closure_assertions, collect_flow_closure,
 };
 use deja_flow::{RunTimingBreakdown, count_assertions_in_closure};
 use deja_store::{
@@ -290,7 +291,12 @@ pub async fn run(
     let identity = make_walk_identity(&config, &goal, fp_res.digest);
 
     // Resolve runtime (e.g. "ios-27.2") via driver factory.
-    let driver_ctx = build_driver_context(&config, deps, config.timeout_ms);
+    let driver_ctx = build_driver_context(
+        &config,
+        deps,
+        config.timeout_ms,
+        Some(identity.build_fingerprint.clone()),
+    );
     let runtime = match deps
         .driver_factory
         .resolve_runtime(&driver_ctx, &deps.cancel)
@@ -386,47 +392,12 @@ pub async fn run(
                 &mut report,
             );
         }
-        RunPlan::Execute(ep) => ep,
+        RunPlan::Execute(ep) => *ep,
     };
 
-    // Pre-run closure validation: collect closure, check appId confinement, check forbidden values.
-    let closure = match collect_flow_closure(&config.workspace_root, &exec_plan.flow_abs_path) {
-        Ok(c) => c,
-        Err(err) => {
-            store.close();
-            let total_ms = cmd_t0.elapsed().as_millis() as u64;
-            let mut report = build_base_report(
-                RunCommand::Run,
-                identity,
-                &goal,
-                exec_plan.cache_status,
-                exec_plan.miss_reason,
-                RunOutcome::ClosureError,
-                false,
-                cmd_started_at,
-                now_iso8601(),
-                total_ms,
-                runtime,
-            );
-            report.core.yaml_path = Some(exec_plan.display_flow_path);
-            report
-                .core
-                .errors
-                .push(redaction.redact_str(&err.to_string()));
-            return finalize_run_report(
-                deps,
-                &config.workspace_root,
-                args.store.as_deref(),
-                &immutable_report_rel,
-                explicit_report.as_deref(),
-                effective_junit.as_deref(),
-                json_mode,
-                args.summary,
-                &redaction,
-                &mut report,
-            );
-        }
-    };
+    // Reuse the exact `FlowClosure` collected and approved during `plan_execution` without
+    // reopening flow files from disk, then check static appId confinement and forbidden secrets.
+    let closure = exec_plan.closure;
 
     if let Err(msg) = validate_closure_app_id_confinement(&closure, &config.app_id, &config.env) {
         store.close();
@@ -959,7 +930,7 @@ enum RunPlan {
         detail: String,
         yaml_path: Option<String>,
     },
-    Execute(ExecutionPlan),
+    Execute(Box<ExecutionPlan>),
 }
 
 enum ExecMode {
@@ -981,6 +952,7 @@ enum ExecMode {
 struct ExecutionPlan {
     flow_abs_path: PathBuf,
     display_flow_path: String,
+    closure: FlowClosure,
     cache_status: CacheStatus,
     miss_reason: Option<CacheMissReason>,
     validation_origin: Option<WalkOrigin>,
@@ -1051,9 +1023,10 @@ fn plan_execution(
                 });
             }
             let matches_manifest = closure.sha256 == entry.closure_sha256;
-            return Ok(RunPlan::Execute(ExecutionPlan {
+            return Ok(RunPlan::Execute(Box::new(ExecutionPlan {
                 flow_abs_path: canonical_flow,
                 display_flow_path: entry.flow.clone(),
+                closure,
                 cache_status: CacheStatus::Miss,
                 miss_reason: Some(if matches_manifest {
                     CacheMissReason::NotValidated
@@ -1066,7 +1039,7 @@ fn plan_execution(
                 mode: ExecMode::ManifestVerify {
                     flow_rel: entry.flow,
                 },
-            }));
+            })));
         }
 
         let decision = cf.plan_run(
@@ -1079,20 +1052,25 @@ fn plan_execution(
         )?;
         match decision {
             ConsumerRunPlan::Hit {
-                entry, flow_path, ..
-            } => Ok(RunPlan::Execute(ExecutionPlan {
+                entry,
+                flow_path,
+                closure,
+                ..
+            } => Ok(RunPlan::Execute(Box::new(ExecutionPlan {
                 flow_abs_path: flow_path,
                 display_flow_path: entry.flow,
+                closure,
                 cache_status: CacheStatus::Hit,
                 miss_reason: None,
                 validation_origin: None,
                 closure_matches_manifest: true,
                 new_build_replay: None,
                 mode: ExecMode::ManifestHit,
-            })),
+            }))),
             ConsumerRunPlan::ReplayInPlace {
                 entry,
                 flow_path,
+                closure,
                 reason,
                 previous_successful,
                 ..
@@ -1104,9 +1082,10 @@ fn plan_execution(
                     previous_validated_at: prev.validated_at,
                     recorded_for_new_build: false,
                 });
-                Ok(RunPlan::Execute(ExecutionPlan {
+                Ok(RunPlan::Execute(Box::new(ExecutionPlan {
                     flow_abs_path: flow_path,
                     display_flow_path: entry.flow,
+                    closure,
                     cache_status: CacheStatus::Miss,
                     miss_reason: Some(reason),
                     validation_origin: Some(WalkOrigin::ReplayedOnNewBuild),
@@ -1115,7 +1094,7 @@ fn plan_execution(
                     mode: ExecMode::ManifestReplayInPlace {
                         miss_reason: reason,
                     },
-                }))
+                })))
             }
             ConsumerRunPlan::Refuse {
                 outcome,
@@ -1132,19 +1111,30 @@ fn plan_execution(
         }
     } else {
         match store.lookup_for_runtime(identity, runtime)? {
-            LookupResult::Hit(hit) => Ok(RunPlan::Execute(ExecutionPlan {
-                flow_abs_path: PathBuf::from(&hit.flow_path),
-                display_flow_path: workspace_relative_display(
+            LookupResult::Hit(hit) => {
+                let flow_abs = PathBuf::from(&hit.flow_path);
+                let display_flow =
+                    workspace_relative_display(&config.workspace_root, Path::new(&hit.flow_path));
+                let closure = match collect_and_verify_classic_closure(
                     &config.workspace_root,
-                    Path::new(&hit.flow_path),
-                ),
-                cache_status: CacheStatus::Hit,
-                miss_reason: None,
-                validation_origin: None,
-                closure_matches_manifest: false,
-                new_build_replay: None,
-                mode: ExecMode::ClassicHit,
-            })),
+                    &flow_abs,
+                    &hit.walk,
+                ) {
+                    Ok(c) => c,
+                    Err(refuse) => return Ok(refuse),
+                };
+                Ok(RunPlan::Execute(Box::new(ExecutionPlan {
+                    flow_abs_path: flow_abs,
+                    display_flow_path: display_flow,
+                    closure,
+                    cache_status: CacheStatus::Hit,
+                    miss_reason: None,
+                    validation_origin: None,
+                    closure_matches_manifest: false,
+                    new_build_replay: None,
+                    mode: ExecMode::ClassicHit,
+                })))
+            }
             LookupResult::Miss(miss) => {
                 if miss.reason == CacheMissReason::StaleBuild
                     && config.stale_build == Some(StaleBuildPolicy::ReplayLastVerified)
@@ -1157,6 +1147,15 @@ fn plan_execution(
                             }
                         };
                     if let LookupResult::Hit(prev_hit) = prev_lookup {
+                        let flow_abs = PathBuf::from(&prev_hit.flow_path);
+                        let closure = match collect_and_verify_classic_closure(
+                            &config.workspace_root,
+                            &flow_abs,
+                            &prev_hit.walk,
+                        ) {
+                            Ok(c) => c,
+                            Err(refuse) => return Ok(refuse),
+                        };
                         let nb = NewBuildReplayReport {
                             policy: StaleBuildPolicy::ReplayLastVerified,
                             previous_build_fingerprint: prev_hit.walk.build_fingerprint.clone(),
@@ -1164,9 +1163,10 @@ fn plan_execution(
                             previous_validated_at: prev_hit.walk.last_validation.at.clone(),
                             recorded_for_new_build: false,
                         };
-                        return Ok(RunPlan::Execute(ExecutionPlan {
-                            flow_abs_path: PathBuf::from(&prev_hit.flow_path),
+                        return Ok(RunPlan::Execute(Box::new(ExecutionPlan {
+                            flow_abs_path: flow_abs,
                             display_flow_path: prev_hit.walk.flow_path.clone(),
+                            closure,
                             cache_status: CacheStatus::Miss,
                             miss_reason: Some(CacheMissReason::StaleBuild),
                             validation_origin: Some(WalkOrigin::ReplayedOnNewBuild),
@@ -1177,7 +1177,7 @@ fn plan_execution(
                                 stored_flow_sha256: prev_hit.walk.flow_sha256,
                                 stored_subflow_files: prev_hit.walk.subflow_files,
                             },
-                        }));
+                        })));
                     }
                     return Ok(RunPlan::Refuse {
                         cache_status: CacheStatus::Miss,
@@ -1222,6 +1222,77 @@ fn plan_execution(
             }
         }
     }
+}
+
+fn collect_and_verify_classic_closure(
+    workspace_root: &Path,
+    flow_abs: &Path,
+    walk: &StoredWalk,
+) -> Result<FlowClosure, RunPlan> {
+    let closure =
+        collect_flow_closure(workspace_root, flow_abs).map_err(|err| RunPlan::Refuse {
+            cache_status: CacheStatus::Miss,
+            miss_reason: CacheMissReason::FlowChanged,
+            outcome: RunOutcome::ClosureError,
+            detail: err.to_string(),
+            yaml_path: Some(walk.flow_path.clone()),
+        })?;
+    let main_sha = closure
+        .files
+        .iter()
+        .find(|f| f.path == closure.main)
+        .map(|f| f.sha256.as_str());
+    if main_sha != Some(walk.flow_sha256.as_str()) {
+        return Err(RunPlan::Refuse {
+            cache_status: CacheStatus::Miss,
+            miss_reason: CacheMissReason::FlowChanged,
+            outcome: RunOutcome::FlowChanged,
+            detail: "the stored flow changed on disk before execution".to_string(),
+            yaml_path: Some(walk.flow_path.clone()),
+        });
+    }
+    if let Some(ref expected_closure) = walk.closure_sha256
+        && closure.sha256 != *expected_closure
+    {
+        return Err(RunPlan::Refuse {
+            cache_status: CacheStatus::Miss,
+            miss_reason: CacheMissReason::FlowChanged,
+            outcome: RunOutcome::FlowChanged,
+            detail: "the stored flow closure changed on disk before execution".to_string(),
+            yaml_path: Some(walk.flow_path.clone()),
+        });
+    }
+    if let Some(ref stored_subflows) = walk.subflow_files {
+        if closure.files.len() != stored_subflows.len() + 1 {
+            return Err(RunPlan::Refuse {
+                cache_status: CacheStatus::Miss,
+                miss_reason: CacheMissReason::FlowChanged,
+                outcome: RunOutcome::FlowChanged,
+                detail: "the stored flow's referenced files changed on disk before execution"
+                    .to_string(),
+                yaml_path: Some(walk.flow_path.clone()),
+            });
+        }
+        for sf in stored_subflows {
+            let matched = closure
+                .files
+                .iter()
+                .any(|f| (f.source == sf.path || f.path == sf.path) && f.sha256 == sf.sha256);
+            if !matched {
+                return Err(RunPlan::Refuse {
+                    cache_status: CacheStatus::Miss,
+                    miss_reason: CacheMissReason::FlowChanged,
+                    outcome: RunOutcome::FlowChanged,
+                    detail: format!(
+                        "the stored subflow `{}` changed on disk before execution",
+                        sf.path
+                    ),
+                    yaml_path: Some(walk.flow_path.clone()),
+                });
+            }
+        }
+    }
+    Ok(closure)
 }
 
 fn failure_signature(

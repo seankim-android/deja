@@ -570,7 +570,12 @@ pub async fn run(
     }
 
     // Resolve runtime, create driver, attach session, and install app.
-    let driver_ctx = build_driver_context(&config, deps, config.verification_timeout_ms);
+    let driver_ctx = build_driver_context(
+        &config,
+        deps,
+        config.verification_timeout_ms,
+        Some(identity.build_fingerprint.clone()),
+    );
     let runtime = match deps
         .driver_factory
         .resolve_runtime(&driver_ctx, &deps.cancel)

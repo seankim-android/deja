@@ -8,12 +8,14 @@ use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;
 use std::future::Future;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::Stdio;
-use std::time::Duration;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use deja_core::fingerprint_tree;
 use deja_driver_ios::cache::{
     build_cache_key, detect_toolchain, native_simulator_arch, resolve_deja_home,
 };
@@ -26,9 +28,10 @@ use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 use tokio_util::sync::CancellationToken;
 
-use crate::fs_safe::open_read_nofollow;
+use crate::fs_safe::{create_new_nofollow, open_read_nofollow};
 
 const MAX_INFO_PLIST_BYTES: u64 = 4 * 1024 * 1024;
+static BUNDLE_STAGE_SEQ: AtomicU64 = AtomicU64::new(1);
 
 /// Future type returned by [`DriverFactory`] methods.
 pub type FactoryFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -64,6 +67,7 @@ pub struct DriverContext {
     pub device: String,
     pub app_id: String,
     pub build_path: PathBuf,
+    pub expected_build_fingerprint: Option<String>,
     pub workspace_root: PathBuf,
     pub disable_animations: bool,
     pub crash_report_grace_ms: u64,
@@ -208,12 +212,30 @@ impl DriverFactory for RealDriverFactory {
                 return Err(DriverFactoryError::Cancelled);
             }
             if ctx.platform == "ios" {
-                verify_ios_app_bundle(&ctx.build_path, &ctx.app_id)
-                    .map_err(DriverFactoryError::UnsupportedOrConfig)?;
+                let build_path = ctx.build_path.clone();
+                let app_id = ctx.app_id.clone();
+                let expected_fp = ctx.expected_build_fingerprint.clone();
+                let staged = tokio::select! {
+                    _ = cancel.cancelled() => return Err(DriverFactoryError::Cancelled),
+                    res = tokio::task::spawn_blocking(move || {
+                        stage_and_verify_ios_app_bundle(
+                            &build_path,
+                            &app_id,
+                            expected_fp.as_deref(),
+                        )
+                    }) => match res {
+                        Ok(inner) => inner.map_err(DriverFactoryError::UnsupportedOrConfig)?,
+                        Err(join_err) => {
+                            return Err(DriverFactoryError::Runtime(format!(
+                                "iOS `.app` bundle staging task failed: {join_err}"
+                            )));
+                        }
+                    },
+                };
                 let simctl = Simctl::with_env(simctl_env_from_map(&ctx.env));
                 tokio::select! {
                     _ = cancel.cancelled() => return Err(DriverFactoryError::Cancelled),
-                    res = simctl.install_app(&ctx.device, &ctx.build_path) => res,
+                    res = simctl.install_app(&ctx.device, staged.app_path()) => res,
                 }
                 .map_err(|err| {
                     DriverFactoryError::Runtime(format!(
@@ -222,10 +244,207 @@ impl DriverFactory for RealDriverFactory {
                         ctx.device
                     ))
                 })?;
+                drop(staged);
             }
             Ok(())
         })
     }
+}
+
+/// RAII temporary immutable copy of an iOS `.app` bundle whose `Info.plist` `CFBundleIdentifier`
+/// and streaming tree SHA-256 fingerprint have both been verified before installation.
+pub struct StagedIosAppBundle {
+    temp_dir: PathBuf,
+    app_path: PathBuf,
+    fingerprint: String,
+}
+
+impl StagedIosAppBundle {
+    #[must_use]
+    pub fn app_path(&self) -> &Path {
+        &self.app_path
+    }
+
+    #[must_use]
+    pub fn staging_dir(&self) -> &Path {
+        &self.temp_dir
+    }
+
+    #[must_use]
+    pub fn fingerprint(&self) -> &str {
+        &self.fingerprint
+    }
+}
+
+impl Drop for StagedIosAppBundle {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.temp_dir);
+    }
+}
+
+/// Stage an immutable temporary copy of an iOS `.app` bundle (using APFS copy-on-write `/bin/cp -cR`
+/// on macOS with a safe symlink-refusing recursive copy fallback), verify its `Info.plist`
+/// `CFBundleIdentifier == expected_app_id`, and assert its streaming tree SHA-256 matches
+/// `expected_fingerprint` before returning the staged copy for `simctl install`.
+pub fn stage_and_verify_ios_app_bundle(
+    build_path: &Path,
+    expected_app_id: &str,
+    expected_fingerprint: Option<&str>,
+) -> Result<StagedIosAppBundle, String> {
+    let lmeta = fs::symlink_metadata(build_path).map_err(|err| {
+        format!(
+            "iOS buildPath cannot be inspected ({}): {err}",
+            build_path.display()
+        )
+    })?;
+    if lmeta.file_type().is_symlink() {
+        return Err(format!(
+            "iOS buildPath must not be a symbolic link: {}",
+            build_path.display()
+        ));
+    }
+    if !lmeta.file_type().is_dir() || build_path.extension().and_then(|s| s.to_str()) != Some("app")
+    {
+        return Err(format!(
+            "iOS buildPath must be an existing `.app` bundle directory (got {})",
+            build_path.display()
+        ));
+    }
+
+    let app_name = build_path
+        .file_name()
+        .ok_or_else(|| format!("iOS buildPath has no bundle name: {}", build_path.display()))?;
+
+    let seq = BUNDLE_STAGE_SEQ.fetch_add(1, Ordering::Relaxed);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let temp_dir = std::env::temp_dir().join(format!(
+        "deja-ios-bundle-{}-{seq}-{nanos:x}",
+        std::process::id()
+    ));
+    let mut dir_builder = fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        dir_builder.mode(0o700);
+    }
+    dir_builder
+        .create(&temp_dir)
+        .map_err(|err| format!("failed to create temporary iOS bundle staging directory: {err}"))?;
+
+    let app_path = temp_dir.join(app_name);
+    let mut staged = StagedIosAppBundle {
+        temp_dir,
+        app_path,
+        fingerprint: String::new(),
+    };
+
+    stage_ios_bundle_tree(build_path, &staged.app_path)?;
+    verify_ios_app_bundle(&staged.app_path, expected_app_id)?;
+
+    let staged_fp = fingerprint_tree(&staged.temp_dir, &staged.app_path, "iOS")
+        .map_err(|err| format!("failed to fingerprint staged iOS `.app` bundle: {err}"))?;
+    if let Some(expected) = expected_fingerprint
+        && staged_fp != expected
+    {
+        return Err(format!(
+            "iOS `.app` bundle changed between fingerprinting ({expected}) and installation ({staged_fp}); rebuild or retry with an immutable build artifact"
+        ));
+    }
+    staged.fingerprint = staged_fp;
+    Ok(staged)
+}
+
+fn stage_ios_bundle_tree(src: &Path, dst: &Path) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let status = std::process::Command::new("/bin/cp")
+            .args(["-cR", "--"])
+            .arg(src)
+            .arg(dst)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        if let Ok(st) = status
+            && st.success()
+        {
+            return Ok(());
+        }
+        let _ = fs::remove_dir_all(dst);
+    }
+    copy_tree_nofollow(src, dst)
+}
+
+fn copy_tree_nofollow(src: &Path, dst: &Path) -> Result<(), String> {
+    fs::create_dir(dst)
+        .map_err(|err| format!("failed to create staged directory {}: {err}", dst.display()))?;
+    let entries = fs::read_dir(src).map_err(|err| {
+        format!(
+            "failed to read iOS `.app` directory {}: {err}",
+            src.display()
+        )
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|err| format!("failed to iterate iOS `.app` bundle: {err}"))?;
+        let ftype = entry
+            .file_type()
+            .map_err(|err| format!("failed to inspect iOS `.app` entry type: {err}"))?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        if ftype.is_symlink() {
+            return Err(format!(
+                "iOS `.app` bundle cannot contain symbolic links: {}",
+                src_path.display()
+            ));
+        }
+        if ftype.is_dir() {
+            copy_tree_nofollow(&src_path, &dst_path)?;
+        } else if ftype.is_file() {
+            let mut reader = open_read_nofollow(&src_path).map_err(|err| {
+                format!(
+                    "failed to open iOS `.app` file {}: {err}",
+                    src_path.display()
+                )
+            })?;
+            let meta = reader.metadata().map_err(|err| {
+                format!(
+                    "failed to stat iOS `.app` file {}: {err}",
+                    src_path.display()
+                )
+            })?;
+            let mut writer = create_new_nofollow(&dst_path).map_err(|err| {
+                format!(
+                    "failed to create staged iOS `.app` file {}: {err}",
+                    dst_path.display()
+                )
+            })?;
+            std::io::copy(&mut reader, &mut writer).map_err(|err| {
+                format!(
+                    "failed to copy iOS `.app` file {}: {err}",
+                    src_path.display()
+                )
+            })?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = meta.permissions().mode() & 0o777;
+                let _ = writer.set_permissions(fs::Permissions::from_mode(mode));
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = meta;
+            }
+        } else {
+            return Err(format!(
+                "iOS `.app` bundle cannot contain special files: {}",
+                src_path.display()
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Strictly validate that an iOS `buildPath` is a non-symlink `.app` bundle directory containing
@@ -312,9 +531,8 @@ fn extract_cf_bundle_id_from_binary_plist(
 ) -> Result<String, String> {
     #[cfg(target_os = "macos")]
     {
-        use std::io::Write;
         let mut child = std::process::Command::new("/usr/bin/plutil")
-            .args(["-convert", "json", "-o", "-", "-"])
+            .args(["-convert", "xml1", "-o", "-", "-"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -338,20 +556,9 @@ fn extract_cf_bundle_id_from_binary_plist(
                 String::from_utf8_lossy(&output.stderr).trim()
             ));
         }
-        let val: serde_json::Value = serde_json::from_slice(&output.stdout)
-            .map_err(|err| format!("failed to parse plutil JSON output: {err}"))?;
-        let bundle_id = val
-            .get("CFBundleIdentifier")
-            .and_then(serde_json::Value::as_str)
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| {
-                format!(
-                    "Info.plist ({}) is missing string CFBundleIdentifier",
-                    info_plist.display()
-                )
-            })?;
-        Ok(bundle_id.to_string())
+        let xml = std::str::from_utf8(&output.stdout)
+            .map_err(|err| format!("plutil XML1 output is not valid UTF-8: {err}"))?;
+        extract_cf_bundle_id_from_xml_plist(xml)
     }
     #[cfg(not(target_os = "macos"))]
     {

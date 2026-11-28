@@ -102,12 +102,14 @@ pub fn build_driver_context(
     config: &LoadedConfig,
     deps: &CliDeps,
     timeout_ms: u64,
+    expected_build_fingerprint: Option<String>,
 ) -> DriverContext {
     DriverContext {
         platform: config.platform.clone(),
         device: config.device.clone().unwrap_or_default(),
         app_id: config.app_id.clone(),
         build_path: config.build_path.clone().unwrap_or_default(),
+        expected_build_fingerprint,
         workspace_root: config.workspace_root.clone(),
         disable_animations: config.disable_animations,
         crash_report_grace_ms: config.crash_report_grace_ms,

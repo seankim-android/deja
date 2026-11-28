@@ -19,7 +19,7 @@ use serde_json::{Value, json};
 use crate::CliDeps;
 use crate::cli::GateArgs;
 use crate::commands::manifest::has_unsafe_control_or_bidi_char;
-use crate::config::{CommandCapability, LoadConfigOptions, load_config};
+use crate::config::{CommandCapability, DEFAULT_CONFIG_PATH, LoadConfigOptions, load_config};
 use crate::exit_codes::{EXIT_GATE_CLOSED, EXIT_GATE_ERROR, EXIT_OK, EXIT_USAGE_OR_CONFIG};
 use crate::fs_safe::{
     GateEvidenceError, lexical_normalize, precheck_gate_evidence_paths,
@@ -83,6 +83,7 @@ pub fn run(args: &GateArgs, explicit_config: Option<&Path>, json_mode: bool, dep
     if let Some(ref label) = args.label
         && (label.trim().is_empty() || has_unsafe_control_or_bidi_char(label))
     {
+        invalidate_prior_gate_evidence_early(args, explicit_config, deps);
         emit_gate_error(
             deps,
             json_mode,
@@ -94,6 +95,7 @@ pub fn run(args: &GateArgs, explicit_config: Option<&Path>, json_mode: bool, dep
     if let Some(ref rt) = args.runtime
         && (rt.trim().is_empty() || has_unsafe_control_or_bidi_char(rt))
     {
+        invalidate_prior_gate_evidence_early(args, explicit_config, deps);
         emit_gate_error(
             deps,
             json_mode,
@@ -107,6 +109,7 @@ pub fn run(args: &GateArgs, explicit_config: Option<&Path>, json_mode: bool, dep
     let mut seen_stores = BTreeSet::new();
     for id in &args.stores {
         if let Err(err) = validate_store_id(id) {
+            invalidate_prior_gate_evidence_early(args, explicit_config, deps);
             emit_gate_error(deps, json_mode, "INVALID_STORE_ID", &err.to_string());
             return EXIT_USAGE_OR_CONFIG;
         }
@@ -125,6 +128,7 @@ pub fn run(args: &GateArgs, explicit_config: Option<&Path>, json_mode: bool, dep
     }) {
         Ok(cfg) => cfg,
         Err(err) => {
+            invalidate_prior_gate_evidence_early(args, explicit_config, deps);
             let redaction =
                 RedactionContext::new(&deps.cwd, deps.home_dir.as_deref(), &[], &deps.env);
             emit_gate_error(
@@ -164,7 +168,7 @@ pub fn run(args: &GateArgs, explicit_config: Option<&Path>, json_mode: bool, dep
     };
     let evidence_txt_path = sibling_evidence_txt_path(&evidence_json_path);
 
-    let mut forbidden_paths = vec![goals_abs.clone()];
+    let mut forbidden_paths = vec![goals_abs.clone(), config.config_path.clone()];
     if let Some(ref manifest_rel) = config.manifest {
         forbidden_paths.push(config.workspace_root.join(manifest_rel));
     }
@@ -704,6 +708,86 @@ fn scan_reports_for_build(workspace_root: &Path, build_fingerprint: &str) -> Sca
         }
     }
     out
+}
+
+/// Best-effort, fail-safe invalidation of previously verified `deja-gate-evidence` files
+/// before early validation errors (`--label`, `--runtime`, `--store`, malformed config) exit.
+///
+/// Always runs the full [`precheck_gate_evidence_paths`] safety checks (symlink refusal,
+/// `.deja/` outside `.deja/gate/` refusal, protected input path refusal, `"kind":
+/// "deja-gate-evidence"` verification, and byte-exact `.txt` table match) so unrelated user
+/// files are NEVER touched.
+fn invalidate_prior_gate_evidence_early(
+    args: &GateArgs,
+    explicit_config: Option<&Path>,
+    deps: &CliDeps,
+) {
+    let config_abs = match explicit_config {
+        Some(p) if p.is_absolute() => lexical_normalize(p),
+        Some(p) => lexical_normalize(&deps.cwd.join(p)),
+        None => lexical_normalize(&deps.cwd.join(DEFAULT_CONFIG_PATH)),
+    };
+    let config_dir = config_abs
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| deps.cwd.clone());
+
+    // Best-effort workspace root resolution: if config is readable JSON with a valid
+    // `workspaceRoot`, honor it (for example when `--label` failed on a valid config pointing
+    // to a sibling workspace); otherwise fall back to `config_dir` / `deps.cwd`.
+    let mut forbidden_paths = vec![
+        if args.goals.is_absolute() {
+            lexical_normalize(&args.goals)
+        } else {
+            lexical_normalize(&deps.cwd.join(&args.goals))
+        },
+        config_abs.clone(),
+    ];
+
+    let mut candidate_ws = fs::canonicalize(&config_dir)
+        .or_else(|_| fs::canonicalize(&deps.cwd))
+        .unwrap_or_else(|_| lexical_normalize(&deps.cwd));
+    if let Ok(raw_cfg) = read_to_string_nofollow_bounded(&config_abs, 1024 * 1024)
+        && let Ok(val) = serde_json::from_str::<Value>(&raw_cfg)
+        && let Some(obj) = val.as_object()
+    {
+        if let Some(ws_str) = obj.get("workspaceRoot").and_then(Value::as_str)
+            && !ws_str.trim().is_empty()
+        {
+            let ws_joined = if Path::new(ws_str).is_absolute() {
+                PathBuf::from(ws_str)
+            } else {
+                config_dir.join(ws_str)
+            };
+            if let Ok(canon_ws) = fs::canonicalize(&ws_joined)
+                && canon_ws.is_dir()
+            {
+                candidate_ws = canon_ws;
+            }
+        }
+        if let Some(manifest_str) = obj.get("manifest").and_then(Value::as_str)
+            && !manifest_str.trim().is_empty()
+        {
+            forbidden_paths.push(lexical_normalize(&candidate_ws.join(manifest_str)));
+        }
+    }
+
+    let evidence_json_path = match &args.evidence {
+        Some(p) if p.is_absolute() => lexical_normalize(p),
+        Some(p) => lexical_normalize(&deps.cwd.join(p)),
+        None => candidate_ws.join(".deja/gate/evidence.json"),
+    };
+    let evidence_txt_path = sibling_evidence_txt_path(&evidence_json_path);
+
+    if let Ok(precheck) = precheck_gate_evidence_paths(
+        &candidate_ws,
+        &evidence_json_path,
+        &evidence_txt_path,
+        &forbidden_paths,
+        render_gate_table_from_json,
+    ) {
+        let _ = remove_verified_gate_evidence(&precheck);
+    }
 }
 
 fn emit_gate_error(deps: &CliDeps, json_mode: bool, code: &str, message: &str) {
