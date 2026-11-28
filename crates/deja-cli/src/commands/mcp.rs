@@ -37,6 +37,8 @@ impl CliMcpDriverFactory {
             crash_report_grace_ms: ctx.crash_report_grace_ms,
             crash_report_dir: ctx.crash_report_dir.clone(),
             deja_home: self.deja_home.clone(),
+            headless: ctx.headless,
+            screen_size: ctx.screen_size.clone(),
             timeout_ms: ctx.timeout_ms,
             env: ctx.env.clone(),
         }

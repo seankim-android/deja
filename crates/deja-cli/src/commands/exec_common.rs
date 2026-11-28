@@ -309,6 +309,8 @@ pub fn build_driver_context(
             .get("DEJA_HOME")
             .filter(|v| !v.is_empty())
             .map(PathBuf::from),
+        headless: config.headless,
+        screen_size: config.screen_size.clone(),
         timeout_ms,
         env: deps.env.clone(),
     }

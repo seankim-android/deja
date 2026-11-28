@@ -171,6 +171,12 @@ pub struct UiNode {
     pub hittable: bool,
     pub is_on_screen: bool,
     pub frame: UiRect,
+    /// Optional clipped visible hit rectangle when the node is partially clipped by the viewport
+    /// or an overflow scroll container. When present and non-empty, [`UiNode::tap_point`] targets
+    /// this rect's center while [`Self::frame`] retains the full unclipped bounds for visibility
+    /// fraction checks (such as `scrollUntilVisible`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visible_frame: Option<UiRect>,
 }
 
 #[derive(Deserialize)]
@@ -210,6 +216,8 @@ struct UiNodeWire {
     #[serde(default)]
     is_on_screen: Option<bool>,
     frame: UiRect,
+    #[serde(default)]
+    visible_frame: Option<UiRect>,
 }
 
 impl From<UiNodeWire> for UiNode {
@@ -236,6 +244,7 @@ impl From<UiNodeWire> for UiNode {
             // that omit `isOnScreen` fall back to `hittable` instead of blindly defaulting `true`.
             is_on_screen: wire.is_on_screen.unwrap_or(wire.hittable),
             frame: wire.frame,
+            visible_frame: wire.visible_frame,
         }
     }
 }
@@ -261,11 +270,38 @@ impl Default for UiNode {
             hittable: false,
             is_on_screen: true,
             frame: UiRect::default(),
+            visible_frame: None,
         }
     }
 }
 
 impl UiNode {
+    /// Returns the preferred tap point for this node: the center of its clipped visible hit
+    /// region (`visible_frame`) when present and non-empty, otherwise `frame.center()`.
+    #[must_use]
+    pub fn tap_point(&self) -> UiPoint {
+        self.visible_frame
+            .filter(|r| !r.is_empty())
+            .unwrap_or(self.frame)
+            .center()
+    }
+
+    /// Returns the fraction `[0.0, 1.0]` of this node's full [`Self::frame`] visible inside
+    /// `viewport`, using [`Self::visible_frame`] when clipped by an overflow scroll container
+    /// or viewport boundary and falling back to [`UiRect::visible_fraction_in`] otherwise.
+    #[must_use]
+    pub fn visible_fraction(&self, viewport: UiSize) -> f64 {
+        let total = self.frame.area();
+        if total <= 0.0 || !viewport.is_positive() {
+            return 0.0;
+        }
+        if let Some(clipped) = self.visible_frame {
+            let vp_rect = UiRect::new(0.0, 0.0, viewport.width, viewport.height);
+            return (clipped.intersection_area(vp_rect) / total).clamp(0.0, 1.0);
+        }
+        self.frame.visible_fraction_in(viewport)
+    }
+
     /// Projects this node into a [`HashableNode`] matching Swift↔Rust FNV-1a parity.
     pub fn as_hashable(&self) -> HashableNode<'_> {
         HashableNode {
@@ -600,6 +636,10 @@ pub struct WaitSelectorRequest {
     pub app_id: String,
     pub selector: Selector,
     pub not_visible: bool,
+    /// When `true` (used for Web selector-based taps), a matched element is only accepted once
+    /// `node.hittable == true` so occluded elements behind a modal/overlay keep polling until
+    /// unoccluded or timeout instead of dispatching a click onto the obscuring overlay.
+    pub require_hittable: bool,
     pub wait_stable: bool,
     pub stable_polls: usize,
     /// When `Some(n)`, fails fast on a missing selector once the screen produces `n`
@@ -620,6 +660,7 @@ impl WaitSelectorRequest {
             app_id: app_id.into(),
             selector,
             not_visible: false,
+            require_hittable: false,
             wait_stable: false,
             stable_polls: 2,
             fail_fast_on_settle_polls: None,

@@ -1,4 +1,16 @@
-//! Native Web driver using direct Chromium Chrome DevTools Protocol WebSockets.
+//! Native Web driver using direct Chromium Chrome DevTools Protocol (CDP) WebSockets.
+
+pub mod browser;
+pub mod cdp;
+pub mod dom;
+pub mod driver;
+pub mod error;
+pub mod input;
+
+pub use browser::{discover_chromium, discover_working_chromium, probe_chromium_version};
+pub use driver::{WebDriver, WebDriverConfig};
+pub use error::{Result, WebDriverError, map_web_err};
+pub use input::{ScreenSize, format_web_runtime_suffix, validate_loopback_http_url};
 
 /// Canonical crate identifier used by workspace smoke checks.
 pub const CRATE_NAME: &str = "deja-driver-web";
@@ -7,12 +19,4 @@ pub const CRATE_NAME: &str = "deja-driver-web";
 pub const UPSTREAM_CRATES: &[&str] = &[deja_core::CRATE_NAME, deja_flow::CRATE_NAME];
 
 #[cfg(test)]
-mod tests {
-    use super::{CRATE_NAME, UPSTREAM_CRATES};
-
-    #[test]
-    fn crate_identity_matches() {
-        assert_eq!(CRATE_NAME, "deja-driver-web");
-        assert_eq!(UPSTREAM_CRATES, &["deja-core", "deja-flow"]);
-    }
-}
+mod tests;

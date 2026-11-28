@@ -1310,6 +1310,7 @@ fn multi_store_evaluate_gate_sharding_conflicts_flaky_runtime_and_corrupt_store(
                 at: "2026-05-01T10:02:00Z".to_string(),
             }],
             consumer: None,
+            ..Default::default()
         },
     )
     .unwrap();
@@ -3012,6 +3013,7 @@ fn regression_r2_f4_f5_f7_failed_candidate_rejection_per_run_legacy_and_external
                 at: "2026-05-01T10:00:00Z".to_string(),
             }],
             consumer: None,
+            ..Default::default()
         },
     )
     .unwrap();
