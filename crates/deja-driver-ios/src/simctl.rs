@@ -99,20 +99,47 @@ pub fn validate_bundle_id(bundle_id: &str) -> Result<String> {
 /// - `com.apple.CoreSimulator.SimRuntime.iOS-27-2` -> `"ios-27.2"`
 /// - `com.apple.CoreSimulator.SimRuntime.iOS-27-2-iPhone19-4` -> `"ios-27.2"`
 /// - `SimRuntime.iOS-18-3-1` -> `"ios-18.3.1"`
+/// - `"ios-27.2"` / `"iOS 27.2"` -> `"ios-27.2"`
 pub fn normalize_runtime_identifier(raw: &str) -> String {
     let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
     let suffix = trimmed
         .strip_prefix("com.apple.CoreSimulator.SimRuntime.")
         .or_else(|| trimmed.strip_prefix("SimRuntime."))
         .unwrap_or(trimmed);
 
-    let mut parts = suffix.split('-');
-    let Some(platform) = parts.next() else {
-        return trimmed.to_ascii_lowercase();
+    let Some(sep_idx) = suffix
+        .bytes()
+        .position(|b| b == b'-' || b.is_ascii_whitespace())
+    else {
+        return suffix.to_ascii_lowercase();
     };
-    let version_parts: Vec<&str> = parts
-        .take_while(|seg| !seg.is_empty() && seg.bytes().all(|b| b.is_ascii_digit()))
-        .collect();
+    let platform = suffix[..sep_idx].trim();
+    let rest = suffix[sep_idx + 1..].trim_start_matches(['-', ' ', '\t']);
+    if platform.is_empty() || rest.is_empty() {
+        return suffix.to_ascii_lowercase();
+    }
+
+    let mut version_parts: Vec<&str> = Vec::new();
+    for token in rest.split(|c: char| c == '-' || c.is_ascii_whitespace()) {
+        if token.is_empty() {
+            continue;
+        }
+        if token.bytes().all(|b| b.is_ascii_digit()) {
+            version_parts.push(token);
+        } else if token.contains('.')
+            && token
+                .split('.')
+                .all(|seg| !seg.is_empty() && seg.bytes().all(|b| b.is_ascii_digit()))
+        {
+            version_parts.extend(token.split('.'));
+        } else {
+            // Stop at device-specific suffixes such as `-iPhone19-4` or build qualifiers.
+            break;
+        }
+    }
 
     if version_parts.is_empty() {
         return suffix.to_ascii_lowercase();
@@ -123,6 +150,140 @@ pub fn normalize_runtime_identifier(raw: &str) -> String {
         platform.to_ascii_lowercase(),
         version_parts.join(".")
     )
+}
+
+/// Normalizes an iOS/CoreSimulator runtime identifier (`DEJA-55`).
+///
+/// Delegates to [`normalize_runtime_identifier`] so runtime normalization is consistent across
+/// device listings, cache keys, and CLI diagnostics.
+pub fn normalize_ios_runtime_identifier(raw: &str) -> String {
+    normalize_runtime_identifier(raw)
+}
+
+/// Resolves the normalized runtime version (for example `"ios-27.2"`) for a specific simulator
+/// `udid` from a parsed `simctl list devices -j` slice (case-insensitive UDID match).
+pub fn find_device_runtime_version(devices: &[SimDevice], udid: &str) -> Result<String> {
+    let canonical = validate_udid(udid)?;
+    let device = devices
+        .iter()
+        .find(|dev| dev.udid.eq_ignore_ascii_case(&canonical))
+        .ok_or_else(|| {
+            IosDriverError::InvalidArgument(format!(
+                "simulator `{canonical}` not found in simctl device list"
+            ))
+        })?;
+    let raw = if !device.runtime_identifier.trim().is_empty() {
+        device.runtime_identifier.as_str()
+    } else {
+        device.runtime_normalized.as_str()
+    };
+    let normalized = normalize_ios_runtime_identifier(raw);
+    if normalized.is_empty() {
+        return Err(IosDriverError::InvalidArgument(format!(
+            "simulator `{canonical}` has an empty runtime identifier"
+        )));
+    }
+    Ok(normalized)
+}
+
+/// Maps Maestro/Déjà privacy permission actions onto `xcrun simctl privacy` actions (fail-closed).
+pub fn map_privacy_action(raw: &str) -> Result<&'static str> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "allow" | "grant" => Ok("grant"),
+        "deny" | "revoke" => Ok("revoke"),
+        "unset" | "reset" => Ok("reset"),
+        _ => Err(IosDriverError::InvalidArgument(format!(
+            "unsupported iOS privacy action `{raw}` (expected allow, deny, or unset)"
+        ))),
+    }
+}
+
+/// Maps Maestro/Déjà privacy permission keys onto `xcrun simctl privacy` services (fail-closed).
+pub fn map_privacy_service(raw: &str) -> Result<&'static str> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "all" => Ok("all"),
+        "calendar" => Ok("calendar"),
+        "contacts-limited" | "contacts_limited" => Ok("contacts-limited"),
+        "contacts" => Ok("contacts"),
+        "location" => Ok("location"),
+        "location-always" | "location_always" => Ok("location-always"),
+        "photos-add" | "photos_add" => Ok("photos-add"),
+        "photos" => Ok("photos"),
+        "media-library" | "media_library" | "medialibrary" => Ok("media-library"),
+        "microphone" => Ok("microphone"),
+        "motion" => Ok("motion"),
+        "reminders" => Ok("reminders"),
+        "siri" => Ok("siri"),
+        _ => Err(IosDriverError::InvalidArgument(format!(
+            "unsupported iOS privacy service `{raw}`"
+        ))),
+    }
+}
+
+/// Validates media paths for `xcrun simctl addmedia` (non-empty list of existing, regular,
+/// non-symlink UTF-8 file paths that do not start with `-`).
+pub fn validate_media_paths(paths: &[PathBuf]) -> Result<Vec<String>> {
+    if paths.is_empty() {
+        return Err(IosDriverError::InvalidArgument(
+            "add_media requires at least one file path".to_string(),
+        ));
+    }
+    let mut validated = Vec::with_capacity(paths.len());
+    for path in paths {
+        let path_str = path.to_str().ok_or_else(|| {
+            IosDriverError::InvalidPath(format!("non-UTF-8 media path: {}", path.display()))
+        })?;
+        if path_str.is_empty() || path_str.starts_with('-') || path_str.contains('\0') {
+            return Err(IosDriverError::InvalidPath(format!(
+                "invalid media path: {path_str}"
+            )));
+        }
+        let meta = std::fs::symlink_metadata(path).map_err(|source| {
+            IosDriverError::InvalidPath(format!(
+                "media file does not exist or cannot be stat'd ({}): {source}",
+                path.display()
+            ))
+        })?;
+        if meta.file_type().is_symlink() {
+            return Err(IosDriverError::InvalidPath(format!(
+                "refusing symlink media file: {}",
+                path.display()
+            )));
+        }
+        if !meta.is_file() {
+            return Err(IosDriverError::InvalidPath(format!(
+                "media path is not a regular file: {}",
+                path.display()
+            )));
+        }
+        validated.push(path_str.to_string());
+    }
+    Ok(validated)
+}
+
+/// Validates a URL for `xcrun simctl openurl` (non-empty, no control/NUL/CR/LF bytes, valid
+/// RFC 3986 scheme parsed by `reqwest::Url`).
+pub fn validate_open_link_url(url: &str) -> Result<String> {
+    if url.bytes().any(|b| matches!(b, b'\0' | b'\r' | b'\n')) {
+        return Err(IosDriverError::InvalidArgument(
+            "URL must not contain NUL, CR, or LF characters".to_string(),
+        ));
+    }
+    let trimmed = url.trim();
+    if trimmed.is_empty() || trimmed.starts_with('-') {
+        return Err(IosDriverError::InvalidArgument(format!(
+            "invalid URL `{url}`"
+        )));
+    }
+    let parsed = reqwest::Url::parse(trimmed).map_err(|err| {
+        IosDriverError::InvalidArgument(format!("invalid URL `{trimmed}`: {err}"))
+    })?;
+    if parsed.scheme().is_empty() {
+        return Err(IosDriverError::InvalidArgument(format!(
+            "URL `{trimmed}` is missing a scheme"
+        )));
+    }
+    Ok(trimmed.to_string())
 }
 
 fn validate_env_key(key: &str) -> Result<()> {
@@ -162,7 +323,7 @@ impl Simctl {
 
     fn command(&self) -> Command {
         let mut cmd = Command::new("xcrun");
-        cmd.arg("simctl").stdin(Stdio::null());
+        cmd.arg("simctl").stdin(Stdio::null()).kill_on_drop(true);
         if let Some(ref path) = self.env.env_path {
             cmd.env("PATH", path);
         }
@@ -202,6 +363,68 @@ impl Simctl {
     pub async fn list_devices(&self) -> Result<Vec<SimDevice>> {
         let output = self.run_simctl(&["list", "devices", "-j"]).await?;
         parse_devices_json(&output.stdout)
+    }
+
+    pub async fn device_runtime_version(&self, udid: &str) -> Result<String> {
+        let canonical = validate_udid(udid)?;
+        let devices = self.list_devices().await?;
+        find_device_runtime_version(&devices, &canonical)
+    }
+
+    pub async fn clear_keychain(&self, udid: &str) -> Result<()> {
+        let canonical = validate_udid(udid)?;
+        self.run_simctl(&["keychain", &canonical, "reset"]).await?;
+        Ok(())
+    }
+
+    pub async fn set_permissions(
+        &self,
+        udid: &str,
+        bundle_id: &str,
+        perms: &BTreeMap<String, String>,
+    ) -> Result<()> {
+        let canonical = validate_udid(udid)?;
+        let bundle = validate_bundle_id(bundle_id)?;
+        if perms.is_empty() {
+            return Ok(());
+        }
+
+        // Validate every permission entry up front before mutating simulator privacy state,
+        // applying `"all"` first so specific service entries can override it deterministically.
+        let mut validated: Vec<(&'static str, &'static str)> = Vec::with_capacity(perms.len());
+        for (raw_service, raw_action) in perms {
+            let service = map_privacy_service(raw_service)?;
+            let action = map_privacy_action(raw_action)?;
+            validated.push((service, action));
+        }
+        validated.sort_by_key(|(service, _)| if *service == "all" { 0u8 } else { 1u8 });
+
+        for (service, action) in validated {
+            self.run_simctl(&["privacy", &canonical, action, service, &bundle])
+                .await?;
+        }
+        Ok(())
+    }
+
+    pub async fn add_media(&self, udid: &str, paths: &[PathBuf]) -> Result<()> {
+        let canonical = validate_udid(udid)?;
+        let validated_paths = validate_media_paths(paths)?;
+        let mut args: Vec<&str> = Vec::with_capacity(2 + validated_paths.len());
+        args.push("addmedia");
+        args.push(&canonical);
+        for p in &validated_paths {
+            args.push(p.as_str());
+        }
+        self.run_simctl(&args).await?;
+        Ok(())
+    }
+
+    pub async fn open_link(&self, udid: &str, url: &str) -> Result<()> {
+        let canonical = validate_udid(udid)?;
+        let validated_url = validate_open_link_url(url)?;
+        self.run_simctl(&["openurl", &canonical, &validated_url])
+            .await?;
+        Ok(())
     }
 
     pub async fn ensure_booted(&self, udid: &str) -> Result<()> {
@@ -592,8 +815,10 @@ fn verify_container_confinement(canonical_container: &Path, canonical_udid: &str
 #[cfg(test)]
 mod tests {
     use super::{
-        clear_app_data_container, normalize_runtime_identifier, parse_devices_json,
-        parse_runtimes_json, validate_bundle_id, verify_png_header,
+        SimDevice, clear_app_data_container, find_device_runtime_version, map_privacy_action,
+        map_privacy_service, normalize_ios_runtime_identifier, normalize_runtime_identifier,
+        parse_devices_json, parse_runtimes_json, validate_bundle_id, validate_media_paths,
+        validate_open_link_url, verify_png_header,
     };
     use std::path::PathBuf;
 
@@ -612,22 +837,133 @@ mod tests {
 
     #[test]
     fn runtime_normalization_handles_standard_and_device_suffixed_ids() {
+        for (raw, expected) in [
+            ("com.apple.CoreSimulator.SimRuntime.iOS-27-2", "ios-27.2"),
+            (
+                "com.apple.CoreSimulator.SimRuntime.iOS-27-2-iPhone19-4",
+                "ios-27.2",
+            ),
+            ("SimRuntime.iOS-18-3-1", "ios-18.3.1"),
+            ("ios-27.2", "ios-27.2"),
+            ("iOS 27.2", "ios-27.2"),
+            ("iOS 18.3.1", "ios-18.3.1"),
+            ("iOS-27.2-iPhone19-4", "ios-27.2"),
+            (
+                "com.apple.CoreSimulator.SimRuntime.watchOS-11-0",
+                "watchos-11.0",
+            ),
+        ] {
+            assert_eq!(normalize_runtime_identifier(raw), expected, "raw={raw}");
+            assert_eq!(normalize_ios_runtime_identifier(raw), expected, "raw={raw}");
+        }
+    }
+
+    #[test]
+    fn finds_device_runtime_version_case_insensitively() {
+        let devices = vec![SimDevice {
+            udid: TEST_UDID.to_string(),
+            name: "iPhone 17".to_string(),
+            state: "Booted".to_string(),
+            is_available: true,
+            runtime_identifier: "com.apple.CoreSimulator.SimRuntime.iOS-27-2-iPhone19-4"
+                .to_string(),
+            runtime_normalized: "ios-27.2".to_string(),
+            device_type_identifier: None,
+        }];
         assert_eq!(
-            normalize_runtime_identifier("com.apple.CoreSimulator.SimRuntime.iOS-27-2"),
+            find_device_runtime_version(&devices, &TEST_UDID.to_ascii_lowercase()).unwrap(),
             "ios-27.2"
         );
+        assert!(find_device_runtime_version(&devices, "not-a-udid").is_err());
+        assert!(
+            find_device_runtime_version(&devices, "DA910389-DF0B-4254-BB78-7164E0E27609").is_err()
+        );
+    }
+
+    #[test]
+    fn privacy_action_and_service_mapping_fail_closed() {
+        assert_eq!(map_privacy_action("allow").unwrap(), "grant");
+        assert_eq!(map_privacy_action("GRANT").unwrap(), "grant");
+        assert_eq!(map_privacy_action("deny").unwrap(), "revoke");
+        assert_eq!(map_privacy_action("revoke").unwrap(), "revoke");
+        assert_eq!(map_privacy_action("unset").unwrap(), "reset");
+        assert_eq!(map_privacy_action("reset").unwrap(), "reset");
+        assert!(map_privacy_action("prompt").is_err());
+        assert!(map_privacy_action("").is_err());
+
+        for (raw, expected) in [
+            ("all", "all"),
+            ("calendar", "calendar"),
+            ("contacts-limited", "contacts-limited"),
+            ("contacts_limited", "contacts-limited"),
+            ("contacts", "contacts"),
+            ("location", "location"),
+            ("location-always", "location-always"),
+            ("location_always", "location-always"),
+            ("photos-add", "photos-add"),
+            ("photos_add", "photos-add"),
+            ("photos", "photos"),
+            ("media-library", "media-library"),
+            ("media_library", "media-library"),
+            ("medialibrary", "media-library"),
+            ("microphone", "microphone"),
+            ("motion", "motion"),
+            ("reminders", "reminders"),
+            ("siri", "siri"),
+        ] {
+            assert_eq!(map_privacy_service(raw).unwrap(), expected, "raw={raw}");
+        }
+        assert!(map_privacy_service("camera-unknown").is_err());
+        assert!(map_privacy_service("").is_err());
+    }
+
+    #[test]
+    fn validates_media_paths_and_open_link_urls() {
+        assert!(validate_media_paths(&[]).is_err());
+        assert!(validate_media_paths(&[PathBuf::from("-flag.png")]).is_err());
+
+        let root = unique_temp_dir("media");
+        std::fs::create_dir_all(&root).unwrap();
+        let file = root.join("photo.png");
+        std::fs::write(&file, b"fake").unwrap();
         assert_eq!(
-            normalize_runtime_identifier("com.apple.CoreSimulator.SimRuntime.iOS-27-2-iPhone19-4"),
-            "ios-27.2"
+            validate_media_paths(std::slice::from_ref(&file)).unwrap(),
+            vec![file.to_string_lossy().into_owned()]
+        );
+        assert!(validate_media_paths(std::slice::from_ref(&root)).is_err());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            let link = root.join("sym.png");
+            symlink(&file, &link).unwrap();
+            assert!(validate_media_paths(&[link]).is_err());
+        }
+
+        let _ = std::fs::remove_dir_all(&root);
+
+        assert_eq!(
+            validate_open_link_url("https://example.com/checkout?id=1").unwrap(),
+            "https://example.com/checkout?id=1"
         );
         assert_eq!(
-            normalize_runtime_identifier("SimRuntime.iOS-18-3-1"),
-            "ios-18.3.1"
+            validate_open_link_url("myapp://cart/42").unwrap(),
+            "myapp://cart/42"
         );
-        assert_eq!(
-            normalize_runtime_identifier("com.apple.CoreSimulator.SimRuntime.watchOS-11-0"),
-            "watchos-11.0"
-        );
+        for bad in [
+            "",
+            "   ",
+            "no-scheme",
+            "-flag",
+            "https://example.com/\nnewline",
+            "https://example.com/\rcr",
+            "https://example.com/\0nul",
+        ] {
+            assert!(
+                validate_open_link_url(bad).is_err(),
+                "expected err for {bad:?}"
+            );
+        }
     }
 
     #[test]

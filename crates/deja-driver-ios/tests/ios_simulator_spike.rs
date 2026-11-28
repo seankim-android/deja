@@ -1,8 +1,13 @@
+use deja_core::FailureCategory;
 use deja_driver_ios::{
-    ActKind, ActRequest, AgentClient, HierarchyResponse, IosDriverError, IosRunnerConfig,
-    IosRunnerSession, KeyRequest, Simctl, SimctlEnv, SwipeRequest, TapRequest, TextMatchMode,
-    TypeRequest, WaitForSelectorRequest, WarmupRequest, compute_hierarchy_hash,
-    find_xcodebuild_test_pids_for_udid, send_sigterm_to_pid, validate_udid,
+    ActKind, ActRequest, AgentClient, HierarchyResponse, IosDriver, IosDriverConfig,
+    IosDriverError, IosRunnerConfig, IosRunnerSession, KeyRequest, Simctl, SimctlEnv, SwipeRequest,
+    TapRequest, TextMatchMode, TypeRequest, WaitForSelectorRequest, WarmupRequest,
+    compute_hierarchy_hash, find_xcodebuild_test_pids_for_udid, send_sigterm_to_pid, validate_udid,
+};
+use deja_flow::{
+    DriverCapability, DriverError, FlowExecutionConfig, FlowExecutor, PlatformDriver,
+    StepFailureKind,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -1464,5 +1469,224 @@ async fn benchmark_deja_fixture_optimized_and_session_reuse() {
         "timeout_visible_sample_count: {}",
         miss_wait.visible_sample.len()
     );
+    println!("orphaned_xcodebuild_pids: {}", orphans.len());
+}
+
+#[tokio::test]
+#[ignore = "requires macOS + Xcode + dedicated iOS simulator (DEJA_IOS_TEST_UDID)"]
+async fn flow_executor_drives_deja_fixture_end_to_end_and_reuses_warm_session() {
+    let udid = require_test_udid();
+    assert_no_maestro_or_java_on_sanitized_path().await;
+
+    let env = sanitized_simctl_env();
+    let simctl = Simctl::with_env(env.clone());
+    simctl
+        .ensure_booted(&udid)
+        .await
+        .expect("boot dedicated iOS simulator");
+
+    // 1. Verify DEJA-55 normalized runtime version for this simulator UDID.
+    let runtime_version = simctl
+        .device_runtime_version(&udid)
+        .await
+        .expect("resolve normalized device runtime version");
+    assert!(
+        runtime_version.starts_with("ios-"),
+        "expected normalized iOS runtime starting with `ios-`, got `{runtime_version}`"
+    );
+
+    // 2. Build and install DejaFixture.app.
+    let fixture_build_dir = TempDirGuard::new("fixture-e2e");
+    let app_path = build_deja_fixture(fixture_build_dir.path(), &env).await;
+    simctl
+        .install_app(&udid, &app_path)
+        .await
+        .expect("install DejaFixture.app");
+
+    // 3. Configure production IosDriver with isolated DEJA_HOME and sanitized PATH.
+    let deja_home = TempDirGuard::new("deja-home-driver-e2e");
+    let mut driver_cfg = IosDriverConfig::new(&udid);
+    driver_cfg.deja_home = Some(deja_home.path().to_path_buf());
+    driver_cfg.env = env;
+    driver_cfg.startup_timeout = Duration::from_secs(90);
+
+    let driver = IosDriver::new(driver_cfg).expect("construct IosDriver");
+    assert_eq!(driver.platform(), "ios");
+    assert_eq!(driver.attach_count(), 0);
+    assert_eq!(
+        driver
+            .runtime_version()
+            .await
+            .expect("driver runtime_version"),
+        runtime_version
+    );
+
+    let cancel = CancellationToken::new();
+
+    // 4. Flow #1: Execute REAL checked-in `spikes/003-ios-deja/flows/checkout.yaml`.
+    let flow1_executor = FlowExecutor::new(FlowExecutionConfig::new(repo_root()));
+    let flow1_outcome = flow1_executor
+        .execute_file(
+            &driver,
+            Path::new("spikes/003-ios-deja/flows/checkout.yaml"),
+            &cancel,
+        )
+        .await;
+    assert!(
+        flow1_outcome.passed,
+        "Flow #1 (checkout.yaml) failed: {:?} | failure={:?}",
+        flow1_outcome.failed_step, flow1_outcome.failure
+    );
+    assert_eq!(
+        flow1_outcome.assertions_executed, 12,
+        "expected all 12 assertions in checkout.yaml to execute"
+    );
+    assert_eq!(
+        driver.attach_count(),
+        1,
+        "Flow #1 should perform exactly one runner attach"
+    );
+    let first_runner_pid = driver.runner_pid();
+
+    // 5. Flow #2 on the SAME IosDriver: DEJA_FIXTURE_ORDER=WC-2027 + eraseText + hideKeyboard
+    //    + takeScreenshot + clearKeychain (verifying 0 ms warm attach reuse).
+    let flow2_ws = TempDirGuard::new("flow2-workspace");
+    let flow2_yaml = r#"appId: dev.deja.ios.checkout
+---
+- launchApp:
+    appId: dev.deja.ios.checkout
+    clearState: true
+    clearKeychain: true
+    arguments:
+      DEJA_FIXTURE_ORDER: WC-2027
+- assertVisible:
+    id: screen_login
+- tapOn:
+    id: username_input
+- inputText: qa@example.comXX
+- eraseText: 2
+- assertVisible: qa@example.com
+- tapOn:
+    id: password_input
+- inputText: testing123
+- hideKeyboard
+- tapOn:
+    id: login_button
+- assertVisible:
+    id: screen_catalog
+- tapOn:
+    id: add_to_cart
+- assertVisible:
+    id: screen_cart
+- tapOn:
+    id: checkout_button
+- assertVisible:
+    id: order_confirmation
+- assertVisible: "Order #WC-2027 · Mochi sticker pack"
+- takeScreenshot: wc2027_confirmation
+- clearKeychain
+"#;
+    let flow2_executor = FlowExecutor::new(FlowExecutionConfig::new(flow2_ws.path().to_path_buf()));
+    let flow2_outcome = flow2_executor
+        .execute_yaml(&driver, flow2_yaml, &cancel)
+        .await;
+    assert!(
+        flow2_outcome.passed,
+        "Flow #2 failed: {:?} | failure={:?}",
+        flow2_outcome.failed_step, flow2_outcome.failure
+    );
+    assert_eq!(
+        driver.attach_count(),
+        1,
+        "Flow #2 must reuse the warm runner session (0 ms re-attach)"
+    );
+    assert_eq!(
+        driver.runner_pid(),
+        first_runner_pid,
+        "Flow #2 must stay attached to the exact same runner PID"
+    );
+    assert_eq!(
+        flow2_outcome.screenshots.len(),
+        1,
+        "Flow #2 should capture 1 PNG screenshot"
+    );
+    let shot_bytes = std::fs::read(&flow2_outcome.screenshots[0]).expect("read Flow #2 screenshot");
+    assert!(
+        shot_bytes.len() > 1_024 && shot_bytes.starts_with(b"\x89PNG\r\n\x1a\n"),
+        "Flow #2 screenshot must be a valid non-trivial PNG ({} bytes)",
+        shot_bytes.len()
+    );
+
+    // 6. Fail-closed `back` -> UnsupportedCapability (both through FlowExecutor and direct driver).
+    let back_yaml = "appId: dev.deja.ios.checkout\n---\n- back\n";
+    let back_outcome = flow2_executor
+        .execute_yaml(&driver, back_yaml, &cancel)
+        .await;
+    assert!(!back_outcome.passed);
+    assert_eq!(
+        back_outcome.failed_step.as_ref().map(|s| s.kind),
+        Some(StepFailureKind::UnsupportedCapability)
+    );
+    assert_eq!(
+        back_outcome.failure.as_ref().map(|f| f.category),
+        Some(FailureCategory::Runner)
+    );
+    match driver.back(FIXTURE_BUNDLE_ID, &cancel).await {
+        Err(DriverError::Unsupported(u)) => {
+            assert_eq!(u.platform, "ios");
+            assert_eq!(u.capability, DriverCapability::SystemBack);
+        }
+        other => panic!("expected direct driver.back() Unsupported(SystemBack), got {other:?}"),
+    }
+
+    // 7. Missing assertion -> FailureCategory::ProductAssertion with non-empty VisibleContext.
+    let mut miss_cfg = FlowExecutionConfig::new(flow2_ws.path().to_path_buf());
+    miss_cfg.default_step_timeout = Duration::from_millis(800);
+    let miss_executor = FlowExecutor::new(miss_cfg);
+    let miss_yaml = r#"appId: dev.deja.ios.checkout
+---
+- assertVisible: "Nonexistent DEJA-64 Banner"
+"#;
+    let miss_outcome = miss_executor
+        .execute_yaml(&driver, miss_yaml, &cancel)
+        .await;
+    assert!(!miss_outcome.passed);
+    let miss_failure = miss_outcome
+        .failure
+        .as_ref()
+        .expect("missing assertion must classify failure");
+    assert_eq!(miss_failure.category, FailureCategory::ProductAssertion);
+    assert!(!miss_failure.repair_eligible);
+    let visible_ctx = miss_outcome
+        .failed_step
+        .as_ref()
+        .and_then(|s| s.visible_context.as_ref())
+        .expect("missing assertion must attach VisibleContext");
+    assert!(
+        !visible_ctx.items().is_empty(),
+        "VisibleContext on missing assertion must be non-empty"
+    );
+
+    // 8. Clean shutdown leaves 0 orphaned xcodebuild PIDs for this simulator.
+    driver.shutdown().await.expect("IosDriver shutdown");
+    let orphans = find_xcodebuild_test_pids_for_udid(&udid).expect("ps orphan check");
+    assert!(
+        orphans.is_empty(),
+        "expected 0 orphaned xcodebuild processes after IosDriver shutdown, found {orphans:?}"
+    );
+
+    println!("=== DEJA-64 LIVE FLOW EXECUTOR EVIDENCE ===");
+    println!("runtime_version: {runtime_version}");
+    println!(
+        "flow1_checkout_ms: {} | assertions: {}",
+        flow1_outcome.duration_ms, flow1_outcome.assertions_executed
+    );
+    println!(
+        "flow2_reused_ms: {} | attach_count: {} | screenshot_bytes: {}",
+        flow2_outcome.duration_ms,
+        driver.attach_count(),
+        shot_bytes.len()
+    );
+    println!("miss_visible_context: {}", visible_ctx.format_summary());
     println!("orphaned_xcodebuild_pids: {}", orphans.len());
 }
