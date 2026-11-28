@@ -1,19 +1,10 @@
 # Logs
 logs
 *.log
-# Checked-in deterministic classifier inputs and curated secret-free Android evidence.
-!packages/maestro/test/fixtures/classification/*.log
+# Checked-in curated secret-free Android evidence.
 !spikes/001-android-deja/evidence/walk006-*-output.log
 !spikes/001-android-deja/evidence/walk007-*-output.log
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-pnpm-debug.log*
-lerna-debug.log*
 
-node_modules
-dist
-dist-ssr
 .tmp/
 .deja/
 .walkcache/
@@ -51,7 +42,13 @@ demo/film/device.mp4
 .claude/worktrees/
 .claude/settings.local.json
 dist-bin/
-.*.bun-build
 
-# Rust / Cargo build output (rust/Cargo.lock is intentionally tracked)
-rust/target/
+# Rust / Cargo build output (Cargo.lock is intentionally tracked)
+/target/
+
+# Legacy retired prototype build artifacts (kept ignored for upgraded checkouts)
+/rust/target/
+node_modules/
+dist/
+dist-ssr/
+.*.bun-build

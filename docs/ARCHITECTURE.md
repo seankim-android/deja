@@ -45,7 +45,7 @@ YAML.
 
 ## Plugin boundaries
 
-Vendor-neutral contracts are in [`packages/core/src/contracts.ts`](../packages/core/src/contracts.ts).
+Vendor-neutral contracts live in `crates/deja-core` (ported from the retired prototype's `packages/core/src/contracts.ts`).
 Core imports no Maestro, OpenClaw, React, filesystem, demo, or platform implementation.
 
 | Contract | Responsibility | Current implementation |

@@ -1,6 +1,8 @@
 # Déjà deterministic native iOS fixture
 
-A minimal SwiftUI login → add item → checkout app used only by WALK-011. It shares no product code
+> **Historical prototype record:** The `bun ../../apps/cli/deja.ts` and Maestro 2.12 commands below document the retired WALK-011 prototype (reproducible at pre-`DEJA-75` commit `fedb4e5`). For the current pure-Rust native iOS Simulator spike (`DejaXCTestRunner`, zero Maestro/Bun/Java), see [SPIKE_EVIDENCE.md](../../drivers/ios/DejaXCTestRunner/SPIKE_EVIDENCE.md).
+
+A minimal SwiftUI login → add item → checkout app used by WALK-011 and the native Rust iOS spike (`DEJA-60`). It shares no product code
 with Blankaday or the Android/Web fixtures. Both fields accept only deterministic test values.
 
 ## Reproduce the verified path

@@ -28,12 +28,15 @@ compare like-for-like lifecycles before drawing timing conclusions. See
 
 ## CLI
 
-From a configured fixture directory, use `bun ../../apps/cli/deja.ts …`; from the repository
-root, use `bun run deja -- … --config <path>`. Help works without configuration:
+On the promoted pure-Rust workspace, runnable commands today are:
 
 ```sh
-bun run deja -- --help
+cargo run -- --help
+cargo run -- guide
+cargo run --bin deja-repo-check -- --require-clean --check-chart
 ```
+
+The command table and sections below document the full Déjà CLI contract originally validated on the retired TypeScript/Bun prototype (reproducible at pre-`DEJA-75` commit `fedb4e5` via `bun run deja -- --help`) and currently being ported to native Rust in `DEJA-61`..`DEJA-67`:
 
 | Command | Behavior |
 | --- | --- |
@@ -362,9 +365,8 @@ candidates, similarity, and the selected goal/YAML separately from cold-explorat
 The provider is a tiny in-process lexical hash embedder, not a learned model or remote vector DB. Its
 explicit normalizations are limited to examples such as `check out`/`checkout` and `finish`/`complete`.
 This proves local relevance/fallback plumbing only: **general semantic correctness, broad paraphrase
-coverage, non-English understanding, and complete adversarial detection are not claimed**. See
-[`packages/semantic-local/README.md`](../packages/semantic-local/README.md) and the deterministic WALK-016
-tests before relying on a goal outside those examples.
+coverage, non-English understanding, and complete adversarial detection are not claimed**. Review the
+deterministic WALK-016 lexical-embedding contract (`crates/deja-core`) before relying on a goal outside those examples.
 
 ### Rerun a failed walk: flaky and crash results
 
@@ -824,30 +826,27 @@ Déjà was formerly called WalkCache.
 ## Development
 
 ```sh
-bun install
-bun run lint                  # Oxlint
-bun test --timeout=10000      # deterministic unit/component/integration suite
-bun run build                 # TypeScript project build + optional viewer production bundle
-bun run dev -- --host 127.0.0.1 --port 4173
-bun scripts/validate-release-artifacts.ts  # run in a committed, clean tree
+cargo fmt --all -- --check
+cargo clippy --locked --offline --workspace --all-targets --all-features -- -D warnings
+cargo test --locked --offline --workspace --all-features
+cargo run --locked --offline --bin deja-repo-check -- --require-clean --check-chart
 ```
 
-[`Portable checks`](CI.md) additionally documents the GitHub Actions Linux job, its exact
-clean-checkout commands and artifact scans, and why real Android/Chromium flows remain separately
-evident local integration gates. CI makes no device, model, or iOS claim.
+[`CI checks`](CI.md) additionally documents the GitHub Actions Rust workflow, its exact
+clean-checkout commands and artifact scans, and why real device runs remain separately
+evidenced local integration gates. CI makes no device, model, or iOS simulator claim.
 
-The Vite app is an **optional read-only local viewer**, not the Déjà runtime. It cannot start
-runs or repair and is unnecessary for headless use. See [viewer/README.md](../viewer/README.md).
-The package scripts also include `preview` for the built viewer.
+The legacy TypeScript/Bun packages and optional read-only Vite viewer were retired in `DEJA-75`.
 
 ## Repository guide and evidence workflow
 
 - [`docs/ARCHITECTURE.md`](ARCHITECTURE.md) — implementation and persistence contracts.
+- [`docs/PERFORMANCE.md`](PERFORMANCE.md) — latency baselines and native Rust optimization roadmap.
+- [`docs/AGENT_GUIDE.md`](AGENT_GUIDE.md) — embedded agent guide printed by `deja guide`.
 - [`docs/ROUTE_GRAPH.md`](ROUTE_GRAPH.md) — diagnostic-only bounded Android route graphs, exact
   WALK-020 evidence provenance, conservative screen matching, and acceptance limits.
 - [`docs/SUBFLOW_COMPOSITION.md`](SUBFLOW_COMPOSITION.md) — WALK-018 typed verified login reuse,
   clean-state composed/exact replay, byte-preservation evidence, and narrow composition limits.
-- [`apps/cli/README.md`](../apps/cli/README.md) — CLI adapter details and Web boundary.
 - [`spikes/001-android-deja/`](../spikes/001-android-deja/README.md) — preserved Android fixture/evidence.
 - [`spikes/002-web-deja/`](../spikes/002-web-deja/README.md) — bounded Chromium fixture/evidence.
 - [`spikes/003-ios-deja/`](../spikes/003-ios-deja/README.md) — bounded native iOS simulator fixture/evidence.

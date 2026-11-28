@@ -1,5 +1,7 @@
 # Spike 001: Android Déjà proof of concept
 
+> **Historical prototype record:** The `bun scripts/*.ts` commands below document the retired TypeScript/Bun prototype (reproducible at pre-`DEJA-75` commit `fedb4e5`). The Android fixture app, flows, and evidence in this directory remain active test inputs for the native Rust Android driver (`DEJA-68`).
+
 ## Verdict: VALIDATED
 
 **Question:** can an OpenClaw/Kimi agent explore this Android app through Maestro, save a
@@ -60,8 +62,7 @@ DEJA_OPENCLAW="$(command -v openclaw)" \
 HTTPS endpoint, Kimi model, timeouts, and deterministic fixture-only credentials. The generated pinned
 OpenClaw config invokes `openclaw agent exec --json` with only `maestro__*` tools. A stdio proxy starts
 Maestro MCP and records redacted JSON-RPC activity without copying inline YAML or screen contents into
-the activity log. See [`packages/agent-openclaw/README.md`](../../packages/agent-openclaw/README.md)
-for the invocation, denial, and metric contracts.
+the activity log. (Historical prototype package `packages/agent-openclaw` was retired in `DEJA-75`.)
 
 The parent clears only `dev.deja.checkout` before exploration and again before independent
 verification. The explorer has an empty attempt workspace, no file/shell/web/memory/session tools, no
@@ -102,7 +103,7 @@ SHA-256 values were byte-for-byte unchanged.
 
 ### Conservative local storage (WALK-004)
 
-[`packages/store-local`](../../packages/store-local/README.md) now owns lookup, verified persistence,
+The historical `packages/store-local` prototype package (retired in `DEJA-75`) owned lookup, verified persistence,
 and validation history. New successful flows are content-addressed; lookup additionally requires the
 flow schema and recomputed flow checksum, and a failed latest validation is not a reusable hit. Valid
 schema-1 WALK-003 metadata upgrades without inventing success. Malformed or unsafe memory fails closed;
@@ -188,8 +189,7 @@ WALK-006 does not generate a source patch or decide repairs.
 `bun scripts/deja.ts repair checkout --config repair.config.json` now implements only the two-file
 Checkout source patch. It requires the exact WALK-006 selector failure at
 `dev.deja.checkout:id/checkout_button`; navigation, product assertions, unknown output, other
-selectors, timeouts, and runner errors are refused. The complete deterministic safety contract is in
-[`packages/repair/README.md`](../../packages/repair/README.md).
+selectors, timeouts, and runner errors are refused. (The historical prototype `packages/repair` package was retired in `DEJA-75`.)
 
 The accepted source-repair run used a passing cached walk created from the current stable source, then
 temporarily reversed only [`evidence/walk007-repair.diff`](evidence/walk007-repair.diff) with

@@ -20,7 +20,7 @@ In the legacy architecture, Déjà's own orchestration overhead was ~3–19 ms; 
 
 ### Native Rust + `DejaXCTestRunner` iOS Spike (`DEJA-60`)
 
-Measured on Apple Silicon (`iPhone 17`, iOS `27.2`, Xcode `27.2` `27B52`) in [SPIKE_EVIDENCE.md](../rust/drivers/ios/DejaXCTestRunner/SPIKE_EVIDENCE.md):
+Measured on Apple Silicon (`iPhone 17`, iOS `27.2`, Xcode `27.2` `27B52`) in [SPIKE_EVIDENCE.md](../drivers/ios/DejaXCTestRunner/SPIKE_EVIDENCE.md):
 
 | Phase | Observed (`DEJA-60`) | Share of warm E2E | Primary bottleneck |
 | --- | ---: | ---: | --- |
@@ -56,7 +56,7 @@ Measured on Apple Silicon (`iPhone 17`, iOS `27.2`, Xcode `27.2` `27B52`) in [SP
 
 ## Crate Boundary & Dependency Rules
 
-Every optimization respects [`workspace_boundaries.rs`](../rust/crates/deja-cli/tests/workspace_boundaries.rs) and `unsafe_code = "deny"`:
+Every optimization respects [`workspace_boundaries.rs`](../crates/deja-cli/tests/workspace_boundaries.rs) and `unsafe_code = "deny"`:
 
 - **`deja-core`:** Closed-world dependency allowlist — no `rayon`, `cap-std`, or `criterion`. Use `std::thread::scope` I/O prefetching (0 extra crates) while preserving sequential SHA-256 byte-stream parity.
 - **`deja-flow`:** Pure platform-neutral logic with zero HTTP, SQLite, WebSocket, or CLI dependencies. Explicit `DriverCapabilities` + `UnsupportedCapability` contracts prevent silent platform emulation.

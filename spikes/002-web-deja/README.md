@@ -8,13 +8,10 @@ Déjà viewer and does not share code with the validated Android fixture.
 From this directory, with the Android fixture's environment helper used only for Maestro/Java `PATH`:
 
 ```sh
-bun server.ts
-# In another shell:
-. ../001-android-deja/scripts/env.sh
-bun ../../apps/cli/deja.ts remember checkout \
-  --flow flows/checkout.yaml --config deja.config.json
-bun ../../apps/cli/deja.ts run checkout --config deja.config.json
+python3 server.py
 ```
+
+Historical WALK-010 prototype runs invoked the retired Bun/TypeScript CLI against this same fixture server (`127.0.0.1:4174`). Native Rust Web support is tracked in `DEJA-69`.
 
 The server binds only to `127.0.0.1:4174` by default and serves `public/` with no caching. Both
 fixture fields are deterministic test values; never substitute personal credentials. `appId`/the
