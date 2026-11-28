@@ -2,11 +2,13 @@
 //! multi-build & multi-runtime `validation_runs`, durable `flaky` markers, `goal_embeddings`,
 //! and persistent stat-verified `build_fingerprint_cache`.
 
+use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::fs::{self, Metadata};
 use std::io::{ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use deja_core::{
@@ -14,8 +16,8 @@ use deja_core::{
     LookupHit, LookupMiss, LookupResult, RepairProvenance, StoredClosureCheck, StoredFlowFile,
     StoredValidation, StoredWalk, WalkIdentity, WalkOrigin, WalkValidation,
     check_manifest_flow_path, check_stored_subflows, cmp_utf16, collect_flow_closure,
-    fingerprint_file, fingerprint_tree, normalize_goal, plan_stored_closure,
-    read_stored_flow_files,
+    fingerprint_file_cancellable, fingerprint_tree_cancellable, normalize_goal,
+    plan_stored_closure, read_stored_flow_files,
 };
 use rusqlite::{
     Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params,
@@ -1611,6 +1613,106 @@ impl SqliteWalkStore {
         query_all_runs_for_walk(conn, walk.id)
     }
 
+    /// Read all integrity-verified historical `duration_ms` samples grouped by `goal_key` across
+    /// all `validation_runs` rows with a non-null `duration_ms` (for pooled cross-shard LPT
+    /// scheduling).
+    ///
+    /// Strictly read-only via [`Self::ensure_read_conn`]: returns an empty map without creating
+    /// any database or sidecar files when the store does not exist yet. Every matching
+    /// `validation_runs` row and its parent `walks` row are verified against their
+    /// `integrity_sha256` digests and checked for a non-negative `duration_ms`, failing closed
+    /// with [`StoreError::InvalidWalkMemory`] on any tampering or corruption.
+    pub fn goal_duration_samples_ms(&self) -> Result<BTreeMap<String, Vec<u64>>, StoreError> {
+        let never_cancel = AtomicBool::new(false);
+        self.goal_duration_samples_ms_cancellable(&never_cancel)
+    }
+
+    /// Interruptible variant of [`Self::goal_duration_samples_ms`] that streams rows directly from
+    /// SQLite and checks `cancel` on every row, returning [`StoreError::Cancelled`] immediately if
+    /// cancellation is requested.
+    pub fn goal_duration_samples_ms_cancellable(
+        &self,
+        cancel: &AtomicBool,
+    ) -> Result<BTreeMap<String, Vec<u64>>, StoreError> {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(StoreError::Cancelled);
+        }
+        let mut guard = self.lock_inner()?;
+        if cancel.load(Ordering::Relaxed) {
+            return Err(StoreError::Cancelled);
+        }
+        let Some(conn) = self.ensure_read_conn(&mut guard)? else {
+            return Ok(BTreeMap::new());
+        };
+        if cancel.load(Ordering::Relaxed) {
+            return Err(StoreError::Cancelled);
+        }
+
+        let mut stmt = conn.prepare_cached(
+            "SELECT walk_id, build_fingerprint, runtime, flow_path, flow_sha256,
+                    closure_sha256, subflow_files_json, passed, flaky,
+                    validated_at, origin, failure_category, report_path,
+                    duration_ms, phase_timings_json, integrity_sha256
+             FROM validation_runs
+             WHERE duration_ms IS NOT NULL",
+        )?;
+
+        let mut verified_goal_keys: BTreeMap<i64, String> = BTreeMap::new();
+        let mut grouped: BTreeMap<String, Vec<u64>> = BTreeMap::new();
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            if cancel.load(Ordering::Relaxed) {
+                return Err(StoreError::Cancelled);
+            }
+            let raw = read_validation_run_row(row)?;
+            let validated = validate_run_row_struct(raw)?;
+            let duration_ms = validated.duration_ms.ok_or_else(|| {
+                StoreError::InvalidWalkMemory(
+                    "validation_runs duration_ms unexpectedly NULL".to_string(),
+                )
+            })?;
+            let goal_key = if let Some(cached) = verified_goal_keys.get(&validated.walk_id) {
+                cached.clone()
+            } else {
+                let walk = query_walk_by_id(conn, validated.walk_id).map_err(|err| match err {
+                    StoreError::Sqlite(rusqlite::Error::QueryReturnedNoRows) => {
+                        StoreError::InvalidWalkMemory(format!(
+                            "validation_runs references missing walk_id {}",
+                            validated.walk_id
+                        ))
+                    }
+                    other => other,
+                })?;
+                verified_goal_keys.insert(validated.walk_id, walk.goal_key.clone());
+                walk.goal_key
+            };
+            grouped.entry(goal_key).or_default().push(duration_ms);
+        }
+
+        Ok(grouped)
+    }
+
+    /// Compute the integrity-verified historical median `duration_ms` per `goal_key` across all
+    /// `validation_runs` rows with a non-null `duration_ms`.
+    ///
+    /// Delegates to [`Self::goal_duration_samples_ms`] so read-only safety and tamper detection
+    /// are identical.
+    pub fn median_goal_durations_ms(&self) -> Result<BTreeMap<String, u64>, StoreError> {
+        let grouped = self.goal_duration_samples_ms()?;
+        let mut medians = BTreeMap::new();
+        for (goal_key, mut vals) in grouped {
+            vals.sort_unstable();
+            let n = vals.len();
+            let median = if n % 2 == 1 {
+                vals[n / 2]
+            } else {
+                ((u128::from(vals[n / 2 - 1]) + u128::from(vals[n / 2])) / 2) as u64
+            };
+            medians.insert(goal_key, median);
+        }
+        Ok(medians)
+    }
+
     /// Look up `validation_runs` rows for one `(logical walk, build_fingerprint)` and optional `runtime`.
     ///
     /// When `runtime` is `Some(rt)`, returns at most one run for `runtime_key == rt`.
@@ -1761,6 +1863,24 @@ impl SqliteWalkStore {
         build_path: &Path,
         label: &str,
     ) -> Result<FingerprintCacheResult, StoreError> {
+        let never_cancel = AtomicBool::new(false);
+        self.fingerprint_with_cache_cancellable(root, build_path, label, &never_cancel)
+    }
+
+    /// Interruptible variant of [`Self::fingerprint_with_cache`] that checks `cancel` before and
+    /// during stat snapshotting, streaming SHA-256 hashing, and cache persistence, returning
+    /// `Err(StoreError::Core(CoreError::Cancelled))` on cancellation without writing partial cache
+    /// rows to SQLite.
+    pub fn fingerprint_with_cache_cancellable(
+        &self,
+        root: &Path,
+        build_path: &Path,
+        label: &str,
+        cancel: &AtomicBool,
+    ) -> Result<FingerprintCacheResult, StoreError> {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(StoreError::Core(CoreError::Cancelled));
+        }
         let target = if build_path.is_absolute() {
             build_path.to_path_buf()
         } else {
@@ -1771,7 +1891,11 @@ impl SqliteWalkStore {
         let canonical = fs::canonicalize(&target)?;
         let canonical_str = canonical.to_string_lossy().into_owned();
 
-        let pre_snapshot = collect_build_stat_snapshot(&canonical, is_dir, label)?;
+        let pre_snapshot =
+            collect_build_stat_snapshot_cancellable(&canonical, is_dir, label, cancel)?;
+        if cancel.load(Ordering::Relaxed) {
+            return Err(StoreError::Core(CoreError::Cancelled));
+        }
 
         if let Some(ref pre) = pre_snapshot {
             let cached_digest = {
@@ -1783,7 +1907,8 @@ impl SqliteWalkStore {
                 }
             };
             if let Some(digest) = cached_digest {
-                let post_snapshot = collect_build_stat_snapshot(&canonical, is_dir, label)?;
+                let post_snapshot =
+                    collect_build_stat_snapshot_cancellable(&canonical, is_dir, label, cancel)?;
                 if post_snapshot.as_ref() == Some(pre) {
                     return Ok(FingerprintCacheResult {
                         digest,
@@ -1795,16 +1920,23 @@ impl SqliteWalkStore {
         }
 
         let digest = if is_dir {
-            fingerprint_tree(root, &canonical, label)?
+            fingerprint_tree_cancellable(root, &canonical, label, cancel)?
         } else {
-            fingerprint_file(root, &canonical)?
+            fingerprint_file_cancellable(root, &canonical, cancel)?
         };
+        if cancel.load(Ordering::Relaxed) {
+            return Err(StoreError::Core(CoreError::Cancelled));
+        }
         let bytes_read = pre_snapshot
             .as_ref()
             .map(|snap| snap.total_bytes())
             .unwrap_or_else(|| target_meta.len());
 
-        let post_snapshot = collect_build_stat_snapshot(&canonical, is_dir, label)?;
+        let post_snapshot =
+            collect_build_stat_snapshot_cancellable(&canonical, is_dir, label, cancel)?;
+        if cancel.load(Ordering::Relaxed) {
+            return Err(StoreError::Core(CoreError::Cancelled));
+        }
         if let (Some(pre), Some(post)) = (pre_snapshot, post_snapshot)
             && pre == post
         {
@@ -1812,7 +1944,7 @@ impl SqliteWalkStore {
                 let guard = self.lock_inner()?;
                 guard.mode == OpenMode::Writable
             };
-            if is_writable {
+            if is_writable && !cancel.load(Ordering::Relaxed) {
                 let updated_at = now_iso8601();
                 if let Some(row) = build_cache_row(&canonical_str, &post, &digest, &updated_at) {
                     self.with_write_tx(|tx| {
@@ -3206,13 +3338,20 @@ fn validate_tree_name<'a>(name: &'a OsStr, label: &str) -> Result<&'a str, Store
     })
 }
 
-fn walk_tree_entries(
+fn walk_tree_entries_cancellable(
     dir: &Path,
     prefix: &str,
     label: &str,
     out: &mut Vec<(String, PathBuf)>,
+    cancel: &AtomicBool,
 ) -> Result<(), StoreError> {
+    if cancel.load(Ordering::Relaxed) {
+        return Err(StoreError::Core(CoreError::Cancelled));
+    }
     for entry in fs::read_dir(dir)? {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(StoreError::Core(CoreError::Cancelled));
+        }
         let entry = entry?;
         let file_type = entry.file_type()?;
         let name = entry.file_name();
@@ -3224,7 +3363,7 @@ fn walk_tree_entries(
         };
         let full_path = entry.path();
         if file_type.is_dir() {
-            walk_tree_entries(&full_path, &rel_posix, label, out)?;
+            walk_tree_entries_cancellable(&full_path, &rel_posix, label, out, cancel)?;
         } else if file_type.is_file() {
             out.push((rel_posix, full_path));
         } else {
@@ -3236,11 +3375,15 @@ fn walk_tree_entries(
     Ok(())
 }
 
-fn collect_build_stat_snapshot(
+fn collect_build_stat_snapshot_cancellable(
     canonical: &Path,
     is_dir: bool,
     label: &str,
+    cancel: &AtomicBool,
 ) -> Result<Option<BuildStatSnapshot>, StoreError> {
+    if cancel.load(Ordering::Relaxed) {
+        return Err(StoreError::Core(CoreError::Cancelled));
+    }
     if !is_dir {
         let meta = fs::metadata(canonical)?;
         if !meta.is_file() {
@@ -3256,7 +3399,10 @@ fn collect_build_stat_snapshot(
         return Ok(None);
     };
     let mut files = Vec::new();
-    walk_tree_entries(canonical, "", label, &mut files)?;
+    walk_tree_entries_cancellable(canonical, "", label, &mut files, cancel)?;
+    if cancel.load(Ordering::Relaxed) {
+        return Err(StoreError::Core(CoreError::Cancelled));
+    }
     if files.is_empty() {
         return Err(StoreError::Core(deja_core::CoreError::Fingerprint(
             format!("{label} build tree must contain at least one file"),
@@ -3266,6 +3412,9 @@ fn collect_build_stat_snapshot(
 
     let mut entries = Vec::with_capacity(files.len());
     for (rel_posix, full_path) in files {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(StoreError::Core(CoreError::Cancelled));
+        }
         let meta = fs::symlink_metadata(&full_path)?;
         if !meta.file_type().is_file() {
             return Err(StoreError::Core(deja_core::CoreError::Fingerprint(

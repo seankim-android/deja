@@ -41,6 +41,7 @@ impl CliMcpDriverFactory {
             screen_size: ctx.screen_size.clone(),
             timeout_ms: ctx.timeout_ms,
             env: ctx.env.clone(),
+            staged_build: None,
         }
     }
 }

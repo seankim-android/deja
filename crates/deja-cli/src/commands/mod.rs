@@ -12,3 +12,4 @@ pub mod mcp;
 pub mod migrate;
 pub mod remember;
 pub mod run;
+pub mod run_batch;

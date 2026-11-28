@@ -12,10 +12,11 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use deja_core::fingerprint_tree;
+use deja_core::fingerprint_tree_cancellable;
 use deja_driver_ios::cache::{
     build_cache_key, detect_toolchain, native_simulator_arch, resolve_deja_home,
 };
@@ -64,6 +65,47 @@ impl DriverFactoryError {
     }
 }
 
+/// Cloneable, reference-counted handle to a verified, staged iOS `.app` bundle shared across
+/// parallel batch workers so the `.app` tree is copied and SHA-256 verified only once per batch.
+#[derive(Clone)]
+pub struct SharedStagedBuild {
+    inner: Arc<StagedIosAppBundle>,
+}
+
+impl std::fmt::Debug for SharedStagedBuild {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SharedStagedBuild")
+            .field("app_path", &self.inner.app_path())
+            .field("fingerprint", &self.inner.fingerprint())
+            .finish()
+    }
+}
+
+impl SharedStagedBuild {
+    /// Wrap a verified [`StagedIosAppBundle`] for shared read-only reuse across workers.
+    #[must_use]
+    pub fn new(staged: StagedIosAppBundle) -> Self {
+        Self {
+            inner: Arc::new(staged),
+        }
+    }
+
+    #[must_use]
+    pub fn app_path(&self) -> &Path {
+        self.inner.app_path()
+    }
+
+    #[must_use]
+    pub fn staging_dir(&self) -> &Path {
+        self.inner.staging_dir()
+    }
+
+    #[must_use]
+    pub fn fingerprint(&self) -> &str {
+        self.inner.fingerprint()
+    }
+}
+
 /// Parameters passed to [`DriverFactory`] to resolve runtime, build a driver, and install an app.
 #[derive(Debug, Clone)]
 pub struct DriverContext {
@@ -81,6 +123,8 @@ pub struct DriverContext {
     pub screen_size: Option<serde_json::Value>,
     pub timeout_ms: u64,
     pub env: BTreeMap<String, String>,
+    /// Optional batch-shared staged build artifact verified once and reused across shard workers.
+    pub staged_build: Option<SharedStagedBuild>,
 }
 
 /// Abstract factory for constructing concrete [`PlatformDriver`] instances.
@@ -91,6 +135,21 @@ pub trait DriverFactory: Send + Sync {
         ctx: &'a DriverContext,
         cancel: &'a CancellationToken,
     ) -> FactoryFuture<'a, Result<Option<String>, DriverFactoryError>>;
+
+    /// Optionally stage and verify a shared build artifact once for a multi-goal batch so shard
+    /// workers reuse it without re-copying or re-hashing on every device.
+    fn prepare_batch_build<'a>(
+        &'a self,
+        _ctx: &'a DriverContext,
+        cancel: &'a CancellationToken,
+    ) -> FactoryFuture<'a, Result<Option<SharedStagedBuild>, DriverFactoryError>> {
+        Box::pin(async move {
+            if cancel.is_cancelled() {
+                return Err(DriverFactoryError::Cancelled);
+            }
+            Ok(None)
+        })
+    }
 
     /// Instantiate a concrete [`PlatformDriver`] for the target platform and device.
     fn create<'a>(
@@ -180,6 +239,29 @@ impl DriverFactory for RealDriverFactory {
         })
     }
 
+    fn prepare_batch_build<'a>(
+        &'a self,
+        ctx: &'a DriverContext,
+        cancel: &'a CancellationToken,
+    ) -> FactoryFuture<'a, Result<Option<SharedStagedBuild>, DriverFactoryError>> {
+        Box::pin(async move {
+            if cancel.is_cancelled() {
+                return Err(DriverFactoryError::Cancelled);
+            }
+            if ctx.platform == "ios" {
+                let staged = run_cancellable_ios_bundle_staging(
+                    ctx.build_path.clone(),
+                    ctx.app_id.clone(),
+                    ctx.expected_build_fingerprint.clone(),
+                    cancel,
+                )
+                .await?;
+                return Ok(Some(SharedStagedBuild::new(staged)));
+            }
+            Ok(None)
+        })
+    }
+
     fn create<'a>(
         &'a self,
         ctx: &'a DriverContext,
@@ -191,8 +273,19 @@ impl DriverFactory for RealDriverFactory {
             }
             match ctx.platform.as_str() {
                 "ios" => {
-                    verify_ios_app_bundle(&ctx.build_path, &ctx.app_id)
-                        .map_err(DriverFactoryError::UnsupportedOrConfig)?;
+                    if let Some(ref staged) = ctx.staged_build {
+                        if let Some(ref expected) = ctx.expected_build_fingerprint
+                            && staged.fingerprint() != expected
+                        {
+                            return Err(DriverFactoryError::UnsupportedOrConfig(format!(
+                                "staged iOS `.app` bundle fingerprint ({}) does not match expected ({expected})",
+                                staged.fingerprint()
+                            )));
+                        }
+                    } else {
+                        verify_ios_app_bundle(&ctx.build_path, &ctx.app_id)
+                            .map_err(DriverFactoryError::UnsupportedOrConfig)?;
+                    }
                     let mut cfg = IosDriverConfig::new(&ctx.device)
                         .with_disable_animations(ctx.disable_animations);
                     cfg.env = simctl_env_from_map(&ctx.env);
@@ -260,27 +353,37 @@ impl DriverFactory for RealDriverFactory {
                 return Err(DriverFactoryError::Cancelled);
             }
             if ctx.platform == "ios" {
-                let build_path = ctx.build_path.clone();
-                let app_id = ctx.app_id.clone();
-                let expected_fp = ctx.expected_build_fingerprint.clone();
-                let staged = tokio::select! {
-                    _ = cancel.cancelled() => return Err(DriverFactoryError::Cancelled),
-                    res = tokio::task::spawn_blocking(move || {
-                        stage_and_verify_ios_app_bundle(
-                            &build_path,
-                            &app_id,
-                            expected_fp.as_deref(),
-                        )
-                    }) => match res {
-                        Ok(inner) => inner.map_err(DriverFactoryError::UnsupportedOrConfig)?,
-                        Err(join_err) => {
-                            return Err(DriverFactoryError::Runtime(format!(
-                                "iOS `.app` bundle staging task failed: {join_err}"
-                            )));
-                        }
-                    },
-                };
                 let simctl = Simctl::with_env(simctl_env_from_map(&ctx.env));
+                if let Some(ref staged) = ctx.staged_build {
+                    if let Some(ref expected) = ctx.expected_build_fingerprint
+                        && staged.fingerprint() != expected
+                    {
+                        return Err(DriverFactoryError::UnsupportedOrConfig(format!(
+                            "staged iOS `.app` bundle fingerprint ({}) does not match expected ({expected})",
+                            staged.fingerprint()
+                        )));
+                    }
+                    tokio::select! {
+                        _ = cancel.cancelled() => return Err(DriverFactoryError::Cancelled),
+                        res = simctl.install_app(&ctx.device, staged.app_path()) => res,
+                    }
+                    .map_err(|err| {
+                        DriverFactoryError::Runtime(format!(
+                            "failed to install {} onto simulator {}: {err}",
+                            ctx.build_path.display(),
+                            ctx.device
+                        ))
+                    })?;
+                    return Ok(());
+                }
+
+                let staged = run_cancellable_ios_bundle_staging(
+                    ctx.build_path.clone(),
+                    ctx.app_id.clone(),
+                    ctx.expected_build_fingerprint.clone(),
+                    cancel,
+                )
+                .await?;
                 tokio::select! {
                     _ = cancel.cancelled() => return Err(DriverFactoryError::Cancelled),
                     res = simctl.install_app(&ctx.device, staged.app_path()) => res,
@@ -330,6 +433,66 @@ impl Drop for StagedIosAppBundle {
     }
 }
 
+/// Error returned by [`stage_and_verify_ios_app_bundle_cancellable`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StageBundleError {
+    Cancelled,
+    Failed(String),
+}
+
+async fn run_cancellable_ios_bundle_staging(
+    build_path: PathBuf,
+    app_id: String,
+    expected_fp: Option<String>,
+    cancel: &CancellationToken,
+) -> Result<StagedIosAppBundle, DriverFactoryError> {
+    run_cancellable_ios_bundle_staging_with_hook(build_path, app_id, expected_fp, cancel, None)
+        .await
+}
+
+type StageTestHook = Box<dyn FnOnce(&Path, &AtomicBool) + Send + 'static>;
+
+async fn run_cancellable_ios_bundle_staging_with_hook(
+    build_path: PathBuf,
+    app_id: String,
+    expected_fp: Option<String>,
+    cancel: &CancellationToken,
+    after_copy_hook: Option<StageTestHook>,
+) -> Result<StagedIosAppBundle, DriverFactoryError> {
+    if cancel.is_cancelled() {
+        return Err(DriverFactoryError::Cancelled);
+    }
+    let cancel_flag = Arc::new(AtomicBool::new(false));
+    let worker_flag = Arc::clone(&cancel_flag);
+    let mut handle = tokio::task::spawn_blocking(move || {
+        stage_and_verify_ios_app_bundle_inner(
+            &build_path,
+            &app_id,
+            expected_fp.as_deref(),
+            &worker_flag,
+            after_copy_hook,
+        )
+    });
+    tokio::select! {
+        res = &mut handle => match res {
+            Ok(Ok(staged)) => Ok(staged),
+            Ok(Err(StageBundleError::Cancelled)) => Err(DriverFactoryError::Cancelled),
+            Ok(Err(StageBundleError::Failed(msg))) => Err(DriverFactoryError::UnsupportedOrConfig(msg)),
+            Err(join_err) => Err(DriverFactoryError::Runtime(format!(
+                "iOS `.app` bundle staging task failed: {join_err}"
+            ))),
+        },
+        _ = cancel.cancelled() => {
+            cancel_flag.store(true, Ordering::SeqCst);
+            // Always await the blocking staging worker to completion so any child `/bin/cp` is
+            // killed, partial temporary directories are deleted, and Tokio runtime shutdown never
+            // stalls on a detached blocking task.
+            let _ = handle.await;
+            Err(DriverFactoryError::Cancelled)
+        }
+    }
+}
+
 /// Stage an immutable temporary copy of an iOS `.app` bundle (using APFS copy-on-write `/bin/cp -cR`
 /// on macOS with a safe symlink-refusing recursive copy fallback), verify its `Info.plist`
 /// `CFBundleIdentifier == expected_app_id`, and assert its streaming tree SHA-256 matches
@@ -339,29 +502,77 @@ pub fn stage_and_verify_ios_app_bundle(
     expected_app_id: &str,
     expected_fingerprint: Option<&str>,
 ) -> Result<StagedIosAppBundle, String> {
+    let never_cancel = AtomicBool::new(false);
+    stage_and_verify_ios_app_bundle_cancellable(
+        build_path,
+        expected_app_id,
+        expected_fingerprint,
+        &never_cancel,
+    )
+    .map_err(|err| match err {
+        StageBundleError::Cancelled => "operation cancelled".to_string(),
+        StageBundleError::Failed(msg) => msg,
+    })
+}
+
+/// Cancellable variant of [`stage_and_verify_ios_app_bundle`] that checks `cancel_flag` before
+/// and between filesystem copy/hash steps, terminates any spawned `/bin/cp` child on cancel, and
+/// cleans up the temporary staging directory via [`StagedIosAppBundle::drop`] before returning.
+pub fn stage_and_verify_ios_app_bundle_cancellable(
+    build_path: &Path,
+    expected_app_id: &str,
+    expected_fingerprint: Option<&str>,
+    cancel_flag: &AtomicBool,
+) -> Result<StagedIosAppBundle, StageBundleError> {
+    stage_and_verify_ios_app_bundle_inner(
+        build_path,
+        expected_app_id,
+        expected_fingerprint,
+        cancel_flag,
+        None,
+    )
+}
+
+fn stage_and_verify_ios_app_bundle_inner(
+    build_path: &Path,
+    expected_app_id: &str,
+    expected_fingerprint: Option<&str>,
+    cancel_flag: &AtomicBool,
+    after_copy_hook: Option<StageTestHook>,
+) -> Result<StagedIosAppBundle, StageBundleError> {
+    if cancel_flag.load(Ordering::Relaxed) {
+        return Err(StageBundleError::Cancelled);
+    }
     let lmeta = fs::symlink_metadata(build_path).map_err(|err| {
-        format!(
+        StageBundleError::Failed(format!(
             "iOS buildPath cannot be inspected ({}): {err}",
             build_path.display()
-        )
+        ))
     })?;
     if lmeta.file_type().is_symlink() {
-        return Err(format!(
+        return Err(StageBundleError::Failed(format!(
             "iOS buildPath must not be a symbolic link: {}",
             build_path.display()
-        ));
+        )));
     }
     if !lmeta.file_type().is_dir() || build_path.extension().and_then(|s| s.to_str()) != Some("app")
     {
-        return Err(format!(
+        return Err(StageBundleError::Failed(format!(
             "iOS buildPath must be an existing `.app` bundle directory (got {})",
             build_path.display()
-        ));
+        )));
     }
 
-    let app_name = build_path
-        .file_name()
-        .ok_or_else(|| format!("iOS buildPath has no bundle name: {}", build_path.display()))?;
+    let app_name = build_path.file_name().ok_or_else(|| {
+        StageBundleError::Failed(format!(
+            "iOS buildPath has no bundle name: {}",
+            build_path.display()
+        ))
+    })?;
+
+    if cancel_flag.load(Ordering::Relaxed) {
+        return Err(StageBundleError::Cancelled);
+    }
 
     let seq = BUNDLE_STAGE_SEQ.fetch_add(1, Ordering::Relaxed);
     let nanos = SystemTime::now()
@@ -378,9 +589,11 @@ pub fn stage_and_verify_ios_app_bundle(
         use std::os::unix::fs::DirBuilderExt;
         dir_builder.mode(0o700);
     }
-    dir_builder
-        .create(&temp_dir)
-        .map_err(|err| format!("failed to create temporary iOS bundle staging directory: {err}"))?;
+    dir_builder.create(&temp_dir).map_err(|err| {
+        StageBundleError::Failed(format!(
+            "failed to create temporary iOS bundle staging directory: {err}"
+        ))
+    })?;
 
     let app_path = temp_dir.join(app_name);
     let mut staged = StagedIosAppBundle {
@@ -389,92 +602,164 @@ pub fn stage_and_verify_ios_app_bundle(
         fingerprint: String::new(),
     };
 
-    stage_ios_bundle_tree(build_path, &staged.app_path)?;
-    verify_ios_app_bundle(&staged.app_path, expected_app_id)?;
+    stage_ios_bundle_tree(build_path, &staged.app_path, cancel_flag)?;
+    if let Some(hook) = after_copy_hook {
+        hook(&staged.temp_dir, cancel_flag);
+    }
+    if cancel_flag.load(Ordering::Relaxed) {
+        return Err(StageBundleError::Cancelled);
+    }
+    verify_ios_app_bundle(&staged.app_path, expected_app_id).map_err(StageBundleError::Failed)?;
+    if cancel_flag.load(Ordering::Relaxed) {
+        return Err(StageBundleError::Cancelled);
+    }
 
-    let staged_fp = fingerprint_tree(&staged.temp_dir, &staged.app_path, "iOS")
-        .map_err(|err| format!("failed to fingerprint staged iOS `.app` bundle: {err}"))?;
+    let staged_fp =
+        fingerprint_tree_cancellable(&staged.temp_dir, &staged.app_path, "iOS", cancel_flag)
+            .map_err(|err| match err {
+                deja_core::CoreError::Cancelled => StageBundleError::Cancelled,
+                other => StageBundleError::Failed(format!(
+                    "failed to fingerprint staged iOS `.app` bundle: {other}"
+                )),
+            })?;
+    if cancel_flag.load(Ordering::Relaxed) {
+        return Err(StageBundleError::Cancelled);
+    }
     if let Some(expected) = expected_fingerprint
         && staged_fp != expected
     {
-        return Err(format!(
+        return Err(StageBundleError::Failed(format!(
             "iOS `.app` bundle changed between fingerprinting ({expected}) and installation ({staged_fp}); rebuild or retry with an immutable build artifact"
-        ));
+        )));
     }
     staged.fingerprint = staged_fp;
     Ok(staged)
 }
 
-fn stage_ios_bundle_tree(src: &Path, dst: &Path) -> Result<(), String> {
+fn stage_ios_bundle_tree(
+    src: &Path,
+    dst: &Path,
+    cancel_flag: &AtomicBool,
+) -> Result<(), StageBundleError> {
+    if cancel_flag.load(Ordering::Relaxed) {
+        return Err(StageBundleError::Cancelled);
+    }
     #[cfg(target_os = "macos")]
     {
-        let status = std::process::Command::new("/bin/cp")
+        let spawned = std::process::Command::new("/bin/cp")
             .args(["-cR", "--"])
             .arg(src)
             .arg(dst)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
-            .status();
-        if let Ok(st) = status
-            && st.success()
-        {
-            return Ok(());
+            .spawn();
+        if let Ok(mut child) = spawned {
+            loop {
+                if cancel_flag.load(Ordering::Relaxed) {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let _ = fs::remove_dir_all(dst);
+                    return Err(StageBundleError::Cancelled);
+                }
+                match child.try_wait() {
+                    Ok(Some(st)) if st.success() => return Ok(()),
+                    Ok(Some(_)) => break,
+                    Ok(None) => std::thread::sleep(Duration::from_millis(10)),
+                    Err(_) => {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        break;
+                    }
+                }
+            }
+            let _ = fs::remove_dir_all(dst);
         }
-        let _ = fs::remove_dir_all(dst);
     }
-    copy_tree_nofollow(src, dst)
+    copy_tree_nofollow(src, dst, cancel_flag)
 }
 
-fn copy_tree_nofollow(src: &Path, dst: &Path) -> Result<(), String> {
-    fs::create_dir(dst)
-        .map_err(|err| format!("failed to create staged directory {}: {err}", dst.display()))?;
+fn copy_tree_nofollow(
+    src: &Path,
+    dst: &Path,
+    cancel_flag: &AtomicBool,
+) -> Result<(), StageBundleError> {
+    use std::io::Write;
+    if cancel_flag.load(Ordering::Relaxed) {
+        return Err(StageBundleError::Cancelled);
+    }
+    fs::create_dir(dst).map_err(|err| {
+        StageBundleError::Failed(format!(
+            "failed to create staged directory {}: {err}",
+            dst.display()
+        ))
+    })?;
     let entries = fs::read_dir(src).map_err(|err| {
-        format!(
+        StageBundleError::Failed(format!(
             "failed to read iOS `.app` directory {}: {err}",
             src.display()
-        )
+        ))
     })?;
+    let mut buf = [0u8; 65_536];
     for entry in entries {
-        let entry = entry.map_err(|err| format!("failed to iterate iOS `.app` bundle: {err}"))?;
-        let ftype = entry
-            .file_type()
-            .map_err(|err| format!("failed to inspect iOS `.app` entry type: {err}"))?;
+        if cancel_flag.load(Ordering::Relaxed) {
+            return Err(StageBundleError::Cancelled);
+        }
+        let entry = entry.map_err(|err| {
+            StageBundleError::Failed(format!("failed to iterate iOS `.app` bundle: {err}"))
+        })?;
+        let ftype = entry.file_type().map_err(|err| {
+            StageBundleError::Failed(format!("failed to inspect iOS `.app` entry type: {err}"))
+        })?;
         let src_path = entry.path();
         let dst_path = dst.join(entry.file_name());
         if ftype.is_symlink() {
-            return Err(format!(
+            return Err(StageBundleError::Failed(format!(
                 "iOS `.app` bundle cannot contain symbolic links: {}",
                 src_path.display()
-            ));
+            )));
         }
         if ftype.is_dir() {
-            copy_tree_nofollow(&src_path, &dst_path)?;
+            copy_tree_nofollow(&src_path, &dst_path, cancel_flag)?;
         } else if ftype.is_file() {
             let mut reader = open_read_nofollow(&src_path).map_err(|err| {
-                format!(
+                StageBundleError::Failed(format!(
                     "failed to open iOS `.app` file {}: {err}",
                     src_path.display()
-                )
+                ))
             })?;
             let meta = reader.metadata().map_err(|err| {
-                format!(
+                StageBundleError::Failed(format!(
                     "failed to stat iOS `.app` file {}: {err}",
                     src_path.display()
-                )
+                ))
             })?;
             let mut writer = create_new_nofollow(&dst_path).map_err(|err| {
-                format!(
+                StageBundleError::Failed(format!(
                     "failed to create staged iOS `.app` file {}: {err}",
                     dst_path.display()
-                )
+                ))
             })?;
-            std::io::copy(&mut reader, &mut writer).map_err(|err| {
-                format!(
-                    "failed to copy iOS `.app` file {}: {err}",
-                    src_path.display()
-                )
-            })?;
+            loop {
+                if cancel_flag.load(Ordering::Relaxed) {
+                    return Err(StageBundleError::Cancelled);
+                }
+                let n = reader.read(&mut buf).map_err(|err| {
+                    StageBundleError::Failed(format!(
+                        "failed to copy iOS `.app` file {}: {err}",
+                        src_path.display()
+                    ))
+                })?;
+                if n == 0 {
+                    break;
+                }
+                writer.write_all(&buf[..n]).map_err(|err| {
+                    StageBundleError::Failed(format!(
+                        "failed to copy iOS `.app` file {}: {err}",
+                        src_path.display()
+                    ))
+                })?;
+            }
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
@@ -486,10 +771,10 @@ fn copy_tree_nofollow(src: &Path, dst: &Path) -> Result<(), String> {
                 let _ = meta;
             }
         } else {
-            return Err(format!(
+            return Err(StageBundleError::Failed(format!(
                 "iOS `.app` bundle cannot contain special files: {}",
                 src_path.display()
-            ));
+            )));
         }
     }
     Ok(())
@@ -1033,5 +1318,190 @@ async fn probe_chromium(env: &BTreeMap<String, String>, required: bool) -> Docto
                     .to_string(),
             ),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    #[tokio::test]
+    async fn prepare_batch_build_cancellation_signals_worker_awaits_and_cleans_staging_dir() {
+        let unique = format!(
+            "deja-stage-cancel-test-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        );
+        let root = std::env::temp_dir().join(unique);
+        let app_dir = root.join("Demo.app");
+        fs::create_dir_all(&app_dir).unwrap();
+        let plist = r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>CFBundleIdentifier</key><string>com.example.demo</string>
+</dict></plist>
+"#;
+        fs::write(app_dir.join("Info.plist"), plist).unwrap();
+        fs::write(app_dir.join("Demo"), b"fake-mach-o").unwrap();
+
+        // 1. Pre-cancelled `RealDriverFactory::prepare_batch_build` returns `Cancelled` immediately.
+        let pre_cancel = CancellationToken::new();
+        pre_cancel.cancel();
+        let factory = RealDriverFactory;
+        let ctx = DriverContext {
+            platform: "ios".to_string(),
+            app_id: "com.example.demo".to_string(),
+            device: "00000000-0000-4000-8000-000000000001".to_string(),
+            build_path: app_dir.clone(),
+            expected_build_fingerprint: None,
+            workspace_root: root.clone(),
+            staged_build: None,
+            disable_animations: true,
+            crash_report_grace_ms: 0,
+            crash_report_dir: None,
+            deja_home: None,
+            headless: None,
+            screen_size: None,
+            timeout_ms: 30_000,
+            env: BTreeMap::new(),
+        };
+        let pre_res = factory.prepare_batch_build(&ctx, &pre_cancel).await;
+        assert!(
+            matches!(pre_res, Err(DriverFactoryError::Cancelled)),
+            "pre-cancelled prepare_batch_build must return Cancelled"
+        );
+
+        // 2. Mid-staging cancellation sets `cancel_flag`, awaits the `spawn_blocking` worker to
+        //    completion, and deletes the temporary staging directory via `StagedIosAppBundle::drop`.
+        let cancel = CancellationToken::new();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel::<PathBuf>();
+        let worker_saw_cancel = Arc::new(AtomicBool::new(false));
+        let worker_saw_cancel_hook = Arc::clone(&worker_saw_cancel);
+        let staged_dir_slot: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
+        let staged_dir_slot_hook = Arc::clone(&staged_dir_slot);
+
+        let hook: StageTestHook = Box::new(move |temp_dir: &Path, flag: &AtomicBool| {
+            *staged_dir_slot_hook.lock().unwrap() = Some(temp_dir.to_path_buf());
+            let _ = started_tx.send(temp_dir.to_path_buf());
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while !flag.load(Ordering::SeqCst) {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "cancel_flag was never signaled to blocking staging worker"
+                );
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            worker_saw_cancel_hook.store(true, Ordering::SeqCst);
+        });
+
+        let cancel_trigger = cancel.clone();
+        let trigger_task = tokio::spawn(async move {
+            let dir = started_rx.await.expect("staging hook must run");
+            assert!(
+                dir.exists(),
+                "temp staging directory must exist while staging is in flight"
+            );
+            cancel_trigger.cancel();
+        });
+
+        let res = run_cancellable_ios_bundle_staging_with_hook(
+            app_dir.clone(),
+            "com.example.demo".to_string(),
+            None,
+            &cancel,
+            Some(hook),
+        )
+        .await;
+        trigger_task.await.unwrap();
+
+        assert!(
+            matches!(res, Err(DriverFactoryError::Cancelled)),
+            "cancelled staging must return DriverFactoryError::Cancelled"
+        );
+        assert!(
+            worker_saw_cancel.load(Ordering::SeqCst),
+            "cancel path must signal cancel_flag AND await the spawn_blocking worker before returning"
+        );
+        let staged_dir = staged_dir_slot
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("staging temp dir recorded");
+        assert!(
+            !staged_dir.exists(),
+            "cancelled staging must clean up temporary staging directory {}",
+            staged_dir.display()
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn stage_ios_bundle_cancellable_aborts_during_fingerprinting_and_cleans_up() {
+        let unique = format!(
+            "deja-stage-fp-cancel-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        );
+        let root = std::env::temp_dir().join(unique);
+        let app_dir = root.join("Big.app");
+        fs::create_dir_all(&app_dir).unwrap();
+        let plist = r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>CFBundleIdentifier</key><string>com.example.big</string>
+</dict></plist>
+"#;
+        fs::write(app_dir.join("Info.plist"), plist).unwrap();
+        let blob = vec![0x42u8; deja_core::FINGERPRINT_CHUNK_BYTES * 4];
+        for i in 0..8 {
+            fs::write(app_dir.join(format!("asset-{i:02}.bin")), &blob).unwrap();
+        }
+
+        // Flip `cancel_flag` from a concurrent thread as soon as the copy completes (inside the
+        // fingerprinting window) and ensure either Cancelled (with staging dir cleaned) or valid
+        // completion occurs — never a leaked temp dir or panic.
+        let staged_dir_slot: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
+        let staged_dir_slot_hook = Arc::clone(&staged_dir_slot);
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        let worker_flag = Arc::clone(&cancel_flag);
+
+        let hook: StageTestHook = Box::new(move |temp_dir: &Path, flag: &AtomicBool| {
+            *staged_dir_slot_hook.lock().unwrap() = Some(temp_dir.to_path_buf());
+            // Flip flag directly after copy so `verify_ios_app_bundle` / `fingerprint_tree_cancellable`
+            // sees cancellation before hashing completes.
+            flag.store(true, Ordering::SeqCst);
+        });
+
+        let res = stage_and_verify_ios_app_bundle_inner(
+            &app_dir,
+            "com.example.big",
+            None,
+            &worker_flag,
+            Some(hook),
+        );
+        assert!(
+            matches!(res, Err(StageBundleError::Cancelled)),
+            "expected Cancelled when flag flips before fingerprinting"
+        );
+        let staged_dir = staged_dir_slot
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("temp dir recorded");
+        assert!(
+            !staged_dir.exists(),
+            "temp staging directory must be removed on cancellation: {}",
+            staged_dir.display()
+        );
+
+        let _ = fs::remove_dir_all(&root);
     }
 }

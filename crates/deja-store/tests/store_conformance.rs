@@ -3820,3 +3820,253 @@ fn regression_r3_f7_previous_successful_orders_by_parsed_utc_instant() {
         }
     }
 }
+
+#[test]
+fn median_goal_durations_ms_readonly_medians_and_tamper_rejection() {
+    // 1. Uncreated DB: returns empty map and creates ZERO files/directories/sidecars.
+    let ws_empty = TempWorkspace::new("median-empty");
+    let ro_empty =
+        SqliteWalkStore::open_readonly(SqliteStoreOptions::new(ws_empty.path())).unwrap();
+    let empty_medians = ro_empty.median_goal_durations_ms().unwrap();
+    assert!(empty_medians.is_empty());
+    assert!(ro_empty.goal_duration_samples_ms().unwrap().is_empty());
+    assert!(
+        !ws_empty.path().join(".deja").exists(),
+        "median_goal_durations_ms must not create .deja/ or sidecars on uncreated DB"
+    );
+
+    // 2. Odd, even, NULL-ignored, and overflow-safe large medians across multiple builds/runtimes.
+    let ws = TempWorkspace::new("median-vals");
+    let store = SqliteWalkStore::open_writable(SqliteStoreOptions::new(ws.path())).unwrap();
+    let (flow_path, flow_sha) = write_classic_flow(
+        &ws,
+        ".deja/flows/med/ios.yaml",
+        "appId: com.example.app\n---\n- assertVisible: Home\n",
+    );
+
+    // Goal "Odd Goal": durations [900, 100, 500] -> median 500 (plus a NULL duration row ignored).
+    for (build, dur) in [
+        ("b1", Some(900u64)),
+        ("b2", Some(100u64)),
+        ("b3", Some(500u64)),
+        ("b4", None),
+    ] {
+        let mut val = RecordValidationInput::new(true, "2026-05-01T10:00:00Z");
+        if let Some(ms) = dur {
+            val = val.with_duration_ms(ms);
+        }
+        store
+            .upsert_walk(&UpsertWalkInput {
+                identity: ios_identity("Odd Goal", build),
+                flow_path: flow_path.clone(),
+                flow_sha256: flow_sha.clone(),
+                subflow_files: Some(vec![]),
+                legacy_closure: false,
+                closure_sha256: None,
+                validation: val,
+                exploration: None,
+                repair_history: None,
+            })
+            .unwrap();
+    }
+
+    // Goal "Even Goal": durations [400, 100, 200, 300] -> sorted [100, 200, 300, 400] -> median 250.
+    for (build, dur) in [("b1", 400u64), ("b2", 100), ("b3", 200), ("b4", 300)] {
+        store
+            .upsert_walk(&UpsertWalkInput {
+                identity: ios_identity("Even Goal", build),
+                flow_path: flow_path.clone(),
+                flow_sha256: flow_sha.clone(),
+                subflow_files: Some(vec![]),
+                legacy_closure: false,
+                closure_sha256: None,
+                validation: RecordValidationInput::new(true, "2026-05-01T10:00:00Z")
+                    .with_duration_ms(dur),
+                exploration: None,
+                repair_history: None,
+            })
+            .unwrap();
+    }
+
+    // Goal "Large Even Goal": overflow-safe integer median near i64::MAX.
+    let big_a = (i64::MAX as u64) - 2;
+    let big_b = i64::MAX as u64;
+    for (build, dur) in [("b1", big_a), ("b2", big_b)] {
+        store
+            .upsert_walk(&UpsertWalkInput {
+                identity: ios_identity("Large Even Goal", build),
+                flow_path: flow_path.clone(),
+                flow_sha256: flow_sha.clone(),
+                subflow_files: Some(vec![]),
+                legacy_closure: false,
+                closure_sha256: None,
+                validation: RecordValidationInput::new(true, "2026-05-01T10:00:00Z")
+                    .with_duration_ms(dur),
+                exploration: None,
+                repair_history: None,
+            })
+            .unwrap();
+    }
+
+    // Goal "Null Only": only NULL duration -> absent from map.
+    store
+        .upsert_walk(&UpsertWalkInput {
+            identity: ios_identity("Null Only", "b1"),
+            flow_path: flow_path.clone(),
+            flow_sha256: flow_sha.clone(),
+            subflow_files: Some(vec![]),
+            legacy_closure: false,
+            closure_sha256: None,
+            validation: RecordValidationInput::new(true, "2026-05-01T10:00:00Z"),
+            exploration: None,
+            repair_history: None,
+        })
+        .unwrap();
+
+    let mut samples = store.goal_duration_samples_ms().unwrap();
+    for vals in samples.values_mut() {
+        vals.sort_unstable();
+    }
+    assert_eq!(samples.get("odd goal"), Some(&vec![100, 500, 900]));
+    assert_eq!(samples.get("even goal"), Some(&vec![100, 200, 300, 400]));
+    assert_eq!(samples.get("large even goal"), Some(&vec![big_a, big_b]));
+    assert!(!samples.contains_key("null only"));
+
+    let medians = store.median_goal_durations_ms().unwrap();
+    assert_eq!(medians.get("odd goal"), Some(&500));
+    assert_eq!(medians.get("even goal"), Some(&250));
+    assert_eq!(
+        medians.get("large even goal"),
+        Some(&((i64::MAX as u64) - 1))
+    );
+    assert!(!medians.contains_key("null only"));
+
+    let db_path = store.memory_path().to_path_buf();
+    store.close();
+
+    // Read-only handle sees exact same samples and medians and creates zero sidecars.
+    let ro = SqliteWalkStore::open_readonly(SqliteStoreOptions::new(ws.path())).unwrap();
+    let mut ro_samples = ro.goal_duration_samples_ms().unwrap();
+    for vals in ro_samples.values_mut() {
+        vals.sort_unstable();
+    }
+    assert_eq!(ro_samples, samples);
+    assert_eq!(ro.median_goal_durations_ms().unwrap(), medians);
+    drop(ro);
+
+    // 3. Tampering with `duration_ms` directly in SQLite fails closed with `InvalidWalkMemory`.
+    let raw_conn = Connection::open(&db_path).unwrap();
+    raw_conn
+        .execute(
+            "UPDATE validation_runs SET duration_ms = 999999 WHERE duration_ms = 500",
+            [],
+        )
+        .unwrap();
+    drop(raw_conn);
+
+    let ro_tampered = SqliteWalkStore::open_readonly(SqliteStoreOptions::new(ws.path())).unwrap();
+    assert!(matches!(
+        ro_tampered.goal_duration_samples_ms(),
+        Err(StoreError::InvalidWalkMemory(_))
+    ));
+    let err = ro_tampered
+        .median_goal_durations_ms()
+        .expect_err("tampered duration_ms must fail closed");
+    assert!(
+        matches!(err, StoreError::InvalidWalkMemory(_)),
+        "expected InvalidWalkMemory, got {err:?}"
+    );
+    drop(ro_tampered);
+
+    // 4. Restoring `duration_ms` and tampering with `walks.goal_key` ALSO fails closed.
+    let raw_conn2 = Connection::open(&db_path).unwrap();
+    raw_conn2
+        .execute(
+            "UPDATE validation_runs SET duration_ms = 500 WHERE duration_ms = 999999",
+            [],
+        )
+        .unwrap();
+    raw_conn2
+        .execute(
+            "UPDATE walks SET goal_key = 'tampered goal' WHERE goal_key = 'odd goal'",
+            [],
+        )
+        .unwrap();
+    drop(raw_conn2);
+
+    let ro_tampered_walk =
+        SqliteWalkStore::open_readonly(SqliteStoreOptions::new(ws.path())).unwrap();
+    let err_walk = ro_tampered_walk
+        .median_goal_durations_ms()
+        .expect_err("tampered walks.goal_key must fail closed");
+    assert!(
+        matches!(err_walk, StoreError::InvalidWalkMemory(_)),
+        "expected InvalidWalkMemory, got {err_walk:?}"
+    );
+}
+
+#[test]
+fn goal_duration_samples_ms_cancellable_aborts_cleanly_and_matches_parity() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let ws = TempWorkspace::new("deja66-r3-f4-dur-cancel");
+    let (flow_path, flow_sha) = write_classic_flow(
+        &ws,
+        ".deja/flows/cancel/ios.yaml",
+        "appId: com.demo.app\n---\n- launchApp\n",
+    );
+
+    let store = SqliteWalkStore::open_writable(SqliteStoreOptions::new(ws.path())).unwrap();
+    for i in 0..40u64 {
+        store
+            .upsert_walk(&UpsertWalkInput {
+                identity: ios_identity(&format!("goal {i}"), &format!("b{i}")),
+                flow_path: flow_path.clone(),
+                flow_sha256: flow_sha.clone(),
+                subflow_files: Some(vec![]),
+                legacy_closure: false,
+                closure_sha256: None,
+                validation: RecordValidationInput::new(true, "2026-05-01T10:00:00Z")
+                    .with_duration_ms(100 + i),
+                exploration: None,
+                repair_history: None,
+            })
+            .unwrap();
+    }
+
+    let false_flag = AtomicBool::new(false);
+    let expected = store.goal_duration_samples_ms().unwrap();
+    let cancellable_ok = store
+        .goal_duration_samples_ms_cancellable(&false_flag)
+        .unwrap();
+    assert_eq!(cancellable_ok, expected);
+
+    // Pre-cancelled flag must immediately return `StoreError::Cancelled`.
+    let pre_cancel = AtomicBool::new(true);
+    let pre_err = store
+        .goal_duration_samples_ms_cancellable(&pre_cancel)
+        .expect_err("pre-cancelled duration scan must abort");
+    assert!(
+        matches!(pre_err, StoreError::Cancelled),
+        "expected StoreError::Cancelled, got {pre_err:?}"
+    );
+    assert_eq!(pre_err.code(), "CANCELLED");
+    assert_eq!(pre_err.exit_code(), 1);
+    store.close();
+
+    // Concurrent mid-scan cancellation on read-only handle either cancels cleanly or returns full
+    // exact parity (never partial/corrupt data or lock leaks).
+    let ro = Arc::new(SqliteWalkStore::open_readonly(SqliteStoreOptions::new(ws.path())).unwrap());
+    let flag = Arc::new(AtomicBool::new(false));
+    let ro_bg = Arc::clone(&ro);
+    let flag_bg = Arc::clone(&flag);
+    let handle = std::thread::spawn(move || ro_bg.goal_duration_samples_ms_cancellable(&flag_bg));
+    flag.store(true, Ordering::SeqCst);
+    match handle.join().unwrap() {
+        Err(StoreError::Cancelled) => {}
+        Ok(samples) => assert_eq!(samples, expected),
+        Err(other) => panic!("unexpected error: {other:?}"),
+    }
+    assert!(!ws.path().join(".deja/memory/walks.sqlite.lock").exists());
+}

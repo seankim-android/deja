@@ -5,6 +5,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Duration;
 
+use deja_cli::exit_codes::{
+    CANCEL_SIGNAL_SIGINT, CANCEL_SIGNAL_SIGTERM, exit_code_for_cancel_signal,
+};
 use deja_cli::{CliDeps, run_cli_from_args};
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
@@ -24,23 +27,27 @@ fn main() -> ExitCode {
         .build()
         .expect("failed to build Tokio runtime");
 
-    let signal_exit_code = Arc::new(AtomicU8::new(0));
-    let signal_exit_clone = Arc::clone(&signal_exit_code);
+    let cancel_signal = Arc::new(AtomicU8::new(0));
+    let signal_slot = Arc::clone(&cancel_signal);
 
     let exit_code = runtime.block_on(async move {
         let cancel = CancellationToken::new();
         let signal_cancel = cancel.clone();
         let signal_task = tokio::spawn(async move {
-            let code = wait_for_termination_signal().await;
-            signal_exit_clone.store(code, Ordering::SeqCst);
+            let sig = wait_for_termination_signal().await;
+            signal_slot.store(sig, Ordering::SeqCst);
             signal_cancel.cancel();
         });
 
-        let deps = CliDeps::real(cancel);
+        let deps = CliDeps::real_with_signal(cancel, Arc::clone(&cancel_signal));
         let code = run_cli_from_args(std::env::args_os(), &deps).await;
         signal_task.abort();
-        let sig = signal_exit_code.load(Ordering::SeqCst);
-        if sig != 0 && code == 0 { sig } else { code }
+        let sig = cancel_signal.load(Ordering::SeqCst);
+        if sig != 0 && code == 0 {
+            exit_code_for_cancel_signal(sig)
+        } else {
+            code
+        }
     });
 
     // Bounded runtime shutdown so a blocked Tokio blocking-pool `stdin` read (`read(0, ...)`)
@@ -56,20 +63,20 @@ async fn wait_for_termination_signal() -> u8 {
         use tokio::signal::unix::{SignalKind, signal};
         let mut sigterm = signal(SignalKind::terminate()).ok();
         tokio::select! {
-            _ = tokio::signal::ctrl_c() => 130,
+            _ = tokio::signal::ctrl_c() => CANCEL_SIGNAL_SIGINT,
             _ = async {
                 if let Some(ref mut s) = sigterm {
                     s.recv().await;
                 } else {
                     std::future::pending::<()>().await;
                 }
-            } => 143,
+            } => CANCEL_SIGNAL_SIGTERM,
         }
     }
     #[cfg(not(unix))]
     {
         let _ = tokio::signal::ctrl_c().await;
-        130
+        CANCEL_SIGNAL_SIGINT
     }
 }
 

@@ -13,6 +13,7 @@ use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU8;
 
 use clap::Parser;
 use tokio_util::sync::CancellationToken;
@@ -47,6 +48,8 @@ pub struct CliDeps {
     pub driver_factory: Arc<dyn DriverFactory>,
     pub doctor_probes: Arc<dyn DoctorProbes>,
     pub cancel: CancellationToken,
+    /// OS termination signal recorded BEFORE `cancel.cancel()` (`0` = none/token, `2` = SIGINT, `15` = SIGTERM).
+    pub cancel_signal: Arc<AtomicU8>,
 }
 
 impl CliDeps {
@@ -54,6 +57,13 @@ impl CliDeps {
     /// `RealDriverFactory`, and `RealDoctorProbes`.
     #[must_use]
     pub fn real(cancel: CancellationToken) -> Self {
+        Self::real_with_signal(cancel, Arc::new(AtomicU8::new(0)))
+    }
+
+    /// Construct production [`CliDeps`] wired with a shared `cancel_signal` slot so signal
+    /// handlers can report exact POSIX exit codes (`130` for `SIGINT`, `143` for `SIGTERM`).
+    #[must_use]
+    pub fn real_with_signal(cancel: CancellationToken, cancel_signal: Arc<AtomicU8>) -> Self {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let env: BTreeMap<String, String> = std::env::vars().collect();
         let home_dir = env
@@ -69,6 +79,7 @@ impl CliDeps {
             driver_factory: Arc::new(RealDriverFactory),
             doctor_probes: Arc::new(RealDoctorProbes),
             cancel,
+            cancel_signal,
         }
     }
 }
