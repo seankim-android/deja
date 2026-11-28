@@ -154,6 +154,22 @@ fn rejects_invalid_json_and_secret_leaks() {
     let err = validate_repo(&repo_unicode_leak.path, RepoCheckOptions::default())
         .expect_err("Unicode-prefixed GitHub token must still fail ASCII-boundary scan");
     assert!(err.contains("GitHub credential"), "{err}");
+
+    // Stack-safe JSON syntax validation must accept deeply nested valid JSON (>128 levels)
+    // matching legacy JS/Bun JSON.parse parity.
+    let repo_nested_json = TempGitRepo::new("deep-nested-json");
+    let nested = format!("{}1{}", "[".repeat(200), "]".repeat(200));
+    repo_nested_json.write("nested.json", nested.as_bytes());
+    repo_nested_json.commit_all("initial");
+    let report = validate_repo(
+        &repo_nested_json.path,
+        RepoCheckOptions {
+            require_clean: true,
+            check_chart: false,
+        },
+    )
+    .expect("200-level nested valid JSON must pass");
+    assert_eq!(report.json_files, 1);
 }
 
 #[test]

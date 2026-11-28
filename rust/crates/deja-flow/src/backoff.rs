@@ -151,6 +151,7 @@ pub struct HashableNode<'a> {
     pub label: &'a str,
     pub title: &'a str,
     pub value: Option<&'a str>,
+    pub placeholder_value: Option<&'a str>,
     pub enabled: bool,
     pub selected: bool,
     pub has_focus: bool,
@@ -286,6 +287,7 @@ pub fn hash_hierarchy_nodes<'a>(nodes: impl IntoIterator<Item = HashableNode<'a>
         write_field(&mut hash, node.label);
         write_field(&mut hash, node.title);
         write_field(&mut hash, node.value.unwrap_or(""));
+        write_field(&mut hash, node.placeholder_value.unwrap_or(""));
         let flags: u8 = u8::from(node.enabled)
             | (u8::from(node.selected) << 1)
             | (u8::from(node.has_focus) << 2)
@@ -329,6 +331,7 @@ mod tests {
             label,
             title: "",
             value: None,
+            placeholder_value: None,
             enabled: true,
             selected: false,
             has_focus: false,
@@ -498,16 +501,24 @@ mod tests {
         let mut title_updated = child_inside_group;
         title_updated.title = "Added";
 
+        let mut placeholder_updated = child_inside_group;
+        placeholder_updated.placeholder_value = Some("Enter promo code");
+
         let mut sibling_after_group = sample_node(2, Some(0), 1, "app", "Button", "buy_button", "");
         sibling_after_group.title = "Buy now";
 
         let h_nested = hash_hierarchy_nodes([root, group, child_inside_group]);
         let h_title_changed = hash_hierarchy_nodes([root, group, title_updated]);
+        let h_placeholder_changed = hash_hierarchy_nodes([root, group, placeholder_updated]);
         let h_sibling = hash_hierarchy_nodes([root, group, sibling_after_group]);
 
         assert_ne!(
             h_nested, h_title_changed,
             "title-only update must change hierarchy hash"
+        );
+        assert_ne!(
+            h_nested, h_placeholder_changed,
+            "placeholder-only update must change hierarchy hash"
         );
         assert_ne!(
             h_nested, h_sibling,

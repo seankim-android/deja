@@ -1,9 +1,8 @@
 //! Pure-Rust repository artifact validator and results-chart SVG generator.
 //!
 //! Replaces `scripts/validate-release-artifacts.ts` and `scripts/render-results-chart.ts`
-//! with zero Bun/Node runtime dependency.
+//! with zero Bun/Node runtime dependency and zero new external crates beyond the workspace.
 
-use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -57,41 +56,178 @@ fn run_git(root: &Path, args: &[&str]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-fn forbidden_path_patterns() -> Vec<Regex> {
-    [
-        r"(^|/)\.deja/",
-        r"(^|/)\.tmp/",
-        r"(^|/)node_modules/",
-        r"(^|/)dist/",
-        r"(^|/)\.gradle/",
-        r"\.(apk|aab|class|pyc)$",
-        r"(^|/)(build|dist|out)/.*\.jar$",
-        r"(^|/)demo/assets/",
-        r"(^|/)demo/rehearsal/scene-[0-9]+\.png$",
-        r"(^|/)target/",
-    ]
-    .into_iter()
-    .map(|pat| Regex::new(pat).expect("valid static forbidden path regex"))
-    .collect()
+fn has_path_dir_segment(path: &str, segment: &str) -> bool {
+    let mut parts = path.split('/');
+    // A directory segment must precede at least one trailing component.
+    let mut prev = parts.next();
+    for next in parts {
+        if prev == Some(segment) {
+            return true;
+        }
+        prev = Some(next);
+    }
+    false
 }
 
-fn forbidden_content_patterns() -> Vec<(&'static str, Regex)> {
-    // Split sensitive literal tokens across concat! so scanning this source file never self-triggers.
-    [
-        ("private home path", concat!("/Users/", "seankim")),
-        ("private key", concat!("BEGIN ", "[A-Z ]*", "PRIVATE KEY")),
-        (
-            "GitHub credential",
-            concat!(r"(?-u:\b)gh", "[opusr]_[A-Za-z0-9]{20,}"),
-        ),
-        (
-            "OpenAI-shaped credential",
-            concat!(r"(?-u:\b)sk", "-[A-Za-z0-9_-]{24,}"),
-        ),
-    ]
-    .into_iter()
-    .map(|(label, pat)| (label, Regex::new(pat).expect("valid static leak regex")))
-    .collect()
+fn is_forbidden_tracked_path(path: &str) -> bool {
+    if has_path_dir_segment(path, ".deja")
+        || has_path_dir_segment(path, ".tmp")
+        || has_path_dir_segment(path, "node_modules")
+        || has_path_dir_segment(path, "dist")
+        || has_path_dir_segment(path, ".gradle")
+        || has_path_dir_segment(path, "target")
+    {
+        return true;
+    }
+
+    if path.ends_with(".apk")
+        || path.ends_with(".aab")
+        || path.ends_with(".class")
+        || path.ends_with(".pyc")
+    {
+        return true;
+    }
+
+    if path.ends_with(".jar")
+        && (has_path_dir_segment(path, "build")
+            || has_path_dir_segment(path, "dist")
+            || has_path_dir_segment(path, "out"))
+    {
+        return true;
+    }
+
+    if path.starts_with("demo/assets/") || path.contains("/demo/assets/") {
+        return true;
+    }
+
+    if let Some(rest) = path
+        .strip_prefix("demo/rehearsal/scene-")
+        .or_else(|| path.split_once("/demo/rehearsal/scene-").map(|(_, r)| r))
+        && let Some(digits) = rest.strip_suffix(".png")
+        && !digits.is_empty()
+        && digits.bytes().all(|b| b.is_ascii_digit())
+    {
+        return true;
+    }
+
+    false
+}
+
+fn is_ascii_word_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
+fn contains_private_key_header(text: &str) -> bool {
+    let prefix = concat!("BEGIN", " ");
+    let suffix = concat!("PRIVATE", " KEY");
+    let mut offset = 0;
+    while let Some(pos) = text[offset..].find(prefix) {
+        let start = offset + pos + prefix.len();
+        let bytes = text.as_bytes();
+        let mut cursor = start;
+        while cursor < bytes.len() && (bytes[cursor].is_ascii_uppercase() || bytes[cursor] == b' ')
+        {
+            if text[cursor..].starts_with(suffix) {
+                return true;
+            }
+            cursor += 1;
+        }
+        offset = start;
+    }
+    false
+}
+
+fn contains_github_credential(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i + 24 <= bytes.len() {
+        if bytes[i] == b'g'
+            && bytes[i + 1] == b'h'
+            && matches!(bytes[i + 2], b'o' | b'p' | b'u' | b's' | b'r')
+            && bytes[i + 3] == b'_'
+            && (i == 0 || !is_ascii_word_byte(bytes[i - 1]))
+        {
+            let mut j = i + 4;
+            while j < bytes.len() && bytes[j].is_ascii_alphanumeric() {
+                j += 1;
+            }
+            if j - (i + 4) >= 20 {
+                return true;
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
+fn contains_openai_credential(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i + 27 <= bytes.len() {
+        if bytes[i] == b's'
+            && bytes[i + 1] == b'k'
+            && bytes[i + 2] == b'-'
+            && (i == 0 || !is_ascii_word_byte(bytes[i - 1]))
+        {
+            let mut j = i + 3;
+            while j < bytes.len()
+                && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_' || bytes[j] == b'-')
+            {
+                j += 1;
+            }
+            if j - (i + 3) >= 24 {
+                return true;
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
+fn scan_secret_leaks(contents: &str) -> Vec<&'static str> {
+    let mut found = Vec::new();
+    if contents.contains(concat!("/Users/", "seankim")) {
+        found.push("private home path");
+    }
+    if contains_private_key_header(contents) {
+        found.push("private key");
+    }
+    if contains_github_credential(contents) {
+        found.push("GitHub credential");
+    }
+    if contains_openai_credential(contents) {
+        found.push("OpenAI-shaped credential");
+    }
+    found
+}
+
+/// Extracts Markdown link targets matching `!?\[[^\]\n]*\]\(([^)\n]+)\)` without regex crates.
+fn extract_markdown_link_targets(contents: &str) -> Vec<&str> {
+    let mut targets = Vec::new();
+    let bytes = contents.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'[' {
+            let mut j = i + 1;
+            while j < bytes.len() && bytes[j] != b']' && bytes[j] != b'\n' {
+                j += 1;
+            }
+            if j + 1 < bytes.len() && bytes[j] == b']' && bytes[j + 1] == b'(' {
+                let target_start = j + 2;
+                let mut k = target_start;
+                while k < bytes.len() && bytes[k] != b')' && bytes[k] != b'\n' {
+                    k += 1;
+                }
+                if k > target_start && k < bytes.len() && bytes[k] == b')' {
+                    targets.push(&contents[target_start..k]);
+                    i = k + 1;
+                    continue;
+                }
+            }
+        }
+        i += 1;
+    }
+    targets
 }
 
 fn is_external_scheme(target: &str) -> bool {
@@ -104,6 +240,258 @@ fn is_external_scheme(target: &str) -> bool {
     };
     first.is_ascii_alphabetic()
         && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '.' | '-'))
+}
+
+/// Stack-safe, iterative RFC 8259 JSON syntax validator that supports arbitrary nesting depth
+/// without hitting `serde_json::Value`'s 128-level recursion cap.
+pub fn validate_json_syntax(input: &str) -> Result<(), String> {
+    #[derive(Clone, Copy)]
+    enum Container {
+        Array,
+        Object,
+    }
+
+    #[derive(Clone, Copy)]
+    enum Expect {
+        Value,
+        ArrayElementOrEnd,
+        ObjectKeyOrEnd,
+        ObjectKey,
+        ObjectColon,
+        AfterValue,
+    }
+
+    let bytes = input.as_bytes();
+    let mut pos = 0_usize;
+
+    let skip_ws = |p: &mut usize| {
+        while *p < bytes.len() && matches!(bytes[*p], b' ' | b'\t' | b'\r' | b'\n') {
+            *p += 1;
+        }
+    };
+
+    let parse_string = |p: &mut usize| -> Result<(), String> {
+        if *p >= bytes.len() || bytes[*p] != b'"' {
+            return Err(format!("expected '\"' at byte {}", *p));
+        }
+        *p += 1;
+        while *p < bytes.len() {
+            let b = bytes[*p];
+            if b == b'"' {
+                *p += 1;
+                return Ok(());
+            }
+            if b == b'\\' {
+                *p += 1;
+                if *p >= bytes.len() {
+                    return Err("unterminated escape sequence in string".to_string());
+                }
+                match bytes[*p] {
+                    b'"' | b'\\' | b'/' | b'b' | b'f' | b'n' | b'r' | b't' => {
+                        *p += 1;
+                    }
+                    b'u' => {
+                        *p += 1;
+                        if *p + 4 > bytes.len()
+                            || !bytes[*p..*p + 4].iter().all(|c| c.is_ascii_hexdigit())
+                        {
+                            return Err(format!("invalid \\u escape at byte {}", *p));
+                        }
+                        *p += 4;
+                    }
+                    other => {
+                        return Err(format!(
+                            "invalid escape '\\{}' at byte {}",
+                            other as char, *p
+                        ));
+                    }
+                }
+            } else if b < 0x20 {
+                return Err(format!(
+                    "unescaped control character 0x{b:02x} at byte {}",
+                    *p
+                ));
+            } else {
+                *p += 1;
+            }
+        }
+        Err("unterminated JSON string".to_string())
+    };
+
+    let parse_number = |p: &mut usize| -> Result<(), String> {
+        let start = *p;
+        if *p < bytes.len() && bytes[*p] == b'-' {
+            *p += 1;
+        }
+        if *p >= bytes.len() {
+            return Err(format!("incomplete number at byte {start}"));
+        }
+        match bytes[*p] {
+            b'0' => {
+                *p += 1;
+            }
+            b'1'..=b'9' => {
+                *p += 1;
+                while *p < bytes.len() && bytes[*p].is_ascii_digit() {
+                    *p += 1;
+                }
+            }
+            _ => return Err(format!("invalid number at byte {start}")),
+        }
+        if *p < bytes.len() && bytes[*p] == b'.' {
+            *p += 1;
+            if *p >= bytes.len() || !bytes[*p].is_ascii_digit() {
+                return Err(format!("expected fraction digits at byte {}", *p));
+            }
+            while *p < bytes.len() && bytes[*p].is_ascii_digit() {
+                *p += 1;
+            }
+        }
+        if *p < bytes.len() && matches!(bytes[*p], b'e' | b'E') {
+            *p += 1;
+            if *p < bytes.len() && matches!(bytes[*p], b'+' | b'-') {
+                *p += 1;
+            }
+            if *p >= bytes.len() || !bytes[*p].is_ascii_digit() {
+                return Err(format!("expected exponent digits at byte {}", *p));
+            }
+            while *p < bytes.len() && bytes[*p].is_ascii_digit() {
+                *p += 1;
+            }
+        }
+        Ok(())
+    };
+
+    let mut stack: Vec<Container> = Vec::new();
+    let mut expect = Expect::Value;
+
+    loop {
+        skip_ws(&mut pos);
+        match expect {
+            Expect::Value => {
+                if pos >= bytes.len() {
+                    return Err("unexpected end of JSON input".to_string());
+                }
+                match bytes[pos] {
+                    b'[' => {
+                        pos += 1;
+                        stack.push(Container::Array);
+                        expect = Expect::ArrayElementOrEnd;
+                    }
+                    b'{' => {
+                        pos += 1;
+                        stack.push(Container::Object);
+                        expect = Expect::ObjectKeyOrEnd;
+                    }
+                    b'"' => {
+                        parse_string(&mut pos)?;
+                        expect = Expect::AfterValue;
+                    }
+                    b'-' | b'0'..=b'9' => {
+                        parse_number(&mut pos)?;
+                        expect = Expect::AfterValue;
+                    }
+                    b't' if input[pos..].starts_with("true") => {
+                        pos += 4;
+                        expect = Expect::AfterValue;
+                    }
+                    b'f' if input[pos..].starts_with("false") => {
+                        pos += 5;
+                        expect = Expect::AfterValue;
+                    }
+                    b'n' if input[pos..].starts_with("null") => {
+                        pos += 4;
+                        expect = Expect::AfterValue;
+                    }
+                    other => {
+                        return Err(format!(
+                            "unexpected token '{}' at byte {pos}",
+                            other as char
+                        ));
+                    }
+                }
+            }
+            Expect::ArrayElementOrEnd => {
+                if pos < bytes.len() && bytes[pos] == b']' {
+                    pos += 1;
+                    stack.pop();
+                    expect = Expect::AfterValue;
+                } else {
+                    expect = Expect::Value;
+                }
+            }
+            Expect::ObjectKeyOrEnd => {
+                if pos < bytes.len() && bytes[pos] == b'}' {
+                    pos += 1;
+                    stack.pop();
+                    expect = Expect::AfterValue;
+                } else {
+                    expect = Expect::ObjectKey;
+                }
+            }
+            Expect::ObjectKey => {
+                parse_string(&mut pos)?;
+                expect = Expect::ObjectColon;
+            }
+            Expect::ObjectColon => {
+                if pos >= bytes.len() || bytes[pos] != b':' {
+                    return Err(format!("expected ':' at byte {pos}"));
+                }
+                pos += 1;
+                expect = Expect::Value;
+            }
+            Expect::AfterValue => match stack.last().copied() {
+                None => {
+                    if pos != bytes.len() {
+                        return Err(format!("trailing characters at byte {pos}"));
+                    }
+                    return Ok(());
+                }
+                Some(Container::Array) => {
+                    if pos >= bytes.len() {
+                        return Err("unclosed JSON array".to_string());
+                    }
+                    match bytes[pos] {
+                        b',' => {
+                            pos += 1;
+                            expect = Expect::Value;
+                        }
+                        b']' => {
+                            pos += 1;
+                            stack.pop();
+                        }
+                        other => {
+                            return Err(format!(
+                                "expected ',' or ']' at byte {pos}, got '{}'",
+                                other as char
+                            ));
+                        }
+                    }
+                }
+                Some(Container::Object) => {
+                    if pos >= bytes.len() {
+                        return Err("unclosed JSON object".to_string());
+                    }
+                    match bytes[pos] {
+                        b',' => {
+                            pos += 1;
+                            expect = Expect::ObjectKey;
+                        }
+                        b'}' => {
+                            pos += 1;
+                            stack.pop();
+                        }
+                        other => {
+                            return Err(format!(
+                                "expected ',' or '}}' at byte {pos}, got '{}'",
+                                other as char
+                            ));
+                        }
+                    }
+                }
+            },
+        }
+    }
 }
 
 /// Validates tracked repository artifacts, Markdown links, JSON syntax, secret leaks,
@@ -129,11 +517,10 @@ pub fn validate_repo(root: &Path, options: RepoCheckOptions) -> Result<RepoCheck
     let raw_files = run_git(&canonical_root, &["ls-files", "-z"])?;
     let files: Vec<&str> = raw_files.split('\0').filter(|s| !s.is_empty()).collect();
 
-    let forbidden_paths = forbidden_path_patterns();
     let forbidden_tracked: Vec<&str> = files
         .iter()
         .copied()
-        .filter(|path| forbidden_paths.iter().any(|re| re.is_match(path)))
+        .filter(|path| is_forbidden_tracked_path(path))
         .collect();
     if !forbidden_tracked.is_empty() {
         return Err(format!(
@@ -142,9 +529,6 @@ pub fn validate_repo(root: &Path, options: RepoCheckOptions) -> Result<RepoCheck
         ));
     }
 
-    let md_link_re = Regex::new(r"!?\[[^\]\n]*\]\(([^)\n]+)\)").expect("valid markdown link regex");
-    let forbidden_contents = forbidden_content_patterns();
-
     let mut text_files = 0_usize;
     let mut json_files = 0_usize;
     let mut markdown_links = 0_usize;
@@ -152,7 +536,7 @@ pub fn validate_repo(root: &Path, options: RepoCheckOptions) -> Result<RepoCheck
     let mut broken_markdown_links: Vec<String> = Vec::new();
 
     for rel_path in &files {
-        let full_path = root.join(rel_path);
+        let full_path = canonical_root.join(rel_path);
         let bytes = fs::read(&full_path)
             .map_err(|err| format!("failed to read tracked file {rel_path}: {err}"))?;
         if bytes.contains(&0) {
@@ -164,11 +548,11 @@ pub fn validate_repo(root: &Path, options: RepoCheckOptions) -> Result<RepoCheck
         if rel_path.ends_with(".md") {
             let parent_dir = Path::new(rel_path)
                 .parent()
-                .map(|p| root.join(p))
-                .unwrap_or_else(|| root.to_path_buf());
-            for caps in md_link_re.captures_iter(&contents) {
-                let raw_target = caps.get(1).map(|m| m.as_str()).unwrap_or("").trim();
+                .map(|p| canonical_root.join(p))
+                .unwrap_or_else(|| canonical_root.clone());
+            for raw_target in extract_markdown_link_targets(&contents) {
                 let target = raw_target
+                    .trim()
                     .trim_start_matches('<')
                     .trim_end_matches('>')
                     .split_whitespace()
@@ -188,7 +572,7 @@ pub fn validate_repo(root: &Path, options: RepoCheckOptions) -> Result<RepoCheck
                 }
                 markdown_links += 1;
                 let resolved = if let Some(stripped) = local_path.strip_prefix('/') {
-                    root.join(stripped)
+                    canonical_root.join(stripped)
                 } else {
                     parent_dir.join(local_path)
                 };
@@ -200,15 +584,13 @@ pub fn validate_repo(root: &Path, options: RepoCheckOptions) -> Result<RepoCheck
 
         // Legacy TypeScript tsconfig files are JSONC (comments/trailing commas).
         if rel_path.ends_with(".json") && !rel_path.starts_with("tsconfig") {
-            serde_json::from_str::<serde_json::Value>(&contents)
+            validate_json_syntax(&contents)
                 .map_err(|err| format!("Invalid JSON in {rel_path}: {err}"))?;
             json_files += 1;
         }
 
-        for (label, re) in &forbidden_contents {
-            if re.is_match(&contents) {
-                leaks.push(format!("{rel_path}: {label}"));
-            }
+        for label in scan_secret_leaks(&contents) {
+            leaks.push(format!("{rel_path}: {label}"));
         }
     }
 
@@ -226,14 +608,18 @@ pub fn validate_repo(root: &Path, options: RepoCheckOptions) -> Result<RepoCheck
     }
 
     let results_chart_valid = if options.check_chart {
-        let expected = render_results_chart_svg(root)?;
-        let chart_path = root.join("docs/results-chart.svg");
+        let expected = render_results_chart_svg(&canonical_root)?;
+        let chart_path = canonical_root.join("docs/results-chart.svg");
         let current = fs::read_to_string(&chart_path).unwrap_or_default();
         if current != expected {
-            return Err(
-                "docs/results-chart.svg is out of date; run `cargo run --bin deja-repo-check -- --render-chart`"
-                    .to_string(),
-            );
+            let regen_cmd = if canonical_root.join("Cargo.toml").exists() {
+                "cargo run --bin deja-repo-check -- --render-chart"
+            } else {
+                "cargo run --manifest-path rust/Cargo.toml --bin deja-repo-check -- --render-chart"
+            };
+            return Err(format!(
+                "docs/results-chart.svg is out of date; run `{regen_cmd}`"
+            ));
         }
         Some(true)
     } else {

@@ -31,6 +31,5 @@ deja-explore.workspace = true
 deja-flow.workspace = true
 deja-mcp.workspace = true
 deja-store.workspace = true
-regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
