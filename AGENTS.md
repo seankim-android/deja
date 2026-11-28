@@ -15,7 +15,7 @@ Déjà is an Apache-2.0 memory layer and native runner for `maestro/v1` app test
 
 ## Plan -> Execute Workflow
 
-- For non-trivial tasks, plan first on Carbon (`pro` tier) and execute on Neon (`inherit`).
+- Structure non-trivial work in two phases: **Phase 1 (Plan, core architecture & hard invariants)** on a stronger planning/reasoning tier, then **Phase 2 (Standard wiring, tests & polish)** on the default execution tier (follow your local agent model mapping). Offload large spec/doc reads and pre-PR checks to read-only `doc-reader` and `reviewer` subagents when configured.
 - Always verify locally before pushing:
   - Rust (from `rust/`): `cargo fmt --all -- --check`, `cargo fetch --locked`, `cargo clippy --locked --offline --workspace --all-targets --all-features -- -D warnings`, `cargo test --locked --offline --workspace --all-features`, and `DEJA_BOUNDARIES_ALL_TARGETS=1 cargo test --locked --offline -p deja-cli --test workspace_boundaries --all-features`.
   - Repo checks: `bun scripts/validate-release-artifacts.ts` (must pass on a clean committed tree; never leak local `/Users/...` home paths or secrets, and keep all local Markdown links valid).
@@ -32,7 +32,7 @@ Déjà is an Apache-2.0 memory layer and native runner for `maestro/v1` app test
 - Run independent cross-review from a detached checkout of the pushed head (`git worktree add --detach <review-path> origin/<branch>`):
   - **Antigravity / Claude Code PRs** are reviewed by Codex (`codex review --base origin/main --title "<PR title>"`), capturing stdout, stderr, and exit status locally; keep raw diagnostic transcripts local and post the findings verbatim (never rewritten or summarized) after replacing local checkout paths with repository-relative paths and checking against the no-leak rule above.
   - **Codex PRs** are reviewed by Claude Code / Antigravity in a restricted read-only review pass on a detached checkout.
-  - **Fallback on confirmed rate limit/outage only:** If `codex review` exits non-zero with a confirmed usage/rate limit or outage in captured stderr, keep the full diagnostic locally, run a fresh-context read-only self-review subagent (`pro` tier) on the detached checkout, post findings verbatim (sanitized per the no-leak rule) prefixed with `Self-review fallback (Codex limit/unavailable: <sanitized error or status code>)`, and apply the same review gate.
+  - **Fallback on confirmed rate limit/outage only:** If `codex review` exits non-zero with a confirmed usage/rate limit or outage in captured stderr, keep the full diagnostic locally, run a fresh-context read-only `reviewer` subagent (stronger model/reasoning tier) on the detached checkout, post findings verbatim (sanitized per the no-leak rule) prefixed with `Self-review fallback (Codex limit/unavailable: <sanitized error or status code>)`, and apply the same review gate.
 - **Answer every finding** on the PR with the fix commit SHA or a linked `DEJA-` ticket for out-of-scope follow-ups, re-test, push, and re-run review on the new head.
 - **3-round cap:** Run up to 3 review↔fix rounds. After a completed round 3, fix remaining in-scope findings, ticket deferred items, re-test, and reply with the verified fix SHA.
 - **Auto-merge:** Once base is `main`, review is clean (<= 3 rounds, all findings fixed or ticketed), and all GitHub Actions CI checks pass on the exact head SHA:
