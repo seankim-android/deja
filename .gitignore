@@ -47,6 +47,9 @@ demo/film/device.mp4
 
 # Local agent tooling state
 .omc/
+.omx/
+.claude/worktrees/
+.claude/settings.local.json
 dist-bin/
 .*.bun-build
 
