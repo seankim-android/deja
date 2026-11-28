@@ -151,42 +151,93 @@ fn round_coord_to_i32(v: f64) -> i32 {
 
 /// Platform-neutral accessibility/DOM/OCR UI element node.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", from = "UiNodeWire")]
 pub struct UiNode {
     pub index: usize,
-    #[serde(default)]
     pub parent_index: Option<usize>,
-    #[serde(default)]
     pub depth: usize,
-    #[serde(default)]
     pub source: String,
-    #[serde(default)]
     pub observation_source: ObservationSource,
-    #[serde(default)]
     pub element_type: String,
-    #[serde(default)]
     pub identifier: String,
-    #[serde(default)]
     pub label: String,
-    #[serde(default)]
     pub title: String,
-    #[serde(default)]
     pub value: Option<String>,
-    #[serde(default)]
     pub placeholder_value: Option<String>,
-    #[serde(default = "default_true")]
     pub enabled: bool,
-    #[serde(default)]
     pub checked: bool,
-    #[serde(default)]
     pub selected: bool,
-    #[serde(default)]
     pub has_focus: bool,
-    #[serde(default)]
     pub hittable: bool,
-    #[serde(default = "default_true")]
     pub is_on_screen: bool,
     pub frame: UiRect,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UiNodeWire {
+    index: usize,
+    #[serde(default)]
+    parent_index: Option<usize>,
+    #[serde(default)]
+    depth: usize,
+    #[serde(default)]
+    source: String,
+    #[serde(default)]
+    observation_source: ObservationSource,
+    #[serde(default)]
+    element_type: String,
+    #[serde(default)]
+    identifier: String,
+    #[serde(default)]
+    label: String,
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    value: Option<String>,
+    #[serde(default)]
+    placeholder_value: Option<String>,
+    #[serde(default = "default_true")]
+    enabled: bool,
+    #[serde(default)]
+    checked: bool,
+    #[serde(default)]
+    selected: bool,
+    #[serde(default)]
+    has_focus: bool,
+    #[serde(default)]
+    hittable: bool,
+    #[serde(default)]
+    is_on_screen: Option<bool>,
+    frame: UiRect,
+}
+
+impl From<UiNodeWire> for UiNode {
+    fn from(wire: UiNodeWire) -> Self {
+        Self {
+            index: wire.index,
+            parent_index: wire.parent_index,
+            depth: wire.depth,
+            source: wire.source,
+            observation_source: wire.observation_source,
+            element_type: wire.element_type,
+            identifier: wire.identifier,
+            label: wire.label,
+            title: wire.title,
+            value: wire.value,
+            placeholder_value: wire.placeholder_value,
+            enabled: wire.enabled,
+            checked: wire.checked,
+            selected: wire.selected,
+            has_focus: wire.has_focus,
+            hittable: wire.hittable,
+            // Preserve explicit `isOnScreen` from modern drivers (so disabled on-screen nodes
+            // remain visible while scroll-clipped nodes stay off-screen). Legacy JSON payloads
+            // that omit `isOnScreen` fall back to `hittable` instead of blindly defaulting `true`.
+            is_on_screen: wire.is_on_screen.unwrap_or(wire.hittable),
+            frame: wire.frame,
+        }
+    }
 }
 
 impl Default for UiNode {
@@ -391,6 +442,16 @@ impl Default for LaunchOptions {
             env: BTreeMap::new(),
         }
     }
+}
+
+/// Options forwarded to [`PlatformDriver::open_link`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenLinkOptions {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_verify: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub browser: Option<bool>,
 }
 
 /// Coordinates and timing for [`PlatformDriver::swipe`].
@@ -673,6 +734,7 @@ pub trait PlatformDriver: Send + Sync {
         &'a self,
         app_id: Option<&'a str>,
         url: &'a str,
+        opts: &'a OpenLinkOptions,
         cancel: &'a CancellationToken,
     ) -> DriverFuture<'a, ()>;
 

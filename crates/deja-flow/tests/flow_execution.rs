@@ -14,13 +14,13 @@ use deja_flow::{
     DEFAULT_HOLD_SCROLL_MS, DriverCapabilities, DriverCapability, DriverCrashSignal, DriverError,
     DriverFuture, EnvStack, FailedStepContext, FailureClassifier, FlowExecutionConfig,
     FlowExecutor, FlowParseError, KeyPress, LaunchOptions, MAX_INTERPOLATED_BYTES,
-    ObservationSource, PlatformDriver, PointSpec, Selector, SelectorError, StepFailureKind,
-    SwipeParams, SynthesizedAttemptsJunitInput, SynthesizedJunitInput, UiHierarchy, UiNode,
-    UiPoint, UiRect, UiSize, VisibleContext, WaitSelectorOutcome, WaitSelectorRequest,
-    build_visible_context, count_assertions_in_closure, count_assertions_in_flow_yaml,
-    hash_hierarchy_nodes, merge_junit_suites, parse_flow, prepare_junit, redact_junit,
-    redact_junit_with_redactors, reports_failure, synthesized_attempts_junit, synthesized_junit,
-    wait_local, write_errored_junit,
+    ObservationSource, OpenLinkOptions, PlatformDriver, PointSpec, Selector, SelectorError,
+    StepFailureKind, SwipeParams, SynthesizedAttemptsJunitInput, SynthesizedJunitInput,
+    UiHierarchy, UiNode, UiPoint, UiRect, UiSize, VisibleContext, WaitSelectorOutcome,
+    WaitSelectorRequest, build_visible_context, count_assertions_in_closure,
+    count_assertions_in_flow_yaml, hash_hierarchy_nodes, merge_junit_suites, parse_flow,
+    prepare_junit, redact_junit, redact_junit_with_redactors, reports_failure,
+    synthesized_attempts_junit, synthesized_junit, wait_local, write_errored_junit,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -101,8 +101,13 @@ enum DriverEvent {
     KillApp(String),
     ClearState(String),
     ClearKeychain,
-    OpenLink(String),
+    OpenLink {
+        url: String,
+        auto_verify: Option<bool>,
+        browser: Option<bool>,
+    },
     AddMedia(Vec<PathBuf>),
+    CheckAppCrash(String),
     Hierarchy {
         known_hash: Option<String>,
     },
@@ -138,8 +143,10 @@ struct MockState {
     launch_error: Option<String>,
     open_link_error: Option<String>,
     crash_signal: Option<DriverCrashSignal>,
+    crash_signals_by_app: BTreeMap<String, DriverCrashSignal>,
     hierarchy_delay: Option<Duration>,
     fail_hierarchy_once: bool,
+    fail_all_hierarchies_transient: bool,
     /// Fails the first N taps with Selector-invisible screen before switching.
     fail_tap_count: usize,
     tap_calls: usize,
@@ -316,11 +323,16 @@ impl PlatformDriver for MockDriver {
         &'a self,
         _app_id: Option<&'a str>,
         url: &'a str,
+        opts: &'a OpenLinkOptions,
         _cancel: &'a CancellationToken,
     ) -> DriverFuture<'a, ()> {
         Box::pin(async move {
             let mut st = self.state.lock().unwrap();
-            st.events.push(DriverEvent::OpenLink(url.to_string()));
+            st.events.push(DriverEvent::OpenLink {
+                url: url.to_string(),
+                auto_verify: opts.auto_verify,
+                browser: opts.browser,
+            });
             if let Some(ref err) = st.open_link_error {
                 return Err(DriverError::NavigationFailed {
                     target: url.to_string(),
@@ -382,6 +394,13 @@ impl PlatformDriver for MockDriver {
                     operation: "hierarchy".to_string(),
                     detail,
                     transient: false,
+                });
+            }
+            if st.fail_all_hierarchies_transient {
+                return Err(DriverError::Transport {
+                    operation: "hierarchy".to_string(),
+                    detail: "simulated persistent transient hierarchy error".to_string(),
+                    transient: true,
                 });
             }
             let current = st.fallback_hierarchy.clone();
@@ -572,11 +591,20 @@ impl PlatformDriver for MockDriver {
 
     fn check_app_crash<'a>(
         &'a self,
-        _app_id: &'a str,
+        app_id: &'a str,
         _since_epoch_ms: u64,
         _cancel: &'a CancellationToken,
     ) -> DriverFuture<'a, Option<DriverCrashSignal>> {
-        Box::pin(async move { Ok(self.state.lock().unwrap().crash_signal.clone()) })
+        Box::pin(async move {
+            let mut st = self.state.lock().unwrap();
+            st.events
+                .push(DriverEvent::CheckAppCrash(app_id.to_string()));
+            Ok(st
+                .crash_signals_by_app
+                .get(app_id)
+                .cloned()
+                .or_else(|| st.crash_signal.clone()))
+        })
     }
 
     fn shutdown<'a>(&'a self) -> DriverFuture<'a, ()> {
@@ -1917,6 +1945,7 @@ async fn deja52_failure_classifier_precedence_and_assertion_counts() {
             label: label.to_string(),
             kind: StepFailureKind::AssertionFailed,
             message: "assertion failed".to_string(),
+            failed_app_id: None,
             visible_context: None,
             crash_signal: None,
         };
@@ -1940,6 +1969,7 @@ async fn deja52_failure_classifier_precedence_and_assertion_counts() {
         label: "Tap on id: checkout_btn".to_string(),
         kind: StepFailureKind::SelectorNotFound,
         message: "not found".to_string(),
+        failed_app_id: None,
         visible_context: None,
         crash_signal: None,
     };
@@ -1982,6 +2012,7 @@ async fn deja52_failure_classifier_precedence_and_assertion_counts() {
         label: "Launch app \"dev.deja.checkout\"".to_string(),
         kind: StepFailureKind::NavigationFailed,
         message: "unable to launch".to_string(),
+        failed_app_id: None,
         visible_context: None,
         crash_signal: None,
     };
@@ -2004,6 +2035,7 @@ async fn deja52_failure_classifier_precedence_and_assertion_counts() {
         label: "Extended wait until \"Ready\" is visible".to_string(),
         kind: StepFailureKind::AssertionFailed,
         message: "timed out".to_string(),
+        failed_app_id: None,
         visible_context: None,
         crash_signal: None,
     };
@@ -3179,4 +3211,708 @@ appId: dev.deja.checkout
         })
         .collect();
     assert_eq!(plain_holds, vec![None, None]);
+}
+
+// ============================================================================
+// Codex Cross-Review Round 2 Regression Tests (Findings 1-9)
+// ============================================================================
+
+#[cfg(unix)]
+#[tokio::test]
+async fn round2_lexical_symlink_resolution_matches_flow_closure() {
+    use std::os::unix::fs::symlink;
+
+    let ws = TempDir::new("round2-lexical-symlink");
+    fs::create_dir_all(ws.path().join("real")).unwrap();
+    fs::create_dir_all(ws.path().join("alias")).unwrap();
+
+    fs::write(
+        ws.path().join("real/entry.yaml"),
+        r#"
+appId: dev.deja.checkout
+---
+- runFlow: helper.yaml
+- addMedia:
+    - pic.png
+"#,
+    )
+    .unwrap();
+    fs::write(
+        ws.path().join("real/helper.yaml"),
+        "- inputText: from-real-dir\n",
+    )
+    .unwrap();
+    fs::write(ws.path().join("real/pic.png"), b"REAL").unwrap();
+
+    fs::write(
+        ws.path().join("alias/helper.yaml"),
+        "- inputText: from-alias-dir\n",
+    )
+    .unwrap();
+    fs::write(ws.path().join("alias/pic.png"), b"ALIAS").unwrap();
+
+    symlink("../real/entry.yaml", ws.path().join("alias/entry.yaml")).unwrap();
+    fs::write(
+        ws.path().join("root.yaml"),
+        "appId: dev.deja.checkout\n---\n- runFlow: alias/entry.yaml\n",
+    )
+    .unwrap();
+
+    // Closure collector resolves relative references from the symlink's own lexical directory.
+    let closure = collect_flow_closure(ws.path(), Path::new("alias/entry.yaml"))
+        .expect("closure for symlinked entry");
+    let rels: Vec<String> = closure.files.iter().map(|f| f.source.clone()).collect();
+    assert!(
+        rels.iter().any(|r| r == "alias/helper.yaml"),
+        "expected alias/helper.yaml in closure, got {rels:?}"
+    );
+    assert!(
+        rels.iter().any(|r| r == "alias/pic.png"),
+        "expected alias/pic.png in closure, got {rels:?}"
+    );
+    assert!(
+        !rels.iter().any(|r| r == "real/helper.yaml"),
+        "must not resolve helper against symlink target directory: {rels:?}"
+    );
+
+    let canonical_alias_pic = fs::canonicalize(ws.path().join("alias/pic.png")).unwrap();
+
+    // 1. Direct root `execute_file` on in-workspace symlink resolves `helper.yaml` & `pic.png`
+    // relative to `alias/`, matching `collect_flow_closure`.
+    let driver_root = MockDriver::full();
+    let out_root = FlowExecutor::new(FlowExecutionConfig::new(ws.path().to_path_buf()))
+        .execute_file(
+            &driver_root,
+            Path::new("alias/entry.yaml"),
+            &CancellationToken::new(),
+        )
+        .await;
+    assert!(out_root.passed, "{:#?}", out_root.failed_step);
+    let typed_root: Vec<String> = driver_root
+        .events()
+        .into_iter()
+        .filter_map(|e| match e {
+            DriverEvent::InputText(s) => Some(s),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(typed_root, vec!["from-alias-dir"]);
+    let media_root: Vec<PathBuf> = driver_root
+        .events()
+        .into_iter()
+        .filter_map(|e| match e {
+            DriverEvent::AddMedia(paths) => Some(paths),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    assert_eq!(media_root, vec![canonical_alias_pic.clone()]);
+
+    // 2. Nested `runFlow: alias/entry.yaml` from `root.yaml` also resolves `helper.yaml` & `pic.png`
+    // relative to `alias/` (NOT `real/`).
+    let driver_nested = MockDriver::full();
+    let out_nested = FlowExecutor::new(FlowExecutionConfig::new(ws.path().to_path_buf()))
+        .execute_file(
+            &driver_nested,
+            Path::new("root.yaml"),
+            &CancellationToken::new(),
+        )
+        .await;
+    assert!(out_nested.passed, "{:#?}", out_nested.failed_step);
+    let typed_nested: Vec<String> = driver_nested
+        .events()
+        .into_iter()
+        .filter_map(|e| match e {
+            DriverEvent::InputText(s) => Some(s),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(typed_nested, vec!["from-alias-dir"]);
+    let media_nested: Vec<PathBuf> = driver_nested
+        .events()
+        .into_iter()
+        .filter_map(|e| match e {
+            DriverEvent::AddMedia(paths) => Some(paths),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    assert_eq!(media_nested, vec![canonical_alias_pic]);
+}
+
+#[tokio::test]
+async fn round2_ios_json_offscreen_state_preserved() {
+    let ws = TempDir::new("round2-ios-offscreen");
+
+    // Runner-shaped JSON payload with:
+    // - explicit clipped off-screen node (`isOnScreen: false`)
+    // - legacy payload node omitting `isOnScreen` with `hittable: false`
+    // - disabled on-screen node (`isOnScreen: true, hittable: false, enabled: false`)
+    // - normal on-screen hittable node
+    let runner_json = r#"{
+        "appId": "dev.deja.checkout",
+        "state": "running_foreground",
+        "viewport": {"width": 390.0, "height": 844.0},
+        "truncated": false,
+        "hierarchyHash": "",
+        "unchanged": false,
+        "nodes": [
+            {
+                "index": 0,
+                "depth": 1,
+                "source": "app",
+                "elementType": "Button",
+                "identifier": "clipped_btn",
+                "label": "Clipped Offscreen",
+                "title": "",
+                "enabled": true,
+                "selected": false,
+                "hasFocus": false,
+                "hittable": false,
+                "isOnScreen": false,
+                "frame": {"x": 20.0, "y": 1400.0, "width": 200.0, "height": 44.0}
+            },
+            {
+                "index": 1,
+                "depth": 1,
+                "source": "app",
+                "elementType": "Button",
+                "identifier": "legacy_clipped_btn",
+                "label": "Legacy Offscreen",
+                "title": "",
+                "enabled": true,
+                "selected": false,
+                "hasFocus": false,
+                "hittable": false,
+                "frame": {"x": 20.0, "y": 1500.0, "width": 200.0, "height": 44.0}
+            },
+            {
+                "index": 2,
+                "depth": 1,
+                "source": "app",
+                "elementType": "Button",
+                "identifier": "disabled_visible_btn",
+                "label": "Disabled Visible",
+                "title": "",
+                "enabled": false,
+                "selected": false,
+                "hasFocus": false,
+                "hittable": false,
+                "isOnScreen": true,
+                "frame": {"x": 20.0, "y": 240.0, "width": 200.0, "height": 44.0}
+            },
+            {
+                "index": 3,
+                "depth": 1,
+                "source": "app",
+                "elementType": "Button",
+                "identifier": "normal_btn",
+                "label": "Continue",
+                "title": "",
+                "enabled": true,
+                "selected": false,
+                "hasFocus": false,
+                "hittable": true,
+                "isOnScreen": true,
+                "frame": {"x": 20.0, "y": 320.0, "width": 200.0, "height": 44.0}
+            }
+        ]
+    }"#;
+
+    let mut decoded: UiHierarchy =
+        serde_json::from_str(runner_json).expect("decode runner-shaped UiHierarchy");
+    decoded.hierarchy_hash = decoded.hierarchy_hash_hex();
+    assert!(!decoded.nodes[0].is_on_screen);
+    assert!(!decoded.nodes[1].is_on_screen);
+    assert!(decoded.nodes[2].is_on_screen);
+    assert!(decoded.nodes[3].is_on_screen);
+
+    let driver = MockDriver::full();
+    driver.set_screen(decoded);
+
+    let mut cfg = FlowExecutionConfig::new(ws.path().to_path_buf());
+    cfg.default_step_timeout = Duration::from_millis(60);
+
+    // Clipped off-screen node (`isOnScreen: false`) fails `assertVisible`.
+    let vis_fail = FlowExecutor::new(cfg.clone())
+        .execute_yaml(
+            &driver,
+            "appId: dev.deja.checkout\n---\n- assertVisible:\n    id: clipped_btn\n",
+            &CancellationToken::new(),
+        )
+        .await;
+    assert!(!vis_fail.passed);
+    assert_eq!(
+        vis_fail.failure.as_ref().map(|f| f.category),
+        Some(FailureCategory::ProductAssertion)
+    );
+
+    // Legacy omitted `isOnScreen` with `hittable: false` also fails `assertVisible`.
+    let legacy_fail = FlowExecutor::new(cfg.clone())
+        .execute_yaml(
+            &driver,
+            "appId: dev.deja.checkout\n---\n- assertVisible:\n    id: legacy_clipped_btn\n",
+            &CancellationToken::new(),
+        )
+        .await;
+    assert!(!legacy_fail.passed);
+
+    // Both off-screen nodes pass `assertNotVisible`, while explicit `isOnScreen: true`
+    // disabled node passes `assertVisible: { id: disabled_visible_btn, enabled: false }`.
+    let pass_yaml = r#"
+appId: dev.deja.checkout
+---
+- assertNotVisible:
+    id: clipped_btn
+- assertNotVisible:
+    id: legacy_clipped_btn
+- assertVisible:
+    id: disabled_visible_btn
+    enabled: false
+- assertVisible:
+    id: normal_btn
+"#;
+    let pass_out = FlowExecutor::new(cfg)
+        .execute_yaml(&driver, pass_yaml, &CancellationToken::new())
+        .await;
+    assert!(pass_out.passed, "{:#?}", pass_out.failed_step);
+}
+
+#[tokio::test]
+async fn round2_known_hash_bypassed_for_unhashed_checked_and_system_ui() {
+    let ws = TempDir::new("round2-known-hash-bypass");
+    let driver = MockDriver::full();
+    driver.state.lock().unwrap().honour_known_hash = true;
+
+    let unchecked_node = node(
+        0,
+        None,
+        "agree_chk",
+        "Accept terms",
+        UiRect::new(20.0, 200.0, 240.0, 44.0),
+    );
+    let mut checked_node = unchecked_node.clone();
+    checked_node.checked = true;
+
+    let screen_unchecked = hierarchy_of(vec![unchecked_node]);
+    let screen_checked = hierarchy_of(vec![checked_node]);
+    assert_eq!(
+        screen_unchecked.hierarchy_hash, screen_checked.hierarchy_hash,
+        "checked-only flip intentionally produces identical FNV-1a hierarchyHash"
+    );
+
+    driver.set_screen(screen_unchecked);
+    driver.push_tap_screen(screen_checked);
+
+    let yaml = r#"
+appId: dev.deja.checkout
+---
+- assertVisible:
+    id: agree_chk
+    checked: false
+- tapOn:
+    id: agree_chk
+- assertVisible:
+    id: agree_chk
+    checked: true
+"#;
+    let mut cfg = FlowExecutionConfig::new(ws.path().to_path_buf());
+    cfg.default_step_timeout = Duration::from_millis(200);
+    let out = FlowExecutor::new(cfg)
+        .execute_yaml(&driver, yaml, &CancellationToken::new())
+        .await;
+    assert!(
+        out.passed,
+        "checked-only flip must bypass knownHash cache and pass: {:#?}",
+        out.failed_step
+    );
+
+    let known_hashes: Vec<Option<String>> = driver
+        .events()
+        .into_iter()
+        .filter_map(|e| match e {
+            DriverEvent::Hierarchy { known_hash } => Some(known_hash),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        known_hashes.len() >= 3,
+        "expected hierarchy calls for both checked assertions + tap"
+    );
+    assert!(
+        known_hashes.last().unwrap().is_none(),
+        "selector with `checked: true` must send known_hash = None, got {known_hashes:?}"
+    );
+
+    // Nested relational selector with `checked` also flags `uses_unhashed_fields`.
+    let nested_checked = Selector {
+        text: Some("Label".to_string()),
+        child_of: Some(Box::new(Selector {
+            id: Some("row".to_string()),
+            checked: Some(true),
+            ..Selector::default()
+        })),
+        ..Selector::default()
+    };
+    assert!(nested_checked.uses_unhashed_fields());
+
+    // `include_system_ui = true` also bypasses `known_hash` on plain selectors.
+    let sys_driver = MockDriver::full();
+    sys_driver.state.lock().unwrap().honour_known_hash = true;
+    sys_driver.set_screen(hierarchy_of(vec![node(
+        0,
+        None,
+        "ready",
+        "Ready",
+        UiRect::new(20.0, 200.0, 120.0, 44.0),
+    )]));
+    let mut sys_cfg = FlowExecutionConfig::new(ws.path().to_path_buf());
+    sys_cfg.include_system_ui = true;
+    let sys_out = FlowExecutor::new(sys_cfg)
+        .execute_yaml(
+            &sys_driver,
+            "appId: dev.deja.checkout\n---\n- assertVisible: \"Ready\"\n- assertVisible: \"Ready\"\n",
+            &CancellationToken::new(),
+        )
+        .await;
+    assert!(sys_out.passed, "{:#?}", sys_out.failed_step);
+    let sys_hashes: Vec<Option<String>> = sys_driver
+        .events()
+        .into_iter()
+        .filter_map(|e| match e {
+            DriverEvent::Hierarchy { known_hash } => Some(known_hash),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        sys_hashes.iter().all(Option::is_none),
+        "include_system_ui must always bypass known_hash: {sys_hashes:?}"
+    );
+}
+
+#[tokio::test]
+async fn round2_scroll_until_visible_enforces_deadline_strictly() {
+    let ws = TempDir::new("round2-scroll-deadline");
+    let driver = MockDriver::full();
+    driver.state.lock().unwrap().hierarchy_delay = Some(Duration::from_millis(40));
+    driver.set_screen(hierarchy_of(vec![node(
+        0,
+        None,
+        "terms_btn",
+        "Terms",
+        UiRect::new(20.0, 790.0, 350.0, 40.0),
+    )]));
+
+    let yaml = r#"
+appId: dev.deja.checkout
+---
+- scrollUntilVisible:
+    element:
+      id: terms_btn
+    direction: DOWN
+    timeout: 1
+    centerElement: true
+"#;
+    let out = FlowExecutor::new(FlowExecutionConfig::new(ws.path().to_path_buf()))
+        .execute_yaml(&driver, yaml, &CancellationToken::new())
+        .await;
+    assert!(
+        !out.passed,
+        "1ms timeout with 40ms hierarchy fetch must fail with timeout instead of accepting late match"
+    );
+    assert_eq!(
+        out.failed_step.as_ref().unwrap().kind,
+        StepFailureKind::Timeout
+    );
+    assert_eq!(
+        out.failure.as_ref().map(|f| f.category),
+        Some(FailureCategory::Timeout)
+    );
+    let swipes = driver
+        .events()
+        .into_iter()
+        .filter(|e| matches!(e, DriverEvent::Swipe { .. }))
+        .count();
+    assert_eq!(
+        swipes, 0,
+        "timed-out scrollUntilVisible must not issue any discovery or centering swipe"
+    );
+}
+
+#[tokio::test]
+async fn round2_wait_local_returns_transport_error_when_no_fresh_observation() {
+    let ws = TempDir::new("round2-wait-transport");
+    let screen = hierarchy_of(vec![node(
+        0,
+        None,
+        "home",
+        "Home",
+        UiRect::new(20.0, 200.0, 200.0, 44.0),
+    )]);
+
+    // 1. Direct `wait_local`: seeded with prior-step `initial_hierarchy`, every fetch fails transiently.
+    let direct_driver = MockDriver::full();
+    direct_driver
+        .state
+        .lock()
+        .unwrap()
+        .fail_all_hierarchies_transient = true;
+    let mut req = WaitSelectorRequest::visible(
+        "dev.deja.checkout",
+        Selector::by_id("missing_elem"),
+        Duration::from_millis(60),
+    );
+    req.initial_hierarchy = Some(screen.clone());
+    let err = wait_local(&direct_driver, &req, &CancellationToken::new())
+        .await
+        .expect_err("all-transient fetch failure must return DriverError::Transport, not miss");
+    assert!(
+        matches!(
+            err,
+            DriverError::Transport {
+                transient: true,
+                ..
+            }
+        ),
+        "expected transient DriverError::Transport, got {err:?}"
+    );
+
+    // 2. End-to-end via `FlowExecutor`: step 1 populates `last_hierarchy`, step 2 hits
+    // transient transport errors on every poll -> classified as Runner (Transport), NOT ProductAssertion.
+    let exec_driver = MockDriver::full();
+    exec_driver.push_hierarchy(screen);
+    exec_driver
+        .state
+        .lock()
+        .unwrap()
+        .fail_all_hierarchies_transient = true;
+    let mut cfg = FlowExecutionConfig::new(ws.path().to_path_buf());
+    cfg.default_step_timeout = Duration::from_millis(60);
+    let out = FlowExecutor::new(cfg)
+        .execute_yaml(
+            &exec_driver,
+            "appId: dev.deja.checkout\n---\n- assertVisible:\n    id: home\n- assertVisible:\n    id: missing_elem\n",
+            &CancellationToken::new(),
+        )
+        .await;
+    assert!(!out.passed);
+    assert_eq!(
+        out.failed_step.as_ref().unwrap().kind,
+        StepFailureKind::Transport
+    );
+    assert_eq!(
+        out.failure.as_ref().map(|f| f.category),
+        Some(FailureCategory::Runner)
+    );
+}
+
+#[tokio::test]
+async fn round2_child_subflow_crash_probed_for_child_app_id() {
+    let ws = TempDir::new("round2-child-crash");
+    fs::write(
+        ws.path().join("child.yaml"),
+        r#"
+appId: dev.deja.child
+---
+- tapOn:
+    id: missing_in_child
+"#,
+    )
+    .unwrap();
+    fs::write(
+        ws.path().join("parent.yaml"),
+        r#"
+appId: dev.deja.parent
+---
+- runFlow: child.yaml
+"#,
+    )
+    .unwrap();
+
+    let driver = MockDriver::full();
+    driver.set_screen(hierarchy_of(vec![node(
+        0,
+        None,
+        "other",
+        "Other",
+        UiRect::new(20.0, 200.0, 200.0, 44.0),
+    )]));
+    driver.state.lock().unwrap().crash_signals_by_app.insert(
+        "dev.deja.child".to_string(),
+        DriverCrashSignal {
+            source: CrashSignalSource::CrashReport,
+            report_file: Some("ChildApp-2026-11-28.ips".to_string()),
+            process: Some("ChildApp".to_string()),
+            detail: Some("EXC_BAD_ACCESS".to_string()),
+        },
+    );
+
+    let mut cfg = FlowExecutionConfig::new(ws.path().to_path_buf());
+    cfg.default_step_timeout = Duration::from_millis(80);
+    let out = FlowExecutor::new(cfg)
+        .execute_file(&driver, Path::new("parent.yaml"), &CancellationToken::new())
+        .await;
+    assert!(!out.passed);
+
+    let probed_apps: Vec<String> = driver
+        .events()
+        .into_iter()
+        .filter_map(|e| match e {
+            DriverEvent::CheckAppCrash(app) => Some(app),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        probed_apps,
+        vec!["dev.deja.child"],
+        "crash check must probe child subflow's app_id, not restored parent"
+    );
+    assert_eq!(
+        out.failure.as_ref().map(|f| f.category),
+        Some(FailureCategory::AppCrash)
+    );
+    assert_eq!(
+        out.failed_step
+            .as_ref()
+            .and_then(|s| s.failed_app_id.as_deref()),
+        Some("dev.deja.child")
+    );
+    assert_eq!(
+        out.app_id.as_deref(),
+        Some("dev.deja.parent"),
+        "parent appId scope must still be restored after child subflow exits"
+    );
+}
+
+#[tokio::test]
+async fn round2_retry_tap_if_no_change_refreshes_stale_snapshot_before_point_tap() {
+    let ws = TempDir::new("round2-retry-point-tap");
+    // MockDriver::full() intentionally does NOT advertise CompoundAct, so tap 1 mutates the
+    // screen without returning a fresh hierarchy (leaving `last_hierarchy` stale on screen A).
+    let driver = MockDriver::full();
+    let screen_a = hierarchy_of(vec![node(
+        0,
+        None,
+        "to_b",
+        "Go to B",
+        UiRect::new(20.0, 200.0, 200.0, 44.0),
+    )]);
+    let screen_b = hierarchy_of(vec![node(
+        0,
+        None,
+        "screen_b",
+        "Screen B",
+        UiRect::new(20.0, 200.0, 200.0, 44.0),
+    )]);
+    driver.set_screen(screen_a);
+    // Tap 1 (id: to_b) transitions screen A -> screen B.
+    // Tap 2 (point: 50%, 50%) leaves screen B unchanged, so retryTapIfNoChange MUST fire tap 3!
+    driver.push_tap_screen(screen_b);
+
+    let yaml = r#"
+appId: dev.deja.checkout
+---
+- assertVisible:
+    id: to_b
+- tapOn:
+    id: to_b
+- tapOn:
+    point: 50%, 50%
+    retryTapIfNoChange: true
+"#;
+    let out = FlowExecutor::new(FlowExecutionConfig::new(ws.path().to_path_buf()))
+        .execute_yaml(&driver, yaml, &CancellationToken::new())
+        .await;
+    assert!(out.passed, "{:#?}", out.failed_step);
+
+    let taps: Vec<(f64, f64)> = driver
+        .events()
+        .into_iter()
+        .filter_map(|e| match e {
+            DriverEvent::Tap(x, y) => Some((x, y)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        taps.len(),
+        3,
+        "expected 1 tap for to_b + 1 initial point tap + 1 retry point tap on unchanged screen B, got {taps:?}"
+    );
+    assert_eq!(
+        out.timing.steps[2].retries, 1,
+        "point tap with retryTapIfNoChange must refresh stale pre-tap hierarchy and retry once"
+    );
+}
+
+#[tokio::test]
+async fn round2_open_link_forwards_browser_and_auto_verify_options() {
+    let ws = TempDir::new("round2-open-link-opts");
+    let driver = MockDriver::full();
+    let yaml = r#"
+appId: dev.deja.checkout
+---
+- openLink:
+    link: https://example.com/offer
+    browser: true
+    autoVerify: true
+- openLink: https://example.com/simple
+"#;
+    let out = FlowExecutor::new(FlowExecutionConfig::new(ws.path().to_path_buf()))
+        .execute_yaml(&driver, yaml, &CancellationToken::new())
+        .await;
+    assert!(out.passed, "{:#?}", out.failed_step);
+
+    let open_links: Vec<(String, Option<bool>, Option<bool>)> = driver
+        .events()
+        .into_iter()
+        .filter_map(|e| match e {
+            DriverEvent::OpenLink {
+                url,
+                auto_verify,
+                browser,
+            } => Some((url, auto_verify, browser)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        open_links,
+        vec![
+            (
+                "https://example.com/offer".to_string(),
+                Some(true),
+                Some(true)
+            ),
+            ("https://example.com/simple".to_string(), None, None),
+        ]
+    );
+}
+
+#[test]
+fn round2_junit_redacts_unicode_attribute_names() {
+    let redactor = create_redactor("/tmp/ws-junit", None, &["fixture-secret".to_string()]);
+    let provider = provider_key_redactor(std::iter::empty::<(&str, &str)>());
+
+    let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<testsuites>
+  <testsuite name="suite" tests="1" failures="0" time="1.250">
+    <testcase id="case1" 名time="fixture-secret" 名status="ERROR" time="1.250" status="SUCCESS"/>
+  </testsuite>
+</testsuites>"#;
+
+    // Unicode attribute `名status="ERROR"` must not be misread as structural `status="ERROR"`.
+    assert!(!reports_failure(xml));
+
+    let redacted = redact_junit_with_redactors(xml, &redactor, &provider);
+    assert!(
+        !redacted.contains("fixture-secret"),
+        "Unicode-named attribute value must be redacted: {redacted}"
+    );
+    assert!(
+        redacted.contains("名time=\"&lt;redacted-fixture-value&gt;\""),
+        "Unicode attribute name should be preserved with XML-escaped redacted value: {redacted}"
+    );
+    assert!(
+        redacted.contains("time=\"1.250\"") && redacted.contains("status=\"SUCCESS\""),
+        "exact structural attributes must remain untouched: {redacted}"
+    );
 }

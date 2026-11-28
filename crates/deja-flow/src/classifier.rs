@@ -39,6 +39,8 @@ pub struct FailedStepContext {
     pub kind: StepFailureKind,
     pub message: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failed_app_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub visible_context: Option<VisibleContext>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub crash_signal: Option<DriverCrashSignal>,

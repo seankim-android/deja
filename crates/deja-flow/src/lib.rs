@@ -31,8 +31,8 @@ pub use classifier::{
 };
 pub use driver::{
     ActAction, ActOutcome, ActPayload, DriverCrashSignal, DriverError, DriverFuture, KeyPress,
-    LaunchOptions, PlatformDriver, SwipeParams, UiHierarchy, UiNode, UiPoint, UiRect, UiSize,
-    WaitSelectorOutcome, WaitSelectorRequest,
+    LaunchOptions, OpenLinkOptions, PlatformDriver, SwipeParams, UiHierarchy, UiNode, UiPoint,
+    UiRect, UiSize, WaitSelectorOutcome, WaitSelectorRequest,
 };
 pub use executor::{
     DEFAULT_ACTION_FAIL_FAST_SETTLE_POLLS, DEFAULT_HOLD_SCROLL_MS, EnvStack, FlowExecutionConfig,

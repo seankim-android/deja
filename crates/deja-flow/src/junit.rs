@@ -332,8 +332,8 @@ fn find_tag_end(xml: &str, start: usize) -> usize {
     bytes.len()
 }
 
-fn is_attr_name_byte(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || matches!(b, b'_' | b':' | b'.' | b'-')
+fn is_xml_name_delim(ch: char) -> bool {
+    ch.is_whitespace() || matches!(ch, '=' | '/' | '>' | '<' | '"' | '\'')
 }
 
 /// Redacts all non-structural attribute values inside a single XML tag `<...>`.
@@ -351,9 +351,10 @@ fn redact_tag_attributes<F: Fn(&str) -> String>(tag: &str, redact: &F) -> String
         out.push('<');
         i += 1;
     }
-    while i < bytes.len() && !bytes[i].is_ascii_whitespace() && bytes[i] != b'>' && bytes[i] != b'/'
-    {
-        let ch = tag[i..].chars().next().expect("valid UTF-8");
+    while let Some(ch) = tag[i..].chars().next() {
+        if ch.is_whitespace() || matches!(ch, '>' | '/') {
+            break;
+        }
         out.push(ch);
         i += ch.len_utf8();
     }
@@ -361,8 +362,11 @@ fn redact_tag_attributes<F: Fn(&str) -> String>(tag: &str, redact: &F) -> String
     while i < bytes.len() {
         // Copy whitespace.
         let ws_start = i;
-        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
-            i += 1;
+        while let Some(ch) = tag[i..].chars().next() {
+            if !ch.is_whitespace() {
+                break;
+            }
+            i += ch.len_utf8();
         }
         out.push_str(&tag[ws_start..i]);
         if i >= bytes.len() {
@@ -373,13 +377,16 @@ fn redact_tag_attributes<F: Fn(&str) -> String>(tag: &str, redact: &F) -> String
             break;
         }
 
-        // Parse attribute name.
+        // Parse full XML attribute name (including multi-byte UTF-8 Unicode name characters).
         let name_start = i;
-        while i < bytes.len() && is_attr_name_byte(bytes[i]) {
-            i += 1;
+        while let Some(ch) = tag[i..].chars().next() {
+            if is_xml_name_delim(ch) {
+                break;
+            }
+            i += ch.len_utf8();
         }
         if i == name_start {
-            // Unexpected character: copy verbatim and advance.
+            // Unexpected delimiter character: copy verbatim and advance by one char.
             let ch = tag[i..].chars().next().expect("valid UTF-8");
             out.push(ch);
             i += ch.len_utf8();
@@ -387,8 +394,11 @@ fn redact_tag_attributes<F: Fn(&str) -> String>(tag: &str, redact: &F) -> String
         }
         let name = &tag[name_start..i];
         let mut cursor = i;
-        while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
-            cursor += 1;
+        while let Some(ch) = tag[cursor..].chars().next() {
+            if !ch.is_whitespace() {
+                break;
+            }
+            cursor += ch.len_utf8();
         }
         if cursor >= bytes.len() || bytes[cursor] != b'=' {
             out.push_str(&tag[name_start..cursor]);
@@ -396,8 +406,11 @@ fn redact_tag_attributes<F: Fn(&str) -> String>(tag: &str, redact: &F) -> String
             continue;
         }
         cursor += 1; // skip '='
-        while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
-            cursor += 1;
+        while let Some(ch) = tag[cursor..].chars().next() {
+            if !ch.is_whitespace() {
+                break;
+            }
+            cursor += ch.len_utf8();
         }
         if cursor >= bytes.len() || !matches!(bytes[cursor], b'"' | b'\'') {
             out.push_str(&tag[name_start..cursor]);
@@ -523,35 +536,50 @@ pub fn redact_junit_with_redactors(
 fn extract_tag_attr<'a>(tag: &'a str, target_name: &str) -> Option<&'a str> {
     let bytes = tag.as_bytes();
     let mut i = 1; // skip '<'
-    while i < bytes.len() && !bytes[i].is_ascii_whitespace() && bytes[i] != b'>' && bytes[i] != b'/'
-    {
-        i += 1;
+    while let Some(ch) = tag[i..].chars().next() {
+        if ch.is_whitespace() || matches!(ch, '>' | '/') {
+            break;
+        }
+        i += ch.len_utf8();
     }
     while i < bytes.len() {
-        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
-            i += 1;
+        while let Some(ch) = tag[i..].chars().next() {
+            if !ch.is_whitespace() {
+                break;
+            }
+            i += ch.len_utf8();
         }
         if i >= bytes.len() || bytes[i] == b'>' || bytes[i] == b'/' {
             break;
         }
         let name_start = i;
-        while i < bytes.len() && is_attr_name_byte(bytes[i]) {
-            i += 1;
+        while let Some(ch) = tag[i..].chars().next() {
+            if is_xml_name_delim(ch) {
+                break;
+            }
+            i += ch.len_utf8();
         }
         if i == name_start {
-            i += 1;
+            let ch = tag[i..].chars().next().expect("valid UTF-8");
+            i += ch.len_utf8();
             continue;
         }
         let name = &tag[name_start..i];
-        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
-            i += 1;
+        while let Some(ch) = tag[i..].chars().next() {
+            if !ch.is_whitespace() {
+                break;
+            }
+            i += ch.len_utf8();
         }
         if i >= bytes.len() || bytes[i] != b'=' {
             continue;
         }
         i += 1;
-        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
-            i += 1;
+        while let Some(ch) = tag[i..].chars().next() {
+            if !ch.is_whitespace() {
+                break;
+            }
+            i += ch.len_utf8();
         }
         if i >= bytes.len() || !matches!(bytes[i], b'"' | b'\'') {
             continue;

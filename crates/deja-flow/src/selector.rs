@@ -229,6 +229,53 @@ impl Selector {
             || !self.contains_descendants.is_empty()
     }
 
+    /// Returns `true` when this selector (or any nested relational/descendant selector)
+    /// inspects attributes or nodes excluded from [`crate::backoff::hash_hierarchy_nodes`]
+    /// (such as `checked` or volatile system-chrome identifiers), so `knownHash` caching
+    /// must be bypassed.
+    pub fn uses_unhashed_fields(&self) -> bool {
+        if self.checked.is_some() {
+            return true;
+        }
+        if let Some(ref id) = self.id {
+            let lower = id.to_ascii_lowercase();
+            if lower.contains("com.android.systemui:id/")
+                || lower.contains("statusbarbackground")
+                || lower.contains("navigationbarbackground")
+                || lower.contains("statusbar")
+            {
+                return true;
+            }
+        }
+        self.below
+            .as_deref()
+            .is_some_and(Self::uses_unhashed_fields)
+            || self
+                .above
+                .as_deref()
+                .is_some_and(Self::uses_unhashed_fields)
+            || self
+                .left_of
+                .as_deref()
+                .is_some_and(Self::uses_unhashed_fields)
+            || self
+                .right_of
+                .as_deref()
+                .is_some_and(Self::uses_unhashed_fields)
+            || self
+                .child_of
+                .as_deref()
+                .is_some_and(Self::uses_unhashed_fields)
+            || self
+                .contains_child
+                .as_deref()
+                .is_some_and(Self::uses_unhashed_fields)
+            || self
+                .contains_descendants
+                .iter()
+                .any(Self::uses_unhashed_fields)
+    }
+
     /// Returns `true` ONLY when `id`/`text` contain no regex metacharacters and no `index`,
     /// relational, point, or state filters exist.
     ///
@@ -908,16 +955,22 @@ pub async fn wait_local<D: PlatformDriver + ?Sized>(
     let start = Instant::now();
     let deadline = start + req.timeout;
     let single_probe = req.timeout.is_zero();
+    let allow_known_hash = !req.include_system_ui && !req.selector.uses_unhashed_fields();
     let mut schedule = PollSchedule::default();
     let mut settle = SettleTracker::new(req.stable_polls.max(1));
-    let mut miss_settle = req
-        .fail_fast_on_settle_polls
-        .map(|n| SettleTracker::new(n.max(2)));
+    let mut miss_settle = if allow_known_hash {
+        req.fail_fast_on_settle_polls
+            .map(|n| SettleTracker::new(n.max(2)))
+    } else {
+        None
+    };
     let mut polls: u32 = 0;
 
     let mut cached_hierarchy: Option<UiHierarchy> = None;
     let mut latest_hierarchy: Option<UiHierarchy> = None;
     let mut known_hash: Option<String> = None;
+    let mut last_observed_hash: Option<String> = None;
+    let mut had_usable_observation_this_wait = false;
 
     if let Some(ref init) = req.initial_hierarchy
         && !init.unchanged
@@ -928,7 +981,7 @@ pub async fn wait_local<D: PlatformDriver + ?Sized>(
         } else {
             format!("{h_u64:016x}")
         };
-        if !init.truncated {
+        if allow_known_hash && !init.truncated {
             known_hash = Some(h_hex);
         }
         cached_hierarchy = Some(init.clone());
@@ -951,6 +1004,11 @@ pub async fn wait_local<D: PlatformDriver + ?Sized>(
             Some(rem)
         };
         polls = polls.saturating_add(1);
+        let request_known_hash = if allow_known_hash {
+            known_hash.as_deref()
+        } else {
+            None
+        };
 
         let fetch = match remaining_for_fetch {
             None => tokio::select! {
@@ -959,7 +1017,7 @@ pub async fn wait_local<D: PlatformDriver + ?Sized>(
                 res = driver.hierarchy(
                     &req.app_id,
                     req.include_system_ui,
-                    known_hash.as_deref(),
+                    request_known_hash,
                     cancel,
                 ) => res,
             },
@@ -971,7 +1029,7 @@ pub async fn wait_local<D: PlatformDriver + ?Sized>(
                     driver.hierarchy(
                         &req.app_id,
                         req.include_system_ui,
-                        known_hash.as_deref(),
+                        request_known_hash,
                         cancel,
                     ),
                 ) => match timed {
@@ -1012,16 +1070,17 @@ pub async fn wait_local<D: PlatformDriver + ?Sized>(
                     } else {
                         format!("{h_u64:016x}")
                     };
-                    if resp.truncated {
-                        known_hash = None;
-                    } else {
+                    if allow_known_hash && !resp.truncated {
                         known_hash = Some(h_hex);
+                    } else {
+                        known_hash = None;
                     }
                     cached_hierarchy = Some(resp.clone());
                     Some(resp)
                 };
 
                 if let Some(effective) = effective {
+                    had_usable_observation_this_wait = true;
                     let effective_truncated = effective.truncated;
                     let hash_u64 = effective.hierarchy_hash_u64();
                     let hash_hex = if is_valid_hex_hash(&effective.hierarchy_hash) {
@@ -1029,6 +1088,7 @@ pub async fn wait_local<D: PlatformDriver + ?Sized>(
                     } else {
                         format!("{hash_u64:016x}")
                     };
+                    last_observed_hash = Some(hash_hex.clone());
 
                     if req.wait_stable {
                         if effective_truncated {
@@ -1118,7 +1178,7 @@ pub async fn wait_local<D: PlatformDriver + ?Sized>(
     }
 
     if let Some(err) = last_transient_err
-        && latest_hierarchy.is_none()
+        && !had_usable_observation_this_wait
     {
         return Err(err);
     }
@@ -1139,7 +1199,7 @@ pub async fn wait_local<D: PlatformDriver + ?Sized>(
         elapsed_ms: start.elapsed().as_millis() as u64,
         polls,
         settled_early: false,
-        hierarchy_hash: known_hash.unwrap_or_default(),
+        hierarchy_hash: last_observed_hash.or(known_hash).unwrap_or_default(),
         matched_node: None,
         visible_context,
         hierarchy: if req.return_hierarchy {
