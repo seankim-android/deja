@@ -193,6 +193,19 @@ impl VisibleContext {
         self.truncated
     }
 
+    /// Rebuilds this context by mapping every visible descriptor through `f`
+    /// (for example to apply secret/path redaction), re-deduplicating while
+    /// preserving the original `truncated` marker.
+    #[must_use]
+    pub fn map_items(&self, mut f: impl FnMut(&str) -> String) -> Self {
+        let mapped: Vec<String> = self.items.iter().map(|item| f(item)).collect();
+        let refs: Vec<&str> = mapped.iter().map(String::as_str).collect();
+        let limit = mapped.len().max(1);
+        let mut rebuilt = Self::from_candidates(refs, limit);
+        rebuilt.truncated = self.truncated || rebuilt.truncated;
+        rebuilt
+    }
+
     /// Renders a concise single-line summary suitable for error diagnostics.
     pub fn format_summary(&self) -> String {
         if self.items.is_empty() {

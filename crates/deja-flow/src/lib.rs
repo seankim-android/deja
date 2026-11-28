@@ -50,7 +50,7 @@ pub use parser::{
     ExtendedWaitUntilStep, FlowHeader, FlowParseError, FlowStep, InputTextStep, LaunchAppStep,
     OpenLinkStep, ParsedFlow, PressKeyStep, RepeatStep, RetryStep, RunFlowStep, RunFlowTarget,
     ScrollDirection, ScrollUntilVisibleStep, SwipeStep, TakeScreenshotStep, TapStep,
-    WaitForAnimationToEndStep, parse_flow,
+    WaitForAnimationToEndStep, parse_flow, validate_flow_app_id_confinement,
 };
 pub use selector::{
     CompiledSelector, MAX_SELECTOR_DEPTH, MAX_SELECTOR_PATTERN_BYTES, PointCoord, PointSpec,

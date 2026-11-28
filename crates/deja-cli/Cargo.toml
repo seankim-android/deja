@@ -31,5 +31,15 @@ deja-explore.workspace = true
 deja-flow.workspace = true
 deja-mcp.workspace = true
 deja-store.workspace = true
+hex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true

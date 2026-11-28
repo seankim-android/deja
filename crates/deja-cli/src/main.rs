@@ -1,48 +1,62 @@
-use clap::{Parser, Subcommand};
+//! Native Rust `deja` CLI binary entrypoint.
 
-const LINKED_WORKSPACE_CRATES: [&str; 8] = [
-    deja_core::CRATE_NAME,
-    deja_store::CRATE_NAME,
-    deja_flow::CRATE_NAME,
-    deja_driver_ios::CRATE_NAME,
-    deja_driver_android::CRATE_NAME,
-    deja_driver_web::CRATE_NAME,
-    deja_explore::CRATE_NAME,
-    deja_mcp::CRATE_NAME,
-];
+use std::process::ExitCode;
 
-/// Embedded Déjà agent workflow guide printed by `deja guide`.
-pub const EMBEDDED_AGENT_GUIDE_MD: &str = include_str!("../../../docs/AGENT_GUIDE.md");
+use deja_cli::{CliDeps, run_cli_from_args};
+use tokio_util::sync::CancellationToken;
+use tracing_subscriber::EnvFilter;
 
-#[derive(Debug, Parser)]
-#[command(
-    name = "deja",
-    version,
-    about = "Verified app test memory: explore once, replay with zero model calls"
-)]
-struct Cli {
-    #[command(subcommand)]
-    command: Option<Commands>,
+pub use deja_cli::EMBEDDED_AGENT_GUIDE_MD;
+
+#[tokio::main]
+async fn main() -> ExitCode {
+    let filter = EnvFilter::try_from_env("DEJA_LOG").unwrap_or_else(|_| EnvFilter::new("warn"));
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .with_target(false)
+        .try_init();
+
+    let cancel = CancellationToken::new();
+    let signal_cancel = cancel.clone();
+    let signal_task = tokio::spawn(async move {
+        wait_for_termination_signal().await;
+        signal_cancel.cancel();
+    });
+
+    let deps = CliDeps::real(cancel);
+    let exit_code = run_cli_from_args(std::env::args_os(), &deps).await;
+    signal_task.abort();
+    ExitCode::from(exit_code)
 }
 
-#[derive(Debug, Subcommand)]
-enum Commands {
-    /// Print the embedded Déjà agent workflow guide (`docs/AGENT_GUIDE.md`).
-    Guide,
-}
-
-fn main() {
-    let cli = Cli::parse();
-    let _ = LINKED_WORKSPACE_CRATES;
-    if let Some(Commands::Guide) = cli.command {
-        print!("{EMBEDDED_AGENT_GUIDE_MD}");
+async fn wait_for_termination_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut sigterm = signal(SignalKind::terminate()).ok();
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = async {
+                if let Some(ref mut s) = sigterm {
+                    s.recv().await;
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            } => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Cli, EMBEDDED_AGENT_GUIDE_MD, LINKED_WORKSPACE_CRATES};
+    use super::EMBEDDED_AGENT_GUIDE_MD;
     use clap::CommandFactory;
+    use deja_cli::{LINKED_WORKSPACE_CRATES, cli::Cli};
 
     #[test]
     fn verify_cli_definition() {

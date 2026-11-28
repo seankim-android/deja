@@ -779,6 +779,9 @@ impl FlowExecutor {
         if let Some(ref app_id) = ctx.failed_app_id {
             ctx.failed_app_id = Some(self.scrub(app_id));
         }
+        if let Some(ref vc) = ctx.visible_context {
+            ctx.visible_context = Some(vc.map_items(|item| self.scrub(item)));
+        }
         if let Some(ref mut sig) = ctx.crash_signal
             && let Some(ref detail) = sig.detail
         {
@@ -3721,4 +3724,55 @@ fn read_bounded_file(path: &Path, limit: u64) -> Result<Vec<u8>, FlowExecutionEr
         )));
     }
     Ok(bytes)
+}
+
+#[cfg(test)]
+mod scrub_tests {
+    use super::{FlowExecutionConfig, FlowExecutor};
+    use crate::capabilities::VisibleContext;
+    use crate::classifier::{FailedStepContext, StepFailureKind};
+    use deja_core::{create_redactor, provider_key_redactor};
+    use std::path::PathBuf;
+
+    #[test]
+    fn scrub_failed_step_redacts_visible_context_fixture_and_provider_secrets() {
+        let secret_token = ["sk", "-1234567890abcdefghijklmnop"].concat();
+        let fixture_pw = "fixture-secret-pw-99";
+        let mut cfg = FlowExecutionConfig::new(PathBuf::from("/tmp/fake-ws"));
+        cfg.redactor = create_redactor("/tmp/fake-ws", None, &[fixture_pw.to_string()]);
+        cfg.provider_redactor = provider_key_redactor(std::iter::empty::<(&str, &str)>());
+        let executor = FlowExecutor::new(cfg);
+
+        let mut failed = FailedStepContext {
+            step_index: 1,
+            command: "assertVisible".to_string(),
+            label: format!("Assert {fixture_pw}"),
+            kind: StepFailureKind::AssertionFailed,
+            message: format!("token {secret_token}"),
+            failed_app_id: None,
+            visible_context: Some(VisibleContext::from_candidates(
+                [
+                    "Sign in",
+                    &format!("Email: {fixture_pw}"),
+                    &format!("Header: {secret_token}"),
+                    "Workspace: /tmp/fake-ws/flows/a.yaml",
+                ],
+                3,
+            )),
+            crash_signal: None,
+        };
+
+        executor.scrub_failed_step(&mut failed);
+
+        assert!(!failed.label.contains(fixture_pw));
+        assert!(!failed.message.contains(&secret_token));
+        let vc = failed.visible_context.expect("visible context preserved");
+        assert!(vc.is_truncated(), "truncated flag must be preserved");
+        assert_eq!(vc.items().len(), 3);
+        let joined = vc.items().join(" | ");
+        assert!(joined.contains("Sign in"));
+        assert!(joined.contains("<redacted-fixture-value>"));
+        assert!(!joined.contains(fixture_pw));
+        assert!(!joined.contains(&secret_token));
+    }
 }
