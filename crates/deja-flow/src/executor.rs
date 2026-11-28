@@ -238,6 +238,9 @@ pub struct FlowExecutionConfig {
     pub workspace_root: PathBuf,
     pub flow_dir: Option<PathBuf>,
     pub screenshot_dir: Option<PathBuf>,
+    /// Optional per-run/per-goal screenshot base directory override taking precedence over
+    /// `screenshot_dir` so parallel batch goals executing `takeScreenshot` stay isolated.
+    pub screenshot_dir_override: Option<PathBuf>,
     pub app_id_override: Option<String>,
     pub env: BTreeMap<String, String>,
     pub default_step_timeout: Duration,
@@ -266,6 +269,7 @@ impl FlowExecutionConfig {
             workspace_root,
             flow_dir: None,
             screenshot_dir: None,
+            screenshot_dir_override: None,
             app_id_override: None,
             env: BTreeMap::new(),
             default_step_timeout: DEFAULT_STEP_TIMEOUT,
@@ -2698,11 +2702,20 @@ impl FlowExecutor {
             })?;
         let label = format!("Take screenshot \"{}\"", self.scrub(&raw_path));
 
-        let base_dir = self
-            .config
-            .screenshot_dir
-            .as_deref()
-            .unwrap_or(&state.canonical_workspace);
+        let override_resolved;
+        let base_dir: &Path = if let Some(ref dir) = self.config.screenshot_dir_override {
+            override_resolved = if dir.is_absolute() {
+                dir.clone()
+            } else {
+                state.canonical_workspace.join(dir)
+            };
+            &override_resolved
+        } else {
+            self.config
+                .screenshot_dir
+                .as_deref()
+                .unwrap_or(&state.canonical_workspace)
+        };
         let with_ext = if Path::new(&raw_path).extension().is_none() {
             format!("{raw_path}.png")
         } else {

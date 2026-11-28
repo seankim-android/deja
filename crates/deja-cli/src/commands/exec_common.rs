@@ -41,12 +41,53 @@ use crate::output::{
 const MAX_GOALS_FILE_BYTES: u64 = 4 * 1024 * 1024;
 static PREALLOC_REPORT_SEQ: AtomicU64 = AtomicU64::new(1);
 
+/// Target identity filter used when selecting goals from a multi-platform `deja.walks.json`
+/// manifest (`deja run --goals <manifest>`, `deja run --all`, `deja gate --goals <manifest>`).
+#[derive(Debug, Clone, Copy)]
+pub struct GoalTargetFilter<'a> {
+    pub app_id: &'a str,
+    pub platform: &'a str,
+    pub adapter: Option<&'a str>,
+    pub browser: Option<&'a str>,
+}
+
+impl<'a> GoalTargetFilter<'a> {
+    /// Construct a [`GoalTargetFilter`] directly from a loaded [`LoadedConfig`].
+    #[must_use]
+    pub fn from_config(config: &'a LoadedConfig) -> Self {
+        Self {
+            app_id: &config.app_id,
+            platform: &config.platform,
+            adapter: config.adapter.as_deref(),
+            browser: config.browser.as_deref(),
+        }
+    }
+
+    /// Returns `true` when `entry` belongs to this target configuration.
+    #[must_use]
+    pub fn matches_manifest_walk(&self, entry: &deja_core::ManifestWalk) -> bool {
+        entry.app_id == self.app_id
+            && entry.platform == self.platform
+            && self.adapter.is_none_or(|a| entry.adapter == a)
+            && entry.browser.as_deref() == self.browser
+    }
+}
+
 /// Parse a goals file shared by `deja gate --goals <FILE>` and `deja run --goals <FILE>`.
 ///
 /// Supports plain `#`-comment text lines, a JSON array of strings, or a `deja.walks.json`
 /// manifest object. Reads safely via `O_NOFOLLOW` bounded to 4 MiB and fails closed on empty
 /// lists, control/bidi characters, or invalid goals.
 pub fn parse_goals_file(path: &Path) -> Result<Vec<String>, String> {
+    parse_goals_file_for_target(path, None)
+}
+
+/// Variant of [`parse_goals_file`] that filters `deja.walks.json` manifest entries by `target`
+/// (`appId`, `platform`, `adapter`, `browser`) when `target` is `Some`.
+pub fn parse_goals_file_for_target(
+    path: &Path,
+    target: Option<GoalTargetFilter<'_>>,
+) -> Result<Vec<String>, String> {
     let raw = read_to_string_nofollow_bounded(path, MAX_GOALS_FILE_BYTES)
         .map_err(|err| format!("cannot read goals file {}: {err}", path.display()))?;
     let trimmed = raw.trim_start();
@@ -67,7 +108,22 @@ pub fn parse_goals_file(path: &Path) -> Result<Vec<String>, String> {
     } else if trimmed.starts_with('{') {
         let manifest = parse_walk_manifest(&raw)
             .map_err(|err| format!("goals JSON object is not a valid walk manifest: {err}"))?;
-        manifest.walks.into_iter().map(|w| w.goal).collect()
+        let walks: Vec<String> = match target {
+            Some(filter) => manifest
+                .walks
+                .into_iter()
+                .filter(|w| filter.matches_manifest_walk(w))
+                .map(|w| w.goal)
+                .collect(),
+            None => manifest.walks.into_iter().map(|w| w.goal).collect(),
+        };
+        if walks.is_empty() && target.is_some() {
+            return Err(
+                "manifest contains no walks matching this configuration's appId, platform, adapter, and browser"
+                    .to_string(),
+            );
+        }
+        walks
     } else {
         raw.lines()
             .map(str::trim)
@@ -90,18 +146,80 @@ pub fn parse_goals_file(path: &Path) -> Result<Vec<String>, String> {
     Ok(raw_goals)
 }
 
-/// Pre-allocate a unique workspace-relative batch report path under `.deja/reports/`.
+/// Pre-allocate a unique batch identifier (`batch-<ms>-<pid>-<seq>`) shared between the batch
+/// report filename and isolated per-goal screenshot directories.
 #[must_use]
-pub fn allocate_batch_report_rel_path() -> String {
+pub fn allocate_batch_id() -> String {
     let ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis())
         .unwrap_or(0);
     let seq = PREALLOC_REPORT_SEQ.fetch_add(1, Ordering::Relaxed);
-    format!(
-        ".deja/reports/batch-run-{ms}-{}-{seq}.json",
-        std::process::id()
-    )
+    format!("batch-{ms}-{}-{seq}", std::process::id())
+}
+
+/// Pre-allocate a unique workspace-relative batch report path under `.deja/reports/`.
+#[must_use]
+pub fn allocate_batch_report_rel_path_for_id(batch_id: &str) -> String {
+    format!(".deja/reports/batch-run-{batch_id}.json")
+}
+
+/// Verify that none of Déjà's implicit batch/per-store report paths (`.deja/reports/batch-latest.json`,
+/// `.deja/reports/latest.json`, `.deja/reports/stores/<id>/latest.json`, or the allocated
+/// immutable report / screenshot directory) collide with any protected input or explicit output
+/// path (`--goals`, `--config`, manifest, `--junit`, `--report`).
+pub fn validate_no_implicit_report_collision(
+    workspace_root: &Path,
+    store_ids: &[Option<&str>],
+    immutable_batch_rel: &str,
+    batch_screenshots_rel: &str,
+    protected_entries: &[(&str, &Path)],
+) -> Result<(), String> {
+    let mut implicit_files = vec![
+        lexical_normalize(&workspace_root.join(".deja/reports/batch-latest.json")),
+        lexical_normalize(&workspace_root.join(immutable_batch_rel)),
+    ];
+    for sid in store_ids {
+        let rel = match sid {
+            Some(id) => format!(".deja/reports/stores/{id}/latest.json"),
+            None => ".deja/reports/latest.json".to_string(),
+        };
+        implicit_files.push(lexical_normalize(&workspace_root.join(rel)));
+    }
+    let screenshots_dir = lexical_normalize(&workspace_root.join(batch_screenshots_rel));
+
+    for &(label, raw_path) in protected_entries {
+        let norm_prot = lexical_normalize(raw_path);
+        let resolved_prot =
+            resolve_with_nearest_ancestor(&norm_prot).unwrap_or_else(|_| norm_prot.clone());
+
+        if norm_prot == screenshots_dir
+            || path_inside(&screenshots_dir, &norm_prot)
+            || resolved_prot == screenshots_dir
+            || path_inside(&screenshots_dir, &resolved_prot)
+        {
+            return Err(format!(
+                "refusing to run because {label} ({}) collides with Déjà's batch screenshot directory",
+                raw_path.display()
+            ));
+        }
+
+        for imp in &implicit_files {
+            let resolved_imp = resolve_with_nearest_ancestor(imp).unwrap_or_else(|_| imp.clone());
+            if norm_prot == *imp
+                || resolved_prot == *imp
+                || norm_prot == resolved_imp
+                || resolved_prot == resolved_imp
+            {
+                return Err(format!(
+                    "refusing to run because {label} ({}) collides with Déjà's implicit report file ({})",
+                    raw_path.display(),
+                    imp.display()
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Write redacted batch report JSON to `.deja/reports/batch-run-*.json` and `.deja/reports/batch-latest.json`.
@@ -224,26 +342,7 @@ pub fn validate_early_output_path(
         {
             let manifest_abs = lexical_normalize(&candidate_ws.join(manifest_str));
             protected_files.push(manifest_abs.clone());
-            // Also protect all flow files (and their referenced closures) tracked in the manifest
-            // BEFORE `prepare_safe_junit` runs so `--junit flows/main.yaml` never unlinks a flow!
-            if let Ok(raw_manifest) =
-                read_to_string_nofollow_bounded(&manifest_abs, 16 * 1024 * 1024)
-                && let Ok(manifest) = deja_core::parse_walk_manifest(&raw_manifest)
-            {
-                for entry in &manifest.walks {
-                    let flow_abs = lexical_normalize(&candidate_ws.join(&entry.flow));
-                    protected_files.push(flow_abs.clone());
-                    if let Ok(canon_flow) = fs::canonicalize(&flow_abs)
-                        && let Ok(closure) =
-                            deja_core::collect_flow_closure(&candidate_ws, &canon_flow)
-                    {
-                        for file in &closure.files {
-                            protected_files
-                                .push(lexical_normalize(&candidate_ws.join(&file.source)));
-                        }
-                    }
-                }
-            }
+            collect_manifest_protected_paths(&candidate_ws, &manifest_abs, &mut protected_files);
         }
     }
 
@@ -266,8 +365,32 @@ pub fn validate_early_output_path(
     check_output_target_against_protected(target, flag_label, &candidate_ws, &protected_files)
 }
 
-/// Full walk-state protection check for explicit `--report` / `--junit` destinations once
-/// config (and optionally the active [`FlowClosure`]) have been resolved.
+fn collect_manifest_protected_paths(
+    workspace_root: &Path,
+    manifest_abs: &Path,
+    protected_files: &mut Vec<PathBuf>,
+) {
+    // Protect every flow file (and its referenced closure) tracked in `deja.walks.json` BEFORE
+    // `prepare_safe_junit` runs so neither CLI `--junit` nor `config.junit` can ever unlink a flow!
+    if let Ok(raw_manifest) = read_to_string_nofollow_bounded(manifest_abs, 16 * 1024 * 1024)
+        && let Ok(manifest) = deja_core::parse_walk_manifest(&raw_manifest)
+    {
+        for entry in &manifest.walks {
+            let flow_abs = lexical_normalize(&workspace_root.join(&entry.flow));
+            protected_files.push(flow_abs.clone());
+            if let Ok(canon_flow) = fs::canonicalize(&flow_abs)
+                && let Ok(closure) = deja_core::collect_flow_closure(workspace_root, &canon_flow)
+            {
+                for file in &closure.files {
+                    protected_files.push(lexical_normalize(&workspace_root.join(&file.source)));
+                }
+            }
+        }
+    }
+}
+
+/// Full walk-state protection check for explicit `--report` / `--junit` (and `config.junit`)
+/// destinations once config (and optionally the active [`FlowClosure`]) have been resolved.
 pub fn validate_explicit_output_path(
     target: &Path,
     flag_label: &str,
@@ -279,7 +402,13 @@ pub fn validate_explicit_output_path(
 
     let mut protected_files = vec![config.config_path.clone()];
     if let Some(ref manifest_rel) = config.manifest {
-        protected_files.push(lexical_normalize(&config.workspace_root.join(manifest_rel)));
+        let manifest_abs = lexical_normalize(&config.workspace_root.join(manifest_rel));
+        protected_files.push(manifest_abs.clone());
+        collect_manifest_protected_paths(
+            &config.workspace_root,
+            &manifest_abs,
+            &mut protected_files,
+        );
     }
     if let Some(c) = closure {
         for file in &c.files {
@@ -335,6 +464,10 @@ fn check_output_target_against_protected(
     let flows_dir = lexical_normalize(&canonical_workspace.join(".deja/flows"));
     let manifest_lock = lexical_normalize(&canonical_workspace.join(".deja/manifest.lock"));
     let legacy_walks = lexical_normalize(&canonical_workspace.join("walks.json"));
+    let batch_latest =
+        lexical_normalize(&canonical_workspace.join(".deja/reports/batch-latest.json"));
+    let default_latest = lexical_normalize(&canonical_workspace.join(".deja/reports/latest.json"));
+    let store_reports_dir = lexical_normalize(&canonical_workspace.join(".deja/reports/stores"));
 
     for candidate in [&norm_target, &resolved_target] {
         if candidate == &memory_dir || path_inside(&memory_dir, candidate) {
@@ -352,6 +485,16 @@ fn check_output_target_against_protected(
         if candidate == &manifest_lock || candidate == &legacy_walks {
             return Err(format!(
                 "refusing to overwrite protected Déjà walk state with {flag_label}: {}",
+                target.display()
+            ));
+        }
+        if candidate == &batch_latest
+            || candidate == &default_latest
+            || (path_inside(&store_reports_dir, candidate)
+                && candidate.file_name().and_then(|s| s.to_str()) == Some("latest.json"))
+        {
+            return Err(format!(
+                "refusing to write {flag_label} to Déjà's implicit report path: {}",
                 target.display()
             ));
         }
@@ -726,6 +869,23 @@ pub async fn execute_single_attempt(
     redaction: &RedactionContext,
     cancel: &CancellationToken,
 ) -> ExecutedAttempt {
+    execute_single_attempt_with_screenshot_dir(
+        driver, config, closure, timeout_ms, None, redaction, cancel,
+    )
+    .await
+}
+
+/// Variant of [`execute_single_attempt`] allowing batch runs to isolate `takeScreenshot` paths
+/// per goal and attempt via [`FlowExecutionConfig::screenshot_dir_override`].
+pub async fn execute_single_attempt_with_screenshot_dir(
+    driver: &dyn PlatformDriver,
+    config: &LoadedConfig,
+    closure: &FlowClosure,
+    timeout_ms: u64,
+    screenshot_dir_override: Option<&Path>,
+    redaction: &RedactionContext,
+    cancel: &CancellationToken,
+) -> ExecutedAttempt {
     let started_at = now_iso8601();
     let started_epoch_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -738,6 +898,7 @@ pub async fn execute_single_attempt(
     exec_cfg.app_id_override = Some(config.app_id.clone());
     exec_cfg.env = config.env.clone();
     exec_cfg.flow_timeout = Some(Duration::from_millis(timeout_ms));
+    exec_cfg.screenshot_dir_override = screenshot_dir_override.map(Path::to_path_buf);
     exec_cfg.redactor = redaction.redactor.clone();
     exec_cfg.provider_redactor = redaction.provider.clone();
 

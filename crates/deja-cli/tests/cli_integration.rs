@@ -6133,6 +6133,40 @@ async fn batch_in_process_cancellation_teardown_locks_sqlite_and_junit() {
     assert!(xml.contains(r#"<error type="Cancelled""#));
     assert!(xml.contains(r#"status="SKIPPED""#));
     assert!(xml.contains(r#"<skipped message="cancelled before execution"/>"#));
+
+    // `--summary` lines MUST strictly obey the `deja-summary v=1` grammar (`outcome=error` and
+    // `failure=error` when no `RunResult` exists; never non-v1 `outcome=cancelled`/`skipped` or
+    // `failure=cancelled`/`skipped`).
+    let summary_lines: Vec<&str> = out
+        .stderr
+        .lines()
+        .filter(|l| l.starts_with("deja-summary v=1 "))
+        .collect();
+    assert_eq!(
+        summary_lines.len(),
+        3,
+        "expected 3 summary lines, got: {summary_lines:?}"
+    );
+    assert!(
+        summary_lines[0].contains("outcome=passed ")
+            && summary_lines[0].contains(" failure=none goal=g1"),
+        "unexpected g1 summary line: {}",
+        summary_lines[0]
+    );
+    for (idx, goal) in [(1usize, "g2"), (2usize, "g3")] {
+        let line = summary_lines[idx];
+        assert!(
+            line.contains("outcome=error ")
+                && line.contains(" cache=not-checked ")
+                && line.contains(" model_calls=0 ")
+                && line.contains(&format!(" failure=error goal={goal}")),
+            "cancelled/skipped goal {goal} must emit strict v1 outcome=error failure=error summary, got: {line}"
+        );
+        assert!(
+            !line.contains("cancelled") && !line.contains("skipped"),
+            "deja-summary v=1 must not emit non-v1 cancelled/skipped tokens: {line}"
+        );
+    }
 }
 
 #[cfg(unix)]
@@ -6389,4 +6423,698 @@ async fn batch_verify_serializes_manifest_commits_across_shards_and_real_factory
         "both --verify manifest updates must persist cleanly: {}",
         cap_chk.lock().unwrap().stdout
     );
+}
+
+#[tokio::test]
+async fn regression_deja66_r1_f1_failed_replay_on_new_shard_closes_multi_store_gate() {
+    let ws = TempWs::new("deja66-r1-f1-shard-fail");
+    ws.write_build("build/App.bin", b"build-v1");
+    ws.write(
+        "deja.config.json",
+        &json!({
+            "workspaceRoot": ".",
+            "platform": "ios",
+            "appId": TEST_APP_ID,
+            "adapter": "maestro-ios/v1",
+            "buildPath": "build/App.bin",
+            "device": TEST_UDID,
+            "manifest": "deja.walks.json",
+            "staleBuild": "replay-last-verified"
+        })
+        .to_string(),
+    );
+    write_tagged_flow(&ws, "flows/checkout.yaml", "checkout");
+    seed_manifest_walk(
+        &ws,
+        &[(
+            "checkout",
+            TEST_APP_ID,
+            "ios",
+            "maestro-ios/v1",
+            "flows/checkout.yaml",
+        )],
+    );
+    ws.write("goals.txt", "checkout\n");
+
+    // 1. Goal passes on shard A (`TEST_UDID`).
+    let pass_factory = Arc::new(BatchMockFactory::new(Some("ios-27.2")));
+    let (deps_a, cap_a) = make_deps(
+        &ws.path,
+        Arc::clone(&pass_factory) as Arc<dyn DriverFactory>,
+        default_probes(),
+        CancellationToken::new(),
+    );
+    let code_a = run_cli_from_args(
+        [
+            "deja",
+            "run",
+            "--goals",
+            "goals.txt",
+            "--devices",
+            TEST_UDID,
+            "--json",
+        ],
+        &deps_a,
+    )
+    .await;
+    assert_eq!(code_a, 0, "stderr: {}", cap_a.lock().unwrap().stderr);
+
+    // 2. Goal now moves to brand-new shard B (`TEST_UDID_2`, zero prior history in shard B) and
+    // FAILS consistently on the exact same build!
+    let fail_factory = Arc::new(BatchMockFactory::new(Some("ios-27.2")));
+    fail_factory.add_failing_goal("checkout");
+    let (deps_b, _) = make_deps(
+        &ws.path,
+        Arc::clone(&fail_factory) as Arc<dyn DriverFactory>,
+        default_probes(),
+        CancellationToken::new(),
+    );
+    let code_b = run_cli_from_args(
+        [
+            "deja",
+            "run",
+            "--goals",
+            "goals.txt",
+            "--devices",
+            TEST_UDID_2,
+            "--json",
+        ],
+        &deps_b,
+    )
+    .await;
+    assert_eq!(code_b, 1, "consistent failure on shard B must exit 1");
+
+    // 3. `deja gate --store A --store B` MUST see shard B's failure and close (exit 10),
+    // NEVER passing on shard A's stale success!
+    let (deps_gate, cap_gate) = make_deps(
+        &ws.path,
+        Arc::clone(&pass_factory) as Arc<dyn DriverFactory>,
+        default_probes(),
+        CancellationToken::new(),
+    );
+    let gate_code = run_cli_from_args(
+        [
+            "deja",
+            "gate",
+            "--goals",
+            "goals.txt",
+            "--store",
+            TEST_UDID,
+            "--store",
+            TEST_UDID_2,
+            "--json",
+        ],
+        &deps_gate,
+    )
+    .await;
+    assert_eq!(
+        gate_code,
+        10,
+        "gate must close when shard B failed replay (stdout={})",
+        cap_gate.lock().unwrap().stdout
+    );
+    let gate_json: Value = serde_json::from_str(&cap_gate.lock().unwrap().stdout).unwrap();
+    assert_eq!(gate_json["verdict"], "closed");
+    assert_eq!(gate_json["goals"][0]["outcome"], "failed");
+}
+
+#[tokio::test]
+async fn regression_deja66_r1_f2_config_junit_protects_manifest_flows_and_closures() {
+    let ws = TempWs::new("deja66-r1-f2-cfg-junit");
+    ws.write_build("build/App.bin", b"build-v1");
+    let flow_text = format!(
+        "appId: {TEST_APP_ID}\n---\n- launchApp\n- runFlow: sub.yaml\n- assertVisible: Done\n"
+    );
+    let sub_text = format!("appId: {TEST_APP_ID}\n---\n- assertVisible: Done\n");
+    let flow_path = ws.write("flows/checkout.yaml", &flow_text);
+    let sub_path = ws.write("flows/sub.yaml", &sub_text);
+    seed_manifest_walk(
+        &ws,
+        &[(
+            "checkout",
+            TEST_APP_ID,
+            "ios",
+            "maestro-ios/v1",
+            "flows/checkout.yaml",
+        )],
+    );
+
+    for protected_junit in ["flows/checkout.yaml", "flows/sub.yaml"] {
+        ws.write(
+            "deja.config.json",
+            &json!({
+                "workspaceRoot": ".",
+                "platform": "ios",
+                "appId": TEST_APP_ID,
+                "adapter": "maestro-ios/v1",
+                "buildPath": "build/App.bin",
+                "device": TEST_UDID,
+                "manifest": "deja.walks.json",
+                "junit": protected_junit
+            })
+            .to_string(),
+        );
+        let factory = Arc::new(BatchMockFactory::new(Some("ios-27.2")));
+        let (deps, _) = make_deps(
+            &ws.path,
+            Arc::clone(&factory) as Arc<dyn DriverFactory>,
+            default_probes(),
+            CancellationToken::new(),
+        );
+        let code = run_cli_from_args(["deja", "run", "--all", "--json"], &deps).await;
+        assert_eq!(
+            code, 2,
+            "config.junit targeting {protected_junit} must fail closed exit 2"
+        );
+        assert_eq!(factory.total_create_calls(), 0);
+    }
+
+    assert_eq!(
+        fs::read_to_string(&flow_path).unwrap(),
+        flow_text,
+        "flows/checkout.yaml must remain untouched"
+    );
+    assert_eq!(
+        fs::read_to_string(&sub_path).unwrap(),
+        sub_text,
+        "flows/sub.yaml must remain untouched"
+    );
+}
+
+#[tokio::test]
+async fn regression_deja66_r1_f3_implicit_batch_reports_never_overwrite_goals_or_explicit_outputs()
+{
+    let ws = TempWs::new("deja66-r1-f3-implicit");
+    ws.write_build("build/App.bin", b"build-v1");
+    ws.write(
+        "deja.config.json",
+        &json!({
+            "workspaceRoot": ".",
+            "platform": "ios",
+            "appId": TEST_APP_ID,
+            "adapter": "maestro-ios/v1",
+            "buildPath": "build/App.bin",
+            "device": TEST_UDID,
+            "manifest": "deja.walks.json",
+            "staleBuild": "replay-last-verified"
+        })
+        .to_string(),
+    );
+    write_tagged_flow(&ws, "flows/g1.yaml", "g1");
+    seed_manifest_walk(
+        &ws,
+        &[("g1", TEST_APP_ID, "ios", "maestro-ios/v1", "flows/g1.yaml")],
+    );
+
+    let batch_latest_content = "g1\n";
+    let batch_latest = ws.write(".deja/reports/batch-latest.json", batch_latest_content);
+    let default_latest_content = "g1\n";
+    let default_latest = ws.write(".deja/reports/latest.json", default_latest_content);
+
+    let factory = Arc::new(BatchMockFactory::new(Some("ios-27.2")));
+    for argv in [
+        vec![
+            "deja",
+            "run",
+            "--goals",
+            ".deja/reports/batch-latest.json",
+            "--json",
+        ],
+        vec![
+            "deja",
+            "run",
+            "--goals",
+            ".deja/reports/latest.json",
+            "--json",
+        ],
+        vec![
+            "deja",
+            "run",
+            "--all",
+            "--report",
+            ".deja/reports/batch-latest.json",
+            "--json",
+        ],
+        vec![
+            "deja",
+            "run",
+            "--all",
+            "--junit",
+            ".deja/reports/batch-latest.json",
+            "--json",
+        ],
+    ] {
+        let (deps, _) = make_deps(
+            &ws.path,
+            Arc::clone(&factory) as Arc<dyn DriverFactory>,
+            default_probes(),
+            CancellationToken::new(),
+        );
+        let code = run_cli_from_args(argv.clone(), &deps).await;
+        assert_eq!(
+            code, 2,
+            "implicit report collision for {argv:?} must fail closed exit 2"
+        );
+    }
+    assert_eq!(factory.total_create_calls(), 0);
+    assert_eq!(
+        fs::read_to_string(&batch_latest).unwrap(),
+        batch_latest_content,
+        ".deja/reports/batch-latest.json used as --goals must NEVER be overwritten"
+    );
+    assert_eq!(
+        fs::read_to_string(&default_latest).unwrap(),
+        default_latest_content,
+        ".deja/reports/latest.json used as --goals must NEVER be overwritten"
+    );
+}
+
+#[tokio::test]
+async fn regression_deja66_r1_f4_goals_manifest_filters_multi_platform_same_goal_entries() {
+    let ws = TempWs::new("deja66-r1-f4-multiplat");
+    ws.write_build("build/App.bin", b"build-v1");
+    ws.write(
+        "deja.config.json",
+        &json!({
+            "workspaceRoot": ".",
+            "platform": "ios",
+            "appId": TEST_APP_ID,
+            "adapter": "maestro-ios/v1",
+            "buildPath": "build/App.bin",
+            "device": TEST_UDID,
+            "manifest": "deja.walks.json",
+            "staleBuild": "replay-last-verified"
+        })
+        .to_string(),
+    );
+    write_tagged_flow(&ws, "flows/ios_checkout.yaml", "ios_checkout");
+    ws.write(
+        "flows/android_checkout.yaml",
+        &format!("appId: {TEST_APP_ID}\n---\n- launchApp\n- assertVisible: Done\n"),
+    );
+
+    // Same goal name `"checkout"` for BOTH `ios` and `android` in the same `deja.walks.json`!
+    seed_manifest_walk(
+        &ws,
+        &[
+            (
+                "checkout",
+                TEST_APP_ID,
+                "ios",
+                "maestro-ios/v1",
+                "flows/ios_checkout.yaml",
+            ),
+            (
+                "checkout",
+                TEST_APP_ID,
+                "android",
+                "maestro-android/v1",
+                "flows/android_checkout.yaml",
+            ),
+        ],
+    );
+
+    let factory = Arc::new(BatchMockFactory::new(Some("ios-27.2")));
+    let (deps, cap) = make_deps(
+        &ws.path,
+        Arc::clone(&factory) as Arc<dyn DriverFactory>,
+        default_probes(),
+        CancellationToken::new(),
+    );
+    let code = run_cli_from_args(
+        ["deja", "run", "--goals", "deja.walks.json", "--json"],
+        &deps,
+    )
+    .await;
+    assert_eq!(
+        code,
+        0,
+        "multi-platform manifest passed to --goals must filter cleanly without duplicate-goal error (stderr={})",
+        cap.lock().unwrap().stderr
+    );
+    let parsed: Value = serde_json::from_str(&cap.lock().unwrap().stdout).unwrap();
+    assert_eq!(parsed["goals"].as_array().unwrap().len(), 1);
+    assert_eq!(parsed["goals"][0]["goal"], "checkout");
+    assert_eq!(parsed["goals"][0]["outcome"], "passed");
+
+    // `deja gate --goals deja.walks.json` also filters cleanly and passes!
+    let (deps_gate, cap_gate) = make_deps(
+        &ws.path,
+        Arc::clone(&factory) as Arc<dyn DriverFactory>,
+        default_probes(),
+        CancellationToken::new(),
+    );
+    let gate_code = run_cli_from_args(
+        ["deja", "gate", "--goals", "deja.walks.json", "--json"],
+        &deps_gate,
+    )
+    .await;
+    assert_eq!(
+        gate_code,
+        0,
+        "gate --goals deja.walks.json must pass (stdout={})",
+        cap_gate.lock().unwrap().stdout
+    );
+}
+
+#[tokio::test]
+async fn regression_deja66_r1_f5_unwritable_explicit_report_reflected_in_emitted_batch_json() {
+    let ws = TempWs::new("deja66-r1-f5-report-err");
+    ws.write_build("build/App.bin", b"build-v1");
+    ws.write(
+        "deja.config.json",
+        &json!({
+            "workspaceRoot": ".",
+            "platform": "ios",
+            "appId": TEST_APP_ID,
+            "adapter": "maestro-ios/v1",
+            "buildPath": "build/App.bin",
+            "device": TEST_UDID,
+            "manifest": "deja.walks.json",
+            "staleBuild": "replay-last-verified"
+        })
+        .to_string(),
+    );
+    write_tagged_flow(&ws, "flows/g1.yaml", "g1");
+    seed_manifest_walk(
+        &ws,
+        &[("g1", TEST_APP_ID, "ios", "maestro-ios/v1", "flows/g1.yaml")],
+    );
+    ws.write("not_a_dir", "blocking file");
+
+    let factory = Arc::new(BatchMockFactory::new(Some("ios-27.2")));
+    let (deps, cap) = make_deps(
+        &ws.path,
+        Arc::clone(&factory) as Arc<dyn DriverFactory>,
+        default_probes(),
+        CancellationToken::new(),
+    );
+    let code = run_cli_from_args(
+        [
+            "deja",
+            "run",
+            "--all",
+            "--report",
+            "not_a_dir/batch.json",
+            "--json",
+        ],
+        &deps,
+    )
+    .await;
+    assert_eq!(code, 2, "unwritable explicit --report must exit 2");
+
+    let out = cap.lock().unwrap().clone();
+    let parsed: Value = serde_json::from_str(&out.stdout).unwrap();
+    assert_eq!(parsed["exitCode"], 2);
+    assert_eq!(parsed["passed"], false);
+    assert_eq!(parsed["outcome"], "error");
+    assert!(
+        parsed["errors"].as_array().unwrap().iter().any(|e| e
+            .as_str()
+            .unwrap_or("")
+            .contains("failed to write explicit --report")),
+        "stdout JSON errors must include explicit --report write error: {parsed}"
+    );
+}
+
+#[tokio::test]
+async fn regression_deja66_r1_f7_parallel_batch_goals_isolate_shared_take_screenshot_paths() {
+    let ws = TempWs::new("deja66-r1-f7-shots");
+    ws.write_build("build/App.bin", b"build-v1");
+    ws.write(
+        "deja.config.json",
+        &json!({
+            "workspaceRoot": ".",
+            "platform": "ios",
+            "appId": TEST_APP_ID,
+            "adapter": "maestro-ios/v1",
+            "buildPath": "build/App.bin",
+            "manifest": "deja.walks.json",
+            "staleBuild": "replay-last-verified"
+        })
+        .to_string(),
+    );
+    // Shared subflow writing to identical relative path `shared.png`!
+    ws.write(
+        "flows/capture_sub.yaml",
+        &format!(
+            "appId: {TEST_APP_ID}\n---\n- takeScreenshot: shared.png\n- assertVisible: Done\n"
+        ),
+    );
+    ws.write(
+        "flows/g1.yaml",
+        &format!("appId: {TEST_APP_ID}\n---\n- launchApp\n- inputText: \"g1\"\n- runFlow: capture_sub.yaml\n"),
+    );
+    ws.write(
+        "flows/g2.yaml",
+        &format!("appId: {TEST_APP_ID}\n---\n- launchApp\n- inputText: \"g2\"\n- runFlow: capture_sub.yaml\n"),
+    );
+    seed_manifest_walk(
+        &ws,
+        &[
+            ("g1", TEST_APP_ID, "ios", "maestro-ios/v1", "flows/g1.yaml"),
+            ("g2", TEST_APP_ID, "ios", "maestro-ios/v1", "flows/g2.yaml"),
+        ],
+    );
+
+    // Synchronize both shards with a 2-party Barrier so both goals run concurrently!
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let barrier_clone = Arc::clone(&barrier);
+    let hook: AsyncGoalHook = Arc::new(move |_device, _tag, _cancel| {
+        let b = Arc::clone(&barrier_clone);
+        Box::pin(async move {
+            b.wait().await;
+        })
+    });
+
+    let factory = Arc::new(BatchMockFactory::new(Some("ios-27.2")).with_on_goal(hook));
+    let (deps, cap) = make_deps(
+        &ws.path,
+        Arc::clone(&factory) as Arc<dyn DriverFactory>,
+        default_probes(),
+        CancellationToken::new(),
+    );
+    let devices_arg = format!("{TEST_UDID},{TEST_UDID_2}");
+    let code = tokio::time::timeout(
+        Duration::from_secs(10),
+        run_cli_from_args(
+            ["deja", "run", "--all", "--devices", &devices_arg, "--json"],
+            &deps,
+        ),
+    )
+    .await
+    .expect("parallel screenshot batch must not stall");
+    assert_eq!(code, 0, "stderr: {}", cap.lock().unwrap().stderr);
+
+    let parsed: Value = serde_json::from_str(&cap.lock().unwrap().stdout).unwrap();
+    let goals = parsed["goals"].as_array().unwrap();
+    assert_eq!(goals.len(), 2);
+
+    let extract_shot = |g: &Value| -> String {
+        g["report"]["artifacts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["kind"] == "output")
+            .expect("goal report must contain screenshot output artifact")["path"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    let shot0 = extract_shot(&goals[0]);
+    let shot1 = extract_shot(&goals[1]);
+    assert_ne!(
+        shot0, shot1,
+        "parallel goals must NOT share or overwrite the same screenshot path ({shot0})"
+    );
+    assert!(
+        shot0.contains("goal-0-attempt-1") && shot0.ends_with("/shared.png"),
+        "unexpected shot0 path: {shot0}"
+    );
+    assert!(
+        shot1.contains("goal-1-attempt-1") && shot1.ends_with("/shared.png"),
+        "unexpected shot1 path: {shot1}"
+    );
+    assert!(ws.path.join(&shot0).is_file());
+    assert!(ws.path.join(&shot1).is_file());
+    assert!(
+        !ws.path.join("shared.png").exists(),
+        "batch goals must not write shared.png at workspace root"
+    );
+}
+
+#[tokio::test]
+async fn regression_deja66_r1_f8_lpt_uses_pooled_samples_not_median_of_shard_medians() {
+    let ws = TempWs::new("deja66-r1-f8-pooled-lpt");
+    ws.write_build("build/App.bin", b"build-v-current");
+    ws.write(
+        "deja.config.json",
+        &json!({
+            "workspaceRoot": ".",
+            "platform": "ios",
+            "appId": TEST_APP_ID,
+            "adapter": "maestro-ios/v1",
+            "buildPath": "build/App.bin",
+            "manifest": "deja.walks.json",
+            "staleBuild": "replay-last-verified"
+        })
+        .to_string(),
+    );
+    write_tagged_flow(&ws, "flows/x.yaml", "x");
+    write_tagged_flow(&ws, "flows/y.yaml", "y");
+    seed_manifest_walk(
+        &ws,
+        &[
+            (
+                "goal x",
+                TEST_APP_ID,
+                "ios",
+                "maestro-ios/v1",
+                "flows/x.yaml",
+            ),
+            (
+                "goal y",
+                TEST_APP_ID,
+                "ios",
+                "maestro-ios/v1",
+                "flows/y.yaml",
+            ),
+        ],
+    );
+    ws.write("goals.txt", "goal x\ngoal y\n");
+
+    let x_cl = collect_flow_closure(&ws.path, &ws.path.join("flows/x.yaml")).unwrap();
+    let x_main = x_cl
+        .files
+        .iter()
+        .find(|f| f.path == x_cl.main)
+        .unwrap()
+        .sha256
+        .clone();
+    let y_cl = collect_flow_closure(&ws.path, &ws.path.join("flows/y.yaml")).unwrap();
+    let y_main = y_cl
+        .files
+        .iter()
+        .find(|f| f.path == y_cl.main)
+        .unwrap()
+        .sha256
+        .clone();
+
+    // Seed Shard A (`TEST_UDID`) with NINE 100ms runs for `goal x` AND one 500ms run for `goal y`.
+    let store_a =
+        SqliteWalkStore::open_writable(SqliteStoreOptions::new(&ws.path).with_store_id(TEST_UDID))
+            .unwrap();
+    for i in 0..9 {
+        let fp = format!("{i:064x}");
+        store_a
+            .upsert_walk(&deja_store::UpsertWalkInput {
+                identity: WalkIdentity {
+                    goal: "goal x".to_string(),
+                    app_id: TEST_APP_ID.to_string(),
+                    platform: "ios".to_string(),
+                    flow_schema_version: DEFAULT_FLOW_SCHEMA_VERSION.to_string(),
+                    build_fingerprint: fp,
+                    adapter: Some("maestro-ios/v1".to_string()),
+                    browser: None,
+                },
+                flow_path: "flows/x.yaml".to_string(),
+                flow_sha256: x_main.clone(),
+                subflow_files: None,
+                legacy_closure: false,
+                closure_sha256: Some(x_cl.sha256.clone()),
+                validation: RecordValidationInput::new(true, now_iso8601())
+                    .with_runtime("ios-27.2")
+                    .with_duration_ms(100),
+                exploration: None,
+                repair_history: None,
+            })
+            .unwrap();
+    }
+    store_a
+        .upsert_walk(&deja_store::UpsertWalkInput {
+            identity: WalkIdentity {
+                goal: "goal y".to_string(),
+                app_id: TEST_APP_ID.to_string(),
+                platform: "ios".to_string(),
+                flow_schema_version: DEFAULT_FLOW_SCHEMA_VERSION.to_string(),
+                build_fingerprint: format!("{:064x}", 100),
+                adapter: Some("maestro-ios/v1".to_string()),
+                browser: None,
+            },
+            flow_path: "flows/y.yaml".to_string(),
+            flow_sha256: y_main,
+            subflow_files: None,
+            legacy_closure: false,
+            closure_sha256: Some(y_cl.sha256),
+            validation: RecordValidationInput::new(true, now_iso8601())
+                .with_runtime("ios-27.2")
+                .with_duration_ms(500),
+            exploration: None,
+            repair_history: None,
+        })
+        .unwrap();
+    store_a.close();
+
+    // Seed Shard B (`TEST_UDID_2`) with ONE 9_900ms outlier run for `goal x`.
+    // Median-of-medians would compute (100 + 9900)/2 = 5000ms (scheduling X first — WRONG!).
+    // Pooled median computes median([100 x 9, 9900]) = 100ms (scheduling Y=500ms BEFORE X=100ms!).
+    let store_b = SqliteWalkStore::open_writable(
+        SqliteStoreOptions::new(&ws.path).with_store_id(TEST_UDID_2),
+    )
+    .unwrap();
+    store_b
+        .upsert_walk(&deja_store::UpsertWalkInput {
+            identity: WalkIdentity {
+                goal: "goal x".to_string(),
+                app_id: TEST_APP_ID.to_string(),
+                platform: "ios".to_string(),
+                flow_schema_version: DEFAULT_FLOW_SCHEMA_VERSION.to_string(),
+                build_fingerprint: format!("{:064x}", 200),
+                adapter: Some("maestro-ios/v1".to_string()),
+                browser: None,
+            },
+            flow_path: "flows/x.yaml".to_string(),
+            flow_sha256: x_main,
+            subflow_files: None,
+            legacy_closure: false,
+            closure_sha256: Some(x_cl.sha256),
+            validation: RecordValidationInput::new(true, now_iso8601())
+                .with_runtime("ios-27.2")
+                .with_duration_ms(9_900),
+            exploration: None,
+            repair_history: None,
+        })
+        .unwrap();
+    store_b.close();
+
+    let factory = Arc::new(BatchMockFactory::new(Some("ios-27.2")));
+    let (deps, cap) = make_deps(
+        &ws.path,
+        Arc::clone(&factory) as Arc<dyn DriverFactory>,
+        default_probes(),
+        CancellationToken::new(),
+    );
+    let devices_arg = format!("{TEST_UDID},{TEST_UDID_2}");
+    let code = run_cli_from_args(
+        [
+            "deja",
+            "run",
+            "--goals",
+            "goals.txt",
+            "--devices",
+            &devices_arg,
+            "--json",
+        ],
+        &deps,
+    )
+    .await;
+    assert_eq!(code, 0, "stderr: {}", cap.lock().unwrap().stderr);
+    let parsed: Value = serde_json::from_str(&cap.lock().unwrap().stdout).unwrap();
+    assert_eq!(
+        parsed["scheduledOrder"],
+        json!(["goal y", "goal x"]),
+        "pooled LPT median must schedule goal y (500ms) BEFORE goal x (100ms)"
+    );
+    assert_eq!(parsed["goals"][0]["historicalMedianMs"], 100);
+    assert_eq!(parsed["goals"][1]["historicalMedianMs"], 500);
 }

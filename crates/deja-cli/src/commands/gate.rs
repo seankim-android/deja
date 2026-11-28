@@ -18,7 +18,7 @@ use serde_json::{Value, json};
 
 use crate::CliDeps;
 use crate::cli::GateArgs;
-use crate::commands::exec_common::parse_goals_file;
+use crate::commands::exec_common::{GoalTargetFilter, parse_goals_file_for_target};
 use crate::commands::manifest::has_unsafe_control_or_bidi_char;
 use crate::config::{CommandCapability, DEFAULT_CONFIG_PATH, LoadConfigOptions, load_config};
 use crate::exit_codes::{EXIT_GATE_CLOSED, EXIT_GATE_ERROR, EXIT_OK, EXIT_USAGE_OR_CONFIG};
@@ -217,19 +217,21 @@ pub fn run(args: &GateArgs, explicit_config: Option<&Path>, json_mode: bool, dep
         return code;
     }
 
-    // Now load & strictly validate the goals file.
-    let goals = match parse_goals_file(&goals_abs) {
-        Ok(g) => g,
-        Err(msg) => {
-            emit_gate_error(
-                deps,
-                json_mode,
-                "INVALID_GOALS",
-                &redaction.redact_str(&msg),
-            );
-            return EXIT_USAGE_OR_CONFIG;
-        }
-    };
+    // Now load & strictly validate the goals file (filtering multi-platform manifests by target).
+    let goals =
+        match parse_goals_file_for_target(&goals_abs, Some(GoalTargetFilter::from_config(&config)))
+        {
+            Ok(g) => g,
+            Err(msg) => {
+                emit_gate_error(
+                    deps,
+                    json_mode,
+                    "INVALID_GOALS",
+                    &redaction.redact_str(&msg),
+                );
+                return EXIT_USAGE_OR_CONFIG;
+            }
+        };
 
     let evaluated_at = now_iso8601();
     let build_path = config

@@ -30,11 +30,13 @@ use tokio::sync::{Mutex as AsyncMutex, OnceCell};
 use crate::CliDeps;
 use crate::cli::RunArgs;
 use crate::commands::exec_common::{
-    ExecutedAttempt, allocate_batch_report_rel_path, allocate_report_rel_path, build_base_report,
-    build_consumer_flows, build_driver_context, check_closure_forbidden_values,
-    emit_early_exec_error, execute_single_attempt, failure_run_outcome, make_walk_identity,
-    parse_goals_file, to_execution_result, validate_closure_app_id_confinement,
-    validate_explicit_output_path, write_internal_batch_reports, write_internal_reports,
+    ExecutedAttempt, GoalTargetFilter, allocate_batch_id, allocate_batch_report_rel_path_for_id,
+    allocate_report_rel_path, build_base_report, build_consumer_flows, build_driver_context,
+    check_closure_forbidden_values, emit_early_exec_error,
+    execute_single_attempt_with_screenshot_dir, failure_run_outcome, make_walk_identity,
+    parse_goals_file_for_target, to_execution_result, validate_closure_app_id_confinement,
+    validate_explicit_output_path, validate_no_implicit_report_collision,
+    write_internal_batch_reports, write_internal_reports,
 };
 use crate::commands::manifest::has_unsafe_control_or_bidi_char;
 use crate::commands::run::{
@@ -248,39 +250,22 @@ pub async fn run_batch(
         extra_protected_owned.iter().map(PathBuf::as_path).collect();
 
     let effective_junit: Option<PathBuf> = cli_junit.clone().or_else(|| config.junit.clone());
-    if let Some(ref jpath) = effective_junit {
-        if let Err(msg) =
+    if let Some(ref jpath) = effective_junit
+        && let Err(msg) =
             validate_explicit_output_path(jpath, "--junit", &config, None, &extra_protected_refs)
-        {
-            return emit_early_exec_error(
-                deps,
-                "run",
-                "batch",
-                None,
-                json_mode,
-                args.summary,
-                &redaction,
-                "JUNIT_ERROR",
-                &msg,
-                EXIT_USAGE_OR_CONFIG,
-            );
-        }
-        if cli_junit.is_none()
-            && let Err(err) = prepare_safe_junit(jpath)
-        {
-            return emit_early_exec_error(
-                deps,
-                "run",
-                "batch",
-                None,
-                json_mode,
-                args.summary,
-                &redaction,
-                "JUNIT_ERROR",
-                &format!("cannot prepare JUnit path {}: {err}", jpath.display()),
-                EXIT_USAGE_OR_CONFIG,
-            );
-        }
+    {
+        return emit_early_exec_error(
+            deps,
+            "run",
+            "batch",
+            None,
+            json_mode,
+            args.summary,
+            &redaction,
+            "JUNIT_ERROR",
+            &msg,
+            EXIT_USAGE_OR_CONFIG,
+        );
     }
     if let Some(ref rpath) = explicit_report
         && let Err(msg) =
@@ -290,12 +275,97 @@ pub async fn run_batch(
             deps,
             "run",
             "batch",
-            effective_junit.as_deref(),
+            cli_junit.as_deref(),
             json_mode,
             args.summary,
             &redaction,
             "REPORT_PATH_REFUSED",
             &msg,
+            EXIT_USAGE_OR_CONFIG,
+        );
+    }
+
+    // Resolve shard device list and per-device isolated store IDs (pure validation, no disk I/O)
+    // before checking implicit report collisions or preparing `config.junit`.
+    let shard_specs = match resolve_shard_specs(args, &config) {
+        Ok(specs) => specs,
+        Err(msg) => {
+            return emit_early_exec_error(
+                deps,
+                "run",
+                "batch",
+                cli_junit.as_deref(),
+                json_mode,
+                args.summary,
+                &redaction,
+                "INVALID_DEVICES",
+                &msg,
+                EXIT_USAGE_OR_CONFIG,
+            );
+        }
+    };
+
+    let batch_id = allocate_batch_id();
+    let immutable_batch_rel = allocate_batch_report_rel_path_for_id(&batch_id);
+    let batch_screenshots_rel = format!(".deja/reports/batch-screenshots/{batch_id}");
+
+    // Ensure Déjà's implicit batch/per-store latest reports and screenshot folder never overwrite
+    // `--goals`, config, manifest, `--junit`, or `--report` BEFORE touching disk!
+    let manifest_abs_opt = config
+        .manifest
+        .as_ref()
+        .map(|m| config.workspace_root.join(m));
+    let mut implicit_protected: Vec<(&str, &Path)> =
+        vec![("--config", config.config_path.as_path())];
+    if let Some(ref gpath) = goals_abs {
+        implicit_protected.push(("--goals", gpath.as_path()));
+    }
+    if let Some(ref mpath) = manifest_abs_opt {
+        implicit_protected.push(("manifest", mpath.as_path()));
+    }
+    if let Some(ref jpath) = effective_junit {
+        implicit_protected.push(("--junit", jpath.as_path()));
+    }
+    if let Some(ref rpath) = explicit_report {
+        implicit_protected.push(("--report", rpath.as_path()));
+    }
+    let shard_store_id_refs: Vec<Option<&str>> =
+        shard_specs.iter().map(|s| s.store_id.as_deref()).collect();
+    if let Err(msg) = validate_no_implicit_report_collision(
+        &config.workspace_root,
+        &shard_store_id_refs,
+        &immutable_batch_rel,
+        &batch_screenshots_rel,
+        &implicit_protected,
+    ) {
+        return emit_early_exec_error(
+            deps,
+            "run",
+            "batch",
+            None,
+            json_mode,
+            args.summary,
+            &redaction,
+            "IMPLICIT_REPORT_COLLISION",
+            &msg,
+            EXIT_USAGE_OR_CONFIG,
+        );
+    }
+
+    if let Some(ref jpath) = effective_junit
+        && cli_junit.is_none()
+        && let Err(err) = prepare_safe_junit(jpath)
+    {
+        return emit_early_exec_error(
+            deps,
+            "run",
+            "batch",
+            None,
+            json_mode,
+            args.summary,
+            &redaction,
+            "JUNIT_ERROR",
+            &format!("cannot prepare JUnit path {}: {err}", jpath.display()),
             EXIT_USAGE_OR_CONFIG,
         );
     }
@@ -330,25 +400,6 @@ pub async fn run_batch(
         );
     }
 
-    // Resolve shard device list and per-device isolated store IDs.
-    let shard_specs = match resolve_shard_specs(args, &config) {
-        Ok(specs) => specs,
-        Err(msg) => {
-            return emit_early_exec_error(
-                deps,
-                "run",
-                "batch",
-                effective_junit.as_deref(),
-                json_mode,
-                args.summary,
-                &redaction,
-                "INVALID_DEVICES",
-                &msg,
-                EXIT_USAGE_OR_CONFIG,
-            );
-        }
-    };
-
     let consumer: Option<Arc<ConsumerFlows>> = match build_consumer_flows(&config) {
         Ok(c) => c.map(Arc::new),
         Err(msg) => {
@@ -367,9 +418,11 @@ pub async fn run_batch(
         }
     };
 
-    // Load & validate batch goals (from `--goals <FILE>` or filtered manifest `--all`).
+    // Load & validate batch goals (from `--goals <FILE>` or filtered manifest `--all`),
+    // filtering manifest entries by `(appId, platform, adapter, browser)` in BOTH modes.
+    let target_filter = GoalTargetFilter::from_config(&config);
     let raw_goals = if let Some(ref gpath) = goals_abs {
-        match parse_goals_file(gpath) {
+        match parse_goals_file_for_target(gpath, Some(target_filter)) {
             Ok(list) => list,
             Err(msg) => {
                 return emit_early_exec_error(
@@ -409,12 +462,7 @@ pub async fn run_batch(
         let matching: Vec<String> = manifest
             .walks
             .into_iter()
-            .filter(|entry| {
-                entry.app_id == config.app_id
-                    && entry.platform == config.platform
-                    && Some(entry.adapter.as_str()) == config.adapter.as_deref()
-                    && entry.browser.as_deref() == config.browser.as_deref()
-            })
+            .filter(|entry| target_filter.matches_manifest_walk(entry))
             .map(|entry| entry.goal)
             .collect();
         if matching.is_empty() {
@@ -495,7 +543,6 @@ pub async fn run_batch(
 
     let batch_started_at = now_iso8601();
     let batch_t0 = Instant::now();
-    let immutable_batch_rel = allocate_batch_report_rel_path();
 
     // Open all shard stores upfront (`open_writable`); close already-opened stores on any error.
     let mut opened_stores: Vec<Arc<SqliteWalkStore>> = Vec::with_capacity(shard_specs.len());
@@ -557,16 +604,17 @@ pub async fn run_batch(
     let build_fingerprint_ms = fp_t0.elapsed().as_millis() as u64;
     let build_fingerprint = Arc::new(fp_res.digest);
 
-    // Read integrity-verified historical medians from EVERY shard store and aggregate per goal.
-    let mut shard_medians_by_goal: BTreeMap<String, Vec<u64>> = BTreeMap::new();
+    // Pool all integrity-verified historical `duration_ms` samples across EVERY shard store so
+    // LPT uses the exact pooled median rather than a skewed median-of-shard-medians.
+    let mut pooled_samples_by_goal: BTreeMap<String, Vec<u64>> = BTreeMap::new();
     for store in &opened_stores {
-        match store.median_goal_durations_ms() {
+        match store.goal_duration_samples_ms() {
             Ok(map) => {
-                for (goal_key, med_ms) in map {
-                    shard_medians_by_goal
+                for (goal_key, samples) in map {
+                    pooled_samples_by_goal
                         .entry(goal_key)
                         .or_default()
-                        .push(med_ms);
+                        .extend(samples);
                 }
             }
             Err(err) => {
@@ -588,7 +636,7 @@ pub async fn run_batch(
         }
     }
     let mut aggregated_medians: BTreeMap<String, u64> = BTreeMap::new();
-    for (goal_key, mut vals) in shard_medians_by_goal {
+    for (goal_key, mut vals) in pooled_samples_by_goal {
         if let Some(med) = integer_median(&mut vals) {
             aggregated_medians.insert(goal_key, med);
         }
@@ -684,6 +732,7 @@ pub async fn run_batch(
         let shared_staged: Arc<OnceCell<Option<SharedStagedBuild>>> = Arc::new(OnceCell::new());
         let manifest_mutex: Arc<AsyncMutex<()>> = Arc::new(AsyncMutex::new(()));
         let extra_protected_arc = Arc::new(extra_protected_owned);
+        let batch_screenshot_root = Arc::new(config.workspace_root.join(&batch_screenshots_rel));
 
         let max_extra_retries = args
             .retries
@@ -705,6 +754,7 @@ pub async fn run_batch(
                 effective_junit: effective_junit.clone(),
                 explicit_report: explicit_report.clone(),
                 extra_protected: Arc::clone(&extra_protected_arc),
+                batch_screenshot_root: Arc::clone(&batch_screenshot_root),
                 queue: Arc::clone(&queue),
                 shared_staged: Arc::clone(&shared_staged),
                 manifest_mutex: Arc::clone(&manifest_mutex),
@@ -871,7 +921,7 @@ pub async fn run_batch(
     );
     let final_outcome = derive_batch_outcome(cancelled, final_exit, &goal_results);
 
-    let batch_report = CliBatchRunReport {
+    let mut batch_report = CliBatchRunReport {
         schema_version: WALK_RESULT_SCHEMA_VERSION,
         kind: "deja-batch-run".to_string(),
         command: "run".to_string(),
@@ -898,7 +948,7 @@ pub async fn run_batch(
         errors: batch_errors,
     };
 
-    let redacted_json = match redaction.redact_batch_report(&batch_report) {
+    let mut redacted_json = match redaction.redact_batch_report(&batch_report) {
         Ok(val) => val,
         Err(err) => {
             deps.output.writeln_stderr(&format!(
@@ -912,6 +962,48 @@ pub async fn run_batch(
         }
     };
 
+    // Attempt explicit `--report` write BEFORE emitting stdout JSON / human output and BEFORE
+    // persisting internal reports so any write error is accurately reflected in `batch_report`
+    // (`errors`, `exitCode`, `passed`, `outcome`) and matches the process exit code!
+    if let Some(ref rpath) = explicit_report {
+        let write_err_msg = if refused_report.load(Ordering::SeqCst) {
+            Some(redaction.redact_str(&format!(
+                "refusing to write --report over a protected flow closure path: {}",
+                rpath.display()
+            )))
+        } else {
+            let mut text = serde_json::to_string_pretty(&redacted_json)
+                .expect("redacted batch JSON serializes");
+            text.push('\n');
+            write_atomic_nofollow_excl(rpath, text.as_bytes())
+                .err()
+                .map(|err| {
+                    redaction.redact_str(&format!(
+                        "failed to write explicit --report {}: {err}",
+                        rpath.display()
+                    ))
+                })
+        };
+
+        if let Some(msg) = write_err_msg {
+            deps.output.writeln_stderr(&format!("deja error: {msg}"));
+            batch_report.errors.push(msg);
+            explicit_artifact_failed = true;
+            final_exit = compute_batch_exit_code(
+                cancelled,
+                cancel_signal,
+                explicit_artifact_failed,
+                &goal_exit_codes,
+            );
+            batch_report.exit_code = final_exit;
+            batch_report.outcome = derive_batch_outcome(cancelled, final_exit, &batch_report.goals);
+            batch_report.passed = final_exit == EXIT_OK && !cancelled;
+            if let Ok(updated) = redaction.redact_batch_report(&batch_report) {
+                redacted_json = updated;
+            }
+        }
+    }
+
     if let Err(err) =
         write_internal_batch_reports(&config.workspace_root, &immutable_batch_rel, &redacted_json)
     {
@@ -919,36 +1011,6 @@ pub async fn run_batch(
             "deja warning: failed to write batch report artifact: {err}"
         )));
     }
-
-    if let Some(ref rpath) = explicit_report {
-        if refused_report.load(Ordering::SeqCst) {
-            let msg = redaction.redact_str(&format!(
-                "refusing to write --report over a protected flow closure path: {}",
-                rpath.display()
-            ));
-            deps.output.writeln_stderr(&format!("deja error: {msg}"));
-            explicit_artifact_failed = true;
-        } else {
-            let mut text = serde_json::to_string_pretty(&redacted_json)
-                .expect("redacted batch JSON serializes");
-            text.push('\n');
-            if let Err(err) = write_atomic_nofollow_excl(rpath, text.as_bytes()) {
-                let msg = redaction.redact_str(&format!(
-                    "failed to write explicit --report {}: {err}",
-                    rpath.display()
-                ));
-                deps.output.writeln_stderr(&format!("deja error: {msg}"));
-                explicit_artifact_failed = true;
-            }
-        }
-    }
-
-    final_exit = compute_batch_exit_code(
-        cancelled,
-        cancel_signal,
-        explicit_artifact_failed,
-        &goal_exit_codes,
-    );
 
     if json_mode {
         deps.output.writeln_stdout(
@@ -963,15 +1025,13 @@ pub async fn run_batch(
             let line = if let Some(ref rep) = entry.report {
                 format_summary_line(&rep.core, &redaction)
             } else {
-                let failure_label = match entry.outcome.as_str() {
-                    "cancelled" => "cancelled",
-                    "skipped" => "skipped",
-                    _ => "error",
-                };
+                // Keep `deja-summary v=1` strictly compatible with the v1 summary grammar
+                // (`outcome=error`, `failure=error`) while preserving `"cancelled"`/`"skipped"`
+                // in `CliBatchRunReport` JSON and merged JUnit XML.
                 format_batch_status_summary_line(
                     &entry.goal,
-                    &entry.outcome,
-                    failure_label,
+                    "error",
+                    "error",
                     &batch_report.build_fingerprint,
                     &redaction,
                 )
@@ -1081,6 +1141,7 @@ struct WorkerSharedContext {
     effective_junit: Option<PathBuf>,
     explicit_report: Option<PathBuf>,
     extra_protected: Arc<Vec<PathBuf>>,
+    batch_screenshot_root: Arc<PathBuf>,
     queue: Arc<AsyncMutex<VecDeque<BatchGoal>>>,
     shared_staged: Arc<OnceCell<Option<SharedStagedBuild>>>,
     manifest_mutex: Arc<AsyncMutex<()>>,
@@ -1510,11 +1571,15 @@ async fn run_shard_worker(shard: WorkerShard, ctx: WorkerSharedContext) {
         let mut attempts_raw: Vec<ExecutedAttempt> = Vec::new();
         let mut mid_retry_drift: Option<String> = None;
 
-        let first_attempt = execute_single_attempt(
+        let first_shot_dir = ctx
+            .batch_screenshot_root
+            .join(format!("goal-{}-attempt-1", bg.index));
+        let first_attempt = execute_single_attempt_with_screenshot_dir(
             driver_ref,
             &ctx.config,
             &closure,
             timeout_ms,
+            Some(&first_shot_dir),
             &ctx.redaction,
             &ctx.deps.cancel,
         )
@@ -1542,7 +1607,7 @@ async fn run_shard_worker(shard: WorkerShard, ctx: WorkerSharedContext) {
         let mut cancelled_in_retry = false;
         if !first_passed && ctx.max_extra_retries > 0 && !ctx.deps.cancel.is_cancelled() {
             let first_sig = failure_signature(attempts_raw[0].failure.as_ref());
-            for _ in 0..ctx.max_extra_retries {
+            for retry_idx in 0..ctx.max_extra_retries {
                 if ctx.deps.cancel.is_cancelled() {
                     cancelled_in_retry = true;
                     break;
@@ -1559,11 +1624,17 @@ async fn run_shard_worker(shard: WorkerShard, ctx: WorkerSharedContext) {
                         break;
                     }
                 }
-                let retry_attempt = execute_single_attempt(
+                let retry_shot_dir = ctx.batch_screenshot_root.join(format!(
+                    "goal-{}-attempt-{}",
+                    bg.index,
+                    retry_idx + 2
+                ));
+                let retry_attempt = execute_single_attempt_with_screenshot_dir(
                     driver_ref,
                     &ctx.config,
                     &closure,
                     timeout_ms,
+                    Some(&retry_shot_dir),
                     &ctx.redaction,
                     &ctx.deps.cancel,
                 )
@@ -1766,24 +1837,24 @@ async fn run_shard_worker(shard: WorkerShard, ctx: WorkerSharedContext) {
                 )
                 .map(|_| ())
             }
-            ExecMode::ManifestReplayInPlace { miss_reason } => {
+            ExecMode::ManifestReplayInPlace { .. } => {
+                // Always persist pass, flaky, AND consistent failure outcomes against the verified
+                // manifest closure in this shard's store (creating the shard's `walks` row if this
+                // is the first time the goal ran on this shard) so multi-store `deja gate` never
+                // ignores a failure on shard B because shard A had a prior passing validation.
                 let cf = ctx.consumer.as_deref().expect("manifest mode");
-                if final_passed || *miss_reason == CacheMissReason::FailedValidation || is_flaky {
-                    cf.record_post_run_validation(
-                        &shard.store,
-                        &PostRunValidationOptions {
-                            identity: identity.clone(),
-                            expected_closure_sha256: expected_closure_sha256.clone(),
-                            expected_assertions_sha256: expected_assertions_sha256.clone(),
-                            validation: validation_input,
-                        },
-                    )
-                    .map(|_| {
-                        recorded_for_new_build = final_passed;
-                    })
-                } else {
-                    Ok(())
-                }
+                cf.record_post_run_validation(
+                    &shard.store,
+                    &PostRunValidationOptions {
+                        identity: identity.clone(),
+                        expected_closure_sha256: expected_closure_sha256.clone(),
+                        expected_assertions_sha256: expected_assertions_sha256.clone(),
+                        validation: validation_input,
+                    },
+                )
+                .map(|_| {
+                    recorded_for_new_build = final_passed;
+                })
             }
             ExecMode::ClassicHit => shard
                 .store

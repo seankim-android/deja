@@ -3827,6 +3827,7 @@ fn median_goal_durations_ms_readonly_medians_and_tamper_rejection() {
         SqliteWalkStore::open_readonly(SqliteStoreOptions::new(ws_empty.path())).unwrap();
     let empty_medians = ro_empty.median_goal_durations_ms().unwrap();
     assert!(empty_medians.is_empty());
+    assert!(ro_empty.goal_duration_samples_ms().unwrap().is_empty());
     assert!(
         !ws_empty.path().join(".deja").exists(),
         "median_goal_durations_ms must not create .deja/ or sidecars on uncreated DB"
@@ -3920,6 +3921,15 @@ fn median_goal_durations_ms_readonly_medians_and_tamper_rejection() {
         })
         .unwrap();
 
+    let mut samples = store.goal_duration_samples_ms().unwrap();
+    for vals in samples.values_mut() {
+        vals.sort_unstable();
+    }
+    assert_eq!(samples.get("odd goal"), Some(&vec![100, 500, 900]));
+    assert_eq!(samples.get("even goal"), Some(&vec![100, 200, 300, 400]));
+    assert_eq!(samples.get("large even goal"), Some(&vec![big_a, big_b]));
+    assert!(!samples.contains_key("null only"));
+
     let medians = store.median_goal_durations_ms().unwrap();
     assert_eq!(medians.get("odd goal"), Some(&500));
     assert_eq!(medians.get("even goal"), Some(&250));
@@ -3932,8 +3942,13 @@ fn median_goal_durations_ms_readonly_medians_and_tamper_rejection() {
     let db_path = store.memory_path().to_path_buf();
     store.close();
 
-    // Read-only handle sees exact same medians and creates zero sidecars.
+    // Read-only handle sees exact same samples and medians and creates zero sidecars.
     let ro = SqliteWalkStore::open_readonly(SqliteStoreOptions::new(ws.path())).unwrap();
+    let mut ro_samples = ro.goal_duration_samples_ms().unwrap();
+    for vals in ro_samples.values_mut() {
+        vals.sort_unstable();
+    }
+    assert_eq!(ro_samples, samples);
     assert_eq!(ro.median_goal_durations_ms().unwrap(), medians);
     drop(ro);
 
@@ -3948,6 +3963,10 @@ fn median_goal_durations_ms_readonly_medians_and_tamper_rejection() {
     drop(raw_conn);
 
     let ro_tampered = SqliteWalkStore::open_readonly(SqliteStoreOptions::new(ws.path())).unwrap();
+    assert!(matches!(
+        ro_tampered.goal_duration_samples_ms(),
+        Err(StoreError::InvalidWalkMemory(_))
+    ));
     let err = ro_tampered
         .median_goal_durations_ms()
         .expect_err("tampered duration_ms must fail closed");

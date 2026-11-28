@@ -1612,15 +1612,16 @@ impl SqliteWalkStore {
         query_all_runs_for_walk(conn, walk.id)
     }
 
-    /// Compute the integrity-verified historical median `duration_ms` per `goal_key` across all
-    /// `validation_runs` rows with a non-null `duration_ms` (for LPT batch scheduling).
+    /// Read all integrity-verified historical `duration_ms` samples grouped by `goal_key` across
+    /// all `validation_runs` rows with a non-null `duration_ms` (for pooled cross-shard LPT
+    /// scheduling).
     ///
     /// Strictly read-only via [`Self::ensure_read_conn`]: returns an empty map without creating
     /// any database or sidecar files when the store does not exist yet. Every matching
-    /// `validation_runs` row is verified against its `integrity_sha256` and checked for a
-    /// non-negative `duration_ms`, failing closed with [`StoreError::InvalidWalkMemory`] on any
-    /// tampering or corruption.
-    pub fn median_goal_durations_ms(&self) -> Result<BTreeMap<String, u64>, StoreError> {
+    /// `validation_runs` row and its parent `walks` row are verified against their
+    /// `integrity_sha256` digests and checked for a non-negative `duration_ms`, failing closed
+    /// with [`StoreError::InvalidWalkMemory`] on any tampering or corruption.
+    pub fn goal_duration_samples_ms(&self) -> Result<BTreeMap<String, Vec<u64>>, StoreError> {
         let mut guard = self.lock_inner()?;
         let Some(conn) = self.ensure_read_conn(&mut guard)? else {
             return Ok(BTreeMap::new());
@@ -1666,6 +1667,16 @@ impl SqliteWalkStore {
             grouped.entry(goal_key).or_default().push(duration_ms);
         }
 
+        Ok(grouped)
+    }
+
+    /// Compute the integrity-verified historical median `duration_ms` per `goal_key` across all
+    /// `validation_runs` rows with a non-null `duration_ms`.
+    ///
+    /// Delegates to [`Self::goal_duration_samples_ms`] so read-only safety and tamper detection
+    /// are identical.
+    pub fn median_goal_durations_ms(&self) -> Result<BTreeMap<String, u64>, StoreError> {
+        let grouped = self.goal_duration_samples_ms()?;
         let mut medians = BTreeMap::new();
         for (goal_key, mut vals) in grouped {
             vals.sort_unstable();
