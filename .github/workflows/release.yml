@@ -17,7 +17,7 @@ permissions:
 jobs:
   resolve:
     name: Resolve and verify release tag commit
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     timeout-minutes: 10
     outputs:
       commit_sha: ${{ steps.pin.outputs.commit_sha }}
@@ -59,7 +59,9 @@ jobs:
         include:
           - os: macos-14
             artifact_target: darwin-arm64
-          - os: ubuntu-latest
+          # Declared Linux release baseline: Ubuntu 22.04 (glibc >= 2.35).
+          # DEJA-70 will finalize behavioral smoke checks and evaluate static musl builds.
+          - os: ubuntu-22.04
             artifact_target: linux-x64
     env:
       VERSION: ${{ needs.resolve.outputs.version }}
@@ -77,7 +79,7 @@ jobs:
         run: cargo run --locked --bin deja-repo-check -- --require-clean --check-chart
       - name: Build release binary
         run: cargo build --locked --release --bin deja
-      - name: Stage and smoke-check runnable native CLI on clean PATH
+      - name: Stage and smoke-check binary on clean PATH
         run: |
           mkdir -p dist-bin
           out="dist-bin/deja-${VERSION}-${{ matrix.artifact_target }}"
@@ -86,13 +88,11 @@ jobs:
           env -i PATH=/usr/bin:/bin HOME="$HOME" "$out" --version
           env -i PATH=/usr/bin:/bin HOME="$HOME" "$out" --help >/dev/null
           env -i PATH=/usr/bin:/bin HOME="$HOME" "$out" guide >/dev/null
-          # Fail closed on regular releases until DEJA-65 delivers the runnable native CLI contract.
-          for subcmd in run remember gate manifest doctor; do
-            if ! env -i PATH=/usr/bin:/bin HOME="$HOME" "$out" "$subcmd" --help >/dev/null 2>&1; then
-              echo "Release blocked: native deja binary does not yet implement '$subcmd' (tracked in DEJA-65)." >&2
-              exit 1
-            fi
-          done
+      - name: Require full behavioral release smoke gate (DEJA-65 / DEJA-70)
+        run: |
+          echo "Release blocked: full clean-PATH behavioral smoke tests (remember + warm run + gate + deja-summary v=1) are tracked in DEJA-65 and DEJA-70." >&2
+          echo "Regular releases stay fail-closed until DEJA-70 replaces this gate with an end-to-end deterministic CLI fixture check." >&2
+          exit 1
       - name: Upload built binary artifact
         uses: actions/upload-artifact@v4
         with:
@@ -102,7 +102,7 @@ jobs:
   release:
     name: Draft GitHub release
     needs: [resolve, build]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     timeout-minutes: 10
     permissions:
       contents: write
