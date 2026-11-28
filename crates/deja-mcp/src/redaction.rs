@@ -78,11 +78,34 @@ impl RedactionContext {
         exported
     }
 
-    /// Recursively redact a JSON value (secret key names + workspace/home/fixture + provider patterns).
+    /// Recursively redact a JSON value (secret key names + dynamic object keys + workspace/home/
+    /// fixture + provider patterns).
     #[must_use]
     pub fn redact_json(&self, value: &Value) -> Value {
         let first = redact_json(value, &self.redactor);
-        redact_json_provider_pass(&first, &self.provider)
+        self.redact_json_keys_and_provider_pass(&first)
+    }
+
+    fn redact_json_keys_and_provider_pass(&self, value: &Value) -> Value {
+        match value {
+            Value::String(s) => Value::String(self.provider.redact(s)),
+            Value::Array(items) => Value::Array(
+                items
+                    .iter()
+                    .map(|item| self.redact_json_keys_and_provider_pass(item))
+                    .collect(),
+            ),
+            Value::Object(map) => {
+                let mut out = serde_json::Map::with_capacity(map.len());
+                for (k, v) in map {
+                    let redacted_key = self.redact_str(k);
+                    let redacted_val = self.redact_json_keys_and_provider_pass(v);
+                    out.insert(redacted_key, redacted_val);
+                }
+                Value::Object(out)
+            }
+            other => other.clone(),
+        }
     }
 }
 
@@ -99,24 +122,4 @@ fn slugify_for_redaction(lower: &str) -> String {
         slug.pop();
     }
     slug
-}
-
-fn redact_json_provider_pass(value: &Value, provider: &ProviderKeyRedactor) -> Value {
-    match value {
-        Value::String(s) => Value::String(provider.redact(s)),
-        Value::Array(items) => Value::Array(
-            items
-                .iter()
-                .map(|item| redact_json_provider_pass(item, provider))
-                .collect(),
-        ),
-        Value::Object(map) => {
-            let mut out = serde_json::Map::with_capacity(map.len());
-            for (k, v) in map {
-                out.insert(k.clone(), redact_json_provider_pass(v, provider));
-            }
-            Value::Object(out)
-        }
-        other => other.clone(),
-    }
 }

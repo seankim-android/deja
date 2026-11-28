@@ -101,8 +101,12 @@ pub struct McpServerConfig {
     pub process_env: BTreeMap<String, String>,
     /// Configured fixture credentials / secrets / redaction literals.
     pub forbidden_values: Vec<String>,
-    /// Gates whether `deja_explore` is advertised in `tools/list` and accepted by `tools/call`.
+    /// Gates whether `deja_explore` is enabled by config (`mcp.explore`).
     pub mcp_explore: bool,
+    /// Indicates whether a concrete exploration backend is wired (remains `false` until `DEJA-71`).
+    /// `deja_explore` is advertised in `tools/list` ONLY when BOTH `mcp_explore` AND
+    /// `explore_backend_available` are `true`.
+    pub explore_backend_available: bool,
     pub headless: Option<bool>,
     pub screen_size: Option<Value>,
 }
@@ -170,27 +174,15 @@ impl McpServerConfig {
         ))
     }
 
-    /// Build a [`McpDriverContext`] for `deja_exec_batch` / `deja_run_steps`, requiring a
-    /// configured `device` (and validating `build_path` exists when configured).
+    /// Build a [`McpDriverContext`] for `deja_exec_batch` / `deja_run_steps`, requiring both
+    /// an existing `build_path` and a configured `device` up front (consistent with `deja_run`
+    /// and `deja_remember`).
     pub fn driver_context_for_batch(
         &self,
         timeout_ms: u64,
         expected_build_fingerprint: Option<String>,
     ) -> Result<McpDriverContext, (&'static str, String)> {
-        let device = self.require_device()?;
-        let build_path = match self.build_path {
-            Some(ref bp) => {
-                if !bp.exists() {
-                    return Err((
-                        "BUILD_PATH_MISSING",
-                        format!("`buildPath` does not exist on disk: {}", bp.display()),
-                    ));
-                }
-                bp.clone()
-            }
-            None => PathBuf::new(),
-        };
-        Ok(self.make_driver_context(device, build_path, timeout_ms, expected_build_fingerprint))
+        self.driver_context_requiring_build(timeout_ms, expected_build_fingerprint)
     }
 
     fn require_device(&self) -> Result<String, (&'static str, String)> {

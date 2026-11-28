@@ -4742,3 +4742,73 @@ fn mcp_subprocess_stdio_roundtrip_zero_stdout_leak_and_rejects_json_flag() {
         "deja mcp must exit 0 on EOF; stderr:\n{stderr_text}"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn regression_r1_f3_mcp_exits_promptly_on_sigterm_with_stdin_open() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::process::Stdio;
+    use std::time::Instant;
+
+    let ws = TempWs::new("r1-f3-mcp-sigterm");
+    ws.write(
+        "deja.config.json",
+        &json!({
+            "workspaceRoot": ".",
+            "platform": "ios",
+            "appId": TEST_APP_ID,
+            "adapter": "maestro-ios/v1"
+        })
+        .to_string(),
+    );
+
+    let mut child = deja_bin()
+        .current_dir(&ws.path)
+        .args(["mcp"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn deja mcp");
+
+    // Keep `_stdin` OPEN throughout SIGTERM handling!
+    let mut _stdin = child.stdin.take().expect("piped stdin");
+    let mut stdout_reader = BufReader::new(child.stdout.take().expect("piped stdout"));
+
+    writeln!(
+        _stdin,
+        "{}",
+        json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-03-26"}})
+    )
+    .unwrap();
+    _stdin.flush().unwrap();
+
+    let mut init_line = String::new();
+    let n = stdout_reader
+        .read_line(&mut init_line)
+        .expect("read initialize response");
+    assert!(n > 0);
+    let init_resp: Value = serde_json::from_str(init_line.trim()).unwrap();
+    assert_eq!(init_resp["id"], 1);
+
+    // Send SIGTERM while parent STILL holds `_stdin` open!
+    deja_driver_ios::send_sigterm_to_pid(child.id()).expect("send SIGTERM to deja mcp");
+
+    let start = Instant::now();
+    let exit_status = loop {
+        if let Some(status) = child.try_wait().expect("try_wait on deja mcp") {
+            break status;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(3),
+            "deja mcp hung on SIGTERM while stdin remained open"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    };
+
+    assert_eq!(
+        exit_status.code(),
+        Some(143),
+        "expected exit code 143 on SIGTERM, got: {exit_status:?}"
+    );
+}

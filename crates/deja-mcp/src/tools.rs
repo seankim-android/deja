@@ -179,9 +179,9 @@ pub fn is_known_tool(name: &str) -> bool {
 ///
 /// Every tool sets `additionalProperties: false` and never exposes confinement overrides
 /// (`workspaceRoot`, `appId`, `platform`, `device`, `store`, `buildPath`, `acceptAssertionChange`).
-/// `deja_explore` is included ONLY when `mcp_explore == true`.
+/// `deja_explore` is included ONLY when BOTH `mcp_explore` AND `explore_backend_available` are `true`.
 #[must_use]
-pub fn tool_definitions(mcp_explore: bool) -> Vec<Value> {
+pub fn tool_definitions(mcp_explore: bool, explore_backend_available: bool) -> Vec<Value> {
     let mut tools = vec![
         json!({
             "name": "deja_list",
@@ -294,7 +294,7 @@ pub fn tool_definitions(mcp_explore: bool) -> Vec<Value> {
         }),
     ];
 
-    if mcp_explore {
+    if mcp_explore && explore_backend_available {
         tools.push(json!({
             "name": "deja_explore",
             "description": "Bounded graph-assisted exploration (enabled via `mcp.explore: true`; full engine lands in DEJA-71).",
@@ -518,7 +518,24 @@ fn check_closure_forbidden_values(
     Ok(())
 }
 
-fn allocate_report_rel_path(command: RunCommand) -> String {
+fn mcp_screenshots_dir(config: &McpServerConfig) -> PathBuf {
+    match config.store_id.as_deref() {
+        Some(id) => config
+            .canonical_workspace_root
+            .join(".deja")
+            .join("reports")
+            .join("stores")
+            .join(id)
+            .join("mcp-screenshots"),
+        None => config
+            .canonical_workspace_root
+            .join(".deja")
+            .join("reports")
+            .join("mcp-screenshots"),
+    }
+}
+
+fn allocate_report_rel_path(command: RunCommand, store_id: Option<&str>) -> String {
     let cmd = match command {
         RunCommand::Run => "run",
         RunCommand::Remember => "remember",
@@ -529,7 +546,13 @@ fn allocate_report_rel_path(command: RunCommand) -> String {
         .map(|d| d.as_millis())
         .unwrap_or(0);
     let seq = MCP_REPORT_SEQ.fetch_add(1, Ordering::Relaxed);
-    format!(".deja/reports/{cmd}-{ms}-{}-{seq}.json", std::process::id())
+    match store_id {
+        Some(id) => format!(
+            ".deja/reports/stores/{id}/{cmd}-{ms}-{}-{seq}.json",
+            std::process::id()
+        ),
+        None => format!(".deja/reports/{cmd}-{ms}-{}-{seq}.json", std::process::id()),
+    }
 }
 
 fn write_internal_reports(
@@ -796,6 +819,9 @@ async fn execute_single_closure_attempt(
     exec_cfg.flow_timeout = Some(Duration::from_millis(timeout_ms));
     exec_cfg.redactor = redaction.redactor.clone();
     exec_cfg.provider_redactor = redaction.provider.clone();
+    exec_cfg.screenshot_dir = Some(mcp_screenshots_dir(config));
+    exec_cfg.screenshot_confine_to_dir = true;
+    exec_cfg.screenshot_no_clobber = true;
 
     let main_source = closure
         .files
@@ -1072,13 +1098,16 @@ fn handle_deja_inspect(
         None => ".deja/reports/latest.json".to_string(),
     });
 
-    let (_path, raw_text) =
-        match read_confined_report_file(&ctx.config.canonical_workspace_root, &report_rel) {
-            Ok(r) => r,
-            Err((code, msg)) => {
-                return ToolDispatchResult::Response(tool_error(&ctx.redaction, code, &msg));
-            }
-        };
+    let (_path, raw_text) = match read_confined_report_file(
+        &ctx.config.canonical_workspace_root,
+        ctx.config.store_id.as_deref(),
+        &report_rel,
+    ) {
+        Ok(r) => r,
+        Err((code, msg)) => {
+            return ToolDispatchResult::Response(tool_error(&ctx.redaction, code, &msg));
+        }
+    };
 
     let mut parsed: Value = match serde_json::from_str(&raw_text) {
         Ok(v) => v,
@@ -1228,7 +1257,8 @@ async fn handle_deja_run(
 
     let cmd_started_at = now_iso8601();
     let cmd_t0 = Instant::now();
-    let immutable_report_rel = allocate_report_rel_path(RunCommand::Run);
+    let immutable_report_rel =
+        allocate_report_rel_path(RunCommand::Run, ctx.config.store_id.as_deref());
 
     let consumer = match build_consumer_flows(&ctx.config) {
         Ok(c) => c,
@@ -1393,6 +1423,15 @@ async fn handle_deja_run(
             "APP_ID_CONFINEMENT",
             &msg,
         ));
+    }
+    if let Err((code, msg)) = validate_closure_mcp_policy(
+        &closure,
+        &mcp_screenshots_dir(&ctx.config),
+        &ctx.config.canonical_workspace_root,
+        &ctx.config.env,
+    ) {
+        store.close();
+        return ToolDispatchResult::Response(tool_error(&ctx.redaction, code, &msg));
     }
     if consumer.is_some()
         && let Err(msg) = check_closure_forbidden_values(&closure, &ctx.config.forbidden_values)
@@ -1589,12 +1628,71 @@ async fn handle_deja_run(
     };
     let phase_timings_json = serde_json::to_string(&timing).ok();
 
+    let attempts_report = if attempts_raw.len() >= 2 {
+        Some(
+            attempts_raw
+                .iter()
+                .enumerate()
+                .map(|(i, a)| RunAttempt {
+                    attempt: (i + 1) as u8,
+                    passed: a.passed,
+                    started_at: a.started_at.clone(),
+                    ended_at: a.ended_at.clone(),
+                    duration_ms: a.duration_ms,
+                    failure: a.failure.clone(),
+                    artifacts: a.artifacts.clone(),
+                })
+                .collect::<Vec<_>>(),
+        )
+    } else {
+        None
+    };
+
+    let visible_context = if final_passed {
+        None
+    } else {
+        first.visible_context.clone()
+    };
+
+    // Write the immutable report BEFORE recording `report_path` in SQLite so we NEVER
+    // record or advertise a report path that failed to persist on disk.
+    let pre_ended_at = now_iso8601();
+    let (written_report_path, report_write_warning) = write_run_report(
+        ctx,
+        RunCommand::Run,
+        &identity,
+        exec_plan.cache_status,
+        exec_plan.miss_reason,
+        final_outcome,
+        final_passed,
+        cmd_started_at.clone(),
+        pre_ended_at,
+        runtime.clone(),
+        Some(exec_plan.display_flow_path.clone()),
+        Some(main_sha256.clone()),
+        assertion_count,
+        if final_passed {
+            None
+        } else {
+            first.failure.clone()
+        },
+        visible_context.clone(),
+        Some(to_execution_result(first, Some(&closure))),
+        attempts_report.clone(),
+        first.errors.clone(),
+        &timing,
+        &immutable_report_rel,
+        exec_plan.new_build_replay.clone(),
+    );
+
     let store_t0 = Instant::now();
     let validation_at = first.ended_at.clone();
     let mut validation_input = RecordValidationInput::new(final_passed, validation_at)
         .with_flaky(is_flaky)
-        .with_report_path(immutable_report_rel.clone())
         .with_duration_ms(cmd_t0.elapsed().as_millis() as u64);
+    if let Some(ref rep_path) = written_report_path {
+        validation_input = validation_input.with_report_path(rep_path.clone());
+    }
     if let Some(ref rt) = runtime {
         validation_input = validation_input.with_runtime(rt.clone());
     }
@@ -1751,48 +1849,53 @@ async fn handle_deja_run(
         return ToolDispatchResult::Response(tool_response(&ctx.redaction, payload, true));
     }
 
-    let attempts_report = if attempts_raw.len() >= 2 {
-        Some(
-            attempts_raw
-                .iter()
-                .enumerate()
-                .map(|(i, a)| RunAttempt {
-                    attempt: (i + 1) as u8,
-                    passed: a.passed,
-                    started_at: a.started_at.clone(),
-                    ended_at: a.ended_at.clone(),
-                    duration_ms: a.duration_ms,
-                    failure: a.failure.clone(),
-                    artifacts: a.artifacts.clone(),
-                })
-                .collect::<Vec<_>>(),
-        )
-    } else {
-        None
-    };
-
     let new_build_replay = exec_plan.new_build_replay.map(|mut nb| {
         nb.recorded_for_new_build = recorded_for_new_build;
         nb
     });
 
-    let visible_context = if final_passed {
-        None
+    // Refresh the already-created report with final `store_ms` and `recorded_for_new_build`.
+    let final_report_path = if written_report_path.is_some() {
+        let (refreshed, _) = write_run_report(
+            ctx,
+            RunCommand::Run,
+            &identity,
+            exec_plan.cache_status,
+            exec_plan.miss_reason,
+            final_outcome,
+            final_passed,
+            cmd_started_at,
+            now_iso8601(),
+            runtime.clone(),
+            Some(exec_plan.display_flow_path.clone()),
+            Some(main_sha256.clone()),
+            assertion_count,
+            if final_passed {
+                None
+            } else {
+                first.failure.clone()
+            },
+            visible_context.clone(),
+            Some(to_execution_result(first, Some(&closure))),
+            attempts_report.clone(),
+            first.errors.clone(),
+            &timing,
+            &immutable_report_rel,
+            new_build_replay.clone(),
+        );
+        refreshed.or(written_report_path)
     } else {
-        first.visible_context.clone()
+        None
     };
 
-    let payload = build_run_tool_payload(
+    let payload = assemble_run_tool_payload(
         ctx,
-        RunCommand::Run,
         &identity,
         &goal,
         exec_plan.cache_status,
         exec_plan.miss_reason,
         final_outcome,
         final_passed,
-        cmd_started_at,
-        now_iso8601(),
         runtime,
         Some(exec_plan.display_flow_path),
         Some(main_sha256),
@@ -1803,11 +1906,11 @@ async fn handle_deja_run(
             first.failure.clone()
         },
         visible_context,
-        Some(to_execution_result(first, Some(&closure))),
         attempts_report,
         first.errors.clone(),
+        report_write_warning.into_iter().collect(),
         timing,
-        &immutable_report_rel,
+        final_report_path.as_deref(),
         new_build_replay,
     );
 
@@ -2151,11 +2254,10 @@ fn collect_and_verify_classic_closure(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn build_run_tool_payload(
+fn write_run_report(
     ctx: &ToolContext,
     command: RunCommand,
     identity: &WalkIdentity,
-    goal: &Goal,
     cache_status: CacheStatus,
     cache_miss_reason: Option<CacheMissReason>,
     outcome: RunOutcome,
@@ -2171,17 +2273,17 @@ fn build_run_tool_payload(
     execution: Option<ExecutionResult>,
     attempts: Option<Vec<RunAttempt>>,
     errors: Vec<String>,
-    timing: RunTimingBreakdown,
+    timing: &RunTimingBreakdown,
     immutable_report_rel: &str,
     replayed_on_new_build: Option<NewBuildReplayReport>,
-) -> Value {
+) -> (Option<String>, Option<String>) {
     let safe_goal_key = ctx.redaction.redact_goal_key(&identity.goal);
 
     let core_report = RunResult {
         schema_version: WALK_RESULT_SCHEMA_VERSION,
         command,
         identity: identity.clone(),
-        goal_key: safe_goal_key.clone(),
+        goal_key: safe_goal_key,
         cache_status,
         cache_miss_reason,
         semantic: None,
@@ -2196,7 +2298,7 @@ fn build_run_tool_payload(
         repair_count: 0,
         yaml_path: yaml_path.clone(),
         yaml_sha256: yaml_sha256.clone(),
-        failure: failure.clone(),
+        failure,
         artifacts: yaml_path
             .as_ref()
             .map(|p| {
@@ -2208,38 +2310,81 @@ fn build_run_tool_payload(
             })
             .unwrap_or_default(),
         diffs: Vec::new(),
-        errors: errors.clone(),
+        errors,
         execution,
         exploration: None,
         repair: None,
-        replayed_on_new_build: replayed_on_new_build.clone(),
+        replayed_on_new_build,
         engine: Some(native_engine_report()),
-        attempts: attempts.clone(),
+        attempts,
     };
 
-    if let Ok(mut report_val) = serde_json::to_value(&core_report) {
-        if let Some(obj) = report_val.as_object_mut() {
-            if let Some(ref rt) = runtime {
-                obj.insert("runtime".to_string(), Value::String(rt.clone()));
-            }
-            if let Ok(timing_val) = serde_json::to_value(&timing) {
-                obj.insert("timing".to_string(), timing_val);
-            }
-            if let Some(ref vc) = visible_context
-                && let Ok(vc_val) = serde_json::to_value(vc)
-            {
-                obj.insert("visibleContext".to_string(), vc_val);
-            }
+    let mut report_val = match serde_json::to_value(&core_report) {
+        Ok(val) => val,
+        Err(err) => {
+            return (
+                None,
+                Some(
+                    ctx.redaction
+                        .redact_str(&format!("failed to serialize run report artifact: {err}")),
+                ),
+            );
         }
-        let redacted_report = ctx.redaction.redact_json(&report_val);
-        let _ = write_internal_reports(
-            &ctx.config.canonical_workspace_root,
-            ctx.config.store_id.as_deref(),
-            immutable_report_rel,
-            &redacted_report,
-        );
+    };
+    if let Some(obj) = report_val.as_object_mut() {
+        if let Some(ref rt) = runtime {
+            obj.insert("runtime".to_string(), Value::String(rt.clone()));
+        }
+        if let Ok(timing_val) = serde_json::to_value(timing) {
+            obj.insert("timing".to_string(), timing_val);
+        }
+        if let Some(ref vc) = visible_context
+            && let Ok(vc_val) = serde_json::to_value(vc)
+        {
+            obj.insert("visibleContext".to_string(), vc_val);
+        }
     }
+    let redacted_report = ctx.redaction.redact_json(&report_val);
+    match write_internal_reports(
+        &ctx.config.canonical_workspace_root,
+        ctx.config.store_id.as_deref(),
+        immutable_report_rel,
+        &redacted_report,
+    ) {
+        Ok(()) => (Some(immutable_report_rel.to_string()), None),
+        Err(err) => (
+            None,
+            Some(
+                ctx.redaction
+                    .redact_str(&format!("failed to write run report artifact: {err}")),
+            ),
+        ),
+    }
+}
 
+#[allow(clippy::too_many_arguments)]
+fn assemble_run_tool_payload(
+    ctx: &ToolContext,
+    identity: &WalkIdentity,
+    goal: &Goal,
+    cache_status: CacheStatus,
+    cache_miss_reason: Option<CacheMissReason>,
+    outcome: RunOutcome,
+    passed: bool,
+    runtime: Option<String>,
+    yaml_path: Option<String>,
+    yaml_sha256: Option<String>,
+    assertions: Option<u64>,
+    failure: Option<WalkFailure>,
+    visible_context: Option<VisibleContext>,
+    attempts: Option<Vec<RunAttempt>>,
+    errors: Vec<String>,
+    warnings: Vec<String>,
+    timing: RunTimingBreakdown,
+    written_report_path: Option<&str>,
+    replayed_on_new_build: Option<NewBuildReplayReport>,
+) -> Value {
+    let safe_goal_key = ctx.redaction.redact_goal_key(&identity.goal);
     let (visible_elements, visible_elements_truncated) = match visible_context {
         Some(ref vc) => (Some(vc.items().to_vec()), vc.is_truncated()),
         None => (None, false),
@@ -2298,13 +2443,87 @@ fn build_run_tool_payload(
     if !errors.is_empty() {
         out.insert("errors".to_string(), json!(errors));
     }
+    if !warnings.is_empty() {
+        out.insert("warnings".to_string(), json!(warnings));
+    }
     out.insert("timing".to_string(), json!(timing));
-    out.insert(
-        "reportPath".to_string(),
-        Value::String(immutable_report_rel.to_string()),
-    );
+    if let Some(path) = written_report_path {
+        out.insert("reportPath".to_string(), Value::String(path.to_string()));
+    }
 
     Value::Object(out)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_run_tool_payload(
+    ctx: &ToolContext,
+    command: RunCommand,
+    identity: &WalkIdentity,
+    goal: &Goal,
+    cache_status: CacheStatus,
+    cache_miss_reason: Option<CacheMissReason>,
+    outcome: RunOutcome,
+    passed: bool,
+    started_at: String,
+    ended_at: String,
+    runtime: Option<String>,
+    yaml_path: Option<String>,
+    yaml_sha256: Option<String>,
+    assertions: Option<u64>,
+    failure: Option<WalkFailure>,
+    visible_context: Option<VisibleContext>,
+    execution: Option<ExecutionResult>,
+    attempts: Option<Vec<RunAttempt>>,
+    errors: Vec<String>,
+    timing: RunTimingBreakdown,
+    immutable_report_rel: &str,
+    replayed_on_new_build: Option<NewBuildReplayReport>,
+) -> Value {
+    let (written_report_path, report_write_warning) = write_run_report(
+        ctx,
+        command,
+        identity,
+        cache_status,
+        cache_miss_reason,
+        outcome,
+        passed,
+        started_at,
+        ended_at,
+        runtime.clone(),
+        yaml_path.clone(),
+        yaml_sha256.clone(),
+        assertions,
+        failure.clone(),
+        visible_context.clone(),
+        execution,
+        attempts.clone(),
+        errors.clone(),
+        &timing,
+        immutable_report_rel,
+        replayed_on_new_build.clone(),
+    );
+
+    assemble_run_tool_payload(
+        ctx,
+        identity,
+        goal,
+        cache_status,
+        cache_miss_reason,
+        outcome,
+        passed,
+        runtime,
+        yaml_path,
+        yaml_sha256,
+        assertions,
+        failure,
+        visible_context,
+        attempts,
+        errors,
+        report_write_warning.into_iter().collect(),
+        timing,
+        written_report_path.as_deref(),
+        replayed_on_new_build,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -2377,7 +2596,8 @@ async fn handle_deja_remember(
 
     let cmd_started_at = now_iso8601();
     let cmd_t0 = Instant::now();
-    let immutable_report_rel = allocate_report_rel_path(RunCommand::Remember);
+    let immutable_report_rel =
+        allocate_report_rel_path(RunCommand::Remember, ctx.config.store_id.as_deref());
 
     let consumer = match build_consumer_flows(&ctx.config) {
         Ok(c) => c,
@@ -2436,6 +2656,15 @@ async fn handle_deja_remember(
             "APP_ID_CONFINEMENT",
             &msg,
         ));
+    }
+
+    if let Err((code, msg)) = validate_closure_mcp_policy(
+        &closure,
+        &mcp_screenshots_dir(&ctx.config),
+        &ctx.config.canonical_workspace_root,
+        &ctx.config.env,
+    ) {
+        return ToolDispatchResult::Response(tool_error(&ctx.redaction, code, &msg));
     }
 
     if let Err(msg) = check_closure_forbidden_values(&closure, &ctx.config.forbidden_values) {
@@ -2845,11 +3074,39 @@ async fn handle_deja_remember(
         return ToolDispatchResult::Response(tool_response(&ctx.redaction, payload, true));
     }
 
+    // Write the immutable report BEFORE recording `report_path` in SQLite so we never record
+    // or advertise a report path that failed to persist on disk.
+    let (written_report_path, report_write_warning) = write_run_report(
+        ctx,
+        RunCommand::Remember,
+        &identity,
+        CacheStatus::NotChecked,
+        None,
+        RunOutcome::Remembered,
+        true,
+        cmd_started_at.clone(),
+        now_iso8601(),
+        runtime.clone(),
+        Some(candidate_rel.clone()),
+        Some(main_sha256.clone()),
+        assertion_count,
+        None,
+        None,
+        Some(to_execution_result(last_attempt, Some(&closure))),
+        None,
+        Vec::new(),
+        &timing,
+        &immutable_report_rel,
+        None,
+    );
+
     let phase_timings_json = serde_json::to_string(&timing).ok();
     let mut validation = RecordValidationInput::new(true, last_attempt.ended_at.clone())
         .with_origin(WalkOrigin::Remember)
-        .with_report_path(immutable_report_rel.clone())
         .with_duration_ms(cmd_t0.elapsed().as_millis() as u64);
+    if let Some(ref rep_path) = written_report_path {
+        validation = validation.with_report_path(rep_path.clone());
+    }
     if let Some(ref rt) = runtime {
         validation = validation.with_runtime(rt.clone());
     }
@@ -2943,28 +3200,54 @@ async fn handle_deja_remember(
         }
     };
 
-    let payload = build_run_tool_payload(
+    let final_report_path = if written_report_path.is_some() {
+        let (refreshed, _) = write_run_report(
+            ctx,
+            RunCommand::Remember,
+            &identity,
+            CacheStatus::NotChecked,
+            None,
+            RunOutcome::Remembered,
+            true,
+            cmd_started_at,
+            now_iso8601(),
+            runtime.clone(),
+            Some(stored_flow_path.clone()),
+            Some(stored_flow_sha256.clone()),
+            assertion_count,
+            None,
+            None,
+            Some(to_execution_result(last_attempt, Some(&closure))),
+            None,
+            Vec::new(),
+            &timing,
+            &immutable_report_rel,
+            None,
+        );
+        refreshed.or(written_report_path)
+    } else {
+        None
+    };
+
+    let payload = assemble_run_tool_payload(
         ctx,
-        RunCommand::Remember,
         &identity,
         &goal,
         CacheStatus::NotChecked,
         None,
         RunOutcome::Remembered,
         true,
-        cmd_started_at,
-        now_iso8601(),
         runtime,
         Some(stored_flow_path),
         Some(stored_flow_sha256),
         assertion_count,
         None,
         None,
-        Some(to_execution_result(last_attempt, Some(&closure))),
         None,
         Vec::new(),
+        report_write_warning.into_iter().collect(),
         timing,
-        &immutable_report_rel,
+        final_report_path.as_deref(),
         None,
     );
 
@@ -3100,15 +3383,17 @@ async fn handle_deja_exec_batch(
         ));
     }
 
+    let screenshots_dir = mcp_screenshots_dir(&ctx.config);
     let mut total_ast_steps = 0usize;
-    if let Err(msg) = validate_batch_steps_confinement(
+    if let Err((code, msg)) = validate_batch_steps_confinement(
         &parsed,
+        &screenshots_dir,
         &ctx.config.canonical_workspace_root,
         &ctx.config.app_id,
         &ctx.config.env,
         &mut total_ast_steps,
     ) {
-        return ToolDispatchResult::Response(tool_error(&ctx.redaction, "CONFINEMENT_ERROR", &msg));
+        return ToolDispatchResult::Response(tool_error(&ctx.redaction, code, &msg));
     }
 
     if let Err((code, msg)) = ctx.config.driver_context_for_batch(timeout_ms, None) {
@@ -3125,31 +3410,33 @@ async fn handle_deja_exec_batch(
         return ToolDispatchResult::Cancelled;
     }
 
+    let build_path = ctx
+        .config
+        .build_path
+        .as_ref()
+        .expect("validated build_path");
+
     let t0 = Instant::now();
     let fp_t0 = Instant::now();
-    let current_fp = if let Some(ref build_path) = ctx.config.build_path {
-        match session.fingerprint_build(
-            &ctx.config.canonical_workspace_root,
-            build_path,
-            &ctx.config.platform,
-        ) {
-            Ok(fp) => Some(fp),
-            Err(err) => {
-                return ToolDispatchResult::Response(tool_error(
-                    &ctx.redaction,
-                    "FINGERPRINT_ERROR",
-                    &format!("failed to fingerprint build: {err}"),
-                ));
-            }
+    let current_fp = match session.fingerprint_build(
+        &ctx.config.canonical_workspace_root,
+        build_path,
+        &ctx.config.platform,
+    ) {
+        Ok(fp) => fp,
+        Err(err) => {
+            return ToolDispatchResult::Response(tool_error(
+                &ctx.redaction,
+                "FINGERPRINT_ERROR",
+                &format!("failed to fingerprint build: {err}"),
+            ));
         }
-    } else {
-        None
     };
     let build_fingerprint_ms = fp_t0.elapsed().as_millis() as u64;
 
     let driver_ctx = match ctx
         .config
-        .driver_context_for_batch(timeout_ms, current_fp.clone())
+        .driver_context_for_batch(timeout_ms, Some(current_fp.clone()))
     {
         Ok(c) => c,
         Err((code, msg)) => {
@@ -3181,7 +3468,7 @@ async fn handle_deja_exec_batch(
         ctx.factory.as_ref(),
         &driver_ctx,
         &runtime,
-        current_fp.as_deref(),
+        Some(current_fp.as_str()),
         cancel,
     )
     .await
@@ -3203,7 +3490,9 @@ async fn handle_deja_exec_batch(
     exec_cfg.flow_timeout = Some(Duration::from_millis(timeout_ms));
     exec_cfg.redactor = ctx.redaction.redactor.clone();
     exec_cfg.provider_redactor = ctx.redaction.provider.clone();
-    exec_cfg.screenshot_dir = Some(ctx.config.canonical_workspace_root.clone());
+    exec_cfg.screenshot_dir = Some(screenshots_dir);
+    exec_cfg.screenshot_confine_to_dir = true;
+    exec_cfg.screenshot_no_clobber = true;
     exec_cfg.capture_final_visible_context = observe_final;
 
     let exec_t0 = Instant::now();
@@ -3308,21 +3597,78 @@ async fn handle_deja_exec_batch(
     ))
 }
 
+fn validate_closure_mcp_policy(
+    closure: &FlowClosure,
+    screenshots_dir: &Path,
+    canonical_workspace: &Path,
+    base_env: &BTreeMap<String, String>,
+) -> Result<(), (&'static str, String)> {
+    for file in &closure.files {
+        if file.kind != FlowReferenceKind::Flow {
+            continue;
+        }
+        let text = std::str::from_utf8(&file.bytes).map_err(|err| {
+            (
+                "CLOSURE_ERROR",
+                format!("flow `{}` is not valid UTF-8: {err}", file.source),
+            )
+        })?;
+        let parsed = parse_flow(text).map_err(|err| {
+            (
+                "CLOSURE_ERROR",
+                format!("flow `{}` failed to parse: {err}", file.source),
+            )
+        })?;
+        validate_mcp_flow_policy(
+            &parsed,
+            screenshots_dir,
+            canonical_workspace,
+            base_env,
+            true,
+            None,
+        )?;
+    }
+    Ok(())
+}
+
 fn validate_batch_steps_confinement(
     parsed: &ParsedFlow,
+    screenshots_dir: &Path,
     canonical_workspace: &Path,
     expected_app_id: &str,
     base_env: &BTreeMap<String, String>,
     total_ast_steps: &mut usize,
-) -> Result<(), String> {
-    validate_flow_app_id_confinement(parsed, expected_app_id, base_env)?;
+) -> Result<(), (&'static str, String)> {
+    validate_flow_app_id_confinement(parsed, expected_app_id, base_env)
+        .map_err(|msg| ("APP_ID_CONFINEMENT", msg))?;
 
+    validate_mcp_flow_policy(
+        parsed,
+        screenshots_dir,
+        canonical_workspace,
+        base_env,
+        false,
+        Some(total_ast_steps),
+    )
+}
+
+fn validate_mcp_flow_policy(
+    parsed: &ParsedFlow,
+    screenshots_dir: &Path,
+    canonical_workspace: &Path,
+    base_env: &BTreeMap<String, String>,
+    allow_file_and_media: bool,
+    mut total_ast_steps: Option<&mut usize>,
+) -> Result<(), (&'static str, String)> {
     let mut env_stack = EnvStack::new(base_env.clone());
     let mut header_frame = BTreeMap::new();
     for (k, v) in &parsed.header.env {
-        let interp = env_stack
-            .interpolate(v)
-            .map_err(|err| format!("header env `{k}` interpolation failed: {err}"))?;
+        let interp = env_stack.interpolate(v).map_err(|err| {
+            (
+                "CONFINEMENT_ERROR",
+                format!("header env `{k}` interpolation failed: {err}"),
+            )
+        })?;
         header_frame.insert(k.clone(), interp);
     }
     if !header_frame.is_empty() {
@@ -3334,32 +3680,63 @@ fn validate_batch_steps_confinement(
         &parsed.steps,
         &parsed.header.on_flow_complete,
     ] {
-        check_batch_steps_recursive(steps, canonical_workspace, &mut env_stack, total_ast_steps)?;
+        check_mcp_steps_recursive(
+            steps,
+            screenshots_dir,
+            canonical_workspace,
+            &mut env_stack,
+            allow_file_and_media,
+            total_ast_steps.as_deref_mut(),
+        )?;
     }
 
     Ok(())
 }
 
-fn check_batch_steps_recursive(
+fn check_mcp_steps_recursive(
     steps: &[FlowStep],
+    screenshots_dir: &Path,
     canonical_workspace: &Path,
     env_stack: &mut EnvStack,
-    total_ast_steps: &mut usize,
-) -> Result<(), String> {
+    allow_file_and_media: bool,
+    mut total_ast_steps: Option<&mut usize>,
+) -> Result<(), (&'static str, String)> {
     for step in steps {
-        *total_ast_steps = total_ast_steps.saturating_add(1);
-        if *total_ast_steps > MAX_BATCH_TOTAL_AST_STEPS {
-            return Err(format!(
-                "batch exceeds maximum expanded step count ({MAX_BATCH_TOTAL_AST_STEPS})"
-            ));
+        if let Some(ref mut count) = total_ast_steps {
+            **count = count.saturating_add(1);
+            if **count > MAX_BATCH_TOTAL_AST_STEPS {
+                return Err((
+                    "CONFINEMENT_ERROR",
+                    format!(
+                        "batch exceeds maximum expanded step count ({MAX_BATCH_TOTAL_AST_STEPS})"
+                    ),
+                ));
+            }
         }
         match step {
+            FlowStep::ClearKeychain => {
+                return Err((
+                    "DEVICE_WIDE_COMMAND_FORBIDDEN",
+                    "device-wide `clearKeychain` is forbidden in app-confined MCP flows"
+                        .to_string(),
+                ));
+            }
+            FlowStep::LaunchApp(launch) if launch.clear_keychain => {
+                return Err((
+                    "DEVICE_WIDE_COMMAND_FORBIDDEN",
+                    "device-wide `launchApp.clearKeychain: true` is forbidden in app-confined MCP flows"
+                        .to_string(),
+                ));
+            }
             FlowStep::RunFlow(rf) => {
                 let mut child_frame = BTreeMap::new();
                 for (k, v) in &rf.env {
-                    let interp = env_stack
-                        .interpolate(v)
-                        .map_err(|err| format!("runFlow env `{k}` interpolation failed: {err}"))?;
+                    let interp = env_stack.interpolate(v).map_err(|err| {
+                        (
+                            "CONFINEMENT_ERROR",
+                            format!("runFlow env `{k}` interpolation failed: {err}"),
+                        )
+                    })?;
                     child_frame.insert(k.clone(), interp);
                 }
                 let pushed = !child_frame.is_empty();
@@ -3367,15 +3744,19 @@ fn check_batch_steps_recursive(
                     env_stack.push(child_frame);
                 }
                 let res = match &rf.target {
-                    RunFlowTarget::File(_) => Err(
+                    RunFlowTarget::File(_) if !allow_file_and_media => Err((
+                        "CONFINEMENT_ERROR",
                         "`runFlow.file` is not allowed in `deja_exec_batch`; pass inline steps or use `deja_remember`"
                             .to_string(),
-                    ),
-                    RunFlowTarget::Commands(cmds) => check_batch_steps_recursive(
+                    )),
+                    RunFlowTarget::File(_) => Ok(()),
+                    RunFlowTarget::Commands(cmds) => check_mcp_steps_recursive(
                         cmds,
+                        screenshots_dir,
                         canonical_workspace,
                         env_stack,
-                        total_ast_steps,
+                        allow_file_and_media,
+                        total_ast_steps.as_deref_mut(),
                     ),
                 };
                 if pushed {
@@ -3386,9 +3767,12 @@ fn check_batch_steps_recursive(
             FlowStep::Retry(rt) => {
                 let mut child_frame = BTreeMap::new();
                 for (k, v) in &rt.env {
-                    let interp = env_stack
-                        .interpolate(v)
-                        .map_err(|err| format!("retry env `{k}` interpolation failed: {err}"))?;
+                    let interp = env_stack.interpolate(v).map_err(|err| {
+                        (
+                            "CONFINEMENT_ERROR",
+                            format!("retry env `{k}` interpolation failed: {err}"),
+                        )
+                    })?;
                     child_frame.insert(k.clone(), interp);
                 }
                 let pushed = !child_frame.is_empty();
@@ -3396,15 +3780,19 @@ fn check_batch_steps_recursive(
                     env_stack.push(child_frame);
                 }
                 let res = match &rt.target {
-                    RunFlowTarget::File(_) => Err(
+                    RunFlowTarget::File(_) if !allow_file_and_media => Err((
+                        "CONFINEMENT_ERROR",
                         "`retry.file` is not allowed in `deja_exec_batch`; pass inline steps"
                             .to_string(),
-                    ),
-                    RunFlowTarget::Commands(cmds) => check_batch_steps_recursive(
+                    )),
+                    RunFlowTarget::File(_) => Ok(()),
+                    RunFlowTarget::Commands(cmds) => check_mcp_steps_recursive(
                         cmds,
+                        screenshots_dir,
                         canonical_workspace,
                         env_stack,
-                        total_ast_steps,
+                        allow_file_and_media,
+                        total_ast_steps.as_deref_mut(),
                     ),
                 };
                 if pushed {
@@ -3413,50 +3801,93 @@ fn check_batch_steps_recursive(
                 res?;
             }
             FlowStep::Repeat(rep) => {
-                check_batch_steps_recursive(
+                check_mcp_steps_recursive(
                     &rep.commands,
+                    screenshots_dir,
                     canonical_workspace,
                     env_stack,
-                    total_ast_steps,
+                    allow_file_and_media,
+                    total_ast_steps.as_deref_mut(),
                 )?;
             }
-            FlowStep::AddMedia(_) => {
-                return Err(
+            FlowStep::AddMedia(_) if !allow_file_and_media => {
+                return Err((
+                    "CONFINEMENT_ERROR",
                     "`addMedia` is not allowed in `deja_exec_batch`; use `deja_remember` with a workspace flow"
                         .to_string(),
-                );
+                ));
             }
             FlowStep::TakeScreenshot(ts) => {
-                let resolved = env_stack
-                    .interpolate(&ts.path)
-                    .map_err(|err| format!("takeScreenshot path interpolation failed: {err}"))?;
+                let resolved = env_stack.interpolate(&ts.path).map_err(|err| {
+                    (
+                        "PATH_CONFINEMENT",
+                        format!("takeScreenshot path interpolation failed: {err}"),
+                    )
+                })?;
                 if resolved.contains("${") {
-                    return Err(format!(
-                        "takeScreenshot path `{resolved}` contains an unresolvable variable"
-                    ));
-                }
-                let segments = parse_safe_relative_segments(&resolved)
-                    .map_err(|msg| format!("unconfined takeScreenshot path `{resolved}`: {msg}"))?;
-                if segments.first().map(String::as_str) == Some(".deja")
-                    && segments
-                        .get(1)
-                        .is_some_and(|s| s == "memory" || s == "flows")
-                {
-                    return Err(format!(
-                        "takeScreenshot path `{resolved}` cannot write inside `.deja/memory` or `.deja/flows`"
-                    ));
-                }
-                // Refuse any existing symlink along the screenshot target path inside the workspace.
-                let mut cursor = canonical_workspace.to_path_buf();
-                for seg in &segments {
-                    cursor.push(seg);
-                    if let Ok(meta) = fs::symlink_metadata(&cursor)
-                        && meta.file_type().is_symlink()
-                    {
-                        return Err(format!(
-                            "takeScreenshot path `{resolved}` traverses or targets a symbolic link"
+                    if !allow_file_and_media {
+                        return Err((
+                            "PATH_CONFINEMENT",
+                            format!(
+                                "takeScreenshot path `{resolved}` contains an unresolvable variable"
+                            ),
                         ));
                     }
+                    // For file-backed subflows receiving env vars from parent `runFlow.env`,
+                    // runtime `exec_take_screenshot` enforces strict confinement and no-clobber
+                    // on the fully interpolated path.
+                    continue;
+                }
+                let with_ext = if Path::new(&resolved).extension().is_none() {
+                    format!("{resolved}.png")
+                } else {
+                    resolved.clone()
+                };
+                let segments = parse_safe_relative_segments(&with_ext).map_err(|msg| {
+                    (
+                        "PATH_CONFINEMENT",
+                        format!("unconfined takeScreenshot path `{resolved}`: {msg}"),
+                    )
+                })?;
+                if segments.iter().any(|s| s.starts_with('.')) {
+                    return Err((
+                        "PATH_CONFINEMENT",
+                        format!(
+                            "takeScreenshot path `{resolved}` cannot contain hidden path segments"
+                        ),
+                    ));
+                }
+                // Refuse any existing symlink from workspace root down to the dedicated
+                // `mcp-screenshots/` artifact target, and refuse overwriting existing files.
+                let mut target = screenshots_dir.to_path_buf();
+                for seg in &segments {
+                    target.push(seg);
+                }
+                if let Ok(rel_from_ws) = target.strip_prefix(canonical_workspace) {
+                    let mut cursor = canonical_workspace.to_path_buf();
+                    for comp in rel_from_ws.components() {
+                        if let std::path::Component::Normal(seg) = comp {
+                            cursor.push(seg);
+                            if let Ok(meta) = fs::symlink_metadata(&cursor)
+                                && meta.file_type().is_symlink()
+                            {
+                                return Err((
+                                    "PATH_CONFINEMENT",
+                                    format!(
+                                        "takeScreenshot path `{resolved}` traverses or targets a symbolic link"
+                                    ),
+                                ));
+                            }
+                        }
+                    }
+                }
+                if fs::symlink_metadata(&target).is_ok() {
+                    return Err((
+                        "PATH_CONFINEMENT",
+                        format!(
+                            "takeScreenshot path `{resolved}` refuses to overwrite existing artifact file"
+                        ),
+                    ));
                 }
             }
             _ => {}

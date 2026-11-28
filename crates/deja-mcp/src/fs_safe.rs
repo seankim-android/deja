@@ -231,23 +231,58 @@ pub fn verify_no_symlink_components(
     Ok(cursor)
 }
 
-/// Strictly read a report JSON file confined inside `<canonical_workspace>/.deja/reports/`
-/// using `O_NOFOLLOW`, `!is_symlink()`, `nlink == 1`, and a `16 MiB` size cap.
+/// Strictly read a report JSON file confined inside the active store's reports directory:
+/// - when `store_id == Some(id)`: `<canonical_workspace>/.deja/reports/stores/<id>/`
+/// - when `store_id == None`: `<canonical_workspace>/.deja/reports/` (rejecting `.deja/reports/stores/...`)
+///
+/// Enforces `O_NOFOLLOW`, `!is_symlink()`, `is_file()`, Unix `nlink == 1`, no symlink ancestors,
+/// and a `16 MiB` size cap.
 pub fn read_confined_report_file(
     canonical_workspace: &Path,
+    store_id: Option<&str>,
     report_rel: &str,
 ) -> Result<(PathBuf, String), (&'static str, String)> {
     let segments =
         parse_safe_relative_segments(report_rel).map_err(|msg| ("PATH_CONFINEMENT", msg))?;
 
-    if segments.len() < 3 || segments[0] != ".deja" || segments[1] != "reports" {
-        return Err((
-            "PATH_CONFINEMENT",
-            format!("report path `{report_rel}` must stay strictly inside `.deja/reports/`"),
-        ));
-    }
+    let reports_dir = match store_id {
+        Some(id) => {
+            if segments.len() < 5
+                || segments[0] != ".deja"
+                || segments[1] != "reports"
+                || segments[2] != "stores"
+                || segments[3] != id
+            {
+                return Err((
+                    "PATH_CONFINEMENT",
+                    format!(
+                        "report path `{report_rel}` must stay strictly inside `.deja/reports/stores/{id}/`"
+                    ),
+                ));
+            }
+            canonical_workspace
+                .join(".deja")
+                .join("reports")
+                .join("stores")
+                .join(id)
+        }
+        None => {
+            if segments.len() < 3
+                || segments[0] != ".deja"
+                || segments[1] != "reports"
+                || segments[2] == "stores"
+            {
+                return Err((
+                    "PATH_CONFINEMENT",
+                    format!(
+                        "report path `{report_rel}` must stay strictly inside `.deja/reports/` (outside per-store directories)"
+                    ),
+                ));
+            }
+            canonical_workspace.join(".deja").join("reports")
+        }
+    };
 
-    let reports_dir = canonical_workspace.join(".deja").join("reports");
     let candidate =
         verify_no_symlink_components(canonical_workspace, &segments).map_err(|err| {
             if err.kind() == ErrorKind::NotFound {
@@ -278,7 +313,7 @@ pub fn read_confined_report_file(
     if !path_inside(&canonical_reports, &canonical_target) {
         return Err((
             "PATH_CONFINEMENT",
-            format!("report path `{report_rel}` escapes `.deja/reports/`"),
+            format!("report path `{report_rel}` escapes store reports directory"),
         ));
     }
 

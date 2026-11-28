@@ -472,6 +472,7 @@ fn default_config(ws: &TempWs, build_path: Option<PathBuf>) -> McpServerConfig {
         process_env: BTreeMap::new(),
         forbidden_values: Vec::new(),
         mcp_explore: false,
+        explore_backend_available: false,
         headless: None,
         screen_size: None,
     }
@@ -765,12 +766,15 @@ async fn group2_handshake_tools_list_and_explore_gating() {
     );
     client.close_and_join().await;
 
-    // 2B: mcp_explore = true
+    // 2B: mcp_explore = true, explore_backend_available = false (Phase 3 default!)
+    // `deja_explore` must NOT be advertised in `tools/list` until a backend is wired (DEJA-71),
+    // while direct `tools/call("deja_explore")` still validates args and returns UNSUPPORTED_PHASE.
     let mut cfg_exp = default_config(&ws, None);
     cfg_exp.mcp_explore = true;
+    cfg_exp.explore_backend_available = false;
     let mut client2 = McpTestClient::spawn(
         cfg_exp,
-        factory,
+        factory.clone(),
         FramingMode::NewlineDelimited,
         CancellationToken::new(),
     );
@@ -781,7 +785,10 @@ async fn group2_handshake_tools_list_and_explore_gating() {
         .iter()
         .map(|t| t["name"].as_str().unwrap())
         .collect();
-    assert!(names2.contains(&"deja_explore"));
+    assert!(
+        !names2.contains(&"deja_explore"),
+        "deja_explore must not be advertised when explore_backend_available is false"
+    );
 
     // Invalid args -> INVALID_INPUT
     let exp_bad = client2
@@ -813,6 +820,26 @@ async fn group2_handshake_tools_list_and_explore_gating() {
             .contains("DEJA-71")
     );
     client2.close_and_join().await;
+
+    // 2C: mcp_explore = true AND explore_backend_available = true -> advertised in tools/list!
+    let mut cfg_exp_avail = default_config(&ws, None);
+    cfg_exp_avail.mcp_explore = true;
+    cfg_exp_avail.explore_backend_available = true;
+    let mut client3 = McpTestClient::spawn(
+        cfg_exp_avail,
+        factory,
+        FramingMode::NewlineDelimited,
+        CancellationToken::new(),
+    );
+    let list3 = client3.request(json!(1), "tools/list", json!({})).await;
+    let names3: Vec<&str> = list3["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    assert!(names3.contains(&"deja_explore"));
+    client3.close_and_join().await;
 }
 
 // ===========================================================================
@@ -1681,5 +1708,528 @@ async fn group3_deja_run_flaky_retry_and_pruned_failure_visible_elements() {
         run["result"]["structuredContent"]["visibleElementsTruncated"],
         true
     );
+    client.close_and_join().await;
+}
+
+// ===========================================================================
+// Round 1 Codex cross-review regression tests (Findings #1, #2, #4, #5, #6, #7, #8)
+// ===========================================================================
+
+#[tokio::test]
+async fn regression_r1_f1_split_write_frame_preserved_when_tool_finishes() {
+    let ws = TempWs::new("r1-f1-split");
+    let build_file = ws.write_bytes("build/App.bin", b"v1");
+    let launch_started = Arc::new(Notify::new());
+    let unblock_launch = Arc::new(Notify::new());
+    let driver = MockDriver::new(vec![make_hierarchy(
+        TEST_APP_ID,
+        vec![make_node(0, "ok", "OK")],
+    )])
+    .with_blocking_launch(launch_started.clone(), unblock_launch.clone());
+    let factory = Arc::new(MockFactory::new(Some("ios-27.2"), driver));
+
+    let mut client = McpTestClient::spawn(
+        default_config(&ws, Some(build_file)),
+        factory,
+        FramingMode::NewlineDelimited,
+        CancellationToken::new(),
+    );
+
+    // 1. Start a blocking tool call.
+    client
+        .send(&json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": { "name": "deja_exec_batch", "arguments": { "steps": ["launchApp"] } }
+        }))
+        .await;
+    tokio::time::timeout(Duration::from_secs(5), launch_started.notified())
+        .await
+        .expect("launch started");
+
+    // 2. Write ONLY the first half of a `ping` request while the tool is still running!
+    let full_ping = r#"{"jsonrpc":"2.0","id":2,"method":"ping","params":{}}"#;
+    let (half1, half2) = full_ping.split_at(full_ping.len() / 2);
+    client.send_raw(half1.as_bytes()).await;
+
+    // 3. Unblock the tool and receive its completion response (so JoinSet reaps the task
+    //    while half1 is sitting in FramedReader's buffer!).
+    unblock_launch.notify_waiters();
+    let r1 = client.recv().await;
+    assert_eq!(r1["id"], 1);
+    assert_eq!(r1["result"]["isError"], false);
+
+    // 4. Now write the second half + newline -> ping MUST succeed cleanly (never -32700!).
+    client.send_raw(format!("{half2}\n").as_bytes()).await;
+    let r2 = client.recv().await;
+    assert_eq!(
+        r2,
+        json!({"jsonrpc": "2.0", "id": 2, "result": {}}),
+        "split-write ping must not lose bytes when a tool task finishes"
+    );
+
+    client.close_and_join().await;
+}
+
+#[tokio::test]
+async fn regression_r1_f2_mcp_screenshots_confined_to_dedicated_dir_and_no_clobber() {
+    let ws = TempWs::new("r1-f2-shots");
+    let build_file = ws.write_bytes("build/App.bin", b"v1");
+    ws.write(
+        "flows/snap_good.yaml",
+        "appId: dev.deja.mcp.test\n---\n- launchApp\n- takeScreenshot: flow-shot\n",
+    );
+    ws.write(
+        "flows/snap_escape.yaml",
+        "appId: dev.deja.mcp.test\n---\n- launchApp\n- takeScreenshot: ../escape\n",
+    );
+    ws.write(
+        "flows/snap_existing.yaml",
+        "appId: dev.deja.mcp.test\n---\n- launchApp\n- takeScreenshot: preexisting\n",
+    );
+    ws.write(
+        ".deja/reports/stores/sim-s/mcp-screenshots/preexisting.png",
+        "original-bytes",
+    );
+
+    let driver = MockDriver::new(vec![make_hierarchy(
+        TEST_APP_ID,
+        vec![make_node(0, "ok", "OK")],
+    )]);
+    let factory = Arc::new(MockFactory::new(Some("ios-27.2"), driver));
+
+    let mut cfg = default_config(&ws, Some(build_file));
+    cfg.store_id = Some("sim-s".to_string());
+
+    let mut client = McpTestClient::spawn(
+        cfg,
+        factory,
+        FramingMode::NewlineDelimited,
+        CancellationToken::new(),
+    );
+
+    // 1. Batch screenshot writes ONLY inside `.deja/reports/stores/sim-s/mcp-screenshots/`!
+    let batch_ok = client
+        .call_tool(
+            json!(1),
+            "deja_exec_batch",
+            json!({"steps": ["launchApp", {"takeScreenshot": "batch-shot"}]}),
+        )
+        .await;
+    assert_eq!(batch_ok["result"]["isError"], false, "batch_ok: {batch_ok}");
+    assert!(
+        ws.path
+            .join(".deja/reports/stores/sim-s/mcp-screenshots/batch-shot.png")
+            .is_file(),
+        "screenshot must be written in store-scoped mcp-screenshots/"
+    );
+    assert!(
+        !ws.path.join("batch-shot.png").exists(),
+        "screenshot must never write to workspace root"
+    );
+
+    // 2. Batch refuses overwriting an existing screenshot file (no-clobber)!
+    let batch_clobber = client
+        .call_tool(
+            json!(2),
+            "deja_exec_batch",
+            json!({"steps": ["launchApp", {"takeScreenshot": "batch-shot"}]}),
+        )
+        .await;
+    assert_eq!(batch_clobber["result"]["isError"], true);
+    assert_eq!(
+        batch_clobber["result"]["structuredContent"]["code"],
+        "PATH_CONFINEMENT"
+    );
+
+    // 3. Batch refuses relative traversal / absolute paths!
+    let batch_escape = client
+        .call_tool(
+            json!(3),
+            "deja_exec_batch",
+            json!({"steps": ["launchApp", {"takeScreenshot": "../escaped"}]}),
+        )
+        .await;
+    assert_eq!(batch_escape["result"]["isError"], true);
+    assert_eq!(
+        batch_escape["result"]["structuredContent"]["code"],
+        "PATH_CONFINEMENT"
+    );
+
+    // 4. File-backed `deja_remember` writes ONLY inside `mcp-screenshots/`!
+    let rem_ok = client
+        .call_tool(
+            json!(4),
+            "deja_remember",
+            json!({"goal": "Snap Goal", "flow": "flows/snap_good.yaml"}),
+        )
+        .await;
+    assert_eq!(rem_ok["result"]["isError"], false, "rem_ok: {rem_ok}");
+    assert!(
+        ws.path
+            .join(".deja/reports/stores/sim-s/mcp-screenshots/flow-shot.png")
+            .is_file()
+    );
+    assert!(!ws.path.join("flow-shot.png").exists());
+
+    // 5. File-backed `deja_remember` refuses traversal AND refuses overwriting existing file!
+    let rem_escape = client
+        .call_tool(
+            json!(5),
+            "deja_remember",
+            json!({"goal": "Snap Escape", "flow": "flows/snap_escape.yaml"}),
+        )
+        .await;
+    assert_eq!(rem_escape["result"]["isError"], true);
+    assert_eq!(
+        rem_escape["result"]["structuredContent"]["code"],
+        "PATH_CONFINEMENT"
+    );
+
+    let rem_clobber = client
+        .call_tool(
+            json!(6),
+            "deja_remember",
+            json!({"goal": "Snap Clobber", "flow": "flows/snap_existing.yaml"}),
+        )
+        .await;
+    assert_eq!(rem_clobber["result"]["isError"], true);
+    assert_eq!(
+        rem_clobber["result"]["structuredContent"]["code"],
+        "PATH_CONFINEMENT"
+    );
+    assert_eq!(
+        fs::read_to_string(
+            ws.path
+                .join(".deja/reports/stores/sim-s/mcp-screenshots/preexisting.png")
+        )
+        .unwrap(),
+        "original-bytes",
+        "existing screenshot file must remain untouched"
+    );
+
+    client.close_and_join().await;
+}
+
+#[tokio::test]
+async fn regression_r1_f4_rejects_device_wide_clear_keychain_in_batch_and_remember() {
+    let ws = TempWs::new("r1-f4-keychain");
+    let build_file = ws.write_bytes("build/App.bin", b"v1");
+    ws.write(
+        "flows/clear_kc.yaml",
+        "appId: dev.deja.mcp.test\n---\n- clearKeychain\n- launchApp\n",
+    );
+    ws.write(
+        "flows/launch_kc.yaml",
+        "appId: dev.deja.mcp.test\n---\n- launchApp:\n    clearKeychain: true\n",
+    );
+    ws.write(
+        "flows/sub_parent.yaml",
+        "appId: dev.deja.mcp.test\n---\n- runFlow: clear_kc.yaml\n",
+    );
+
+    let factory = Arc::new(MockFactory::new(Some("ios-27.2"), MockDriver::new(vec![])));
+    let mut client = McpTestClient::spawn(
+        default_config(&ws, Some(build_file)),
+        factory,
+        FramingMode::NewlineDelimited,
+        CancellationToken::new(),
+    );
+
+    for (idx, steps) in [
+        json!(["clearKeychain", "launchApp"]),
+        json!([{"launchApp": {"clearKeychain": true}}]),
+        json!("onFlowStart:\n  - clearKeychain\n---\n- launchApp\n"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let resp = client
+            .call_tool(json!(10 + idx), "deja_exec_batch", json!({"steps": steps}))
+            .await;
+        assert_eq!(resp["result"]["isError"], true);
+        assert_eq!(
+            resp["result"]["structuredContent"]["code"], "DEVICE_WIDE_COMMAND_FORBIDDEN",
+            "expected DEVICE_WIDE_COMMAND_FORBIDDEN for batch: {resp}"
+        );
+    }
+
+    for (idx, flow) in [
+        "flows/clear_kc.yaml",
+        "flows/launch_kc.yaml",
+        "flows/sub_parent.yaml",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let resp = client
+            .call_tool(
+                json!(20 + idx),
+                "deja_remember",
+                json!({"goal": "kc forbidden", "flow": flow}),
+            )
+            .await;
+        assert_eq!(resp["result"]["isError"], true);
+        assert_eq!(
+            resp["result"]["structuredContent"]["code"], "DEVICE_WIDE_COMMAND_FORBIDDEN",
+            "expected DEVICE_WIDE_COMMAND_FORBIDDEN for {flow}: {resp}"
+        );
+    }
+
+    client.close_and_join().await;
+}
+
+#[tokio::test]
+async fn regression_r1_f5_store_isolated_report_inspection_and_persistence() {
+    let ws = TempWs::new("r1-f5-store-iso");
+    let build_file = ws.write_bytes("build/App.bin", b"v1");
+    ws.write(
+        "flows/ok.yaml",
+        "appId: dev.deja.mcp.test\n---\n- launchApp\n- assertVisible: OK\n",
+    );
+    ws.write(".deja/reports/latest.json", r#"{"store":"default"}"#);
+    ws.write(
+        ".deja/reports/stores/store-b/latest.json",
+        r#"{"store":"store-b"}"#,
+    );
+
+    let driver = MockDriver::new(vec![make_hierarchy(
+        TEST_APP_ID,
+        vec![make_node(0, "ok", "OK")],
+    )]);
+    let factory = Arc::new(MockFactory::new(Some("ios-27.2"), driver));
+
+    // 1. Named store `store-a` persists reports under `.deja/reports/stores/store-a/` and cannot
+    //    inspect default store or `store-b` reports!
+    let mut cfg_a = default_config(&ws, Some(build_file.clone()));
+    cfg_a.store_id = Some("store-a".to_string());
+    let mut client_a = McpTestClient::spawn(
+        cfg_a,
+        factory.clone(),
+        FramingMode::NewlineDelimited,
+        CancellationToken::new(),
+    );
+
+    let rem_a = client_a
+        .call_tool(
+            json!(1),
+            "deja_remember",
+            json!({"goal": "Store A Goal", "flow": "flows/ok.yaml"}),
+        )
+        .await;
+    assert_eq!(rem_a["result"]["isError"], false);
+    let rep_a = rem_a["result"]["structuredContent"]["reportPath"]
+        .as_str()
+        .expect("reportPath present");
+    assert!(
+        rep_a.starts_with(".deja/reports/stores/store-a/"),
+        "store-a report must be stored inside store-a directory, got: {rep_a}"
+    );
+
+    // store-a CAN inspect its own report
+    let own = client_a
+        .call_tool(json!(2), "deja_inspect", json!({"report": rep_a}))
+        .await;
+    assert_eq!(own["result"]["isError"], false);
+
+    // store-a CANNOT inspect default store OR store-b reports
+    for (idx, forbidden) in [
+        ".deja/reports/latest.json",
+        ".deja/reports/stores/store-b/latest.json",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let res = client_a
+            .call_tool(
+                json!(10 + idx),
+                "deja_inspect",
+                json!({"report": forbidden}),
+            )
+            .await;
+        assert_eq!(res["result"]["isError"], true);
+        assert_eq!(
+            res["result"]["structuredContent"]["code"],
+            "PATH_CONFINEMENT"
+        );
+    }
+    client_a.close_and_join().await;
+
+    // 2. Default store (`store_id: None`) CAN inspect `.deja/reports/latest.json`, CANNOT inspect
+    //    `.deja/reports/stores/store-a/latest.json`!
+    let mut client_def = McpTestClient::spawn(
+        default_config(&ws, Some(build_file)),
+        factory,
+        FramingMode::NewlineDelimited,
+        CancellationToken::new(),
+    );
+    let def_ok = client_def
+        .call_tool(
+            json!(1),
+            "deja_inspect",
+            json!({"report": ".deja/reports/latest.json"}),
+        )
+        .await;
+    assert_eq!(def_ok["result"]["isError"], false);
+
+    let def_cross = client_def
+        .call_tool(
+            json!(2),
+            "deja_inspect",
+            json!({"report": ".deja/reports/stores/store-a/latest.json"}),
+        )
+        .await;
+    assert_eq!(def_cross["result"]["isError"], true);
+    assert_eq!(
+        def_cross["result"]["structuredContent"]["code"],
+        "PATH_CONFINEMENT"
+    );
+    client_def.close_and_join().await;
+}
+
+#[tokio::test]
+async fn regression_r1_f6_redacts_dynamic_json_keys_in_inspected_reports() {
+    let ws = TempWs::new("r1-f6-dynkeys");
+    let secret = "KeySecretValue88!";
+    let provider_tok = ["sk", "-1234567890abcdefghijklmnop"].concat();
+    let ws_path_str = ws.path.display().to_string();
+
+    let report_json = json!({
+        "summary": "ok",
+        "nested": {
+            format!("secret_{secret}_key"): "v1",
+            format!("path_{ws_path_str}_key"): "v2",
+            format!("tok {provider_tok} key"): "v3",
+        }
+    });
+    ws.write(
+        ".deja/reports/dyn-keys.json",
+        &serde_json::to_string_pretty(&report_json).unwrap(),
+    );
+
+    let mut cfg = default_config(&ws, None);
+    cfg.forbidden_values = vec![secret.to_string()];
+    let factory = Arc::new(MockFactory::new(Some("ios-27.2"), MockDriver::new(vec![])));
+
+    let mut client = McpTestClient::spawn(
+        cfg,
+        factory,
+        FramingMode::NewlineDelimited,
+        CancellationToken::new(),
+    );
+
+    let resp = client
+        .call_tool(
+            json!(1),
+            "deja_inspect",
+            json!({"report": ".deja/reports/dyn-keys.json"}),
+        )
+        .await;
+    assert_eq!(resp["result"]["isError"], false);
+
+    let structured_str = serde_json::to_string(&resp["result"]["structuredContent"]).unwrap();
+    let text_str = resp["result"]["content"][0]["text"].as_str().unwrap();
+    for haystack in [structured_str.as_str(), text_str] {
+        assert!(!haystack.contains(secret), "secret key leaked: {haystack}");
+        assert!(
+            !haystack.contains(&ws_path_str),
+            "workspace path key leaked: {haystack}"
+        );
+        assert!(
+            !haystack.contains(&provider_tok),
+            "provider token key leaked: {haystack}"
+        );
+    }
+
+    client.close_and_join().await;
+}
+
+#[tokio::test]
+async fn regression_r1_f7_buildless_batch_rejected_with_build_path_required() {
+    let ws = TempWs::new("r1-f7-nobuild");
+    let factory = Arc::new(MockFactory::new(Some("ios-27.2"), MockDriver::new(vec![])));
+
+    let mut client = McpTestClient::spawn(
+        default_config(&ws, None),
+        factory,
+        FramingMode::NewlineDelimited,
+        CancellationToken::new(),
+    );
+
+    let resp = client
+        .call_tool(json!(1), "deja_exec_batch", json!({"steps": ["launchApp"]}))
+        .await;
+    assert_eq!(resp["result"]["isError"], true);
+    assert_eq!(
+        resp["result"]["structuredContent"]["code"],
+        "BUILD_PATH_REQUIRED"
+    );
+    client.close_and_join().await;
+}
+
+#[tokio::test]
+async fn regression_r1_f8_unwritable_reports_omits_report_path_in_response_and_sqlite() {
+    let ws = TempWs::new("r1-f8-unwritable");
+    let build_file = ws.write_bytes("build/App.bin", b"v1");
+    ws.write(
+        "flows/ok.yaml",
+        "appId: dev.deja.mcp.test\n---\n- launchApp\n- assertVisible: OK\n",
+    );
+    // Block `.deja/reports` with a regular file so creating `.deja/reports/*.json` fails!
+    ws.write(".deja/reports", "not-a-directory");
+
+    let driver = MockDriver::new(vec![make_hierarchy(
+        TEST_APP_ID,
+        vec![make_node(0, "ok", "OK")],
+    )]);
+    let factory = Arc::new(MockFactory::new(Some("ios-27.2"), driver));
+
+    let mut client = McpTestClient::spawn(
+        default_config(&ws, Some(build_file)),
+        factory,
+        FramingMode::NewlineDelimited,
+        CancellationToken::new(),
+    );
+
+    let rem = client
+        .call_tool(
+            json!(1),
+            "deja_remember",
+            json!({"goal": "Blocked Report Goal", "flow": "flows/ok.yaml"}),
+        )
+        .await;
+    assert_eq!(rem["result"]["isError"], false, "remember passed: {rem}");
+    assert!(
+        rem["result"]["structuredContent"]
+            .get("reportPath")
+            .is_none(),
+        "reportPath must be omitted when report write fails: {rem}"
+    );
+    assert!(
+        !rem["result"]["structuredContent"]["warnings"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "report write failure must be surfaced in warnings: {rem}"
+    );
+
+    let insp = client
+        .call_tool(
+            json!(2),
+            "deja_inspect",
+            json!({"goal": "Blocked Report Goal"}),
+        )
+        .await;
+    assert_eq!(insp["result"]["isError"], false);
+    let runs = insp["result"]["structuredContent"]["validationRuns"]
+        .as_array()
+        .unwrap();
+    assert_eq!(runs.len(), 1);
+    assert!(
+        runs[0].get("reportPath").is_none() || runs[0]["reportPath"].is_null(),
+        "SQLite validation_runs must not record an unwritten reportPath: {runs:?}"
+    );
+
     client.close_and_join().await;
 }

@@ -178,6 +178,7 @@ pub async fn run(
         process_env: deps.env.clone(),
         forbidden_values: config.forbidden_values.clone(),
         mcp_explore: config.mcp.as_ref().is_some_and(|m| m.explore),
+        explore_backend_available: false,
         headless: config.headless,
         screen_size: config.screen_size.clone(),
     };

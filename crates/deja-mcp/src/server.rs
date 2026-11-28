@@ -51,7 +51,7 @@ pub async fn serve<R, W>(
     cancel: CancellationToken,
 ) -> Result<(), McpServerError>
 where
-    R: AsyncRead + Unpin,
+    R: AsyncRead + Unpin + Send + 'static,
     W: AsyncWrite + Unpin + Send + 'static,
 {
     config.validate()?;
@@ -74,8 +74,36 @@ where
     let in_flight: Arc<StdMutex<HashMap<RequestIdKey, CancellationToken>>> =
         Arc::new(StdMutex::new(HashMap::new()));
     let writer = Arc::new(AsyncMutex::new(FramedWriter::new(output)));
-    let mut reader = FramedReader::new(BufReader::new(input));
     let mut tasks: JoinSet<()> = JoinSet::new();
+
+    // Dedicated reader task owns `FramedReader` so `read_frame()` is NEVER dropped mid-frame
+    // when a tool task finishes in the main `tokio::select!` loop (`mpsc::Receiver::recv` is
+    // strictly cancel-safe).
+    let (frame_tx, mut frame_rx) =
+        tokio::sync::mpsc::channel::<Result<(FramingMode, Vec<u8>), ReadFrameError>>(64);
+    let reader_cancel = server_cancel.clone();
+    let reader_handle = tokio::spawn(async move {
+        let mut reader = FramedReader::new(BufReader::new(input));
+        loop {
+            let item = tokio::select! {
+                biased;
+                _ = reader_cancel.cancelled() => break,
+                res = reader.read_frame() => res,
+            };
+            let terminal = matches!(
+                item,
+                Err(ReadFrameError::Eof)
+                    | Err(ReadFrameError::Io(_))
+                    | Err(ReadFrameError::FrameTooLarge {
+                        recoverable: false,
+                        ..
+                    })
+            );
+            if frame_tx.send(item).await.is_err() || terminal {
+                break;
+            }
+        }
+    });
 
     debug!("deja-mcp stdio server started");
 
@@ -92,7 +120,10 @@ where
                 }
                 continue;
             }
-            res = reader.read_frame() => res,
+            maybe = frame_rx.recv() => match maybe {
+                Some(res) => res,
+                None => Err(ReadFrameError::Eof),
+            },
         };
 
         let (mode, raw_bytes) = match frame_res {
@@ -277,7 +308,12 @@ where
                 }
                 let resp = jsonrpc_result(
                     id_val,
-                    json!({ "tools": tool_definitions(tool_ctx.config.mcp_explore) }),
+                    json!({
+                        "tools": tool_definitions(
+                            tool_ctx.config.mcp_explore,
+                            tool_ctx.config.explore_backend_available,
+                        )
+                    }),
                 );
                 if write_response(&writer, &resp, mode).await.is_err() {
                     break;
@@ -394,9 +430,10 @@ where
         }
     }
 
-    // Graceful shutdown: cancel every in-flight task, drain bounded, and shut down any idle
-    // warm driver so zero processes or locks leak.
+    // Graceful shutdown: cancel every in-flight task, abort the dedicated reader task, drain
+    // bounded, and shut down any idle warm driver so zero processes or locks leak.
     server_cancel.cancel();
+    reader_handle.abort();
 
     let drain_res = tokio::time::timeout(SHUTDOWN_JOIN_TIMEOUT, async {
         while tasks.join_next().await.is_some() {}
