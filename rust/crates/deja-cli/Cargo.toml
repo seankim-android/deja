@@ -1,6 +1,7 @@
 [package]
 name = "deja-cli"
 description = "Déjà CLI composition root binary"
+default-run = "deja"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

@@ -140,6 +140,31 @@ fn rejects_invalid_json_and_secret_leaks() {
     let err = validate_repo(&repo_leak.path, RepoCheckOptions::default())
         .expect_err("GitHub token leak must fail");
     assert!(err.contains("GitHub credential"), "{err}");
+
+    // Preserve ASCII word-boundary parity with JS/Bun regexes: a token immediately following
+    // a non-ASCII Unicode letter must still be detected as a leak.
+    let repo_unicode_leak = TempGitRepo::new("unicode-secret-leak");
+    let unicode_prefixed_token = format!("clé{}123456789012345678901234\n", "ghp_");
+    repo_unicode_leak.write("notes.txt", unicode_prefixed_token.as_bytes());
+    repo_unicode_leak.commit_all("initial");
+    let err = validate_repo(&repo_unicode_leak.path, RepoCheckOptions::default())
+        .expect_err("Unicode-prefixed GitHub token must still fail ASCII-boundary scan");
+    assert!(err.contains("GitHub credential"), "{err}");
+}
+
+#[test]
+fn rejects_subdirectory_root_for_repository_wide_check() {
+    let repo = TempGitRepo::new("subdir-root");
+    repo.write("README.md", b"See [missing](docs/nope.md).\n");
+    repo.write("sub/ok.txt", b"clean\n");
+    repo.commit_all("initial");
+
+    let err = validate_repo(&repo.path.join("sub"), RepoCheckOptions::default())
+        .expect_err("subdirectory --root must be rejected");
+    assert!(
+        err.contains("repository top level"),
+        "unexpected error: {err}"
+    );
 }
 
 #[test]

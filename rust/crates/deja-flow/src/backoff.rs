@@ -2,6 +2,7 @@
 //!
 //! Pure `std` implementation shared by `deja-flow` and native platform drivers.
 
+use std::collections::HashSet;
 use std::time::Duration;
 
 /// Adaptive exponential backoff schedule for UI polling loops.
@@ -138,9 +139,12 @@ impl SettleTracker {
     }
 }
 
-/// Lightweight node projection used for chrome-stripped stability hashing.
+/// Lightweight node projection used for structure-preserving, chrome-stripped stability hashing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HashableNode<'a> {
+    pub index: usize,
+    pub parent_index: Option<usize>,
+    pub depth: usize,
     pub source: &'a str,
     pub element_type: &'a str,
     pub identifier: &'a str,
@@ -156,8 +160,8 @@ pub struct HashableNode<'a> {
 }
 
 /// Returns `true` for volatile OS chrome (status bar clocks, battery, signal indicators,
-/// home indicator / system navigation bar) that must be excluded from settle and
-/// scroll-end comparisons so a ticking clock never registers as UI movement.
+/// home indicator / system navigation bar) whose entire subtree must be excluded from
+/// settle and scroll-end comparisons so a ticking clock never registers as UI movement.
 pub fn is_volatile_system_chrome(source: &str, element_type: &str, identifier: &str) -> bool {
     if element_type.eq_ignore_ascii_case("StatusBar") {
         return true;
@@ -176,10 +180,13 @@ pub fn is_volatile_system_chrome(source: &str, element_type: &str, identifier: &
     false
 }
 
-/// Computes a deterministic 64-bit FNV-1a hash over all non-volatile nodes.
+/// Computes a deterministic 64-bit FNV-1a hash over all non-volatile nodes and their tree structure.
 ///
-/// Nodes classified by [`is_volatile_system_chrome`] are skipped so clock/battery ticks
-/// do not invalidate settle detection or short-circuit caches.
+/// Any node classified by [`is_volatile_system_chrome`] — along with all of its descendants via
+/// `parent_index` ancestry — is pruned so ticking status-bar children (e.g. a `StaticText` clock
+/// under a `StatusBar`) do not invalidate settle detection or `knownHash` short-circuit caches.
+/// Retained nodes hash their structural ancestry (`depth` and normalized parent ordinal) as well
+/// as attributes and bounds so reparenting a node produces a distinct hash.
 pub fn hash_hierarchy_nodes<'a>(nodes: impl IntoIterator<Item = HashableNode<'a>>) -> u64 {
     const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
     const FNV_PRIME: u64 = 0x0100_0000_01b3;
@@ -198,14 +205,64 @@ pub fn hash_hierarchy_nodes<'a>(nodes: impl IntoIterator<Item = HashableNode<'a>
         write_bytes(hash, &[0x1f]);
     }
 
+    let collected: Vec<HashableNode<'a>> = nodes.into_iter().collect();
+    let mut parent_by_index = std::collections::HashMap::with_capacity(collected.len());
+    let mut directly_volatile = HashSet::new();
+
+    for node in &collected {
+        parent_by_index.insert(node.index, node.parent_index);
+        if is_volatile_system_chrome(node.source, node.element_type, node.identifier) {
+            directly_volatile.insert(node.index);
+        }
+    }
+
+    // Resolve full volatile ancestry regardless of traversal order, guarding against cycles.
+    let mut pruned_indices = directly_volatile;
+    for node in &collected {
+        if pruned_indices.contains(&node.index) {
+            continue;
+        }
+        let mut cursor = node.parent_index;
+        let mut steps = 0_usize;
+        while let Some(parent_idx) = cursor {
+            if pruned_indices.contains(&parent_idx) {
+                pruned_indices.insert(node.index);
+                break;
+            }
+            steps += 1;
+            if steps > collected.len() {
+                break;
+            }
+            cursor = parent_by_index.get(&parent_idx).copied().flatten();
+        }
+    }
+
+    // Assign stable ordinals to retained nodes so pruning an unrelated StatusBar sibling
+    // never shifts retained parent references, while reparenting or depth changes always do.
+    let mut retained_ordinal = std::collections::HashMap::with_capacity(collected.len());
+    let mut next_ordinal: u64 = 0;
+    for node in &collected {
+        if !pruned_indices.contains(&node.index) {
+            retained_ordinal.insert(node.index, next_ordinal);
+            next_ordinal = next_ordinal.saturating_add(1);
+        }
+    }
+
     let mut hash = FNV_OFFSET_BASIS;
     let mut included: u64 = 0;
 
-    for node in nodes {
-        if is_volatile_system_chrome(node.source, node.element_type, node.identifier) {
+    for node in &collected {
+        if pruned_indices.contains(&node.index) {
             continue;
         }
         included = included.saturating_add(1);
+
+        let normalized_parent: u64 = node
+            .parent_index
+            .and_then(|p| retained_ordinal.get(&p).copied())
+            .unwrap_or(u64::MAX);
+        write_bytes(&mut hash, &normalized_parent.to_le_bytes());
+        write_bytes(&mut hash, &(node.depth as u64).to_le_bytes());
         write_field(&mut hash, node.source);
         write_field(&mut hash, node.element_type);
         write_field(&mut hash, node.identifier);
@@ -233,6 +290,34 @@ mod tests {
         is_volatile_system_chrome,
     };
     use std::time::Duration;
+
+    fn sample_node<'a>(
+        index: usize,
+        parent_index: Option<usize>,
+        depth: usize,
+        source: &'a str,
+        element_type: &'a str,
+        identifier: &'a str,
+        label: &'a str,
+    ) -> HashableNode<'a> {
+        HashableNode {
+            index,
+            parent_index,
+            depth,
+            source,
+            element_type,
+            identifier,
+            label,
+            value: None,
+            enabled: true,
+            selected: false,
+            has_focus: false,
+            x: 20,
+            y: 400,
+            width: 350,
+            height: 48,
+        }
+    }
 
     #[test]
     fn poll_schedule_doubles_caps_and_clamps_to_remaining() {
@@ -318,53 +403,30 @@ mod tests {
     }
 
     #[test]
-    fn hierarchy_hash_ignores_volatile_system_chrome_and_detects_app_changes() {
-        let app_button = HashableNode {
-            source: "app",
-            element_type: "Button",
-            identifier: "checkout_button",
-            label: "Checkout",
-            value: None,
-            enabled: true,
-            selected: false,
-            has_focus: false,
-            x: 20,
-            y: 400,
-            width: 350,
-            height: 48,
-        };
-        let status_clock_1 = HashableNode {
-            source: "springboard",
-            element_type: "StatusBar",
-            identifier: "",
-            label: "9:41",
-            value: None,
-            enabled: true,
-            selected: false,
-            has_focus: false,
-            x: 0,
-            y: 0,
-            width: 393,
-            height: 54,
-        };
-        let status_clock_2 = HashableNode {
-            label: "9:42",
-            ..status_clock_1
-        };
-        let android_nav = HashableNode {
-            source: "com.android.systemui",
-            element_type: "View",
-            identifier: "com.android.systemui:id/clock",
-            label: "9:42",
-            value: None,
-            enabled: true,
-            selected: false,
-            has_focus: false,
-            x: 0,
-            y: 0,
-            width: 100,
-            height: 24,
-        };
+    fn hierarchy_hash_prunes_status_bar_descendants_and_detects_app_changes() {
+        let root_app = sample_node(0, None, 0, "app", "Application", "", "DejaFixture");
+        let status_bar = sample_node(1, Some(0), 1, "app", "StatusBar", "", "");
+        let status_clock_1 = sample_node(2, Some(1), 2, "app", "StaticText", "", "9:41");
+        let status_clock_2 = sample_node(2, Some(1), 2, "app", "StaticText", "", "9:42");
+        let status_battery = sample_node(3, Some(1), 2, "app", "Other", "battery", "98%");
+        let app_button = sample_node(
+            4,
+            Some(0),
+            1,
+            "app",
+            "Button",
+            "checkout_button",
+            "Checkout",
+        );
+        let android_nav = sample_node(
+            5,
+            None,
+            0,
+            "com.android.systemui",
+            "View",
+            "com.android.systemui:id/clock",
+            "9:42",
+        );
 
         assert!(is_volatile_system_chrome("springboard", "StatusBar", ""));
         assert!(is_volatile_system_chrome(
@@ -378,15 +440,47 @@ mod tests {
             "checkout_button"
         ));
 
-        let h1 = hash_hierarchy_nodes([status_clock_1, app_button]);
-        let h2 = hash_hierarchy_nodes([status_clock_2, app_button, android_nav]);
-        assert_eq!(h1, h2, "clock/systemui ticks must not change settle hash");
+        let h1 = hash_hierarchy_nodes([root_app, status_bar, status_clock_1, app_button]);
+        let h2 = hash_hierarchy_nodes([
+            root_app,
+            status_bar,
+            status_clock_2,
+            status_battery,
+            app_button,
+            android_nav,
+        ]);
+        assert_eq!(
+            h1, h2,
+            "ticking StatusBar StaticText children and extra systemui nodes must not change settle hash"
+        );
 
-        let changed_button = HashableNode {
-            label: "Order placed",
-            ..app_button
-        };
-        let h3 = hash_hierarchy_nodes([status_clock_2, changed_button]);
+        let changed_button = sample_node(
+            4,
+            Some(0),
+            1,
+            "app",
+            "Button",
+            "checkout_button",
+            "Order placed",
+        );
+        let h3 = hash_hierarchy_nodes([root_app, status_bar, status_clock_2, changed_button]);
         assert_ne!(h1, h3, "real UI label change must produce a distinct hash");
+    }
+
+    #[test]
+    fn hierarchy_hash_changes_when_node_is_reparented() {
+        let root = sample_node(0, None, 0, "app", "Application", "", "App");
+        let group = sample_node(1, Some(0), 1, "app", "Group", "card", "");
+        let child_inside_group =
+            sample_node(2, Some(1), 2, "app", "Button", "buy_button", "Buy now");
+        let sibling_after_group =
+            sample_node(2, Some(0), 1, "app", "Button", "buy_button", "Buy now");
+
+        let h_nested = hash_hierarchy_nodes([root, group, child_inside_group]);
+        let h_sibling = hash_hierarchy_nodes([root, group, sibling_after_group]);
+        assert_ne!(
+            h_nested, h_sibling,
+            "moving a node out of a Group with identical preorder attributes/bounds must change the hash"
+        );
     }
 }

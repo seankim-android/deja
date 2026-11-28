@@ -82,11 +82,11 @@ fn forbidden_content_patterns() -> Vec<(&'static str, Regex)> {
         ("private key", concat!("BEGIN ", "[A-Z ]*", "PRIVATE KEY")),
         (
             "GitHub credential",
-            concat!(r"\bgh", "[opusr]_[A-Za-z0-9]{20,}"),
+            concat!(r"(?-u:\b)gh", "[opusr]_[A-Za-z0-9]{20,}"),
         ),
         (
             "OpenAI-shaped credential",
-            concat!(r"\bsk", "-[A-Za-z0-9_-]{24,}"),
+            concat!(r"(?-u:\b)sk", "-[A-Za-z0-9_-]{24,}"),
         ),
     ]
     .into_iter()
@@ -109,7 +109,24 @@ fn is_external_scheme(target: &str) -> bool {
 /// Validates tracked repository artifacts, Markdown links, JSON syntax, secret leaks,
 /// optional clean working tree, and optional results-chart SVG parity.
 pub fn validate_repo(root: &Path, options: RepoCheckOptions) -> Result<RepoCheckReport, String> {
-    let raw_files = run_git(root, &["ls-files", "-z"])?;
+    let canonical_root = fs::canonicalize(root)
+        .map_err(|err| format!("failed to resolve root {}: {err}", root.display()))?;
+    let toplevel = discover_repo_root(&canonical_root)?;
+    let canonical_toplevel = fs::canonicalize(&toplevel).map_err(|err| {
+        format!(
+            "failed to resolve git toplevel {}: {err}",
+            toplevel.display()
+        )
+    })?;
+    if canonical_root != canonical_toplevel {
+        return Err(format!(
+            "--root must point to the repository top level ({}), not a subdirectory ({})",
+            canonical_toplevel.display(),
+            canonical_root.display()
+        ));
+    }
+
+    let raw_files = run_git(&canonical_root, &["ls-files", "-z"])?;
     let files: Vec<&str> = raw_files.split('\0').filter(|s| !s.is_empty()).collect();
 
     let forbidden_paths = forbidden_path_patterns();
