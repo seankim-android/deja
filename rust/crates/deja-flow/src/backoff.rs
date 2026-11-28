@@ -2,7 +2,7 @@
 //!
 //! Pure `std` implementation shared by `deja-flow` and native platform drivers.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 /// Adaptive exponential backoff schedule for UI polling loops.
@@ -149,10 +149,12 @@ pub struct HashableNode<'a> {
     pub element_type: &'a str,
     pub identifier: &'a str,
     pub label: &'a str,
+    pub title: &'a str,
     pub value: Option<&'a str>,
     pub enabled: bool,
     pub selected: bool,
     pub has_focus: bool,
+    pub hittable: bool,
     pub x: i32,
     pub y: i32,
     pub width: i32,
@@ -180,13 +182,20 @@ pub fn is_volatile_system_chrome(source: &str, element_type: &str, identifier: &
     false
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChromeStatus {
+    Pruned,
+    Retained,
+}
+
 /// Computes a deterministic 64-bit FNV-1a hash over all non-volatile nodes and their tree structure.
 ///
 /// Any node classified by [`is_volatile_system_chrome`] — along with all of its descendants via
-/// `parent_index` ancestry — is pruned so ticking status-bar children (e.g. a `StaticText` clock
-/// under a `StatusBar`) do not invalidate settle detection or `knownHash` short-circuit caches.
-/// Retained nodes hash their structural ancestry (`depth` and normalized parent ordinal) as well
-/// as attributes and bounds so reparenting a node produces a distinct hash.
+/// `parent_index` ancestry — is pruned in `O(n)` memoized time so ticking status-bar children
+/// (e.g. a `StaticText` clock under a `StatusBar`) do not invalidate settle detection or
+/// `knownHash` short-circuit caches. Retained nodes hash their structural ancestry (`depth` and
+/// normalized parent ordinal), text fields (`identifier`, `label`, `title`, `value`), state flags
+/// (`enabled`, `selected`, `has_focus`, `hittable`), and bounds.
 pub fn hash_hierarchy_nodes<'a>(nodes: impl IntoIterator<Item = HashableNode<'a>>) -> u64 {
     const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
     const FNV_PRIME: u64 = 0x0100_0000_01b3;
@@ -206,43 +215,51 @@ pub fn hash_hierarchy_nodes<'a>(nodes: impl IntoIterator<Item = HashableNode<'a>
     }
 
     let collected: Vec<HashableNode<'a>> = nodes.into_iter().collect();
-    let mut parent_by_index = std::collections::HashMap::with_capacity(collected.len());
-    let mut directly_volatile = HashSet::new();
+    let mut parent_by_index = HashMap::with_capacity(collected.len());
+    let mut status_by_index = HashMap::with_capacity(collected.len());
 
     for node in &collected {
         parent_by_index.insert(node.index, node.parent_index);
         if is_volatile_system_chrome(node.source, node.element_type, node.identifier) {
-            directly_volatile.insert(node.index);
+            status_by_index.insert(node.index, ChromeStatus::Pruned);
         }
     }
 
-    // Resolve full volatile ancestry regardless of traversal order, guarding against cycles.
-    let mut pruned_indices = directly_volatile;
+    // Memoize both Retained and Pruned classifications in O(n) total work while handling cycles.
+    let mut chain = Vec::new();
+    let mut visiting = HashSet::new();
     for node in &collected {
-        if pruned_indices.contains(&node.index) {
+        if status_by_index.contains_key(&node.index) {
             continue;
         }
-        let mut cursor = node.parent_index;
-        let mut steps = 0_usize;
-        while let Some(parent_idx) = cursor {
-            if pruned_indices.contains(&parent_idx) {
-                pruned_indices.insert(node.index);
-                break;
+        chain.clear();
+        visiting.clear();
+        let mut cursor = Some(node.index);
+        let resolved = loop {
+            let Some(idx) = cursor else {
+                break ChromeStatus::Retained;
+            };
+            if let Some(&known) = status_by_index.get(&idx) {
+                break known;
             }
-            steps += 1;
-            if steps > collected.len() {
-                break;
+            if !visiting.insert(idx) {
+                // Defensive cycle guard: a cycle containing no volatile node is retained.
+                break ChromeStatus::Retained;
             }
-            cursor = parent_by_index.get(&parent_idx).copied().flatten();
+            chain.push(idx);
+            cursor = parent_by_index.get(&idx).copied().flatten();
+        };
+        for idx in &chain {
+            status_by_index.insert(*idx, resolved);
         }
     }
 
     // Assign stable ordinals to retained nodes so pruning an unrelated StatusBar sibling
     // never shifts retained parent references, while reparenting or depth changes always do.
-    let mut retained_ordinal = std::collections::HashMap::with_capacity(collected.len());
+    let mut retained_ordinal = HashMap::with_capacity(collected.len());
     let mut next_ordinal: u64 = 0;
     for node in &collected {
-        if !pruned_indices.contains(&node.index) {
+        if status_by_index.get(&node.index) == Some(&ChromeStatus::Retained) {
             retained_ordinal.insert(node.index, next_ordinal);
             next_ordinal = next_ordinal.saturating_add(1);
         }
@@ -252,7 +269,7 @@ pub fn hash_hierarchy_nodes<'a>(nodes: impl IntoIterator<Item = HashableNode<'a>
     let mut included: u64 = 0;
 
     for node in &collected {
-        if pruned_indices.contains(&node.index) {
+        if status_by_index.get(&node.index) != Some(&ChromeStatus::Retained) {
             continue;
         }
         included = included.saturating_add(1);
@@ -267,10 +284,12 @@ pub fn hash_hierarchy_nodes<'a>(nodes: impl IntoIterator<Item = HashableNode<'a>
         write_field(&mut hash, node.element_type);
         write_field(&mut hash, node.identifier);
         write_field(&mut hash, node.label);
+        write_field(&mut hash, node.title);
         write_field(&mut hash, node.value.unwrap_or(""));
-        let flags: u8 = (u8::from(node.enabled))
+        let flags: u8 = u8::from(node.enabled)
             | (u8::from(node.selected) << 1)
-            | (u8::from(node.has_focus) << 2);
+            | (u8::from(node.has_focus) << 2)
+            | (u8::from(node.hittable) << 3);
         write_bytes(&mut hash, &[flags]);
         write_bytes(&mut hash, &node.x.to_le_bytes());
         write_bytes(&mut hash, &node.y.to_le_bytes());
@@ -308,10 +327,12 @@ mod tests {
             element_type,
             identifier,
             label,
+            title: "",
             value: None,
             enabled: true,
             selected: false,
             has_focus: false,
+            hittable: true,
             x: 20,
             y: 400,
             width: 350,
@@ -468,19 +489,56 @@ mod tests {
     }
 
     #[test]
-    fn hierarchy_hash_changes_when_node_is_reparented() {
+    fn hierarchy_hash_changes_on_title_only_update_and_reparenting() {
         let root = sample_node(0, None, 0, "app", "Application", "", "App");
         let group = sample_node(1, Some(0), 1, "app", "Group", "card", "");
-        let child_inside_group =
-            sample_node(2, Some(1), 2, "app", "Button", "buy_button", "Buy now");
-        let sibling_after_group =
-            sample_node(2, Some(0), 1, "app", "Button", "buy_button", "Buy now");
+        let mut child_inside_group = sample_node(2, Some(1), 2, "app", "Button", "buy_button", "");
+        child_inside_group.title = "Buy now";
+
+        let mut title_updated = child_inside_group;
+        title_updated.title = "Added";
+
+        let mut sibling_after_group = sample_node(2, Some(0), 1, "app", "Button", "buy_button", "");
+        sibling_after_group.title = "Buy now";
 
         let h_nested = hash_hierarchy_nodes([root, group, child_inside_group]);
+        let h_title_changed = hash_hierarchy_nodes([root, group, title_updated]);
         let h_sibling = hash_hierarchy_nodes([root, group, sibling_after_group]);
+
+        assert_ne!(
+            h_nested, h_title_changed,
+            "title-only update must change hierarchy hash"
+        );
         assert_ne!(
             h_nested, h_sibling,
             "moving a node out of a Group with identical preorder attributes/bounds must change the hash"
         );
+    }
+
+    #[test]
+    fn hierarchy_hash_handles_deep_chains_and_cycles_linearly() {
+        let deep: Vec<HashableNode<'_>> = (0..4_000)
+            .map(|i| {
+                sample_node(
+                    i,
+                    i.checked_sub(1),
+                    i,
+                    "app",
+                    "Other",
+                    "",
+                    if i == 3_999 { "leaf" } else { "" },
+                )
+            })
+            .collect();
+        let h_a = hash_hierarchy_nodes(deep.iter().copied());
+        let h_b = hash_hierarchy_nodes(deep.iter().copied());
+        assert_eq!(h_a, h_b);
+
+        // Defensive cycle check: cyclic parent_index pointers must terminate cleanly.
+        let cycle = [
+            sample_node(0, Some(1), 0, "app", "Group", "a", "A"),
+            sample_node(1, Some(0), 1, "app", "Group", "b", "B"),
+        ];
+        assert_ne!(hash_hierarchy_nodes(cycle), 0);
     }
 }

@@ -20,13 +20,17 @@ struct TempGitRepo {
 
 impl TempGitRepo {
     fn new(name: &str) -> Self {
+        Self::new_with_suffix(name, "")
+    }
+
+    fn new_with_suffix(name: &str, suffix: &str) -> Self {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("system clock")
             .as_nanos();
         let nonce = TEMP_NONCE.fetch_add(1, Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!(
-            "deja-repo-check-{name}-{}-{nanos}-{nonce}",
+            "deja-repo-check-{name}-{}-{nanos}-{nonce}{suffix}",
             std::process::id()
         ));
         fs::create_dir_all(&path).expect("create temp git repo dir");
@@ -46,7 +50,7 @@ impl TempGitRepo {
 
     fn commit_all(&self, msg: &str) {
         run_git(&self.path, &["add", "-A"]);
-        run_git(&self.path, &["commit", "-q", "-m", msg]);
+        run_git(&self.path, &["commit", "--no-gpg-sign", "-q", "-m", msg]);
     }
 }
 
@@ -168,10 +172,29 @@ fn rejects_subdirectory_root_for_repository_wide_check() {
 }
 
 #[test]
+fn preserves_trailing_space_in_repository_directory_name() {
+    let repo = TempGitRepo::new_with_suffix("trailing-space", " ");
+    repo.write("README.md", b"# Space\n");
+    repo.commit_all("initial");
+
+    let report = validate_repo(
+        &repo.path,
+        RepoCheckOptions {
+            require_clean: true,
+            check_chart: false,
+        },
+    )
+    .expect("repository directory ending with space should validate cleanly");
+    assert_eq!(report.result, "pass");
+}
+
+#[test]
 fn require_clean_rejects_dirty_worktree() {
     let repo = TempGitRepo::new("dirty");
     repo.write("README.md", b"# Clean\n");
     repo.commit_all("initial");
+    // Even if git config sets status.showUntrackedFiles=no, --require-clean must still fail.
+    run_git(&repo.path, &["config", "status.showUntrackedFiles", "no"]);
     repo.write("untracked.txt", b"dirty");
 
     let err = validate_repo(
@@ -181,6 +204,6 @@ fn require_clean_rejects_dirty_worktree() {
             check_chart: false,
         },
     )
-    .expect_err("dirty checkout must fail with require_clean");
+    .expect_err("dirty checkout must fail with require_clean even with showUntrackedFiles=no");
     assert!(err.contains("untracked.txt"), "{err}");
 }

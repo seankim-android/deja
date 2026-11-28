@@ -27,7 +27,7 @@ struct Args {
     check_chart: bool,
 
     /// Regenerate `docs/results-chart.svg` from `demo/live-evidence/` run reports and exit.
-    #[arg(long, conflicts_with = "check_chart")]
+    #[arg(long, conflicts_with_all = ["check_chart", "require_clean"])]
     render_chart: bool,
 }
 
@@ -69,5 +69,24 @@ fn main() -> ExitCode {
             eprintln!("deja-repo-check error: {err}");
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Args;
+    use clap::Parser;
+
+    #[test]
+    fn render_chart_conflicts_with_require_clean_and_check_chart() {
+        assert!(
+            Args::try_parse_from(["deja-repo-check", "--render-chart", "--require-clean"]).is_err()
+        );
+        assert!(
+            Args::try_parse_from(["deja-repo-check", "--render-chart", "--check-chart"]).is_err()
+        );
+        assert!(
+            Args::try_parse_from(["deja-repo-check", "--require-clean", "--check-chart"]).is_ok()
+        );
     }
 }

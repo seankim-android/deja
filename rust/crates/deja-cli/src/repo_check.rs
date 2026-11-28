@@ -37,7 +37,7 @@ pub struct RepoCheckOptions {
 /// Finds the repository root containing `dir` via `git rev-parse --show-toplevel`.
 pub fn discover_repo_root(start_dir: &Path) -> Result<PathBuf, String> {
     let out = run_git(start_dir, &["rev-parse", "--show-toplevel"])?;
-    let trimmed = out.trim();
+    let trimmed = out.trim_end_matches(['\r', '\n']);
     if trimmed.is_empty() {
         return Err("git rev-parse --show-toplevel returned an empty path".to_string());
     }
@@ -240,7 +240,10 @@ pub fn validate_repo(root: &Path, options: RepoCheckOptions) -> Result<RepoCheck
         None
     };
 
-    let dirty = run_git(root, &["status", "--porcelain"])?;
+    let dirty = run_git(
+        &canonical_root,
+        &["status", "--porcelain", "--untracked-files=normal"],
+    )?;
     let checkout_unchanged = dirty.trim().is_empty();
     if options.require_clean && !checkout_unchanged {
         return Err(format!(
@@ -249,7 +252,9 @@ pub fn validate_repo(root: &Path, options: RepoCheckOptions) -> Result<RepoCheck
         ));
     }
 
-    let head = run_git(root, &["rev-parse", "HEAD"])?.trim().to_string();
+    let head = run_git(&canonical_root, &["rev-parse", "HEAD"])?
+        .trim()
+        .to_string();
     Ok(RepoCheckReport {
         result: "pass".to_string(),
         head,
