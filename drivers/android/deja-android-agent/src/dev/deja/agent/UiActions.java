@@ -101,7 +101,12 @@ public final class UiActions {
             KeyEvent[] events = kcm.getEvents(text.toCharArray());
             if (events != null && events.length > 0) {
                 for (KeyEvent event : events) {
-                    uiAutomation.injectInputEvent(event, true);
+                    if (!uiAutomation.injectInputEvent(event, true)) {
+                        throw new IllegalStateException(
+                                "injectInputEvent rejected KeyEvent during typeText (keyCode="
+                                        + event.getKeyCode() + ")"
+                        );
+                    }
                 }
                 return;
             }
@@ -230,7 +235,12 @@ public final class UiActions {
         MotionEvent event = MotionEvent.obtain(downTime, eventTime, action, x, y, 0);
         try {
             event.setSource(InputDevice.SOURCE_TOUCHSCREEN);
-            uiAutomation.injectInputEvent(event, true);
+            if (!uiAutomation.injectInputEvent(event, true)) {
+                throw new IllegalStateException(
+                        "injectInputEvent rejected MotionEvent action=" + action
+                                + " at (" + x + "," + y + ")"
+                );
+            }
         } finally {
             event.recycle();
         }
@@ -262,8 +272,12 @@ public final class UiActions {
                 0,
                 InputDevice.SOURCE_KEYBOARD
         );
-        uiAutomation.injectInputEvent(down, true);
-        uiAutomation.injectInputEvent(up, true);
+        if (!uiAutomation.injectInputEvent(down, true)) {
+            throw new IllegalStateException("injectInputEvent rejected KeyEvent DOWN keyCode=" + keyCode);
+        }
+        if (!uiAutomation.injectInputEvent(up, true)) {
+            throw new IllegalStateException("injectInputEvent rejected KeyEvent UP keyCode=" + keyCode);
+        }
     }
 
     private AccessibilityNodeInfo findEditableFocusTarget() {

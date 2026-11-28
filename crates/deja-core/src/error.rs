@@ -66,6 +66,9 @@ pub enum CoreError {
     #[error("{0}")]
     Fingerprint(String),
 
+    #[error("Operation cancelled")]
+    Cancelled,
+
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }

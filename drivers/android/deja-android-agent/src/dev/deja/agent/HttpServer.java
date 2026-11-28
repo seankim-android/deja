@@ -411,7 +411,14 @@ public final class HttpServer {
         } catch (IllegalArgumentException badArg) {
             return HttpResponse.error(400, badArg.getMessage());
         } catch (RuntimeException runtimeErr) {
-            return HttpResponse.error(500, "action `" + action + "` failed: " + runtimeErr.getMessage());
+            JSONObject errObj = new JSONObject();
+            errObj.put("ok", false);
+            errObj.put(
+                    "error",
+                    "action `" + action + "` failed: "
+                            + (runtimeErr.getMessage() != null ? runtimeErr.getMessage() : runtimeErr.toString())
+            );
+            return HttpResponse.json(500, errObj);
         }
 
         if (postActionDelayMs > 0) {
@@ -514,20 +521,35 @@ public final class HttpServer {
                         includeSystemUi,
                         maxDepth
                 );
-                lastCapture = capture;
-
-                if (capture.truncated) {
+                if (!capture.rootCaptured) {
                     lastHash = "";
                     consecutiveSameHash = 0;
-                } else if (!capture.hierarchyHash.isEmpty() && capture.hierarchyHash.equals(lastHash)) {
-                    consecutiveSameHash++;
                 } else {
-                    lastHash = capture.hierarchyHash;
-                    consecutiveSameHash = 1;
+                    lastCapture = capture;
+                    if (capture.truncated) {
+                        lastHash = "";
+                        consecutiveSameHash = 0;
+                    } else if (!capture.hierarchyHash.isEmpty() && capture.hierarchyHash.equals(lastHash)) {
+                        consecutiveSameHash++;
+                    } else {
+                        lastHash = capture.hierarchyHash;
+                        consecutiveSameHash = 1;
+                    }
                 }
 
                 if (timeoutMs > 0 && SystemClock.uptimeMillis() > deadline) {
                     break;
+                }
+
+                if (!capture.rootCaptured) {
+                    long remaining = deadline - SystemClock.uptimeMillis();
+                    if (remaining <= 0) {
+                        break;
+                    }
+                    int stepMs = WAIT_BACKOFF_MS[Math.min(backoffIdx, WAIT_BACKOFF_MS.length - 1)];
+                    backoffIdx = Math.min(backoffIdx + 1, WAIT_BACKOFF_MS.length - 1);
+                    SystemClock.sleep(Math.min(remaining, stepMs));
+                    continue;
                 }
 
                 HierarchySnapshot.CapturedNode matchedNode = findMatchingNode(
@@ -542,7 +564,9 @@ public final class HttpServer {
                 if (id == null && text == null) {
                     conditionMet = !notVisible;
                 } else if (notVisible) {
-                    conditionMet = (matchedNode == null);
+                    // Never confirm absence from a truncated or unreadable hierarchy capture:
+                    // keep polling until a complete, readable tree confirms the element is absent.
+                    conditionMet = !capture.truncated && (matchedNode == null);
                 } else {
                     conditionMet = (matchedNode != null);
                 }

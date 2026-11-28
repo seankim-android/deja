@@ -15,9 +15,18 @@ use tokio::process::Command;
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
 
+use crate::apk::extract_apk_package_id_from_path;
 use crate::cache::is_executable_file;
 use crate::error::{AndroidDriverError, Result};
-use crate::process::{apply_adb_env, apply_adb_env_std, run_sync_command_bounded, validate_serial};
+use crate::process::{
+    AGENT_PACKAGE_ID, apply_adb_env, apply_adb_env_std, run_sync_command_bounded, validate_serial,
+};
+
+/// Default timeout for control/query `adb` commands (`devices`, `getprop`, `shell`, `forward`, `screencap`).
+pub const DEFAULT_ADB_COMMAND_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Default timeout for bulk-transfer `adb` commands (`install`, `uninstall`, `push`).
+pub const DEFAULT_ADB_TRANSFER_TIMEOUT: Duration = Duration::from_secs(120);
 
 const PNG_MAGIC: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
 const DROP_ADB_TIMEOUT: Duration = Duration::from_millis(800);
@@ -26,6 +35,17 @@ const ANIMATION_SCALE_KEYS: [&str; 3] = [
     "transition_animation_scale",
     "animator_duration_scale",
 ];
+
+/// Returns `true` when `serial` identifies a TCP/IP (`host:port`) or Android wireless debugging
+/// mDNS transport (`._adb-tls-connect._tcp`, `._adb._tcp`) rather than a raw USB hardware serial.
+#[must_use]
+pub fn is_wireless_or_tcp_serial(serial: &str) -> bool {
+    serial.contains(':')
+        || serial.ends_with("._adb-tls-connect._tcp")
+        || serial.contains("._adb-tls-connect._tcp.")
+        || serial.ends_with("._adb._tcp")
+        || serial.contains("._adb._tcp.")
+}
 
 static MEDIA_NONCE: AtomicU64 = AtomicU64::new(0);
 
@@ -543,17 +563,36 @@ pub fn map_android_permission_action(raw: &str) -> Result<&'static str> {
 pub struct Adb {
     path: PathBuf,
     env: BTreeMap<String, String>,
+    command_timeout: Duration,
+    transfer_timeout: Duration,
 }
 
 impl Adb {
     pub fn discover(env: BTreeMap<String, String>) -> Result<Self> {
         let path = discover_adb(&env)?;
-        Ok(Self { path, env })
+        Ok(Self {
+            path,
+            env,
+            command_timeout: DEFAULT_ADB_COMMAND_TIMEOUT,
+            transfer_timeout: DEFAULT_ADB_TRANSFER_TIMEOUT,
+        })
     }
 
     #[must_use]
     pub fn from_path(path: PathBuf, env: BTreeMap<String, String>) -> Self {
-        Self { path, env }
+        Self {
+            path,
+            env,
+            command_timeout: DEFAULT_ADB_COMMAND_TIMEOUT,
+            transfer_timeout: DEFAULT_ADB_TRANSFER_TIMEOUT,
+        }
+    }
+
+    #[must_use]
+    pub fn with_timeouts(mut self, command_timeout: Duration, transfer_timeout: Duration) -> Self {
+        self.command_timeout = command_timeout.max(Duration::from_millis(1));
+        self.transfer_timeout = transfer_timeout.max(Duration::from_millis(1));
+        self
     }
 
     #[must_use]
@@ -566,9 +605,10 @@ impl Adb {
         &self.env
     }
 
-    async fn run_raw(
+    async fn run_raw_with_timeout(
         &self,
         args: &[&str],
+        timeout: Duration,
         cancel: &CancellationToken,
     ) -> Result<std::process::Output> {
         if cancel.is_cancelled() {
@@ -585,6 +625,7 @@ impl Adb {
         debug!(
             program = %self.path.display(),
             subcommand = args.first().copied().unwrap_or(""),
+            timeout_ms = timeout.as_millis() as u64,
             "running adb"
         );
         let child = cmd
@@ -596,19 +637,37 @@ impl Adb {
         tokio::select! {
             biased;
             _ = cancel.cancelled() => Err(AndroidDriverError::Cancelled),
-            out = child.wait_with_output() => out.map_err(|source| AndroidDriverError::Io {
-                context: format!("wait for `adb {}`", args.join(" ")),
-                source,
-            }),
+            timed = tokio::time::timeout(timeout, child.wait_with_output()) => match timed {
+                Ok(Ok(out)) => Ok(out),
+                Ok(Err(source)) => Err(AndroidDriverError::Io {
+                    context: format!("wait for `adb {}`", args.join(" ")),
+                    source,
+                }),
+                Err(_) => Err(AndroidDriverError::Timeout(format!(
+                    "`adb {}` timed out after {}ms",
+                    args.join(" "),
+                    timeout.as_millis()
+                ))),
+            },
         }
     }
 
-    async fn run_ok(
+    async fn run_raw(
         &self,
         args: &[&str],
         cancel: &CancellationToken,
     ) -> Result<std::process::Output> {
-        let out = self.run_raw(args, cancel).await?;
+        self.run_raw_with_timeout(args, self.command_timeout, cancel)
+            .await
+    }
+
+    async fn run_ok_with_timeout(
+        &self,
+        args: &[&str],
+        timeout: Duration,
+        cancel: &CancellationToken,
+    ) -> Result<std::process::Output> {
+        let out = self.run_raw_with_timeout(args, timeout, cancel).await?;
         if !out.status.success() {
             let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
             let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
@@ -621,6 +680,24 @@ impl Adb {
             });
         }
         Ok(out)
+    }
+
+    async fn run_ok(
+        &self,
+        args: &[&str],
+        cancel: &CancellationToken,
+    ) -> Result<std::process::Output> {
+        self.run_ok_with_timeout(args, self.command_timeout, cancel)
+            .await
+    }
+
+    async fn run_ok_transfer(
+        &self,
+        args: &[&str],
+        cancel: &CancellationToken,
+    ) -> Result<std::process::Output> {
+        self.run_ok_with_timeout(args, self.transfer_timeout, cancel)
+            .await
     }
 
     pub async fn version(&self, cancel: &CancellationToken) -> Result<String> {
@@ -707,10 +784,14 @@ impl Adb {
         }
 
         // Fail-closed `ro.serialno` verification for non-emulator devices (`DEJA-85`).
+        // TCP (`host:port`) and wireless debugging mDNS transports (`._adb-tls-connect._tcp`,
+        // `._adb._tcp`) use transport IDs distinct from `ro.serialno`, so we still probe
+        // `ro.serialno` to confirm device responsiveness without falsely rejecting them.
         if !canonical.starts_with("emulator-") {
             let actual_serialno = self.getprop(&canonical, "ro.serialno", cancel).await?;
-            let is_tcp_transport = canonical.contains(':');
-            if actual_serialno.is_empty() || (!is_tcp_transport && actual_serialno != canonical) {
+            let is_network_transport = is_wireless_or_tcp_serial(&canonical);
+            if actual_serialno.is_empty() || (!is_network_transport && actual_serialno != canonical)
+            {
                 return Err(AndroidDriverError::DeviceIdentityMismatch {
                     serial: canonical.clone(),
                     expected_serial: canonical,
@@ -824,7 +905,7 @@ impl Adb {
             AndroidDriverError::InvalidPath(format!("non-UTF-8 APK path: {}", apk_path.display()))
         })?;
         let out = self
-            .run_ok(&["-s", &canonical, "install", "-r", "-g", apk_str], cancel)
+            .run_ok_transfer(&["-s", &canonical, "install", "-r", "-g", apk_str], cancel)
             .await?;
         let stdout = String::from_utf8_lossy(&out.stdout);
         let stderr = String::from_utf8_lossy(&out.stderr);
@@ -839,6 +920,68 @@ impl Adb {
             });
         }
         Ok(())
+    }
+
+    pub async fn uninstall_package(
+        &self,
+        serial: &str,
+        pkg: &str,
+        cancel: &CancellationToken,
+    ) -> Result<()> {
+        let canonical = validate_serial(serial)?;
+        let pkg = validate_package_id(pkg)?;
+        let out = self
+            .run_ok_transfer(&["-s", &canonical, "uninstall", &pkg], cancel)
+            .await?;
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        if stdout.contains("Failure [") || stderr.contains("Failure [") {
+            return Err(AndroidDriverError::CommandFailed {
+                program: self.path.display().to_string(),
+                args: format!("-s {canonical} uninstall {pkg}"),
+                status: out.status.code(),
+                stderr: format!("{} {}", stdout.trim(), stderr.trim())
+                    .trim()
+                    .to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Installs Déjà's own `dev.deja.agent` instrumentation APK.
+    ///
+    /// If `adb install -r -g` fails with `INSTALL_FAILED_UPDATE_INCOMPATIBLE` (e.g. switching
+    /// between the embedded prebuilt APK and a locally compiled APK signed with a different debug
+    /// key), automatically uninstalls `dev.deja.agent` and retries the installation once.
+    /// Strictly restricted to `dev.deja.agent` (never used for user apps under test).
+    pub async fn install_agent_apk(
+        &self,
+        serial: &str,
+        apk_path: &Path,
+        cancel: &CancellationToken,
+    ) -> Result<()> {
+        let actual_pkg = extract_apk_package_id_from_path(apk_path)?;
+        if actual_pkg != AGENT_PACKAGE_ID {
+            return Err(AndroidDriverError::InvalidPath(format!(
+                "refusing to install non-agent APK ({actual_pkg:?}) as `{AGENT_PACKAGE_ID}`"
+            )));
+        }
+        match self.install_apk(serial, apk_path, cancel).await {
+            Ok(()) => Ok(()),
+            Err(AndroidDriverError::CommandFailed { ref stderr, .. })
+                if stderr.contains("INSTALL_FAILED_UPDATE_INCOMPATIBLE") =>
+            {
+                debug!(
+                    serial,
+                    package = AGENT_PACKAGE_ID,
+                    "dev.deja.agent signature mismatch; uninstalling and reinstalling agent APK once"
+                );
+                self.uninstall_package(serial, AGENT_PACKAGE_ID, cancel)
+                    .await?;
+                self.install_apk(serial, apk_path, cancel).await
+            }
+            Err(err) => Err(err),
+        }
     }
 
     pub async fn force_stop(
@@ -1128,7 +1271,7 @@ impl Adb {
                 AndroidDriverError::InvalidPath(format!("non-UTF-8 media path: {}", path.display()))
             })?;
             let _ = self
-                .run_ok(&["-s", &canonical, "push", local_str, &remote], cancel)
+                .run_ok_transfer(&["-s", &canonical, "push", local_str, &remote], cancel)
                 .await?;
             let broadcast = format!(
                 "am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE -d {}",
@@ -1721,6 +1864,119 @@ esac
             log.contains("-s emulator-5554 shell settings put global animator_duration_scale 0.5")
         );
         assert!(log.contains("-s emulator-5554 forward --remove tcp:45123"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn wireless_mdns_serial_passes_serialno_check_and_hung_adb_times_out_and_agent_reinstalls_on_signature_mismatch()
+     {
+        use super::is_wireless_or_tcp_serial;
+        use std::time::Duration;
+
+        assert!(is_wireless_or_tcp_serial("192.168.1.42:5555"));
+        assert!(is_wireless_or_tcp_serial(
+            "adb-R5CT123456-aBcDeF._adb-tls-connect._tcp"
+        ));
+        assert!(is_wireless_or_tcp_serial(
+            "adb-R5CT123456-aBcDeF._adb-tls-connect._tcp."
+        ));
+        assert!(is_wireless_or_tcp_serial("adb-R5CT123456._adb._tcp"));
+        assert!(!is_wireless_or_tcp_serial("R5CT123456"));
+
+        let dir = temp_dir("r1-fixes");
+        let log_file = dir.join("adb.log");
+        let marker_file = dir.join("uninstalled.flag");
+        let adb_bin = dir.join("adb");
+        let agent_apk = dir.join("deja-android-agent.apk");
+        fs::write(&agent_apk, crate::embed::PREBUILT_AGENT_APK).unwrap();
+
+        let script = format!(
+            r#"#!/bin/sh
+echo "$*" >> "{log}"
+case "$*" in
+  "devices -l")
+    echo "List of devices attached"
+    echo "adb-R5CT123456-aBcDeF._adb-tls-connect._tcp device product:p model:Pixel9 transport_id:7"
+    echo "adb-EMPTY._adb-tls-connect._tcp.            device product:p model:Pixel9 transport_id:8"
+    echo "HUNG1                                       device product:p model:Pixel9 transport_id:9"
+    ;;
+  "-s adb-R5CT123456-aBcDeF._adb-tls-connect._tcp shell getprop ro.serialno")
+    echo "R5CT123456"
+    ;;
+  "-s adb-EMPTY._adb-tls-connect._tcp. shell getprop ro.serialno")
+    echo ""
+    ;;
+  "-s HUNG1 shell getprop ro.serialno")
+    sleep 30
+    ;;
+  "-s adb-R5CT123456-aBcDeF._adb-tls-connect._tcp install -r -g "*)
+    if [ ! -f "{marker}" ]; then
+      echo "Failure [INSTALL_FAILED_UPDATE_INCOMPATIBLE: Existing package dev.deja.agent signatures do not match newer version; ignoring!]" >&2
+      exit 1
+    fi
+    echo "Success"
+    ;;
+  "-s adb-R5CT123456-aBcDeF._adb-tls-connect._tcp uninstall dev.deja.agent")
+    touch "{marker}"
+    echo "Success"
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+"#,
+            log = log_file.display(),
+            marker = marker_file.display()
+        );
+        write_exec(&adb_bin, &script);
+
+        let adb = Adb::from_path(adb_bin, BTreeMap::new())
+            .with_timeouts(Duration::from_millis(200), Duration::from_secs(5));
+        let cancel = CancellationToken::new();
+
+        // 1. Wireless mDNS transport ID succeeds when device responds with non-empty ro.serialno.
+        adb.resolve_target_device("adb-R5CT123456-aBcDeF._adb-tls-connect._tcp", &cancel)
+            .await
+            .expect("wireless mDNS serial must resolve cleanly");
+
+        // 2. Wireless mDNS device returning empty ro.serialno still fails closed.
+        let empty_err = adb
+            .resolve_target_device("adb-EMPTY._adb-tls-connect._tcp.", &cancel)
+            .await
+            .expect_err("empty ro.serialno must fail closed even for wireless mDNS");
+        assert!(matches!(
+            empty_err,
+            AndroidDriverError::DeviceIdentityMismatch { .. }
+        ));
+
+        // 3. Hung `adb` subprocess times out promptly instead of hanging indefinitely.
+        let started = std::time::Instant::now();
+        let timeout_err = adb
+            .getprop("HUNG1", "ro.serialno", &cancel)
+            .await
+            .expect_err("hung adb must time out");
+        assert!(matches!(timeout_err, AndroidDriverError::Timeout(_)));
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "hung adb must abort promptly on command_timeout"
+        );
+
+        // 4. `install_agent_apk` recovers from INSTALL_FAILED_UPDATE_INCOMPATIBLE by uninstalling
+        //    ONLY `dev.deja.agent` and retrying once.
+        adb.install_agent_apk(
+            "adb-R5CT123456-aBcDeF._adb-tls-connect._tcp",
+            &agent_apk,
+            &cancel,
+        )
+        .await
+        .expect("install_agent_apk should uninstall dev.deja.agent and succeed on retry");
+
+        let log = fs::read_to_string(&log_file).unwrap();
+        assert!(log.contains("uninstall dev.deja.agent"));
+        let install_count = log.lines().filter(|l| l.contains("install -r -g")).count();
+        assert_eq!(install_count, 2, "expected initial install + 1 retry");
 
         let _ = fs::remove_dir_all(&dir);
     }

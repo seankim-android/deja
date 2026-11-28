@@ -12,13 +12,14 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use deja_core::{fingerprint_file, fingerprint_tree};
+use deja_core::{fingerprint_file_cancellable, fingerprint_tree_cancellable};
 use deja_driver_android::{
     Adb, AgentApkReadiness, AndroidDriver, AndroidDriverConfig, AndroidDriverError, discover_adb,
-    inspect_agent_apk_readiness, verify_and_hash_apk,
+    extract_apk_package_id_from_path, inspect_agent_apk_readiness, verify_and_hash_apk,
 };
 use deja_driver_ios::cache::{
     build_cache_key, detect_toolchain, native_simulator_arch, resolve_deja_home,
@@ -67,6 +68,97 @@ impl DriverFactoryError {
     }
 }
 
+enum StagedBuildArtifact {
+    Ios(StagedIosAppBundle),
+    Android(StagedAndroidApk),
+}
+
+impl StagedBuildArtifact {
+    fn app_path(&self) -> &Path {
+        match self {
+            Self::Ios(staged) => staged.app_path(),
+            Self::Android(staged) => staged.apk_path(),
+        }
+    }
+
+    fn staging_dir(&self) -> &Path {
+        match self {
+            Self::Ios(staged) => staged.staging_dir(),
+            Self::Android(staged) => staged.staging_dir(),
+        }
+    }
+
+    fn fingerprint(&self) -> &str {
+        match self {
+            Self::Ios(staged) => staged.fingerprint(),
+            Self::Android(staged) => staged.fingerprint(),
+        }
+    }
+
+    fn platform(&self) -> &'static str {
+        match self {
+            Self::Ios(_) => "ios",
+            Self::Android(_) => "android",
+        }
+    }
+}
+
+/// Cloneable, reference-counted handle to a verified, staged iOS `.app` bundle or Android `.apk`
+/// artifact shared across parallel batch workers so the build artifact is copied and SHA-256
+/// verified only once per batch.
+#[derive(Clone)]
+pub struct SharedStagedBuild {
+    inner: Arc<StagedBuildArtifact>,
+}
+
+impl std::fmt::Debug for SharedStagedBuild {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SharedStagedBuild")
+            .field("platform", &self.inner.platform())
+            .field("app_path", &self.inner.app_path())
+            .field("fingerprint", &self.inner.fingerprint())
+            .finish()
+    }
+}
+
+impl SharedStagedBuild {
+    /// Wrap a verified [`StagedIosAppBundle`] for shared read-only reuse across workers.
+    #[must_use]
+    pub fn new(staged: StagedIosAppBundle) -> Self {
+        Self {
+            inner: Arc::new(StagedBuildArtifact::Ios(staged)),
+        }
+    }
+
+    /// Wrap a verified [`StagedAndroidApk`] for shared read-only reuse across workers.
+    #[must_use]
+    pub fn new_android(staged: StagedAndroidApk) -> Self {
+        Self {
+            inner: Arc::new(StagedBuildArtifact::Android(staged)),
+        }
+    }
+
+    #[must_use]
+    pub fn app_path(&self) -> &Path {
+        self.inner.app_path()
+    }
+
+    #[must_use]
+    pub fn staging_dir(&self) -> &Path {
+        self.inner.staging_dir()
+    }
+
+    #[must_use]
+    pub fn fingerprint(&self) -> &str {
+        self.inner.fingerprint()
+    }
+
+    #[must_use]
+    pub fn is_platform(&self, platform: &str) -> bool {
+        self.inner.platform() == platform
+    }
+}
+
 /// Parameters passed to [`DriverFactory`] to resolve runtime, build a driver, and install an app.
 #[derive(Debug, Clone)]
 pub struct DriverContext {
@@ -84,6 +176,8 @@ pub struct DriverContext {
     pub screen_size: Option<serde_json::Value>,
     pub timeout_ms: u64,
     pub env: BTreeMap<String, String>,
+    /// Optional batch-shared staged build artifact verified once and reused across shard workers.
+    pub staged_build: Option<SharedStagedBuild>,
 }
 
 /// Abstract factory for constructing concrete [`PlatformDriver`] instances.
@@ -94,6 +188,21 @@ pub trait DriverFactory: Send + Sync {
         ctx: &'a DriverContext,
         cancel: &'a CancellationToken,
     ) -> FactoryFuture<'a, Result<Option<String>, DriverFactoryError>>;
+
+    /// Optionally stage and verify a shared build artifact once for a multi-goal batch so shard
+    /// workers reuse it without re-copying or re-hashing on every device.
+    fn prepare_batch_build<'a>(
+        &'a self,
+        _ctx: &'a DriverContext,
+        cancel: &'a CancellationToken,
+    ) -> FactoryFuture<'a, Result<Option<SharedStagedBuild>, DriverFactoryError>> {
+        Box::pin(async move {
+            if cancel.is_cancelled() {
+                return Err(DriverFactoryError::Cancelled);
+            }
+            Ok(None)
+        })
+    }
 
     /// Instantiate a concrete [`PlatformDriver`] for the target platform and device.
     fn create<'a>(
@@ -128,8 +237,12 @@ fn map_android_factory_err(err: AndroidDriverError) -> DriverFactoryError {
     }
 }
 
-/// Validates that an Android `buildPath` is an existing regular, non-symlink `.apk` archive.
-pub fn verify_android_apk_build(build_path: &Path) -> Result<String, String> {
+/// Validates that an Android `buildPath` is an existing regular, non-symlink `.apk` archive
+/// whose binary `AndroidManifest.xml` `<manifest package="...">` matches `expected_app_id`.
+pub fn verify_android_apk_build(
+    build_path: &Path,
+    expected_app_id: &str,
+) -> Result<String, String> {
     let lmeta = fs::symlink_metadata(build_path).map_err(|err| {
         format!(
             "Android buildPath cannot be inspected ({}): {err}",
@@ -153,7 +266,19 @@ pub fn verify_android_apk_build(build_path: &Path) -> Result<String, String> {
             build_path.display()
         ));
     }
-    verify_and_hash_apk(build_path).map_err(|err| err.to_string())
+    let sha = verify_and_hash_apk(build_path).map_err(|err| err.to_string())?;
+    let apk_pkg = extract_apk_package_id_from_path(build_path).map_err(|err| {
+        format!(
+            "Android APK manifest package check failed ({}): {err}",
+            build_path.display()
+        )
+    })?;
+    if apk_pkg != expected_app_id {
+        return Err(format!(
+            "Android `.apk` manifest package ({apk_pkg:?}) does not match configured appId ({expected_app_id:?})"
+        ));
+    }
+    Ok(sha)
 }
 
 fn simctl_env_from_map(env: &BTreeMap<String, String>) -> SimctlEnv {
@@ -232,6 +357,39 @@ impl DriverFactory for RealDriverFactory {
         })
     }
 
+    fn prepare_batch_build<'a>(
+        &'a self,
+        ctx: &'a DriverContext,
+        cancel: &'a CancellationToken,
+    ) -> FactoryFuture<'a, Result<Option<SharedStagedBuild>, DriverFactoryError>> {
+        Box::pin(async move {
+            if cancel.is_cancelled() {
+                return Err(DriverFactoryError::Cancelled);
+            }
+            if ctx.platform == "ios" {
+                let staged = run_cancellable_ios_bundle_staging(
+                    ctx.build_path.clone(),
+                    ctx.app_id.clone(),
+                    ctx.expected_build_fingerprint.clone(),
+                    cancel,
+                )
+                .await?;
+                return Ok(Some(SharedStagedBuild::new(staged)));
+            }
+            if ctx.platform == "android" {
+                let staged = run_cancellable_android_apk_staging(
+                    ctx.build_path.clone(),
+                    ctx.app_id.clone(),
+                    ctx.expected_build_fingerprint.clone(),
+                    cancel,
+                )
+                .await?;
+                return Ok(Some(SharedStagedBuild::new_android(staged)));
+            }
+            Ok(None)
+        })
+    }
+
     fn create<'a>(
         &'a self,
         ctx: &'a DriverContext,
@@ -243,8 +401,21 @@ impl DriverFactory for RealDriverFactory {
             }
             match ctx.platform.as_str() {
                 "ios" => {
-                    verify_ios_app_bundle(&ctx.build_path, &ctx.app_id)
-                        .map_err(DriverFactoryError::UnsupportedOrConfig)?;
+                    if let Some(ref staged) = ctx.staged_build
+                        && staged.is_platform("ios")
+                    {
+                        if let Some(ref expected) = ctx.expected_build_fingerprint
+                            && staged.fingerprint() != expected
+                        {
+                            return Err(DriverFactoryError::UnsupportedOrConfig(format!(
+                                "staged iOS `.app` bundle fingerprint ({}) does not match expected ({expected})",
+                                staged.fingerprint()
+                            )));
+                        }
+                    } else {
+                        verify_ios_app_bundle(&ctx.build_path, &ctx.app_id)
+                            .map_err(DriverFactoryError::UnsupportedOrConfig)?;
+                    }
                     let mut cfg = IosDriverConfig::new(&ctx.device)
                         .with_disable_animations(ctx.disable_animations);
                     cfg.env = simctl_env_from_map(&ctx.env);
@@ -268,8 +439,21 @@ impl DriverFactory for RealDriverFactory {
                     Ok(Box::new(driver) as Box<dyn PlatformDriver>)
                 }
                 "android" => {
-                    verify_android_apk_build(&ctx.build_path)
-                        .map_err(DriverFactoryError::UnsupportedOrConfig)?;
+                    if let Some(ref staged) = ctx.staged_build
+                        && staged.is_platform("android")
+                    {
+                        if let Some(ref expected) = ctx.expected_build_fingerprint
+                            && staged.fingerprint() != expected
+                        {
+                            return Err(DriverFactoryError::UnsupportedOrConfig(format!(
+                                "staged Android `.apk` fingerprint ({}) does not match expected ({expected})",
+                                staged.fingerprint()
+                            )));
+                        }
+                    } else {
+                        verify_android_apk_build(&ctx.build_path, &ctx.app_id)
+                            .map_err(DriverFactoryError::UnsupportedOrConfig)?;
+                    }
                     let mut cfg = AndroidDriverConfig::new(&ctx.device)
                         .with_disable_animations(ctx.disable_animations)
                         .with_env(ctx.env.clone());
@@ -328,27 +512,39 @@ impl DriverFactory for RealDriverFactory {
                 return Err(DriverFactoryError::Cancelled);
             }
             if ctx.platform == "ios" {
-                let build_path = ctx.build_path.clone();
-                let app_id = ctx.app_id.clone();
-                let expected_fp = ctx.expected_build_fingerprint.clone();
-                let staged = tokio::select! {
-                    _ = cancel.cancelled() => return Err(DriverFactoryError::Cancelled),
-                    res = tokio::task::spawn_blocking(move || {
-                        stage_and_verify_ios_app_bundle(
-                            &build_path,
-                            &app_id,
-                            expected_fp.as_deref(),
-                        )
-                    }) => match res {
-                        Ok(inner) => inner.map_err(DriverFactoryError::UnsupportedOrConfig)?,
-                        Err(join_err) => {
-                            return Err(DriverFactoryError::Runtime(format!(
-                                "iOS `.app` bundle staging task failed: {join_err}"
-                            )));
-                        }
-                    },
-                };
                 let simctl = Simctl::with_env(simctl_env_from_map(&ctx.env));
+                if let Some(ref staged) = ctx.staged_build
+                    && staged.is_platform("ios")
+                {
+                    if let Some(ref expected) = ctx.expected_build_fingerprint
+                        && staged.fingerprint() != expected
+                    {
+                        return Err(DriverFactoryError::UnsupportedOrConfig(format!(
+                            "staged iOS `.app` bundle fingerprint ({}) does not match expected ({expected})",
+                            staged.fingerprint()
+                        )));
+                    }
+                    tokio::select! {
+                        _ = cancel.cancelled() => return Err(DriverFactoryError::Cancelled),
+                        res = simctl.install_app(&ctx.device, staged.app_path()) => res,
+                    }
+                    .map_err(|err| {
+                        DriverFactoryError::Runtime(format!(
+                            "failed to install {} onto simulator {}: {err}",
+                            ctx.build_path.display(),
+                            ctx.device
+                        ))
+                    })?;
+                    return Ok(());
+                }
+
+                let staged = run_cancellable_ios_bundle_staging(
+                    ctx.build_path.clone(),
+                    ctx.app_id.clone(),
+                    ctx.expected_build_fingerprint.clone(),
+                    cancel,
+                )
+                .await?;
                 tokio::select! {
                     _ = cancel.cancelled() => return Err(DriverFactoryError::Cancelled),
                     res = simctl.install_app(&ctx.device, staged.app_path()) => res,
@@ -362,39 +558,42 @@ impl DriverFactory for RealDriverFactory {
                 })?;
                 drop(staged);
             } else if ctx.platform == "android" {
-                let build_path = ctx.build_path.clone();
-                let workspace_root = ctx.workspace_root.clone();
-                let expected_fp = ctx.expected_build_fingerprint.clone();
-                tokio::select! {
-                    _ = cancel.cancelled() => return Err(DriverFactoryError::Cancelled),
-                    res = tokio::task::spawn_blocking(move || -> Result<(), String> {
-                        let _ = verify_android_apk_build(&build_path)?;
-                        if let Some(ref expected) = expected_fp {
-                            let actual = fingerprint_file(&workspace_root, &build_path)
-                                .map_err(|err| format!("failed to fingerprint Android APK: {err}"))?;
-                            if actual != *expected {
-                                return Err(format!(
-                                    "Android `.apk` changed between fingerprinting ({expected}) and installation ({actual}); rebuild or retry with an immutable build artifact"
-                                ));
-                            }
-                        }
-                        Ok(())
-                    }) => match res {
-                        Ok(inner) => inner.map_err(DriverFactoryError::UnsupportedOrConfig)?,
-                        Err(join_err) => {
-                            return Err(DriverFactoryError::Runtime(format!(
-                                "Android APK verification task failed: {join_err}"
-                            )));
-                        }
-                    },
-                };
+                if let Some(ref staged) = ctx.staged_build
+                    && staged.is_platform("android")
+                {
+                    if let Some(ref expected) = ctx.expected_build_fingerprint
+                        && staged.fingerprint() != expected
+                    {
+                        return Err(DriverFactoryError::UnsupportedOrConfig(format!(
+                            "staged Android `.apk` fingerprint ({}) does not match expected ({expected})",
+                            staged.fingerprint()
+                        )));
+                    }
+                    let adb = Adb::discover(ctx.env.clone()).map_err(map_android_factory_err)?;
+                    adb.resolve_target_device(&ctx.device, cancel)
+                        .await
+                        .map_err(map_android_factory_err)?;
+                    adb.install_apk(&ctx.device, staged.app_path(), cancel)
+                        .await
+                        .map_err(map_android_factory_err)?;
+                    return Ok(());
+                }
+
+                let staged = run_cancellable_android_apk_staging(
+                    ctx.build_path.clone(),
+                    ctx.app_id.clone(),
+                    ctx.expected_build_fingerprint.clone(),
+                    cancel,
+                )
+                .await?;
                 let adb = Adb::discover(ctx.env.clone()).map_err(map_android_factory_err)?;
                 adb.resolve_target_device(&ctx.device, cancel)
                     .await
                     .map_err(map_android_factory_err)?;
-                adb.install_apk(&ctx.device, &ctx.build_path, cancel)
+                adb.install_apk(&ctx.device, staged.apk_path(), cancel)
                     .await
                     .map_err(map_android_factory_err)?;
+                drop(staged);
             }
             Ok(())
         })
@@ -432,6 +631,282 @@ impl Drop for StagedIosAppBundle {
     }
 }
 
+/// RAII temporary immutable copy of an Android `.apk` archive whose binary `AndroidManifest.xml`
+/// package ID and streaming SHA-256 fingerprint have both been verified before `adb install`.
+pub struct StagedAndroidApk {
+    temp_dir: PathBuf,
+    apk_path: PathBuf,
+    fingerprint: String,
+}
+
+impl StagedAndroidApk {
+    #[must_use]
+    pub fn apk_path(&self) -> &Path {
+        &self.apk_path
+    }
+
+    #[must_use]
+    pub fn staging_dir(&self) -> &Path {
+        &self.temp_dir
+    }
+
+    #[must_use]
+    pub fn fingerprint(&self) -> &str {
+        &self.fingerprint
+    }
+}
+
+impl Drop for StagedAndroidApk {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.temp_dir);
+    }
+}
+
+async fn run_cancellable_android_apk_staging(
+    build_path: PathBuf,
+    app_id: String,
+    expected_fp: Option<String>,
+    cancel: &CancellationToken,
+) -> Result<StagedAndroidApk, DriverFactoryError> {
+    if cancel.is_cancelled() {
+        return Err(DriverFactoryError::Cancelled);
+    }
+    let cancel_flag = Arc::new(AtomicBool::new(false));
+    let worker_flag = Arc::clone(&cancel_flag);
+    let mut handle = tokio::task::spawn_blocking(move || {
+        stage_and_verify_android_apk_cancellable(
+            &build_path,
+            &app_id,
+            expected_fp.as_deref(),
+            &worker_flag,
+        )
+    });
+    tokio::select! {
+        res = &mut handle => match res {
+            Ok(Ok(staged)) => Ok(staged),
+            Ok(Err(StageBundleError::Cancelled)) => Err(DriverFactoryError::Cancelled),
+            Ok(Err(StageBundleError::Failed(msg))) => Err(DriverFactoryError::UnsupportedOrConfig(msg)),
+            Err(join_err) => Err(DriverFactoryError::Runtime(format!(
+                "Android `.apk` staging task failed: {join_err}"
+            ))),
+        },
+        _ = cancel.cancelled() => {
+            cancel_flag.store(true, Ordering::SeqCst);
+            let _ = handle.await;
+            Err(DriverFactoryError::Cancelled)
+        }
+    }
+}
+
+/// Stage an immutable private temporary copy of an Android `.apk` (`O_NOFOLLOW`), verify its
+/// binary `AndroidManifest.xml` `<manifest package="..."> == expected_app_id`, and assert its
+/// streaming SHA-256 matches `expected_fingerprint` on that exact staged copy before `adb install`.
+pub fn stage_and_verify_android_apk_cancellable(
+    build_path: &Path,
+    expected_app_id: &str,
+    expected_fingerprint: Option<&str>,
+    cancel_flag: &AtomicBool,
+) -> Result<StagedAndroidApk, StageBundleError> {
+    use std::io::Write;
+    if cancel_flag.load(Ordering::Relaxed) {
+        return Err(StageBundleError::Cancelled);
+    }
+    let lmeta = fs::symlink_metadata(build_path).map_err(|err| {
+        StageBundleError::Failed(format!(
+            "Android buildPath cannot be inspected ({}): {err}",
+            build_path.display()
+        ))
+    })?;
+    if lmeta.file_type().is_symlink() {
+        return Err(StageBundleError::Failed(format!(
+            "Android buildPath must not be a symbolic link: {}",
+            build_path.display()
+        )));
+    }
+    if !lmeta.file_type().is_file()
+        || build_path
+            .extension()
+            .and_then(|s| s.to_str())
+            .is_none_or(|ext| !ext.eq_ignore_ascii_case("apk"))
+    {
+        return Err(StageBundleError::Failed(format!(
+            "Android buildPath must be an existing `.apk` regular file (got {})",
+            build_path.display()
+        )));
+    }
+    let apk_name = build_path.file_name().ok_or_else(|| {
+        StageBundleError::Failed(format!(
+            "Android buildPath has no filename: {}",
+            build_path.display()
+        ))
+    })?;
+
+    let seq = BUNDLE_STAGE_SEQ.fetch_add(1, Ordering::Relaxed);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let temp_dir = std::env::temp_dir().join(format!(
+        "deja-android-apk-{}-{seq}-{nanos:x}",
+        std::process::id()
+    ));
+    let mut dir_builder = fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        dir_builder.mode(0o700);
+    }
+    dir_builder.create(&temp_dir).map_err(|err| {
+        StageBundleError::Failed(format!(
+            "failed to create temporary Android APK staging directory: {err}"
+        ))
+    })?;
+
+    let apk_path = temp_dir.join(apk_name);
+    let mut staged = StagedAndroidApk {
+        temp_dir,
+        apk_path,
+        fingerprint: String::new(),
+    };
+
+    let mut reader = open_read_nofollow(build_path).map_err(|err| {
+        StageBundleError::Failed(format!(
+            "failed to open Android APK {}: {err}",
+            build_path.display()
+        ))
+    })?;
+    let mut writer = create_new_nofollow(&staged.apk_path).map_err(|err| {
+        StageBundleError::Failed(format!(
+            "failed to create staged Android APK {}: {err}",
+            staged.apk_path.display()
+        ))
+    })?;
+    let mut buf = [0u8; 65_536];
+    loop {
+        if cancel_flag.load(Ordering::Relaxed) {
+            return Err(StageBundleError::Cancelled);
+        }
+        let n = reader.read(&mut buf).map_err(|err| {
+            StageBundleError::Failed(format!(
+                "failed to copy Android APK {}: {err}",
+                build_path.display()
+            ))
+        })?;
+        if n == 0 {
+            break;
+        }
+        writer.write_all(&buf[..n]).map_err(|err| {
+            StageBundleError::Failed(format!(
+                "failed to write staged Android APK {}: {err}",
+                staged.apk_path.display()
+            ))
+        })?;
+    }
+    drop(writer);
+    drop(reader);
+
+    if cancel_flag.load(Ordering::Relaxed) {
+        return Err(StageBundleError::Cancelled);
+    }
+
+    // Verify package ID directly on the private staged copy (eliminating TOCTOU drift).
+    let apk_pkg = extract_apk_package_id_from_path(&staged.apk_path).map_err(|err| {
+        StageBundleError::Failed(format!(
+            "staged Android APK manifest package check failed ({}): {err}",
+            build_path.display()
+        ))
+    })?;
+    if apk_pkg != expected_app_id {
+        return Err(StageBundleError::Failed(format!(
+            "Android `.apk` manifest package ({apk_pkg:?}) does not match configured appId ({expected_app_id:?})"
+        )));
+    }
+    if cancel_flag.load(Ordering::Relaxed) {
+        return Err(StageBundleError::Cancelled);
+    }
+
+    // Compute streaming SHA-256 directly over the private staged copy and check against expected.
+    let staged_fp = fingerprint_file_cancellable(&staged.temp_dir, &staged.apk_path, cancel_flag)
+        .map_err(|err| match err {
+        deja_core::CoreError::Cancelled => StageBundleError::Cancelled,
+        other => StageBundleError::Failed(format!(
+            "failed to fingerprint staged Android `.apk`: {other}"
+        )),
+    })?;
+    if cancel_flag.load(Ordering::Relaxed) {
+        return Err(StageBundleError::Cancelled);
+    }
+    if let Some(expected) = expected_fingerprint
+        && staged_fp != expected
+    {
+        return Err(StageBundleError::Failed(format!(
+            "Android `.apk` changed between fingerprinting ({expected}) and installation ({staged_fp}); rebuild or retry with an immutable build artifact"
+        )));
+    }
+    staged.fingerprint = staged_fp;
+    Ok(staged)
+}
+
+/// Error returned by [`stage_and_verify_ios_app_bundle_cancellable`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StageBundleError {
+    Cancelled,
+    Failed(String),
+}
+
+async fn run_cancellable_ios_bundle_staging(
+    build_path: PathBuf,
+    app_id: String,
+    expected_fp: Option<String>,
+    cancel: &CancellationToken,
+) -> Result<StagedIosAppBundle, DriverFactoryError> {
+    run_cancellable_ios_bundle_staging_with_hook(build_path, app_id, expected_fp, cancel, None)
+        .await
+}
+
+type StageTestHook = Box<dyn FnOnce(&Path, &AtomicBool) + Send + 'static>;
+
+async fn run_cancellable_ios_bundle_staging_with_hook(
+    build_path: PathBuf,
+    app_id: String,
+    expected_fp: Option<String>,
+    cancel: &CancellationToken,
+    after_copy_hook: Option<StageTestHook>,
+) -> Result<StagedIosAppBundle, DriverFactoryError> {
+    if cancel.is_cancelled() {
+        return Err(DriverFactoryError::Cancelled);
+    }
+    let cancel_flag = Arc::new(AtomicBool::new(false));
+    let worker_flag = Arc::clone(&cancel_flag);
+    let mut handle = tokio::task::spawn_blocking(move || {
+        stage_and_verify_ios_app_bundle_inner(
+            &build_path,
+            &app_id,
+            expected_fp.as_deref(),
+            &worker_flag,
+            after_copy_hook,
+        )
+    });
+    tokio::select! {
+        res = &mut handle => match res {
+            Ok(Ok(staged)) => Ok(staged),
+            Ok(Err(StageBundleError::Cancelled)) => Err(DriverFactoryError::Cancelled),
+            Ok(Err(StageBundleError::Failed(msg))) => Err(DriverFactoryError::UnsupportedOrConfig(msg)),
+            Err(join_err) => Err(DriverFactoryError::Runtime(format!(
+                "iOS `.app` bundle staging task failed: {join_err}"
+            ))),
+        },
+        _ = cancel.cancelled() => {
+            cancel_flag.store(true, Ordering::SeqCst);
+            // Always await the blocking staging worker to completion so any child `/bin/cp` is
+            // killed, partial temporary directories are deleted, and Tokio runtime shutdown never
+            // stalls on a detached blocking task.
+            let _ = handle.await;
+            Err(DriverFactoryError::Cancelled)
+        }
+    }
+}
+
 /// Stage an immutable temporary copy of an iOS `.app` bundle (using APFS copy-on-write `/bin/cp -cR`
 /// on macOS with a safe symlink-refusing recursive copy fallback), verify its `Info.plist`
 /// `CFBundleIdentifier == expected_app_id`, and assert its streaming tree SHA-256 matches
@@ -441,29 +916,77 @@ pub fn stage_and_verify_ios_app_bundle(
     expected_app_id: &str,
     expected_fingerprint: Option<&str>,
 ) -> Result<StagedIosAppBundle, String> {
+    let never_cancel = AtomicBool::new(false);
+    stage_and_verify_ios_app_bundle_cancellable(
+        build_path,
+        expected_app_id,
+        expected_fingerprint,
+        &never_cancel,
+    )
+    .map_err(|err| match err {
+        StageBundleError::Cancelled => "operation cancelled".to_string(),
+        StageBundleError::Failed(msg) => msg,
+    })
+}
+
+/// Cancellable variant of [`stage_and_verify_ios_app_bundle`] that checks `cancel_flag` before
+/// and between filesystem copy/hash steps, terminates any spawned `/bin/cp` child on cancel, and
+/// cleans up the temporary staging directory via [`StagedIosAppBundle::drop`] before returning.
+pub fn stage_and_verify_ios_app_bundle_cancellable(
+    build_path: &Path,
+    expected_app_id: &str,
+    expected_fingerprint: Option<&str>,
+    cancel_flag: &AtomicBool,
+) -> Result<StagedIosAppBundle, StageBundleError> {
+    stage_and_verify_ios_app_bundle_inner(
+        build_path,
+        expected_app_id,
+        expected_fingerprint,
+        cancel_flag,
+        None,
+    )
+}
+
+fn stage_and_verify_ios_app_bundle_inner(
+    build_path: &Path,
+    expected_app_id: &str,
+    expected_fingerprint: Option<&str>,
+    cancel_flag: &AtomicBool,
+    after_copy_hook: Option<StageTestHook>,
+) -> Result<StagedIosAppBundle, StageBundleError> {
+    if cancel_flag.load(Ordering::Relaxed) {
+        return Err(StageBundleError::Cancelled);
+    }
     let lmeta = fs::symlink_metadata(build_path).map_err(|err| {
-        format!(
+        StageBundleError::Failed(format!(
             "iOS buildPath cannot be inspected ({}): {err}",
             build_path.display()
-        )
+        ))
     })?;
     if lmeta.file_type().is_symlink() {
-        return Err(format!(
+        return Err(StageBundleError::Failed(format!(
             "iOS buildPath must not be a symbolic link: {}",
             build_path.display()
-        ));
+        )));
     }
     if !lmeta.file_type().is_dir() || build_path.extension().and_then(|s| s.to_str()) != Some("app")
     {
-        return Err(format!(
+        return Err(StageBundleError::Failed(format!(
             "iOS buildPath must be an existing `.app` bundle directory (got {})",
             build_path.display()
-        ));
+        )));
     }
 
-    let app_name = build_path
-        .file_name()
-        .ok_or_else(|| format!("iOS buildPath has no bundle name: {}", build_path.display()))?;
+    let app_name = build_path.file_name().ok_or_else(|| {
+        StageBundleError::Failed(format!(
+            "iOS buildPath has no bundle name: {}",
+            build_path.display()
+        ))
+    })?;
+
+    if cancel_flag.load(Ordering::Relaxed) {
+        return Err(StageBundleError::Cancelled);
+    }
 
     let seq = BUNDLE_STAGE_SEQ.fetch_add(1, Ordering::Relaxed);
     let nanos = SystemTime::now()
@@ -480,9 +1003,11 @@ pub fn stage_and_verify_ios_app_bundle(
         use std::os::unix::fs::DirBuilderExt;
         dir_builder.mode(0o700);
     }
-    dir_builder
-        .create(&temp_dir)
-        .map_err(|err| format!("failed to create temporary iOS bundle staging directory: {err}"))?;
+    dir_builder.create(&temp_dir).map_err(|err| {
+        StageBundleError::Failed(format!(
+            "failed to create temporary iOS bundle staging directory: {err}"
+        ))
+    })?;
 
     let app_path = temp_dir.join(app_name);
     let mut staged = StagedIosAppBundle {
@@ -491,92 +1016,164 @@ pub fn stage_and_verify_ios_app_bundle(
         fingerprint: String::new(),
     };
 
-    stage_ios_bundle_tree(build_path, &staged.app_path)?;
-    verify_ios_app_bundle(&staged.app_path, expected_app_id)?;
+    stage_ios_bundle_tree(build_path, &staged.app_path, cancel_flag)?;
+    if let Some(hook) = after_copy_hook {
+        hook(&staged.temp_dir, cancel_flag);
+    }
+    if cancel_flag.load(Ordering::Relaxed) {
+        return Err(StageBundleError::Cancelled);
+    }
+    verify_ios_app_bundle(&staged.app_path, expected_app_id).map_err(StageBundleError::Failed)?;
+    if cancel_flag.load(Ordering::Relaxed) {
+        return Err(StageBundleError::Cancelled);
+    }
 
-    let staged_fp = fingerprint_tree(&staged.temp_dir, &staged.app_path, "iOS")
-        .map_err(|err| format!("failed to fingerprint staged iOS `.app` bundle: {err}"))?;
+    let staged_fp =
+        fingerprint_tree_cancellable(&staged.temp_dir, &staged.app_path, "iOS", cancel_flag)
+            .map_err(|err| match err {
+                deja_core::CoreError::Cancelled => StageBundleError::Cancelled,
+                other => StageBundleError::Failed(format!(
+                    "failed to fingerprint staged iOS `.app` bundle: {other}"
+                )),
+            })?;
+    if cancel_flag.load(Ordering::Relaxed) {
+        return Err(StageBundleError::Cancelled);
+    }
     if let Some(expected) = expected_fingerprint
         && staged_fp != expected
     {
-        return Err(format!(
+        return Err(StageBundleError::Failed(format!(
             "iOS `.app` bundle changed between fingerprinting ({expected}) and installation ({staged_fp}); rebuild or retry with an immutable build artifact"
-        ));
+        )));
     }
     staged.fingerprint = staged_fp;
     Ok(staged)
 }
 
-fn stage_ios_bundle_tree(src: &Path, dst: &Path) -> Result<(), String> {
+fn stage_ios_bundle_tree(
+    src: &Path,
+    dst: &Path,
+    cancel_flag: &AtomicBool,
+) -> Result<(), StageBundleError> {
+    if cancel_flag.load(Ordering::Relaxed) {
+        return Err(StageBundleError::Cancelled);
+    }
     #[cfg(target_os = "macos")]
     {
-        let status = std::process::Command::new("/bin/cp")
+        let spawned = std::process::Command::new("/bin/cp")
             .args(["-cR", "--"])
             .arg(src)
             .arg(dst)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
-            .status();
-        if let Ok(st) = status
-            && st.success()
-        {
-            return Ok(());
+            .spawn();
+        if let Ok(mut child) = spawned {
+            loop {
+                if cancel_flag.load(Ordering::Relaxed) {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let _ = fs::remove_dir_all(dst);
+                    return Err(StageBundleError::Cancelled);
+                }
+                match child.try_wait() {
+                    Ok(Some(st)) if st.success() => return Ok(()),
+                    Ok(Some(_)) => break,
+                    Ok(None) => std::thread::sleep(Duration::from_millis(10)),
+                    Err(_) => {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        break;
+                    }
+                }
+            }
+            let _ = fs::remove_dir_all(dst);
         }
-        let _ = fs::remove_dir_all(dst);
     }
-    copy_tree_nofollow(src, dst)
+    copy_tree_nofollow(src, dst, cancel_flag)
 }
 
-fn copy_tree_nofollow(src: &Path, dst: &Path) -> Result<(), String> {
-    fs::create_dir(dst)
-        .map_err(|err| format!("failed to create staged directory {}: {err}", dst.display()))?;
+fn copy_tree_nofollow(
+    src: &Path,
+    dst: &Path,
+    cancel_flag: &AtomicBool,
+) -> Result<(), StageBundleError> {
+    use std::io::Write;
+    if cancel_flag.load(Ordering::Relaxed) {
+        return Err(StageBundleError::Cancelled);
+    }
+    fs::create_dir(dst).map_err(|err| {
+        StageBundleError::Failed(format!(
+            "failed to create staged directory {}: {err}",
+            dst.display()
+        ))
+    })?;
     let entries = fs::read_dir(src).map_err(|err| {
-        format!(
+        StageBundleError::Failed(format!(
             "failed to read iOS `.app` directory {}: {err}",
             src.display()
-        )
+        ))
     })?;
+    let mut buf = [0u8; 65_536];
     for entry in entries {
-        let entry = entry.map_err(|err| format!("failed to iterate iOS `.app` bundle: {err}"))?;
-        let ftype = entry
-            .file_type()
-            .map_err(|err| format!("failed to inspect iOS `.app` entry type: {err}"))?;
+        if cancel_flag.load(Ordering::Relaxed) {
+            return Err(StageBundleError::Cancelled);
+        }
+        let entry = entry.map_err(|err| {
+            StageBundleError::Failed(format!("failed to iterate iOS `.app` bundle: {err}"))
+        })?;
+        let ftype = entry.file_type().map_err(|err| {
+            StageBundleError::Failed(format!("failed to inspect iOS `.app` entry type: {err}"))
+        })?;
         let src_path = entry.path();
         let dst_path = dst.join(entry.file_name());
         if ftype.is_symlink() {
-            return Err(format!(
+            return Err(StageBundleError::Failed(format!(
                 "iOS `.app` bundle cannot contain symbolic links: {}",
                 src_path.display()
-            ));
+            )));
         }
         if ftype.is_dir() {
-            copy_tree_nofollow(&src_path, &dst_path)?;
+            copy_tree_nofollow(&src_path, &dst_path, cancel_flag)?;
         } else if ftype.is_file() {
             let mut reader = open_read_nofollow(&src_path).map_err(|err| {
-                format!(
+                StageBundleError::Failed(format!(
                     "failed to open iOS `.app` file {}: {err}",
                     src_path.display()
-                )
+                ))
             })?;
             let meta = reader.metadata().map_err(|err| {
-                format!(
+                StageBundleError::Failed(format!(
                     "failed to stat iOS `.app` file {}: {err}",
                     src_path.display()
-                )
+                ))
             })?;
             let mut writer = create_new_nofollow(&dst_path).map_err(|err| {
-                format!(
+                StageBundleError::Failed(format!(
                     "failed to create staged iOS `.app` file {}: {err}",
                     dst_path.display()
-                )
+                ))
             })?;
-            std::io::copy(&mut reader, &mut writer).map_err(|err| {
-                format!(
-                    "failed to copy iOS `.app` file {}: {err}",
-                    src_path.display()
-                )
-            })?;
+            loop {
+                if cancel_flag.load(Ordering::Relaxed) {
+                    return Err(StageBundleError::Cancelled);
+                }
+                let n = reader.read(&mut buf).map_err(|err| {
+                    StageBundleError::Failed(format!(
+                        "failed to copy iOS `.app` file {}: {err}",
+                        src_path.display()
+                    ))
+                })?;
+                if n == 0 {
+                    break;
+                }
+                writer.write_all(&buf[..n]).map_err(|err| {
+                    StageBundleError::Failed(format!(
+                        "failed to copy iOS `.app` file {}: {err}",
+                        src_path.display()
+                    ))
+                })?;
+            }
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
@@ -588,10 +1185,10 @@ fn copy_tree_nofollow(src: &Path, dst: &Path) -> Result<(), String> {
                 let _ = meta;
             }
         } else {
-            return Err(format!(
+            return Err(StageBundleError::Failed(format!(
                 "iOS `.app` bundle cannot contain special files: {}",
                 src_path.display()
-            ));
+            )));
         }
     }
     Ok(())
@@ -1272,6 +1869,18 @@ async fn probe_android(
                 ),
             });
         }
+        AgentApkReadiness::EmbeddedPrebuiltReady { sha256 } => {
+            out.push(DoctorCheck {
+                name: "android-agent".to_string(),
+                status: DoctorCheckStatus::Ready,
+                required,
+                detail: format!(
+                    "Embedded prebuilt Déjà Android agent APK ready (sha256={}...; no JDK or Android SDK required)",
+                    &sha256[..12]
+                ),
+                remediation: None,
+            });
+        }
         AgentApkReadiness::CacheHit { source_sha256, .. } => {
             out.push(DoctorCheck {
                 name: "android-agent".to_string(),
@@ -1357,6 +1966,7 @@ mod android_factory_tests {
         DriverFactoryError, RealDoctorProbes, RealDriverFactory,
     };
     use deja_core::fingerprint_file;
+    use deja_driver_android::embed::PREBUILT_AGENT_APK;
     use deja_flow::DriverCapability;
     use std::collections::BTreeMap;
     use std::fs;
@@ -1412,12 +2022,13 @@ esac
     }
 
     #[tokio::test]
-    async fn real_driver_factory_wires_android_runtime_create_and_install_with_fingerprint_check() {
+    async fn real_driver_factory_wires_android_runtime_stages_apk_checks_package_id_and_drift() {
         let dir = temp_dir("wire");
         let log = dir.join("adb.log");
         let adb = write_mock_adb(&dir, &log);
         let apk = dir.join("app-debug.apk");
-        fs::write(&apk, b"PK\x03\x04test-app-apk-bytes").unwrap();
+        // Use the real compiled APK (package="dev.deja.agent") so AXML extraction runs end-to-end!
+        fs::write(&apk, PREBUILT_AGENT_APK).unwrap();
         let fp = fingerprint_file(&dir, &apk).unwrap();
 
         let mut env = BTreeMap::new();
@@ -1426,7 +2037,7 @@ esac
         let ctx = DriverContext {
             platform: "android".to_string(),
             device: "emulator-5554".to_string(),
-            app_id: "com.example.app".to_string(),
+            app_id: "dev.deja.agent".to_string(),
             build_path: apk.clone(),
             expected_build_fingerprint: Some(fp.clone()),
             workspace_root: dir.clone(),
@@ -1438,6 +2049,7 @@ esac
             screen_size: None,
             timeout_ms: 30_000,
             env: env.clone(),
+            staged_build: None,
         };
         let cancel = CancellationToken::new();
         let factory = RealDriverFactory;
@@ -1449,37 +2061,105 @@ esac
             .expect("resolve_runtime should succeed");
         assert_eq!(rt.as_deref(), Some("android-35"));
 
-        // 2. create -> AndroidDriver
+        // 2. create -> AndroidDriver (verifies manifest package == app_id)
         let drv = factory
             .create(&ctx, &cancel)
             .await
-            .expect("create should succeed");
+            .expect("create should succeed with matching APK package");
         assert_eq!(drv.platform(), "android");
         assert!(drv.capabilities().supports(DriverCapability::SystemBack));
         assert!(drv.capabilities().supports(DriverCapability::HoldScroll));
         assert!(!drv.capabilities().supports(DriverCapability::ClearKeychain));
 
-        // 3. install_app succeeds with matching fingerprint and invokes `adb install -r -g`.
+        // 3. Mismatched appId fails closed with exit-2 UnsupportedOrConfig in both create and install_app.
+        let mut wrong_pkg = ctx.clone();
+        wrong_pkg.app_id = "com.example.wrong".to_string();
+        let pkg_err = match factory.create(&wrong_pkg, &cancel).await {
+            Err(err) => err,
+            Ok(_) => panic!("APK package mismatch must fail closed"),
+        };
+        assert!(matches!(
+            pkg_err,
+            DriverFactoryError::UnsupportedOrConfig(_)
+        ));
+        assert!(pkg_err.to_string().contains("dev.deja.agent"));
+        assert!(matches!(
+            factory.install_app(&wrong_pkg, &cancel).await,
+            Err(DriverFactoryError::UnsupportedOrConfig(_))
+        ));
+
+        // 4. Non-APK / corrupt file fails closed with exit-2 UnsupportedOrConfig.
+        let fake_apk = dir.join("fake.apk");
+        fs::write(&fake_apk, b"PK\x03\x04not-a-real-apk").unwrap();
+        let mut fake_ctx = ctx.clone();
+        fake_ctx.build_path = fake_apk;
+        fake_ctx.expected_build_fingerprint = None;
+        assert!(matches!(
+            factory.create(&fake_ctx, &cancel).await,
+            Err(DriverFactoryError::UnsupportedOrConfig(_))
+        ));
+
+        // 5. install_app stages a private copy and passes the STAGED path (not raw workspace path) to `adb install`.
         factory
             .install_app(&ctx, &cancel)
             .await
             .expect("install_app should succeed");
         let adb_log = fs::read_to_string(&log).unwrap();
-        assert!(adb_log.contains("-s emulator-5554 install -r -g"));
+        let install_line = adb_log
+            .lines()
+            .find(|l| l.contains("-s emulator-5554 install -r -g "))
+            .expect("adb install logged");
+        assert!(
+            !install_line.contains(&apk.display().to_string()),
+            "adb install must receive the private staged APK copy, not raw buildPath: {install_line}"
+        );
+        assert!(
+            install_line.contains("deja-android-apk-"),
+            "expected staged APK temp path in adb log: {install_line}"
+        );
 
-        // 4. install_app rejects fingerprint drift (TOCTOU protection) with exit-2 config error.
-        let mut drifted = ctx.clone();
-        drifted.expected_build_fingerprint = Some("0".repeat(64));
-        let drift_err = factory
-            .install_app(&drifted, &cancel)
+        // 6. prepare_batch_build stages once, install_app reuses it, and Drop cleans up the temp dir.
+        let staged = factory
+            .prepare_batch_build(&ctx, &cancel)
             .await
-            .expect_err("drifted APK fingerprint must fail closed");
+            .expect("prepare_batch_build succeeds")
+            .expect("Android returns SharedStagedBuild");
+        let staging_dir = staged.staging_dir().to_path_buf();
+        assert!(staging_dir.is_dir());
+        assert_eq!(staged.fingerprint(), fp);
+        let mut batch_ctx = ctx.clone();
+        batch_ctx.staged_build = Some(staged.clone());
+        factory
+            .install_app(&batch_ctx, &cancel)
+            .await
+            .expect("batch install_app reuses staged APK");
+        drop(batch_ctx);
+        drop(staged);
+        assert!(
+            !staging_dir.exists(),
+            "dropping SharedStagedBuild must remove temporary Android APK staging dir"
+        );
+
+        // 7. Mutating the `.apk` file on disk between fingerprinting and `install_app` fails closed (exit 2).
+        let mutated_apk = dir.join("mutated.apk");
+        fs::write(&mutated_apk, PREBUILT_AGENT_APK).unwrap();
+        let orig_fp = fingerprint_file(&dir, &mutated_apk).unwrap();
+        let mut mutated_bytes = PREBUILT_AGENT_APK.to_vec();
+        mutated_bytes.extend_from_slice(b"drift");
+        fs::write(&mutated_apk, &mutated_bytes).unwrap();
+        let mut drift_ctx = ctx.clone();
+        drift_ctx.build_path = mutated_apk;
+        drift_ctx.expected_build_fingerprint = Some(orig_fp);
+        let drift_err = factory
+            .install_app(&drift_ctx, &cancel)
+            .await
+            .expect_err("mutated APK on disk must fail closed");
         assert!(matches!(
             drift_err,
             DriverFactoryError::UnsupportedOrConfig(_)
         ));
 
-        // 5. Symlink APK buildPath fails closed in both create and install_app.
+        // 8. Symlink APK buildPath fails closed in both create and install_app.
         let sym_apk = dir.join("symlink.apk");
         symlink(&apk, &sym_apk).unwrap();
         let mut sym_ctx = ctx.clone();
@@ -1497,19 +2177,14 @@ esac
     }
 
     #[tokio::test]
-    async fn real_doctor_probes_android_adb_devices_and_agent_readiness() {
+    async fn real_doctor_probes_android_ready_on_jdk_free_host_via_embedded_prebuilt_apk() {
         let dir = temp_dir("doctor");
         let log = dir.join("adb.log");
         let adb = write_mock_adb(&dir, &log);
-        let agent_apk = dir.join("deja-android-agent.apk");
-        fs::write(&agent_apk, b"PK\x03\x04agent-bytes").unwrap();
 
+        // Minimal JDK-free / SDK-free env: ONLY `DEJA_ADB` (no PATH, no JAVA_HOME, no ANDROID_HOME, no DEJA_ANDROID_AGENT_APK).
         let mut env = BTreeMap::new();
         env.insert("DEJA_ADB".to_string(), adb.to_string_lossy().into_owned());
-        env.insert(
-            "DEJA_ANDROID_AGENT_APK".to_string(),
-            agent_apk.to_string_lossy().into_owned(),
-        );
 
         let probes = RealDoctorProbes;
         let checks = probes
@@ -1531,6 +2206,13 @@ esac
         assert_eq!(by_name("android-devices").status, DoctorCheckStatus::Ready);
         assert!(by_name("android-devices").detail.contains("android-35"));
         assert_eq!(by_name("android-agent").status, DoctorCheckStatus::Ready);
+        assert!(
+            by_name("android-agent")
+                .detail
+                .contains("Embedded prebuilt"),
+            "JDK-free host should report embedded prebuilt agent ready: {}",
+            by_name("android-agent").detail
+        );
 
         // Offline serial fails closed with NotReady + remediation.
         let offline_checks = probes
@@ -1549,5 +2231,190 @@ esac
         assert!(dev_check.remediation.is_some());
 
         let _ = fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    #[tokio::test]
+    async fn prepare_batch_build_cancellation_signals_worker_awaits_and_cleans_staging_dir() {
+        let unique = format!(
+            "deja-stage-cancel-test-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        );
+        let root = std::env::temp_dir().join(unique);
+        let app_dir = root.join("Demo.app");
+        fs::create_dir_all(&app_dir).unwrap();
+        let plist = r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>CFBundleIdentifier</key><string>com.example.demo</string>
+</dict></plist>
+"#;
+        fs::write(app_dir.join("Info.plist"), plist).unwrap();
+        fs::write(app_dir.join("Demo"), b"fake-mach-o").unwrap();
+
+        // 1. Pre-cancelled `RealDriverFactory::prepare_batch_build` returns `Cancelled` immediately.
+        let pre_cancel = CancellationToken::new();
+        pre_cancel.cancel();
+        let factory = RealDriverFactory;
+        let ctx = DriverContext {
+            platform: "ios".to_string(),
+            app_id: "com.example.demo".to_string(),
+            device: "00000000-0000-4000-8000-000000000001".to_string(),
+            build_path: app_dir.clone(),
+            expected_build_fingerprint: None,
+            workspace_root: root.clone(),
+            staged_build: None,
+            disable_animations: true,
+            crash_report_grace_ms: 0,
+            crash_report_dir: None,
+            deja_home: None,
+            headless: None,
+            screen_size: None,
+            timeout_ms: 30_000,
+            env: BTreeMap::new(),
+        };
+        let pre_res = factory.prepare_batch_build(&ctx, &pre_cancel).await;
+        assert!(
+            matches!(pre_res, Err(DriverFactoryError::Cancelled)),
+            "pre-cancelled prepare_batch_build must return Cancelled"
+        );
+
+        // 2. Mid-staging cancellation sets `cancel_flag`, awaits the `spawn_blocking` worker to
+        //    completion, and deletes the temporary staging directory via `StagedIosAppBundle::drop`.
+        let cancel = CancellationToken::new();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel::<PathBuf>();
+        let worker_saw_cancel = Arc::new(AtomicBool::new(false));
+        let worker_saw_cancel_hook = Arc::clone(&worker_saw_cancel);
+        let staged_dir_slot: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
+        let staged_dir_slot_hook = Arc::clone(&staged_dir_slot);
+
+        let hook: StageTestHook = Box::new(move |temp_dir: &Path, flag: &AtomicBool| {
+            *staged_dir_slot_hook.lock().unwrap() = Some(temp_dir.to_path_buf());
+            let _ = started_tx.send(temp_dir.to_path_buf());
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while !flag.load(Ordering::SeqCst) {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "cancel_flag was never signaled to blocking staging worker"
+                );
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            worker_saw_cancel_hook.store(true, Ordering::SeqCst);
+        });
+
+        let cancel_trigger = cancel.clone();
+        let trigger_task = tokio::spawn(async move {
+            let dir = started_rx.await.expect("staging hook must run");
+            assert!(
+                dir.exists(),
+                "temp staging directory must exist while staging is in flight"
+            );
+            cancel_trigger.cancel();
+        });
+
+        let res = run_cancellable_ios_bundle_staging_with_hook(
+            app_dir.clone(),
+            "com.example.demo".to_string(),
+            None,
+            &cancel,
+            Some(hook),
+        )
+        .await;
+        trigger_task.await.unwrap();
+
+        assert!(
+            matches!(res, Err(DriverFactoryError::Cancelled)),
+            "cancelled staging must return DriverFactoryError::Cancelled"
+        );
+        assert!(
+            worker_saw_cancel.load(Ordering::SeqCst),
+            "cancel path must signal cancel_flag AND await the spawn_blocking worker before returning"
+        );
+        let staged_dir = staged_dir_slot
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("staging temp dir recorded");
+        assert!(
+            !staged_dir.exists(),
+            "cancelled staging must clean up temporary staging directory {}",
+            staged_dir.display()
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn stage_ios_bundle_cancellable_aborts_during_fingerprinting_and_cleans_up() {
+        let unique = format!(
+            "deja-stage-fp-cancel-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        );
+        let root = std::env::temp_dir().join(unique);
+        let app_dir = root.join("Big.app");
+        fs::create_dir_all(&app_dir).unwrap();
+        let plist = r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>CFBundleIdentifier</key><string>com.example.big</string>
+</dict></plist>
+"#;
+        fs::write(app_dir.join("Info.plist"), plist).unwrap();
+        let blob = vec![0x42u8; deja_core::FINGERPRINT_CHUNK_BYTES * 4];
+        for i in 0..8 {
+            fs::write(app_dir.join(format!("asset-{i:02}.bin")), &blob).unwrap();
+        }
+
+        // Flip `cancel_flag` from a concurrent thread as soon as the copy completes (inside the
+        // fingerprinting window) and ensure either Cancelled (with staging dir cleaned) or valid
+        // completion occurs — never a leaked temp dir or panic.
+        let staged_dir_slot: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
+        let staged_dir_slot_hook = Arc::clone(&staged_dir_slot);
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        let worker_flag = Arc::clone(&cancel_flag);
+
+        let hook: StageTestHook = Box::new(move |temp_dir: &Path, flag: &AtomicBool| {
+            *staged_dir_slot_hook.lock().unwrap() = Some(temp_dir.to_path_buf());
+            // Flip flag directly after copy so `verify_ios_app_bundle` / `fingerprint_tree_cancellable`
+            // sees cancellation before hashing completes.
+            flag.store(true, Ordering::SeqCst);
+        });
+
+        let res = stage_and_verify_ios_app_bundle_inner(
+            &app_dir,
+            "com.example.big",
+            None,
+            &worker_flag,
+            Some(hook),
+        );
+        assert!(
+            matches!(res, Err(StageBundleError::Cancelled)),
+            "expected Cancelled when flag flips before fingerprinting"
+        );
+        let staged_dir = staged_dir_slot
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("temp dir recorded");
+        assert!(
+            !staged_dir.exists(),
+            "temp staging directory must be removed on cancellation: {}",
+            staged_dir.display()
+        );
+
+        let _ = fs::remove_dir_all(&root);
     }
 }

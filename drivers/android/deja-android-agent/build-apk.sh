@@ -5,7 +5,8 @@
 #   build-apk.sh --out <path/to/deja-android-agent.apk> \
 #     [--sdk-root <android-sdk-dir>] \
 #     [--build-tools <version-or-dir>] \
-#     [--platform <platform-or-dir>]
+#     [--platform <platform-or-dir>] \
+#     [--keystore <persistent-keystore-path>]
 
 set -euo pipefail
 
@@ -14,11 +15,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
 BUILD_TOOLS_ARG=""
 PLATFORM_ARG=""
+KEYSTORE_ARG=""
 OUT_PATH=""
 
 usage() {
   cat >&2 <<'EOF'
-Usage: build-apk.sh --out <apk-path> [--sdk-root <dir>] [--build-tools <ver-or-dir>] [--platform <ver-or-dir>]
+Usage: build-apk.sh --out <apk-path> [--sdk-root <dir>] [--build-tools <ver-or-dir>] [--platform <ver-or-dir>] [--keystore <path>]
 EOF
 }
 
@@ -37,6 +39,11 @@ while [[ $# -gt 0 ]]; do
     --platform)
       [[ $# -ge 2 ]] || { usage; exit 2; }
       PLATFORM_ARG="$2"
+      shift 2
+      ;;
+    --keystore)
+      [[ $# -ge 2 ]] || { usage; exit 2; }
+      KEYSTORE_ARG="$2"
       shift 2
       ;;
     --out)
@@ -214,18 +221,44 @@ fi
 # 5. Zip-align on 4-byte boundaries (page-aligned for shared libraries).
 "$ZIPALIGN" -f -p 4 "$TMP_WORK/unaligned.apk" "$TMP_WORK/aligned.apk"
 
-# 6. Generate an ephemeral debug signing keystore inside TMP_WORK (deleted on trap).
-KEYSTORE="$TMP_WORK/debug.keystore"
-"$KEYTOOL_BIN" -genkeypair \
-  -keystore "$KEYSTORE" \
-  -storepass android \
-  -alias androiddebugkey \
-  -keypass android \
-  -keyalg RSA \
-  -keysize 2048 \
-  -validity 10000 \
-  -dname "CN=Deja Debug,O=Deja,C=US" \
-  >/dev/null 2>&1
+# 6. Reuse persistent debug keystore when `--keystore` is supplied (created once with 0600),
+#    or generate an ephemeral keystore inside TMP_WORK (deleted on trap).
+if [[ -n "$KEYSTORE_ARG" ]]; then
+  KEYSTORE="$KEYSTORE_ARG"
+  mkdir -p "$(dirname "$KEYSTORE")"
+  if [[ ! -f "$KEYSTORE" ]]; then
+    TMP_KS="$TMP_WORK/new-debug.keystore"
+    "$KEYTOOL_BIN" -genkeypair \
+      -keystore "$TMP_KS" \
+      -storepass android \
+      -alias androiddebugkey \
+      -keypass android \
+      -keyalg RSA \
+      -keysize 2048 \
+      -validity 10000 \
+      -dname "CN=Deja Debug,O=Deja,C=US" \
+      >/dev/null 2>&1
+    chmod 600 "$TMP_KS"
+    if ! mv -n "$TMP_KS" "$KEYSTORE" 2>/dev/null; then
+      if [[ ! -f "$KEYSTORE" ]]; then
+        mv "$TMP_KS" "$KEYSTORE"
+      fi
+    fi
+    chmod 600 "$KEYSTORE"
+  fi
+else
+  KEYSTORE="$TMP_WORK/debug.keystore"
+  "$KEYTOOL_BIN" -genkeypair \
+    -keystore "$KEYSTORE" \
+    -storepass android \
+    -alias androiddebugkey \
+    -keypass android \
+    -keyalg RSA \
+    -keysize 2048 \
+    -validity 10000 \
+    -dname "CN=Deja Debug,O=Deja,C=US" \
+    >/dev/null 2>&1
+fi
 
 # 7. Sign (v1/v2/v3) and verify the resulting APK.
 "$APKSIGNER" sign \

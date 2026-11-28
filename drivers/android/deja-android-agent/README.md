@@ -13,13 +13,17 @@ Minimal, zero-Gradle on-device UiAutomator2 HTTP instrumentation agent used by `
 
 ## Building Locally
 
-Déjà automatically builds and caches the agent APK on demand into `$DEJA_HOME/drivers/android/<source_sha256>/deja-android-agent.apk` when Android SDK build tools are available, or uses a prebuilt APK supplied via `DEJA_ANDROID_AGENT_APK` (optionally pinned with `DEJA_ANDROID_AGENT_APK_SHA256`).
+Déjà ships a SHA-256-pinned prebuilt agent APK embedded directly into the Rust binary (`prebuilt/deja-android-agent.apk`) for zero-JDK runtime execution. At runtime, Déjà uses:
 
-To compile manually into a temporary path:
+1. `DEJA_ANDROID_AGENT_APK` (optionally pinned with `DEJA_ANDROID_AGENT_APK_SHA256`), if explicitly set.
+2. On-demand compilation from source via `build-apk.sh`, only when `DEJA_ANDROID_BUILD_AGENT_FROM_SOURCE=1` is set (persisting the debug keystore in `$DEJA_HOME/drivers/android/debug.keystore`).
+3. Otherwise, the embedded prebuilt APK materialized into `$DEJA_HOME/drivers/android/<sha256>/deja-android-agent.apk`.
+
+To rebuild the prebuilt APK locally:
 
 ```bash
-chmod +x drivers/android/deja-android-agent/build-apk.sh
-drivers/android/deja-android-agent/build-apk.sh --out /tmp/deja-android-agent.apk
+drivers/android/deja-android-agent/build-apk.sh \
+  --out drivers/android/deja-android-agent/prebuilt/deja-android-agent.apk
 ```
 
-Never commit built `.apk`, `.class`, `.dex`, or `.keystore` files to this repository.
+Never commit arbitrary fixture `.apk`, `.class`, `.dex`, or `.keystore` files to this repository; only `drivers/android/deja-android-agent/prebuilt/deja-android-agent.apk` (`<= 256 KiB`) is allowlisted by `deja-repo-check`.

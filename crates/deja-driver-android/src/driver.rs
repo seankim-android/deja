@@ -558,7 +558,10 @@ impl AndroidDriver {
             }
         };
         if needs_install {
-            if let Err(err) = adb.install_apk(&self.serial, &apk.apk_path, cancel).await {
+            if let Err(err) = adb
+                .install_agent_apk(&self.serial, &apk.apk_path, cancel)
+                .await
+            {
                 if let Some(ref mut anim) = animation_guard {
                     anim.restore().await;
                 }
@@ -937,6 +940,16 @@ impl AndroidDriver {
         } else {
             VisibleContext::default()
         };
+
+        // Defense-in-depth: never accept a positive `notVisible` confirmation backed by a
+        // truncated hierarchy snapshot.
+        if req.not_visible && resp.matched && ui_hierarchy.as_ref().is_some_and(|h| h.truncated) {
+            return Err(DriverError::Transport {
+                operation: "wait_for_selector".to_string(),
+                detail: "server-side waitForSelector confirmed notVisible against a truncated UI hierarchy".to_string(),
+                transient: false,
+            });
+        }
 
         let obtained_fresh =
             resp.matched || !resp.hierarchy_hash.is_empty() || ui_hierarchy.is_some();
@@ -2900,5 +2913,134 @@ esac
 
         server.abort();
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn wait_for_selector_not_visible_and_act_injection_failure_fail_closed() {
+        let mode = Arc::new(AtomicUsize::new(0));
+        let mode_clone = Arc::clone(&mode);
+
+        let (port, server) = spawn_mock_agent(move |_m, path, _body| match path.as_str() {
+            "/waitForSelector" => match mode_clone.load(Ordering::SeqCst) {
+                0 => (
+                    200,
+                    // Unreadable root capture timeout: empty hierarchyHash + no hierarchy.
+                    json!({
+                        "matched": false,
+                        "elapsedMs": 120,
+                        "polls": 4,
+                        "hierarchyHash": "",
+                        "visibleSample": []
+                    })
+                    .to_string(),
+                ),
+                1 => (
+                    200,
+                    // Truncated capture timeout for notVisible: matched=false (never falsely passes).
+                    json!({
+                        "matched": false,
+                        "elapsedMs": 120,
+                        "polls": 4,
+                        "hierarchyHash": "28940cf4aa2f4599",
+                        "visibleSample": ["Checkout"],
+                        "hierarchy": {
+                            "appId": "com.example.app",
+                            "state": "running_foreground",
+                            "truncated": true,
+                            "hierarchyHash": "28940cf4aa2f4599",
+                            "unchanged": false,
+                            "nodeCount": 1,
+                            "nodes": []
+                        }
+                    })
+                    .to_string(),
+                ),
+                _ => (
+                    200,
+                    // Misbehaving server falsely confirming notVisible on a truncated tree.
+                    json!({
+                        "matched": true,
+                        "elapsedMs": 15,
+                        "polls": 1,
+                        "hierarchyHash": "28940cf4aa2f4599",
+                        "visibleSample": [],
+                        "hierarchy": {
+                            "appId": "com.example.app",
+                            "state": "running_foreground",
+                            "truncated": true,
+                            "hierarchyHash": "28940cf4aa2f4599",
+                            "unchanged": false,
+                            "nodeCount": 1,
+                            "nodes": []
+                        }
+                    })
+                    .to_string(),
+                ),
+            },
+            "/act" => (
+                500,
+                json!({
+                    "ok": false,
+                    "error": "UiAutomation.injectInputEvent rejected ACTION_DOWN (missing INJECT_EVENTS permission or blocked window)"
+                })
+                .to_string(),
+            ),
+            _ => (404, "{}".to_string()),
+        })
+        .await;
+
+        let client = AgentClient::new(port, "tok".to_string(), Duration::from_secs(5)).unwrap();
+        let drv = AndroidDriver::with_mock_client_for_tests(
+            AndroidDriverConfig::new("emulator-5554"),
+            client,
+            None,
+            None,
+        )
+        .unwrap();
+        let cancel = CancellationToken::new();
+
+        let mut not_vis_req = WaitSelectorRequest::not_visible(
+            "com.example.app",
+            Selector::by_text("Loading"),
+            Duration::from_millis(200),
+        );
+        not_vis_req.return_hierarchy = true;
+
+        // 1. Unreadable capture timeout surfaces DriverError::Transport.
+        mode.store(0, Ordering::SeqCst);
+        let unreadable_err = drv
+            .wait_for_selector(&not_vis_req, &cancel)
+            .await
+            .expect_err("unreadable capture timeout must return DriverError::Transport");
+        assert!(matches!(unreadable_err, DriverError::Transport { .. }));
+
+        // 2. Truncated hierarchy timeout returns matched=false (never falsely confirms absence).
+        mode.store(1, Ordering::SeqCst);
+        let trunc_out = drv
+            .wait_for_selector(&not_vis_req, &cancel)
+            .await
+            .expect("truncated timeout returns matched=false outcome");
+        assert!(!trunc_out.matched);
+        assert!(trunc_out.hierarchy.as_ref().is_some_and(|h| h.truncated));
+
+        // 3. Defense-in-depth rejects matched=true with truncated hierarchy on notVisible.
+        mode.store(2, Ordering::SeqCst);
+        let misbehaving_err = drv
+            .wait_for_selector(&not_vis_req, &cancel)
+            .await
+            .expect_err("truncated matched=true on notVisible must fail closed");
+        assert!(matches!(misbehaving_err, DriverError::Transport { .. }));
+
+        // 4. Rejected input injection HTTP 500 surfaces as DriverError::Transport.
+        let act_err = drv
+            .tap_point("com.example.app", UiPoint::new(100.0, 200.0), &cancel)
+            .await
+            .expect_err("rejected injectInputEvent HTTP 500 must fail");
+        assert!(matches!(
+            act_err,
+            DriverError::Transport { ref detail, .. } if detail.contains("injectInputEvent")
+        ));
+
+        server.abort();
     }
 }

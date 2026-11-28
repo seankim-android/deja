@@ -238,6 +238,15 @@ pub struct FlowExecutionConfig {
     pub workspace_root: PathBuf,
     pub flow_dir: Option<PathBuf>,
     pub screenshot_dir: Option<PathBuf>,
+    /// Optional per-run/per-goal screenshot base directory override taking precedence over
+    /// `screenshot_dir` so parallel batch goals executing `takeScreenshot` stay isolated.
+    pub screenshot_dir_override: Option<PathBuf>,
+    /// When `true`, `takeScreenshot` targets are strictly confined inside `screenshot_dir`
+    /// (rejecting `..`, absolute paths, symlinks, or writes anywhere else in the workspace).
+    pub screenshot_confine_to_dir: bool,
+    /// When `true`, `takeScreenshot` uses atomic create-new (`O_CREAT | O_EXCL`) and refuses
+    /// to overwrite existing files or symbolic links.
+    pub screenshot_no_clobber: bool,
     pub app_id_override: Option<String>,
     pub env: BTreeMap<String, String>,
     pub default_step_timeout: Duration,
@@ -257,6 +266,10 @@ pub struct FlowExecutionConfig {
     /// and nested `runFlow`/`retry` file steps read exclusively from this in-memory map and
     /// never reopen flow files from disk.
     pub closure_snapshot: Option<BTreeMap<String, Vec<u8>>>,
+    /// When `true`, captures a scrubbed, bounded [`VisibleContext`] snapshot of the final screen
+    /// on passing flows (reusing a fresh cached hierarchy observation or issuing one fresh
+    /// `driver.hierarchy` call if none is fresh yet).
+    pub capture_final_visible_context: bool,
 }
 
 impl FlowExecutionConfig {
@@ -266,6 +279,9 @@ impl FlowExecutionConfig {
             workspace_root,
             flow_dir: None,
             screenshot_dir: None,
+            screenshot_dir_override: None,
+            screenshot_confine_to_dir: false,
+            screenshot_no_clobber: false,
             app_id_override: None,
             env: BTreeMap::new(),
             default_step_timeout: DEFAULT_STEP_TIMEOUT,
@@ -277,6 +293,7 @@ impl FlowExecutionConfig {
             provider_redactor: provider_key_redactor(std::iter::empty::<(&str, &str)>()),
             raw_artifact_path: None,
             closure_snapshot: None,
+            capture_final_visible_context: false,
         }
     }
 
@@ -316,6 +333,10 @@ pub struct FlowExecutionOutcome {
     /// crash-report grace window.
     #[serde(default)]
     pub crash_probe_completed: bool,
+    /// Optional scrubbed, bounded final visible context captured on passing flows when
+    /// [`FlowExecutionConfig::capture_final_visible_context`] is enabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub final_visible_context: Option<VisibleContext>,
 }
 
 /// Platform-neutral `maestro/v1` YAML flow executor.
@@ -350,6 +371,7 @@ struct RuntimeState {
     last_hierarchy: Option<UiHierarchy>,
     last_hierarchy_is_fresh: bool,
     screenshots: Vec<PathBuf>,
+    created_strict_screenshot_dir: bool,
     hook_errors: Vec<String>,
     run_started_epoch_ms: u64,
 }
@@ -595,6 +617,7 @@ impl FlowExecutor {
             last_hierarchy: None,
             last_hierarchy_is_fresh: false,
             screenshots: Vec::new(),
+            created_strict_screenshot_dir: false,
             hook_errors: Vec::new(),
             run_started_epoch_ms,
         };
@@ -628,18 +651,78 @@ impl FlowExecutor {
         let scrubbed_app_id = state.app_id.as_deref().map(|id| self.scrub(id));
 
         match result {
-            Ok(()) if !did_time_out => FlowExecutionOutcome {
-                passed: true,
-                app_id: scrubbed_app_id,
-                duration_ms: total_ms,
-                timing: state.timing,
-                assertions_executed: state.assertions_executed,
-                failed_step: None,
-                failure: None,
-                hook_errors: state.hook_errors,
-                screenshots: state.screenshots,
-                crash_probe_completed: false,
-            },
+            Ok(()) if !did_time_out => {
+                let final_visible_context = if self.config.capture_final_visible_context {
+                    let final_hierarchy =
+                        if state.last_hierarchy_is_fresh && state.last_hierarchy.is_some() {
+                            state.last_hierarchy.clone()
+                        } else if !child_cancel.is_cancelled()
+                            && let Some(app_id) = state.app_id.clone().filter(|id| !id.is_empty())
+                        {
+                            let remaining = self
+                                .config
+                                .flow_timeout
+                                .map(|limit| limit.saturating_sub(started.elapsed()));
+                            match remaining {
+                                Some(rem) if rem.is_zero() => None,
+                                Some(rem) => tokio::select! {
+                                    biased;
+                                    _ = child_cancel.cancelled() => None,
+                                    res = tokio::time::timeout(
+                                        rem,
+                                        self.fetch_fresh_hierarchy_with_cache(
+                                            driver,
+                                            &app_id,
+                                            false,
+                                            &mut state,
+                                            &child_cancel,
+                                        ),
+                                    ) => res.ok().and_then(Result::ok),
+                                },
+                                None => tokio::select! {
+                                    biased;
+                                    _ = child_cancel.cancelled() => None,
+                                    res = self.fetch_fresh_hierarchy_with_cache(
+                                        driver,
+                                        &app_id,
+                                        false,
+                                        &mut state,
+                                        &child_cancel,
+                                    ) => res.ok(),
+                                },
+                            }
+                        } else {
+                            None
+                        };
+                    final_hierarchy.map(|h| {
+                        build_visible_context(
+                            &h.nodes,
+                            Some(&self.config.redactor),
+                            Some(&self.config.provider_redactor),
+                            VisibleContext::DEFAULT_LIMIT,
+                        )
+                    })
+                } else {
+                    None
+                };
+
+                let total_ms = started.elapsed().as_millis() as u64;
+                state.timing.total_ms = total_ms;
+
+                FlowExecutionOutcome {
+                    passed: true,
+                    app_id: scrubbed_app_id,
+                    duration_ms: total_ms,
+                    timing: state.timing,
+                    assertions_executed: state.assertions_executed,
+                    failed_step: None,
+                    failure: None,
+                    hook_errors: state.hook_errors,
+                    screenshots: state.screenshots,
+                    crash_probe_completed: false,
+                    final_visible_context,
+                }
+            }
             Ok(()) => {
                 let failed_step = FailedStepContext {
                     step_index: state.step_counter,
@@ -669,6 +752,7 @@ impl FlowExecutor {
                     hook_errors: state.hook_errors,
                     screenshots: state.screenshots,
                     crash_probe_completed: false,
+                    final_visible_context: None,
                 }
             }
             Err(mut failed_step) => {
@@ -766,6 +850,7 @@ impl FlowExecutor {
                     hook_errors: state.hook_errors,
                     screenshots: state.screenshots,
                     crash_probe_completed,
+                    final_visible_context: None,
                 }
             }
         }
@@ -815,6 +900,7 @@ impl FlowExecutor {
             hook_errors: Vec::new(),
             screenshots: Vec::new(),
             crash_probe_completed: false,
+            final_visible_context: None,
         }
     }
 
@@ -2746,23 +2832,58 @@ impl FlowExecutor {
             })?;
         let label = format!("Take screenshot \"{}\"", self.scrub(&raw_path));
 
-        let base_dir = self
-            .config
-            .screenshot_dir
-            .as_deref()
-            .unwrap_or(&state.canonical_workspace);
         let with_ext = if Path::new(&raw_path).extension().is_none() {
             format!("{raw_path}.png")
         } else {
             raw_path
         };
 
-        let target_path = confine_write_path(
-            &state.canonical_workspace,
-            base_dir,
-            &with_ext,
-            "screenshot",
-        )
+        let target_path = if let Some(ref dir) = self.config.screenshot_dir_override {
+            let override_resolved = if dir.is_absolute() {
+                dir.clone()
+            } else {
+                state.canonical_workspace.join(dir)
+            };
+            confine_write_path(
+                &state.canonical_workspace,
+                &override_resolved,
+                Some(&override_resolved),
+                &with_ext,
+                "screenshot",
+            )
+        } else if self.config.screenshot_confine_to_dir {
+            let Some(ref strict_dir) = self.config.screenshot_dir else {
+                return Err(Box::new(FailedStepContext {
+                    step_index,
+                    command: "takeScreenshot".to_string(),
+                    label: label.clone(),
+                    kind: StepFailureKind::ParseOrConfinement,
+                    message: "screenshot output directory is not configured".to_string(),
+                    failed_app_id: None,
+                    visible_context: None,
+                    crash_signal: None,
+                }));
+            };
+            confine_write_path_strict_dir(
+                &state.canonical_workspace,
+                strict_dir,
+                &with_ext,
+                "screenshot",
+            )
+        } else {
+            let base_dir = self
+                .config
+                .screenshot_dir
+                .as_deref()
+                .unwrap_or(&state.canonical_workspace);
+            confine_write_path(
+                &state.canonical_workspace,
+                base_dir,
+                None,
+                &with_ext,
+                "screenshot",
+            )
+        }
         .map_err(|err| FailedStepContext {
             step_index,
             command: "takeScreenshot".to_string(),
@@ -2774,12 +2895,151 @@ impl FlowExecutor {
             crash_signal: None,
         })?;
 
+        if self.config.screenshot_no_clobber && fs::symlink_metadata(&target_path).is_ok() {
+            return Err(Box::new(FailedStepContext {
+                step_index,
+                command: "takeScreenshot".to_string(),
+                label: label.clone(),
+                kind: StepFailureKind::ParseOrConfinement,
+                message: self.scrub(&format!(
+                    "refusing to overwrite existing screenshot file: {}",
+                    target_path.display()
+                )),
+                failed_app_id: None,
+                visible_context: None,
+                crash_signal: None,
+            }));
+        }
+
         let png_bytes = driver
             .take_screenshot(&app_id, cancel)
             .await
             .map_err(|err| {
                 self.driver_err_to_failed_step(step_index, "takeScreenshot", label.clone(), err)
             })?;
+
+        if self.config.screenshot_confine_to_dir {
+            let strict_dir = self
+                .config
+                .screenshot_dir
+                .as_ref()
+                .expect("validated strict screenshot dir");
+            ensure_strict_screenshot_dir(
+                &state.canonical_workspace,
+                strict_dir,
+                &mut state.created_strict_screenshot_dir,
+            )
+            .map_err(|err| FailedStepContext {
+                step_index,
+                command: "takeScreenshot".to_string(),
+                label: label.clone(),
+                kind: StepFailureKind::ParseOrConfinement,
+                message: self.scrub(&err.to_string()),
+                failed_app_id: None,
+                visible_context: None,
+                crash_signal: None,
+            })?;
+
+            // Re-verify `strict_dir` directly before atomic file creation; `target_path` is a
+            // single flat filename directly inside `strict_dir` (zero intermediate subdirectories).
+            let strict_meta =
+                fs::symlink_metadata(strict_dir).map_err(|err| FailedStepContext {
+                    step_index,
+                    command: "takeScreenshot".to_string(),
+                    label: label.clone(),
+                    kind: StepFailureKind::ParseOrConfinement,
+                    message: self.scrub(&format!("cannot inspect screenshot directory: {err}")),
+                    failed_app_id: None,
+                    visible_context: None,
+                    crash_signal: None,
+                })?;
+            if strict_meta.file_type().is_symlink() || !strict_meta.file_type().is_dir() {
+                return Err(Box::new(FailedStepContext {
+                    step_index,
+                    command: "takeScreenshot".to_string(),
+                    label: label.clone(),
+                    kind: StepFailureKind::ParseOrConfinement,
+                    message: "screenshot output directory is not a safe regular directory"
+                        .to_string(),
+                    failed_app_id: None,
+                    visible_context: None,
+                    crash_signal: None,
+                }));
+            }
+            let canon_strict = fs::canonicalize(strict_dir).map_err(|err| FailedStepContext {
+                step_index,
+                command: "takeScreenshot".to_string(),
+                label: label.clone(),
+                kind: StepFailureKind::ParseOrConfinement,
+                message: self.scrub(&format!("cannot resolve screenshot directory: {err}")),
+                failed_app_id: None,
+                visible_context: None,
+                crash_signal: None,
+            })?;
+            if canon_strict == state.canonical_workspace
+                || !canon_strict.starts_with(&state.canonical_workspace)
+            {
+                return Err(Box::new(FailedStepContext {
+                    step_index,
+                    command: "takeScreenshot".to_string(),
+                    label: label.clone(),
+                    kind: StepFailureKind::ParseOrConfinement,
+                    message: "screenshot output directory escaped confinement via symlink"
+                        .to_string(),
+                    failed_app_id: None,
+                    visible_context: None,
+                    crash_signal: None,
+                }));
+            }
+            let flat_name = target_path.file_name().ok_or_else(|| FailedStepContext {
+                step_index,
+                command: "takeScreenshot".to_string(),
+                label: label.clone(),
+                kind: StepFailureKind::ParseOrConfinement,
+                message: "screenshot target has no filename".to_string(),
+                failed_app_id: None,
+                visible_context: None,
+                crash_signal: None,
+            })?;
+            let final_target = canon_strict.join(flat_name);
+            let write_res = (|| -> std::io::Result<()> {
+                let mut f = fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&final_target)?;
+                if !f.metadata()?.is_file() {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "screenshot target is not a regular file",
+                    ));
+                }
+                std::io::Write::write_all(&mut f, &png_bytes)?;
+                f.sync_all()?;
+                Ok(())
+            })();
+            write_res.map_err(|err| {
+                let kind = if err.kind() == std::io::ErrorKind::AlreadyExists {
+                    StepFailureKind::ParseOrConfinement
+                } else {
+                    StepFailureKind::Transport
+                };
+                FailedStepContext {
+                    step_index,
+                    command: "takeScreenshot".to_string(),
+                    label,
+                    kind,
+                    message: self.scrub(&format!(
+                        "refusing to write screenshot {}: {err}",
+                        final_target.display()
+                    )),
+                    failed_app_id: None,
+                    visible_context: None,
+                    crash_signal: None,
+                }
+            })?;
+            state.screenshots.push(final_target);
+            return Ok(());
+        }
 
         if let Some(parent) = target_path.parent() {
             fs::create_dir_all(parent).map_err(|err| FailedStepContext {
@@ -2793,16 +3053,49 @@ impl FlowExecutor {
                 crash_signal: None,
             })?;
         }
-        fs::write(&target_path, png_bytes).map_err(|err| FailedStepContext {
-            step_index,
-            command: "takeScreenshot".to_string(),
-            label,
-            kind: StepFailureKind::Transport,
-            message: self.scrub(&err.to_string()),
-            failed_app_id: None,
-            visible_context: None,
-            crash_signal: None,
-        })?;
+
+        if self.config.screenshot_no_clobber {
+            let write_res = (|| -> std::io::Result<()> {
+                let mut f = fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&target_path)?;
+                std::io::Write::write_all(&mut f, &png_bytes)?;
+                f.sync_all()?;
+                Ok(())
+            })();
+            write_res.map_err(|err| {
+                let kind = if err.kind() == std::io::ErrorKind::AlreadyExists {
+                    StepFailureKind::ParseOrConfinement
+                } else {
+                    StepFailureKind::Transport
+                };
+                FailedStepContext {
+                    step_index,
+                    command: "takeScreenshot".to_string(),
+                    label,
+                    kind,
+                    message: self.scrub(&format!(
+                        "refusing to write screenshot {}: {err}",
+                        target_path.display()
+                    )),
+                    failed_app_id: None,
+                    visible_context: None,
+                    crash_signal: None,
+                }
+            })?;
+        } else {
+            fs::write(&target_path, png_bytes).map_err(|err| FailedStepContext {
+                step_index,
+                command: "takeScreenshot".to_string(),
+                label,
+                kind: StepFailureKind::Transport,
+                message: self.scrub(&err.to_string()),
+                failed_app_id: None,
+                visible_context: None,
+                crash_signal: None,
+            })?;
+        }
 
         state.screenshots.push(target_path);
         Ok(())
@@ -3883,23 +4176,71 @@ fn confine_existing_file(
     Ok(canonical)
 }
 
+fn resolve_with_nearest_existing_ancestor(path: &Path) -> Result<PathBuf, FlowExecutionError> {
+    let normalized = lexical_normalize(path);
+    let mut suffix: Vec<std::ffi::OsString> = Vec::new();
+    let mut cur = normalized.as_path();
+    while !cur.exists() {
+        let Some(name) = cur.file_name() else {
+            return Err(FlowExecutionError::PathConfinement(
+                "output path has no existing ancestor".to_string(),
+            ));
+        };
+        suffix.push(name.to_os_string());
+        let Some(parent) = cur.parent() else {
+            return Err(FlowExecutionError::PathConfinement(
+                "output path has no existing ancestor".to_string(),
+            ));
+        };
+        cur = parent;
+    }
+    let mut resolved = fs::canonicalize(cur).map_err(|err| {
+        FlowExecutionError::PathConfinement(format!("cannot resolve output ancestor: {err}"))
+    })?;
+    for comp in suffix.into_iter().rev() {
+        resolved.push(comp);
+    }
+    Ok(resolved)
+}
+
 fn confine_write_path(
     canonical_workspace: &Path,
     base_dir: &Path,
+    strict_root: Option<&Path>,
     raw_rel: &str,
     kind: &str,
 ) -> Result<PathBuf, FlowExecutionError> {
     validate_relative_path_syntax(raw_rel, kind)?;
-    let canonical_base = fs::canonicalize(base_dir).unwrap_or_else(|_| lexical_normalize(base_dir));
+    let canonical_base = resolve_with_nearest_existing_ancestor(base_dir)?;
     if canonical_base != canonical_workspace && !canonical_base.starts_with(canonical_workspace) {
         return Err(FlowExecutionError::PathConfinement(format!(
             "{kind} output base directory escapes workspace"
         )));
     }
+    let resolved_strict_root = match strict_root {
+        Some(root) => {
+            let resolved = resolve_with_nearest_existing_ancestor(root)?;
+            if resolved != canonical_workspace && !resolved.starts_with(canonical_workspace) {
+                return Err(FlowExecutionError::PathConfinement(format!(
+                    "{kind} output root directory escapes workspace"
+                )));
+            }
+            Some(resolved)
+        }
+        None => None,
+    };
+
     let lexical = lexical_normalize(&canonical_base.join(raw_rel));
     if lexical == canonical_workspace || !lexical.starts_with(canonical_workspace) {
         return Err(FlowExecutionError::PathConfinement(format!(
             "{kind} output path escapes workspace: {raw_rel}"
+        )));
+    }
+    if let Some(ref root) = resolved_strict_root
+        && (lexical == *root || !lexical.starts_with(root))
+    {
+        return Err(FlowExecutionError::PathConfinement(format!(
+            "{kind} output path escapes goal attempt screenshot directory: {raw_rel}"
         )));
     }
 
@@ -3923,6 +4264,19 @@ fn confine_write_path(
             "{kind} output ancestor escapes workspace via symlink"
         )));
     }
+    if let Some(ref root) = resolved_strict_root {
+        // If the nearest existing ancestor lies at or inside `root`, its canonical target MUST
+        // stay inside `root` (preventing symlinks inside the attempt directory from escaping to a
+        // sibling goal directory or elsewhere in the workspace). If `root` does not exist yet,
+        // the nearest existing ancestor must be an ancestor of `root` itself.
+        let within_root = canonical_ancestor == *root || canonical_ancestor.starts_with(root);
+        let ancestor_of_uncreated_root = !root.exists() && root.starts_with(&canonical_ancestor);
+        if !within_root && !ancestor_of_uncreated_root {
+            return Err(FlowExecutionError::PathConfinement(format!(
+                "{kind} output ancestor escapes goal attempt screenshot directory via symlink"
+            )));
+        }
+    }
     if let Ok(lmeta) = fs::symlink_metadata(&lexical)
         && lmeta.file_type().is_symlink()
     {
@@ -3931,6 +4285,232 @@ fn confine_write_path(
         )));
     }
     Ok(lexical)
+}
+
+fn confine_write_path_strict_dir(
+    canonical_workspace: &Path,
+    strict_dir: &Path,
+    raw_rel: &str,
+    kind: &str,
+) -> Result<PathBuf, FlowExecutionError> {
+    validate_relative_path_syntax(raw_rel, kind)?;
+    if raw_rel.contains('\\') || raw_rel.contains('\0') {
+        return Err(FlowExecutionError::PathConfinement(format!(
+            "{kind} output path contains invalid characters: {raw_rel}"
+        )));
+    }
+    let mut flat_segments: Vec<String> = Vec::new();
+    for component in Path::new(raw_rel).components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err(FlowExecutionError::PathConfinement(format!(
+                    "{kind} output path cannot traverse outside its artifact directory: {raw_rel}"
+                )));
+            }
+            Component::Normal(seg) => {
+                let seg_str = seg.to_str().ok_or_else(|| {
+                    FlowExecutionError::PathConfinement(format!(
+                        "{kind} output path contains invalid UTF-8"
+                    ))
+                })?;
+                if seg_str.is_empty() {
+                    continue;
+                }
+                if seg_str.starts_with('.') {
+                    return Err(FlowExecutionError::PathConfinement(format!(
+                        "{kind} output path cannot contain hidden path segments: {raw_rel}"
+                    )));
+                }
+                flat_segments.push(seg_str.to_string());
+            }
+        }
+    }
+    if flat_segments.is_empty() {
+        return Err(FlowExecutionError::PathConfinement(format!(
+            "{kind} output path must name a file: {raw_rel}"
+        )));
+    }
+
+    // Flatten relative subpaths (e.g. `sub/checkout.png` -> `sub__checkout.png`) into a single
+    // leaf filename directly inside the private `0o700` per-attempt directory so ZERO
+    // intermediate subdirectories are ever created beneath `strict_dir`.
+    let flat_filename = flat_segments.join("__");
+    if flat_filename.is_empty()
+        || flat_filename.starts_with('.')
+        || flat_filename.contains('/')
+        || flat_filename.contains('\\')
+        || flat_filename.contains('\0')
+    {
+        return Err(FlowExecutionError::PathConfinement(format!(
+            "{kind} output filename is not safe: {raw_rel}"
+        )));
+    }
+
+    let norm_strict = lexical_normalize(strict_dir);
+    if norm_strict == canonical_workspace || !norm_strict.starts_with(canonical_workspace) {
+        return Err(FlowExecutionError::PathConfinement(format!(
+            "{kind} artifact directory escapes workspace"
+        )));
+    }
+
+    // Walk every existing component from `canonical_workspace` down to `norm_strict` refusing symlinks.
+    let rel_from_ws = norm_strict
+        .strip_prefix(canonical_workspace)
+        .map_err(|_| FlowExecutionError::PathConfinement(format!("{kind} escapes workspace")))?;
+    let mut cursor = canonical_workspace.to_path_buf();
+    for comp in rel_from_ws.components() {
+        if let Component::Normal(seg) = comp {
+            cursor.push(seg);
+            if let Ok(lmeta) = fs::symlink_metadata(&cursor)
+                && lmeta.file_type().is_symlink()
+            {
+                return Err(FlowExecutionError::PathConfinement(format!(
+                    "{kind} output directory traverses or targets a symlink"
+                )));
+            }
+        }
+    }
+
+    let target = norm_strict.join(&flat_filename);
+    if let Ok(lmeta) = fs::symlink_metadata(&target)
+        && lmeta.file_type().is_symlink()
+    {
+        return Err(FlowExecutionError::PathConfinement(format!(
+            "{kind} output path targets a symlink"
+        )));
+    }
+
+    Ok(target)
+}
+
+/// Ensure `strict_dir` exists as a confined private (`0o700` on Unix) directory strictly inside
+/// `canonical_workspace`, creating missing parent components step-by-step refusing symlinks and
+/// atomically creating `strict_dir` with `DirBuilder::mode(0o700)` on first use.
+fn ensure_strict_screenshot_dir(
+    canonical_workspace: &Path,
+    strict_dir: &Path,
+    already_initialized: &mut bool,
+) -> Result<(), FlowExecutionError> {
+    let norm_strict = lexical_normalize(strict_dir);
+    if norm_strict == canonical_workspace || !norm_strict.starts_with(canonical_workspace) {
+        return Err(FlowExecutionError::PathConfinement(
+            "screenshot artifact directory escapes workspace".to_string(),
+        ));
+    }
+    let rel = norm_strict.strip_prefix(canonical_workspace).map_err(|_| {
+        FlowExecutionError::PathConfinement(
+            "screenshot artifact directory escapes workspace".to_string(),
+        )
+    })?;
+    let comps: Vec<String> = rel
+        .components()
+        .map(|c| match c {
+            Component::Normal(s) => s.to_str().map(ToString::to_string).ok_or_else(|| {
+                FlowExecutionError::PathConfinement(
+                    "screenshot directory contains non-UTF-8 segment".to_string(),
+                )
+            }),
+            _ => Err(FlowExecutionError::PathConfinement(
+                "screenshot directory contains invalid path component".to_string(),
+            )),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if comps.is_empty() {
+        return Err(FlowExecutionError::PathConfinement(
+            "screenshot artifact directory must be inside workspace".to_string(),
+        ));
+    }
+
+    let mut cursor = canonical_workspace.to_path_buf();
+    for seg in &comps[..comps.len() - 1] {
+        cursor.push(seg);
+        match fs::symlink_metadata(&cursor) {
+            Ok(meta) => {
+                if meta.file_type().is_symlink() {
+                    return Err(FlowExecutionError::PathConfinement(
+                        "screenshot directory ancestor is a symlink".to_string(),
+                    ));
+                }
+                if !meta.file_type().is_dir() {
+                    return Err(FlowExecutionError::PathConfinement(
+                        "screenshot directory ancestor is not a directory".to_string(),
+                    ));
+                }
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                match fs::DirBuilder::new().create(&cursor) {
+                    Ok(()) => {}
+                    Err(create_err) if create_err.kind() == std::io::ErrorKind::AlreadyExists => {
+                        let meta = fs::symlink_metadata(&cursor).map_err(|e| {
+                            FlowExecutionError::PathConfinement(format!(
+                                "cannot inspect screenshot ancestor: {e}"
+                            ))
+                        })?;
+                        if meta.file_type().is_symlink() || !meta.file_type().is_dir() {
+                            return Err(FlowExecutionError::PathConfinement(
+                                "screenshot ancestor is not a safe directory".to_string(),
+                            ));
+                        }
+                    }
+                    Err(create_err) => {
+                        return Err(FlowExecutionError::PathConfinement(format!(
+                            "cannot create screenshot parent directory: {create_err}"
+                        )));
+                    }
+                }
+            }
+            Err(err) => {
+                return Err(FlowExecutionError::PathConfinement(format!(
+                    "cannot inspect screenshot ancestor: {err}"
+                )));
+            }
+        }
+    }
+
+    cursor.push(&comps[comps.len() - 1]);
+    if !*already_initialized {
+        match fs::symlink_metadata(&cursor) {
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                let mut builder = fs::DirBuilder::new();
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::DirBuilderExt;
+                    builder.mode(0o700);
+                }
+                builder.create(&cursor).map_err(|e| {
+                    FlowExecutionError::PathConfinement(format!(
+                        "cannot create private screenshot attempt directory: {e}"
+                    ))
+                })?;
+            }
+            Ok(meta) => {
+                if meta.file_type().is_symlink() || !meta.file_type().is_dir() {
+                    return Err(FlowExecutionError::PathConfinement(
+                        "screenshot attempt directory is a symlink or non-directory".to_string(),
+                    ));
+                }
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::MetadataExt;
+                    if (meta.mode() & 0o077) != 0 {
+                        return Err(FlowExecutionError::PathConfinement(
+                            "screenshot attempt directory must have private 0700 permissions"
+                                .to_string(),
+                        ));
+                    }
+                }
+            }
+            Err(err) => {
+                return Err(FlowExecutionError::PathConfinement(format!(
+                    "cannot inspect screenshot attempt directory: {err}"
+                )));
+            }
+        }
+        *already_initialized = true;
+    }
+
+    Ok(())
 }
 
 static MEDIA_STAGING_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -4093,5 +4673,450 @@ mod scrub_tests {
         assert!(joined.contains("<redacted-fixture-value>"));
         assert!(!joined.contains(fixture_pw));
         assert!(!joined.contains(&secret_token));
+    }
+
+    #[tokio::test]
+    async fn capture_final_visible_context_populates_scrubbed_bounded_snapshot_on_pass() {
+        use crate::capabilities::{DriverCapabilities, DriverCapability};
+        use crate::driver::{
+            DriverCrashSignal, DriverError, DriverFuture, KeyPress, LaunchOptions, OpenLinkOptions,
+            PlatformDriver, SwipeParams, UiHierarchy, UiNode, UiPoint, UiRect, UiSize,
+        };
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio_util::sync::CancellationToken;
+
+        struct MiniDriver {
+            caps: DriverCapabilities,
+            hierarchy: UiHierarchy,
+            hierarchy_calls: AtomicUsize,
+        }
+
+        impl PlatformDriver for MiniDriver {
+            fn platform(&self) -> &'static str {
+                "ios"
+            }
+            fn capabilities(&self) -> &DriverCapabilities {
+                &self.caps
+            }
+            fn ensure_session<'a>(&'a self, _c: &'a CancellationToken) -> DriverFuture<'a, ()> {
+                Box::pin(async { Ok(()) })
+            }
+            fn launch_app<'a>(
+                &'a self,
+                _a: &'a str,
+                _o: &'a LaunchOptions,
+                _c: &'a CancellationToken,
+            ) -> DriverFuture<'a, ()> {
+                Box::pin(async { Ok(()) })
+            }
+            fn stop_app<'a>(
+                &'a self,
+                _a: &'a str,
+                _c: &'a CancellationToken,
+            ) -> DriverFuture<'a, ()> {
+                Box::pin(async { Ok(()) })
+            }
+            fn kill_app<'a>(
+                &'a self,
+                _a: &'a str,
+                _c: &'a CancellationToken,
+            ) -> DriverFuture<'a, ()> {
+                Box::pin(async { Ok(()) })
+            }
+            fn clear_state<'a>(
+                &'a self,
+                _a: &'a str,
+                _c: &'a CancellationToken,
+            ) -> DriverFuture<'a, ()> {
+                Box::pin(async { Ok(()) })
+            }
+            fn clear_keychain<'a>(&'a self, _c: &'a CancellationToken) -> DriverFuture<'a, ()> {
+                Box::pin(async { Ok(()) })
+            }
+            fn open_link<'a>(
+                &'a self,
+                _a: Option<&'a str>,
+                _u: &'a str,
+                _o: &'a OpenLinkOptions,
+                _c: &'a CancellationToken,
+            ) -> DriverFuture<'a, ()> {
+                Box::pin(async { Ok(()) })
+            }
+            fn add_media<'a>(
+                &'a self,
+                _p: &'a [PathBuf],
+                _c: &'a CancellationToken,
+            ) -> DriverFuture<'a, ()> {
+                Box::pin(async { Ok(()) })
+            }
+            fn hierarchy<'a>(
+                &'a self,
+                _a: &'a str,
+                _s: bool,
+                _k: Option<&'a str>,
+                _c: &'a CancellationToken,
+            ) -> DriverFuture<'a, UiHierarchy> {
+                Box::pin(async move {
+                    self.hierarchy_calls.fetch_add(1, Ordering::SeqCst);
+                    Ok(self.hierarchy.clone())
+                })
+            }
+            fn tap_point<'a>(
+                &'a self,
+                _a: &'a str,
+                _p: UiPoint,
+                _c: &'a CancellationToken,
+            ) -> DriverFuture<'a, ()> {
+                Box::pin(async { Ok(()) })
+            }
+            fn long_press_point<'a>(
+                &'a self,
+                _a: &'a str,
+                _p: UiPoint,
+                _d: Option<u64>,
+                _c: &'a CancellationToken,
+            ) -> DriverFuture<'a, ()> {
+                Box::pin(async { Ok(()) })
+            }
+            fn double_tap_point<'a>(
+                &'a self,
+                _a: &'a str,
+                _p: UiPoint,
+                _c: &'a CancellationToken,
+            ) -> DriverFuture<'a, ()> {
+                Box::pin(async { Ok(()) })
+            }
+            fn swipe<'a>(
+                &'a self,
+                _p: &'a SwipeParams,
+                _c: &'a CancellationToken,
+            ) -> DriverFuture<'a, ()> {
+                Box::pin(async { Ok(()) })
+            }
+            fn input_text<'a>(
+                &'a self,
+                _a: &'a str,
+                _t: &'a str,
+                _c: &'a CancellationToken,
+            ) -> DriverFuture<'a, ()> {
+                Box::pin(async { Ok(()) })
+            }
+            fn erase_text<'a>(
+                &'a self,
+                _a: &'a str,
+                _n: u32,
+                _c: &'a CancellationToken,
+            ) -> DriverFuture<'a, ()> {
+                Box::pin(async { Ok(()) })
+            }
+            fn press_key<'a>(
+                &'a self,
+                _a: &'a str,
+                _k: &'a KeyPress,
+                _c: &'a CancellationToken,
+            ) -> DriverFuture<'a, ()> {
+                Box::pin(async { Ok(()) })
+            }
+            fn hide_keyboard<'a>(
+                &'a self,
+                _a: &'a str,
+                _c: &'a CancellationToken,
+            ) -> DriverFuture<'a, ()> {
+                Box::pin(async { Ok(()) })
+            }
+            fn back<'a>(&'a self, _a: &'a str, _c: &'a CancellationToken) -> DriverFuture<'a, ()> {
+                Box::pin(async { Ok(()) })
+            }
+            fn take_screenshot<'a>(
+                &'a self,
+                _a: &'a str,
+                _c: &'a CancellationToken,
+            ) -> DriverFuture<'a, Vec<u8>> {
+                Box::pin(async { Err(DriverError::InvalidArgument("unused".to_string())) })
+            }
+            fn check_app_crash<'a>(
+                &'a self,
+                _a: &'a str,
+                _s: u64,
+                _c: &'a CancellationToken,
+            ) -> DriverFuture<'a, Option<DriverCrashSignal>> {
+                Box::pin(async { Ok(None) })
+            }
+            fn shutdown<'a>(&'a self) -> DriverFuture<'a, ()> {
+                Box::pin(async { Ok(()) })
+            }
+        }
+
+        let secret = ["sk", "-1234567890abcdefghijklmnop"].concat();
+        let mut nodes = Vec::new();
+        for i in 0..35 {
+            nodes.push(UiNode {
+                index: i,
+                label: if i == 0 {
+                    format!("Token {secret}")
+                } else {
+                    format!("Row {i:02}")
+                },
+                enabled: true,
+                hittable: true,
+                is_on_screen: true,
+                frame: UiRect::new(0.0, i as f64 * 10.0, 100.0, 10.0),
+                ..UiNode::default()
+            });
+        }
+        let mut h = UiHierarchy {
+            app_id: "dev.deja.app".to_string(),
+            viewport: Some(UiSize::new(390.0, 844.0)),
+            nodes,
+            ..UiHierarchy::default()
+        };
+        h.hierarchy_hash = h.hierarchy_hash_hex();
+
+        let driver = MiniDriver {
+            caps: DriverCapabilities::with([DriverCapability::AccessibilityTree]),
+            hierarchy: h,
+            hierarchy_calls: AtomicUsize::new(0),
+        };
+        let ws = std::env::temp_dir();
+        let mut cfg = FlowExecutionConfig::new(ws);
+        cfg.app_id_override = Some("dev.deja.app".to_string());
+        cfg.capture_final_visible_context = true;
+        let exec = FlowExecutor::new(cfg);
+
+        // Flow with only `launchApp` has no cached hierarchy yet -> must fetch 1 fresh hierarchy.
+        let outcome = exec
+            .execute_yaml(&driver, "- launchApp\n", &CancellationToken::new())
+            .await;
+        assert!(outcome.passed);
+        assert_eq!(driver.hierarchy_calls.load(Ordering::SeqCst), 1);
+        let vc = outcome
+            .final_visible_context
+            .expect("final_visible_context populated");
+        assert_eq!(vc.items().len(), VisibleContext::DEFAULT_LIMIT);
+        assert!(vc.is_truncated());
+        assert!(!vc.items().join(" ").contains(&secret));
+    }
+
+    #[tokio::test]
+    async fn capture_final_visible_context_omits_stale_hierarchy_when_fresh_fetch_fails() {
+        use crate::capabilities::{DriverCapabilities, DriverCapability};
+        use crate::driver::{
+            DriverCrashSignal, DriverError, DriverFuture, KeyPress, LaunchOptions, OpenLinkOptions,
+            PlatformDriver, SwipeParams, UiHierarchy, UiNode, UiPoint, UiRect, UiSize,
+        };
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio_util::sync::CancellationToken;
+
+        struct FailSecondHierarchyDriver {
+            caps: DriverCapabilities,
+            hierarchy: UiHierarchy,
+            calls: AtomicUsize,
+        }
+
+        impl PlatformDriver for FailSecondHierarchyDriver {
+            fn platform(&self) -> &'static str {
+                "ios"
+            }
+            fn capabilities(&self) -> &DriverCapabilities {
+                &self.caps
+            }
+            fn ensure_session<'a>(&'a self, _c: &'a CancellationToken) -> DriverFuture<'a, ()> {
+                Box::pin(async { Ok(()) })
+            }
+            fn launch_app<'a>(
+                &'a self,
+                _a: &'a str,
+                _o: &'a LaunchOptions,
+                _c: &'a CancellationToken,
+            ) -> DriverFuture<'a, ()> {
+                Box::pin(async { Ok(()) })
+            }
+            fn stop_app<'a>(
+                &'a self,
+                _a: &'a str,
+                _c: &'a CancellationToken,
+            ) -> DriverFuture<'a, ()> {
+                Box::pin(async { Ok(()) })
+            }
+            fn kill_app<'a>(
+                &'a self,
+                _a: &'a str,
+                _c: &'a CancellationToken,
+            ) -> DriverFuture<'a, ()> {
+                Box::pin(async { Ok(()) })
+            }
+            fn clear_state<'a>(
+                &'a self,
+                _a: &'a str,
+                _c: &'a CancellationToken,
+            ) -> DriverFuture<'a, ()> {
+                Box::pin(async { Ok(()) })
+            }
+            fn clear_keychain<'a>(&'a self, _c: &'a CancellationToken) -> DriverFuture<'a, ()> {
+                Box::pin(async { Ok(()) })
+            }
+            fn open_link<'a>(
+                &'a self,
+                _a: Option<&'a str>,
+                _u: &'a str,
+                _o: &'a OpenLinkOptions,
+                _c: &'a CancellationToken,
+            ) -> DriverFuture<'a, ()> {
+                Box::pin(async { Ok(()) })
+            }
+            fn add_media<'a>(
+                &'a self,
+                _p: &'a [PathBuf],
+                _c: &'a CancellationToken,
+            ) -> DriverFuture<'a, ()> {
+                Box::pin(async { Ok(()) })
+            }
+            fn hierarchy<'a>(
+                &'a self,
+                _a: &'a str,
+                _s: bool,
+                _k: Option<&'a str>,
+                _c: &'a CancellationToken,
+            ) -> DriverFuture<'a, UiHierarchy> {
+                Box::pin(async move {
+                    let n = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+                    if n == 1 {
+                        Ok(self.hierarchy.clone())
+                    } else {
+                        Err(DriverError::Transport {
+                            operation: "hierarchy".to_string(),
+                            detail: "simulated transient hierarchy failure".to_string(),
+                            transient: true,
+                        })
+                    }
+                })
+            }
+            fn tap_point<'a>(
+                &'a self,
+                _a: &'a str,
+                _p: UiPoint,
+                _c: &'a CancellationToken,
+            ) -> DriverFuture<'a, ()> {
+                Box::pin(async { Ok(()) })
+            }
+            fn long_press_point<'a>(
+                &'a self,
+                _a: &'a str,
+                _p: UiPoint,
+                _d: Option<u64>,
+                _c: &'a CancellationToken,
+            ) -> DriverFuture<'a, ()> {
+                Box::pin(async { Ok(()) })
+            }
+            fn double_tap_point<'a>(
+                &'a self,
+                _a: &'a str,
+                _p: UiPoint,
+                _c: &'a CancellationToken,
+            ) -> DriverFuture<'a, ()> {
+                Box::pin(async { Ok(()) })
+            }
+            fn swipe<'a>(
+                &'a self,
+                _p: &'a SwipeParams,
+                _c: &'a CancellationToken,
+            ) -> DriverFuture<'a, ()> {
+                Box::pin(async { Ok(()) })
+            }
+            fn input_text<'a>(
+                &'a self,
+                _a: &'a str,
+                _t: &'a str,
+                _c: &'a CancellationToken,
+            ) -> DriverFuture<'a, ()> {
+                Box::pin(async { Ok(()) })
+            }
+            fn erase_text<'a>(
+                &'a self,
+                _a: &'a str,
+                _n: u32,
+                _c: &'a CancellationToken,
+            ) -> DriverFuture<'a, ()> {
+                Box::pin(async { Ok(()) })
+            }
+            fn press_key<'a>(
+                &'a self,
+                _a: &'a str,
+                _k: &'a KeyPress,
+                _c: &'a CancellationToken,
+            ) -> DriverFuture<'a, ()> {
+                Box::pin(async { Ok(()) })
+            }
+            fn hide_keyboard<'a>(
+                &'a self,
+                _a: &'a str,
+                _c: &'a CancellationToken,
+            ) -> DriverFuture<'a, ()> {
+                Box::pin(async { Ok(()) })
+            }
+            fn back<'a>(&'a self, _a: &'a str, _c: &'a CancellationToken) -> DriverFuture<'a, ()> {
+                Box::pin(async { Ok(()) })
+            }
+            fn take_screenshot<'a>(
+                &'a self,
+                _a: &'a str,
+                _c: &'a CancellationToken,
+            ) -> DriverFuture<'a, Vec<u8>> {
+                Box::pin(async { Ok(vec![0x89, b'P', b'N', b'G']) })
+            }
+            fn check_app_crash<'a>(
+                &'a self,
+                _a: &'a str,
+                _s: u64,
+                _c: &'a CancellationToken,
+            ) -> DriverFuture<'a, Option<DriverCrashSignal>> {
+                Box::pin(async { Ok(None) })
+            }
+            fn shutdown<'a>(&'a self) -> DriverFuture<'a, ()> {
+                Box::pin(async { Ok(()) })
+            }
+        }
+
+        let mut h = UiHierarchy {
+            app_id: "dev.deja.app".to_string(),
+            viewport: Some(UiSize::new(390.0, 844.0)),
+            nodes: vec![UiNode {
+                index: 0,
+                label: "StalePreTapButton".to_string(),
+                enabled: true,
+                hittable: true,
+                is_on_screen: true,
+                frame: UiRect::new(10.0, 10.0, 100.0, 44.0),
+                ..UiNode::default()
+            }],
+            ..UiHierarchy::default()
+        };
+        h.hierarchy_hash = h.hierarchy_hash_hex();
+
+        let driver = FailSecondHierarchyDriver {
+            caps: DriverCapabilities::with([DriverCapability::AccessibilityTree]),
+            hierarchy: h,
+            calls: AtomicUsize::new(0),
+        };
+        let mut cfg = FlowExecutionConfig::new(std::env::temp_dir());
+        cfg.app_id_override = Some("dev.deja.app".to_string());
+        cfg.capture_final_visible_context = true;
+        let exec = FlowExecutor::new(cfg);
+
+        // `tapOn` succeeds on call #1 and invalidates `last_hierarchy_is_fresh`;
+        // the post-flow fresh fetch (call #2) fails -> must NOT return stale pre-tap context!
+        let outcome = exec
+            .execute_yaml(
+                &driver,
+                "- tapOn: StalePreTapButton\n",
+                &CancellationToken::new(),
+            )
+            .await;
+        assert!(outcome.passed);
+        assert_eq!(driver.calls.load(Ordering::SeqCst), 2);
+        assert!(
+            outcome.final_visible_context.is_none(),
+            "stale pre-action hierarchy must never be returned when final fresh fetch fails"
+        );
     }
 }

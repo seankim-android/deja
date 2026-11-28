@@ -12,6 +12,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use deja_driver_android::validate_serial;
 use serde_json::{Value, json};
 
+const TEST_STORE_ID: &str = "android-e2e";
+
 struct TempDirGuard {
     path: PathBuf,
 }
@@ -128,7 +130,7 @@ fn live_android_cli_end_to_end_lifecycle_without_maestro() {
             "--flow",
             "flows/smoke.yaml",
             "--store",
-            &serial,
+            TEST_STORE_ID,
             "--summary",
             "--json",
         ],
@@ -159,7 +161,7 @@ fn live_android_cli_end_to_end_lifecycle_without_maestro() {
             "run",
             "launch android smoke",
             "--store",
-            &serial,
+            TEST_STORE_ID,
             "--summary",
             "--json",
         ],
@@ -185,7 +187,7 @@ fn live_android_cli_end_to_end_lifecycle_without_maestro() {
             "--goals",
             "deja.walks.json",
             "--store",
-            &serial,
+            TEST_STORE_ID,
             "--runtime",
             &runtime,
             "--label",

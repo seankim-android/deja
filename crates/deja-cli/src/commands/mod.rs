@@ -8,6 +8,8 @@ pub mod guide;
 pub mod inspect;
 pub mod list;
 pub mod manifest;
+pub mod mcp;
 pub mod migrate;
 pub mod remember;
 pub mod run;
+pub mod run_batch;

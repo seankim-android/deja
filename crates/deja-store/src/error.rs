@@ -80,6 +80,10 @@ pub enum StoreError {
     #[error("Candidate flow does not exist: {0}")]
     CandidateNotFound(String),
 
+    /// Operation was cancelled via an explicit cancellation flag.
+    #[error("Operation cancelled")]
+    Cancelled,
+
     /// Underlying pure domain error from `deja-core`.
     #[error(transparent)]
     Core(#[from] CoreError),
@@ -109,9 +113,11 @@ impl StoreError {
             Self::InvalidTimestamp(_) => "INVALID_TIMESTAMP",
             Self::InvalidIdentity(_) => "INVALID_IDENTITY",
             Self::CandidateNotFound(_) => "CANDIDATE_NOT_FOUND",
+            Self::Cancelled => "CANCELLED",
             Self::Core(CoreError::FlowChanged { .. }) => "FLOW_CHANGED",
             Self::Core(CoreError::AssertionHashChanged { .. }) => "ASSERTIONS_CHANGED",
             Self::Core(CoreError::InvalidManifest(_)) => "INVALID_MANIFEST",
+            Self::Core(CoreError::Cancelled) => "CANCELLED",
             Self::Core(_) => "CORE_ERROR",
             Self::Sqlite(_) => "SQLITE_ERROR",
             Self::Io(_) => "IO_ERROR",
@@ -164,7 +170,7 @@ impl StoreError {
             {
                 2
             }
-            Self::Core(_) | Self::Sqlite(_) | Self::Io(_) => 1,
+            Self::Cancelled | Self::Core(_) | Self::Sqlite(_) | Self::Io(_) => 1,
         }
     }
 

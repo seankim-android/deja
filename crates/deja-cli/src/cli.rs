@@ -56,14 +56,29 @@ pub enum Commands {
 
     /// Legacy engine command (Déjà now executes flows natively without Maestro).
     Engine(EngineArgs),
+
+    /// Start the stdio JSON-RPC 2.0 MCP server confined to this workspace and app.
+    Mcp(McpArgs),
 }
 
-/// Arguments for `deja run <goal>...`.
+/// Arguments for `deja run [<goal>... | --goals <FILE> | --all]`.
 #[derive(Debug, Args)]
 pub struct RunArgs {
     /// Goal to replay (use `--` before goals starting with `-`).
-    #[arg(required = true, num_args = 1.., value_name = "GOAL")]
+    #[arg(num_args = 0.., value_name = "GOAL")]
     pub goal: Vec<String>,
+
+    /// Run a batch of goals from a file (plain `#`-comment lines, JSON array, or `deja.walks.json`).
+    #[arg(long, value_name = "FILE")]
+    pub goals: Option<PathBuf>,
+
+    /// Run all matching goals from the configured `deja.walks.json` manifest.
+    #[arg(long)]
+    pub all: bool,
+
+    /// Comma-separated target device / simulator IDs for dynamic multi-device sharding.
+    #[arg(long, value_delimiter = ',', value_name = "IDS")]
+    pub devices: Vec<String>,
 
     /// Re-verify a changed or unvalidated consumer flow in manifest mode.
     #[arg(long)]
@@ -251,6 +266,18 @@ pub enum EngineCommand {
     Install,
 }
 
+/// Arguments for `deja mcp`.
+#[derive(Debug, Args)]
+pub struct McpArgs {
+    /// Isolated store identifier under `.deja/memory/stores/<id>/`.
+    #[arg(long, value_name = "ID")]
+    pub store: Option<String>,
+
+    /// Override target device / simulator UDID (`--device` > `DEJA_DEVICE` > `config.device`).
+    #[arg(long, value_name = "ID")]
+    pub device: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -266,6 +293,53 @@ mod tests {
         let cli = Cli::try_parse_from(["deja", "run", "--", "-dash-goal"]).unwrap();
         match cli.command {
             Some(Commands::Run(args)) => assert_eq!(args.goal, vec!["-dash-goal"]),
+            other => panic!("expected Run, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn run_parses_batch_flags_and_devices_delimiter() {
+        let cli = Cli::try_parse_from([
+            "deja",
+            "run",
+            "--goals",
+            "goals.txt",
+            "--devices",
+            "sim-1,sim-2",
+        ])
+        .unwrap();
+        match cli.command {
+            Some(Commands::Run(args)) => {
+                assert!(args.goal.is_empty());
+                assert_eq!(args.goals, Some(PathBuf::from("goals.txt")));
+                assert!(!args.all);
+                assert_eq!(args.devices, vec!["sim-1", "sim-2"]);
+            }
+            other => panic!("expected Run, got {other:?}"),
+        }
+
+        let cli_all = Cli::try_parse_from(["deja", "run", "--all"]).unwrap();
+        match cli_all.command {
+            Some(Commands::Run(args)) => {
+                assert!(args.goal.is_empty());
+                assert!(args.goals.is_none());
+                assert!(args.all);
+                assert!(args.devices.is_empty());
+            }
+            other => panic!("expected Run, got {other:?}"),
+        }
+
+        // Empty `--devices ""` and `"d1,,d2"` preserve empty tokens for fail-closed validation.
+        let cli_empty_dev = Cli::try_parse_from(["deja", "run", "--all", "--devices", ""]).unwrap();
+        match cli_empty_dev.command {
+            Some(Commands::Run(args)) => assert_eq!(args.devices, vec![""]),
+            other => panic!("expected Run, got {other:?}"),
+        }
+
+        let cli_gap_dev =
+            Cli::try_parse_from(["deja", "run", "--all", "--devices", "d1,,d2"]).unwrap();
+        match cli_gap_dev.command {
+            Some(Commands::Run(args)) => assert_eq!(args.devices, vec!["d1", "", "d2"]),
             other => panic!("expected Run, got {other:?}"),
         }
     }

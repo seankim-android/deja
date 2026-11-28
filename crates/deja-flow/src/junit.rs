@@ -251,6 +251,216 @@ pub fn synthesized_attempts_junit(input: &SynthesizedAttemptsJunitInput<'_>) -> 
     )
 }
 
+/// Compact per-attempt breakdown included in a batch JUnit `<failure>` body when a goal ran
+/// multiple attempts (`--rerun-failed` / `--retries`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BatchJunitAttemptSummary {
+    pub attempt: u8,
+    pub passed: bool,
+    pub duration_ms: u64,
+    pub label: Option<String>,
+    pub failing_step: Option<String>,
+    pub artifact_path: Option<String>,
+    pub crash_summary: Option<String>,
+}
+
+impl From<&RunAttempt> for BatchJunitAttemptSummary {
+    fn from(attempt: &RunAttempt) -> Self {
+        let (label, failing_step, artifact_path, crash_summary) = match attempt.failure.as_ref() {
+            Some(failure) => {
+                let crash = failure.crash.as_ref().map(|c| {
+                    let report_suffix = c
+                        .report_file
+                        .as_deref()
+                        .map(|f| format!(" {f}"))
+                        .unwrap_or_default();
+                    format!("{}{}", crash_source_wire_name(c.source), report_suffix)
+                });
+                (
+                    Some(category_wire_name(failure.category).to_string()),
+                    failure.failing_step.clone(),
+                    failure.raw_artifact_path.clone(),
+                    crash,
+                )
+            }
+            None => (None, None, None, None),
+        };
+        Self {
+            attempt: attempt.attempt,
+            passed: attempt.passed,
+            duration_ms: attempt.duration_ms,
+            label,
+            failing_step,
+            artifact_path,
+            crash_summary,
+        }
+    }
+}
+
+/// Outcome category for one `<testcase>` inside a merged batch JUnit report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BatchJunitCaseStatus {
+    Passed,
+    Failed,
+    Errored,
+    Skipped,
+}
+
+/// One goal entry in a merged batch JUnit report (emitted in deterministic input order `0..N`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BatchJunitCase {
+    pub goal: String,
+    pub status: BatchJunitCaseStatus,
+    pub outcome: String,
+    pub duration_ms: u64,
+    pub detail: Option<String>,
+    pub device: Option<String>,
+    pub error_type: Option<String>,
+    pub attempts: Vec<BatchJunitAttemptSummary>,
+}
+
+fn format_batch_attempt_summary(attempt: &BatchJunitAttemptSummary) -> String {
+    if attempt.passed {
+        format!(
+            "attempt {}: passed ({}ms)",
+            attempt.attempt, attempt.duration_ms
+        )
+    } else {
+        let mut parts = vec![format!(
+            "label: {}",
+            attempt.label.as_deref().unwrap_or("unclassified")
+        )];
+        if let Some(ref step) = attempt.failing_step {
+            parts.push(format!("step: {step}"));
+        }
+        if let Some(ref artifact) = attempt.artifact_path {
+            parts.push(format!("artifact: {artifact}"));
+        }
+        if let Some(ref crash) = attempt.crash_summary {
+            parts.push(format!("crash signal: {crash}"));
+        }
+        parts.push(format!("{}ms", attempt.duration_ms));
+        format!("attempt {}: failed ({})", attempt.attempt, parts.join(", "))
+    }
+}
+
+/// Synthesizes a merged multi-goal batch JUnit report containing a single `<testsuite>` tagged
+/// with `<property name="source" value="deja-synthesized"/>`, `mode="batch"`, and `outcome`,
+/// emitting one `<testcase>` per goal in deterministic input order `0..N` and wrapping through
+/// [`merge_junit_suites`] so `<testsuites>` and `<testsuite>` aggregate counts match accurately.
+#[must_use]
+pub fn synthesized_batch_junit(
+    suite_name: &str,
+    outcome: &str,
+    cases: &[BatchJunitCase],
+    duration_ms: u64,
+) -> String {
+    let mut failures: u64 = 0;
+    let mut errors: u64 = 0;
+    let mut skipped: u64 = 0;
+    let mut rendered_cases = Vec::with_capacity(cases.len());
+
+    for case in cases {
+        let goal = escape_xml(&case.goal);
+        let seconds = format!("{:.3}", (case.duration_ms as f64) / 1000.0);
+        match case.status {
+            BatchJunitCaseStatus::Passed => {
+                rendered_cases.push(format!(
+                    "  <testcase id=\"{goal}\" name=\"{goal}\" classname=\"{goal}\" time=\"{seconds}\" status=\"SUCCESS\"/>"
+                ));
+            }
+            BatchJunitCaseStatus::Failed => {
+                failures = failures.saturating_add(1);
+                let mut parts = vec![format!("outcome: {}", case.outcome)];
+                if let Some(ref device) = case.device
+                    && !device.is_empty()
+                {
+                    parts.push(format!("device: {device}"));
+                }
+                if let Some(ref detail) = case.detail
+                    && !detail.is_empty()
+                {
+                    parts.push(detail.clone());
+                }
+                if case.attempts.len() >= 2 {
+                    let breakdown = case
+                        .attempts
+                        .iter()
+                        .map(format_batch_attempt_summary)
+                        .collect::<Vec<_>>()
+                        .join("; ");
+                    parts.push(format!("attempts ({}): {breakdown}", case.attempts.len()));
+                }
+                let full_detail = parts.join("; ");
+                let short_msg = escape_xml(&collapse_whitespace_and_truncate(&full_detail, 300));
+                let body = escape_xml(&full_detail);
+                rendered_cases.push(format!(
+                    "  <testcase id=\"{goal}\" name=\"{goal}\" classname=\"{goal}\" time=\"{seconds}\" status=\"ERROR\">\n    <failure message=\"{short_msg}\">{body}</failure>\n  </testcase>"
+                ));
+            }
+            BatchJunitCaseStatus::Errored => {
+                errors = errors.saturating_add(1);
+                let err_type = escape_xml(case.error_type.as_deref().unwrap_or(
+                    if case.outcome == "cancelled" {
+                        "Cancelled"
+                    } else {
+                        "Error"
+                    },
+                ));
+                let mut parts = vec![format!("outcome: {}", case.outcome)];
+                if let Some(ref device) = case.device
+                    && !device.is_empty()
+                {
+                    parts.push(format!("device: {device}"));
+                }
+                if let Some(ref detail) = case.detail
+                    && !detail.is_empty()
+                {
+                    parts.push(detail.clone());
+                }
+                let full_detail = parts.join("; ");
+                let short_msg = escape_xml(&collapse_whitespace_and_truncate(&full_detail, 300));
+                let body = escape_xml(&full_detail);
+                rendered_cases.push(format!(
+                    "  <testcase id=\"{goal}\" name=\"{goal}\" classname=\"{goal}\" time=\"{seconds}\" status=\"ERROR\">\n    <error type=\"{err_type}\" message=\"{short_msg}\">{body}</error>\n  </testcase>"
+                ));
+            }
+            BatchJunitCaseStatus::Skipped => {
+                skipped = skipped.saturating_add(1);
+                let skip_text = match case.detail.as_deref() {
+                    Some(d) if !d.is_empty() => {
+                        if d.starts_with("cancelled before execution") {
+                            d.to_string()
+                        } else {
+                            format!("cancelled before execution: {d}")
+                        }
+                    }
+                    _ => "cancelled before execution".to_string(),
+                };
+                let short_msg = escape_xml(&collapse_whitespace_and_truncate(&skip_text, 300));
+                rendered_cases.push(format!(
+                    "  <testcase id=\"{goal}\" name=\"{goal}\" classname=\"{goal}\" time=\"{seconds}\" status=\"SKIPPED\">\n    <skipped message=\"{short_msg}\"/>\n  </testcase>"
+                ));
+            }
+        }
+    }
+
+    let escaped_suite = escape_xml(suite_name);
+    let escaped_outcome = escape_xml(outcome);
+    let suite_seconds = format!("{:.3}", (duration_ms as f64) / 1000.0);
+    let mut suite = format!(
+        "<testsuite name=\"{escaped_suite}\" tests=\"{}\" failures=\"{failures}\" errors=\"{errors}\" skipped=\"{skipped}\" time=\"{suite_seconds}\">\n  <properties>\n    <property name=\"source\" value=\"deja-synthesized\"/>\n    <property name=\"mode\" value=\"batch\"/>\n    <property name=\"outcome\" value=\"{escaped_outcome}\"/>\n  </properties>\n",
+        cases.len()
+    );
+    for tc in rendered_cases {
+        suite.push_str(&tc);
+        suite.push('\n');
+    }
+    suite.push_str("</testsuite>");
+
+    merge_junit_suites(&[suite])
+}
+
 fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
 }

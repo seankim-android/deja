@@ -14,6 +14,17 @@ pub struct EmbeddedFile {
     pub executable: bool,
 }
 
+/// Prebuilt, `apksigner`-verified `deja-android-agent.apk` compiled from [`EMBEDDED_FILES`].
+///
+/// Materialized automatically on JDK-free / Android-SDK-free hosts so running Android flows
+/// requires only `adb`. Set `DEJA_ANDROID_BUILD_AGENT_FROM_SOURCE=1` to compile from source.
+pub const PREBUILT_AGENT_APK: &[u8] =
+    include_bytes!("../../../drivers/android/deja-android-agent/prebuilt/deja-android-agent.apk");
+
+/// Pinned lowercase SHA-256 hex digest of [`PREBUILT_AGENT_APK`].
+pub const PREBUILT_AGENT_APK_SHA256: &str =
+    "adb93d3ecafb7096c35c8290b3786ad085b9a34cab69a0acd0b940d3cc549ee2";
+
 /// All files required to compile `deja-android-agent.apk`, in deterministic lexicographical order.
 pub const EMBEDDED_FILES: &[EmbeddedFile] = &[
     EmbeddedFile {
@@ -109,7 +120,25 @@ pub fn materialize_project(dest_root: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{EMBEDDED_FILES, materialize_project, source_sha256};
+    use super::{
+        EMBEDDED_FILES, PREBUILT_AGENT_APK, PREBUILT_AGENT_APK_SHA256, materialize_project,
+        source_sha256,
+    };
+    use sha2::{Digest, Sha256};
+
+    #[test]
+    fn prebuilt_agent_apk_matches_pinned_sha256_size_cap_and_package_id() {
+        assert!(
+            PREBUILT_AGENT_APK.len() <= 256 * 1024,
+            "prebuilt agent APK ({} bytes) must stay <= 256 KiB",
+            PREBUILT_AGENT_APK.len()
+        );
+        let actual = hex::encode(Sha256::digest(PREBUILT_AGENT_APK));
+        assert_eq!(actual, PREBUILT_AGENT_APK_SHA256);
+        let pkg = crate::apk::extract_apk_package_id(PREBUILT_AGENT_APK)
+            .expect("embedded prebuilt agent APK must parse cleanly");
+        assert_eq!(pkg, crate::process::AGENT_PACKAGE_ID);
+    }
 
     #[test]
     fn embedded_files_are_sorted_and_non_empty() {

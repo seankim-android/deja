@@ -169,6 +169,7 @@ public final class HierarchySnapshot {
         public final String foregroundPackage;
         public final DisplaySize viewport;
         public final boolean truncated;
+        public final boolean rootCaptured;
         public final String hierarchyHash;
         public final List<CapturedNode> nodes;
 
@@ -178,6 +179,7 @@ public final class HierarchySnapshot {
                 String foregroundPackage,
                 DisplaySize viewport,
                 boolean truncated,
+                boolean rootCaptured,
                 String hierarchyHash,
                 List<CapturedNode> nodes
         ) {
@@ -186,6 +188,7 @@ public final class HierarchySnapshot {
             this.foregroundPackage = foregroundPackage;
             this.viewport = viewport;
             this.truncated = truncated;
+            this.rootCaptured = rootCaptured;
             this.hierarchyHash = hierarchyHash;
             this.nodes = nodes;
         }
@@ -339,6 +342,7 @@ public final class HierarchySnapshot {
 
         List<CapturedNode> nodes = new ArrayList<>();
         boolean[] truncated = new boolean[]{false};
+        boolean rootCaptured = false;
         String foregroundPkg = "";
         int bestAppLayer = Integer.MIN_VALUE;
 
@@ -389,6 +393,7 @@ public final class HierarchySnapshot {
                             continue;
                         }
 
+                        rootCaptured = true;
                         Rect winBounds = new Rect();
                         win.getBoundsInScreen(winBounds);
                         Rect clipBounds = computeClipRect(winBounds, displayRect);
@@ -418,6 +423,7 @@ public final class HierarchySnapshot {
             AccessibilityNodeInfo activeRoot = uiAutomation.getRootInActiveWindow();
             if (activeRoot != null) {
                 try {
+                    rootCaptured = true;
                     String pkg = charSeqToString(activeRoot.getPackageName());
                     if (foregroundPkg.isEmpty()) {
                         foregroundPkg = pkg;
@@ -462,13 +468,14 @@ public final class HierarchySnapshot {
             state = nodes.isEmpty() ? "unknown" : "running_foreground";
         }
 
-        String hash = computeHierarchyHashHex(nodes);
+        String hash = rootCaptured && !nodes.isEmpty() ? computeHierarchyHashHex(nodes) : "";
         return new CaptureResult(
                 targetAppId != null ? targetAppId : "",
                 state,
                 foregroundPkg,
                 display,
                 truncated[0],
+                rootCaptured && !nodes.isEmpty(),
                 hash,
                 nodes
         );

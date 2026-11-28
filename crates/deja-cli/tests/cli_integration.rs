@@ -4,14 +4,14 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use deja_cli::driver_factory::{
     DoctorCheck, DoctorCheckStatus, DoctorProbeRequest, DoctorProbes, DriverContext, DriverFactory,
-    DriverFactoryError, FactoryFuture, RealDriverFactory, stage_and_verify_ios_app_bundle,
-    verify_ios_app_bundle,
+    DriverFactoryError, FactoryFuture, RealDriverFactory, SharedStagedBuild,
+    stage_and_verify_ios_app_bundle, verify_ios_app_bundle,
 };
 use deja_cli::output::OutputSink;
 use deja_cli::{CliDeps, EMBEDDED_AGENT_GUIDE_MD, run_cli_from_args};
@@ -528,6 +528,7 @@ fn make_deps(
         driver_factory: factory,
         doctor_probes: probes,
         cancel,
+        cancel_signal: Arc::new(AtomicU8::new(0)),
     };
     (deps, captured)
 }
@@ -2010,6 +2011,7 @@ async fn regression_r1_f1_ios_bundle_validation_rejects_non_app_missing_plist_mi
         screen_size: None,
         timeout_ms: 5_000,
         env: BTreeMap::new(),
+        staged_build: None,
     };
 
     // 1. Plain regular file (`build/App.bin`) rejected with exit 2.
@@ -3096,6 +3098,7 @@ async fn regression_r2_f1_ios_bundle_staging_binds_install_to_fingerprinted_buil
         screen_size: None,
         timeout_ms: 5_000,
         env: BTreeMap::new(),
+        staged_build: None,
     };
     let drift_err = RealDriverFactory
         .install_app(&drift_ctx, &cancel)
@@ -4622,6 +4625,2933 @@ async fn regression_r3_f8_inspect_resolves_path_like_goals_and_explicit_goal_fla
     assert_eq!(j3["walk"]["goal"], "flows/export.json");
 }
 
+// ===========================================================================
+// 3. DEJA-66: Multi-goal batch execution, dynamic `--devices` sharding,
+//    LPT scheduling, merged JUnit, and graceful signal cancellation
+// ===========================================================================
+
+const TEST_UDID_2: &str = "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE";
+
+type AsyncGoalHook = Arc<
+    dyn Fn(
+            String,
+            String,
+            CancellationToken,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+        + Send
+        + Sync,
+>;
+
+#[derive(Clone)]
+struct BatchMockDriver {
+    device: String,
+    caps: DriverCapabilities,
+    executed_log: Arc<Mutex<Vec<(String, String)>>>,
+    shutdown_count: Arc<AtomicUsize>,
+    current_goal: Arc<Mutex<String>>,
+    fail_goals: Arc<Mutex<std::collections::HashSet<String>>>,
+    flaky_goals_seen: Arc<Mutex<std::collections::HashMap<String, usize>>>,
+    on_goal: Option<AsyncGoalHook>,
+}
+
+impl BatchMockDriver {
+    fn new(
+        device: String,
+        executed_log: Arc<Mutex<Vec<(String, String)>>>,
+        shutdown_count: Arc<AtomicUsize>,
+        fail_goals: Arc<Mutex<std::collections::HashSet<String>>>,
+        flaky_goals_seen: Arc<Mutex<std::collections::HashMap<String, usize>>>,
+        on_goal: Option<AsyncGoalHook>,
+    ) -> Self {
+        Self {
+            device,
+            caps: DriverCapabilities::with([
+                DriverCapability::AccessibilityTree,
+                DriverCapability::AppCrashReports,
+            ]),
+            executed_log,
+            shutdown_count,
+            current_goal: Arc::new(Mutex::new(String::new())),
+            fail_goals,
+            flaky_goals_seen,
+            on_goal,
+        }
+    }
+}
+
+impl PlatformDriver for BatchMockDriver {
+    fn platform(&self) -> &'static str {
+        "ios"
+    }
+
+    fn capabilities(&self) -> &DriverCapabilities {
+        &self.caps
+    }
+
+    fn ensure_session<'a>(&'a self, cancel: &'a CancellationToken) -> DriverFuture<'a, ()> {
+        Box::pin(async move {
+            if cancel.is_cancelled() {
+                return Err(DriverError::Cancelled);
+            }
+            Ok(())
+        })
+    }
+
+    fn launch_app<'a>(
+        &'a self,
+        _app_id: &'a str,
+        _opts: &'a LaunchOptions,
+        cancel: &'a CancellationToken,
+    ) -> DriverFuture<'a, ()> {
+        Box::pin(async move {
+            if cancel.is_cancelled() {
+                return Err(DriverError::Cancelled);
+            }
+            Ok(())
+        })
+    }
+
+    fn stop_app<'a>(
+        &'a self,
+        _app_id: &'a str,
+        _cancel: &'a CancellationToken,
+    ) -> DriverFuture<'a, ()> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn kill_app<'a>(
+        &'a self,
+        _app_id: &'a str,
+        _cancel: &'a CancellationToken,
+    ) -> DriverFuture<'a, ()> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn clear_state<'a>(
+        &'a self,
+        _app_id: &'a str,
+        _cancel: &'a CancellationToken,
+    ) -> DriverFuture<'a, ()> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn clear_keychain<'a>(&'a self, _cancel: &'a CancellationToken) -> DriverFuture<'a, ()> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn open_link<'a>(
+        &'a self,
+        _app_id: Option<&'a str>,
+        _url: &'a str,
+        _opts: &'a OpenLinkOptions,
+        _cancel: &'a CancellationToken,
+    ) -> DriverFuture<'a, ()> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn add_media<'a>(
+        &'a self,
+        _paths: &'a [PathBuf],
+        _cancel: &'a CancellationToken,
+    ) -> DriverFuture<'a, ()> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn hierarchy<'a>(
+        &'a self,
+        app_id: &'a str,
+        _include_system_ui: bool,
+        _known_hash: Option<&'a str>,
+        cancel: &'a CancellationToken,
+    ) -> DriverFuture<'a, UiHierarchy> {
+        Box::pin(async move {
+            if cancel.is_cancelled() {
+                return Err(DriverError::Cancelled);
+            }
+            let tag = self.current_goal.lock().unwrap().clone();
+            let should_fail = self.fail_goals.lock().unwrap().contains(&tag) || {
+                let flaky = self.flaky_goals_seen.lock().unwrap();
+                flaky.get(&tag).copied() == Some(1)
+            };
+            let nodes = if should_fail {
+                Vec::new()
+            } else {
+                vec![node_with_label("done", "Done")]
+            };
+            Ok(hierarchy_with_nodes(app_id, nodes))
+        })
+    }
+
+    fn tap_point<'a>(
+        &'a self,
+        _app_id: &'a str,
+        _point: UiPoint,
+        cancel: &'a CancellationToken,
+    ) -> DriverFuture<'a, ()> {
+        Box::pin(async move {
+            if cancel.is_cancelled() {
+                return Err(DriverError::Cancelled);
+            }
+            Ok(())
+        })
+    }
+
+    fn long_press_point<'a>(
+        &'a self,
+        _app_id: &'a str,
+        _point: UiPoint,
+        _duration_ms: Option<u64>,
+        _cancel: &'a CancellationToken,
+    ) -> DriverFuture<'a, ()> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn double_tap_point<'a>(
+        &'a self,
+        _app_id: &'a str,
+        _point: UiPoint,
+        _cancel: &'a CancellationToken,
+    ) -> DriverFuture<'a, ()> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn swipe<'a>(
+        &'a self,
+        _params: &'a SwipeParams,
+        _cancel: &'a CancellationToken,
+    ) -> DriverFuture<'a, ()> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn input_text<'a>(
+        &'a self,
+        _app_id: &'a str,
+        text: &'a str,
+        cancel: &'a CancellationToken,
+    ) -> DriverFuture<'a, ()> {
+        let tag = text.to_string();
+        Box::pin(async move {
+            if cancel.is_cancelled() {
+                return Err(DriverError::Cancelled);
+            }
+            *self.current_goal.lock().unwrap() = tag.clone();
+            {
+                let mut flaky = self.flaky_goals_seen.lock().unwrap();
+                if let Some(count) = flaky.get_mut(&tag) {
+                    *count += 1;
+                }
+            }
+            self.executed_log
+                .lock()
+                .unwrap()
+                .push((self.device.clone(), tag.clone()));
+            if let Some(ref hook) = self.on_goal {
+                hook(self.device.clone(), tag, cancel.clone()).await;
+            }
+            if cancel.is_cancelled() {
+                return Err(DriverError::Cancelled);
+            }
+            Ok(())
+        })
+    }
+
+    fn erase_text<'a>(
+        &'a self,
+        _app_id: &'a str,
+        _count: u32,
+        _cancel: &'a CancellationToken,
+    ) -> DriverFuture<'a, ()> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn press_key<'a>(
+        &'a self,
+        _app_id: &'a str,
+        _key: &'a KeyPress,
+        _cancel: &'a CancellationToken,
+    ) -> DriverFuture<'a, ()> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn hide_keyboard<'a>(
+        &'a self,
+        _app_id: &'a str,
+        _cancel: &'a CancellationToken,
+    ) -> DriverFuture<'a, ()> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn back<'a>(
+        &'a self,
+        _app_id: &'a str,
+        _cancel: &'a CancellationToken,
+    ) -> DriverFuture<'a, ()> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn take_screenshot<'a>(
+        &'a self,
+        _app_id: &'a str,
+        _cancel: &'a CancellationToken,
+    ) -> DriverFuture<'a, Vec<u8>> {
+        Box::pin(async { Ok(b"\x89PNG\r\n\x1a\n".to_vec()) })
+    }
+
+    fn check_app_crash<'a>(
+        &'a self,
+        _app_id: &'a str,
+        _since_epoch_ms: u64,
+        cancel: &'a CancellationToken,
+    ) -> DriverFuture<'a, Option<DriverCrashSignal>> {
+        Box::pin(async move {
+            if cancel.is_cancelled() {
+                return Err(DriverError::Cancelled);
+            }
+            Ok(None)
+        })
+    }
+
+    fn shutdown<'a>(&'a self) -> DriverFuture<'a, ()> {
+        Box::pin(async move {
+            self.shutdown_count.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        })
+    }
+}
+
+struct BatchMockFactory {
+    runtime: Option<String>,
+    resolve_runtime_calls: Arc<AtomicUsize>,
+    prepare_calls: Arc<AtomicUsize>,
+    create_calls_by_device: Arc<Mutex<BTreeMap<String, usize>>>,
+    install_calls: Arc<AtomicUsize>,
+    shutdown_count: Arc<AtomicUsize>,
+    executed_log: Arc<Mutex<Vec<(String, String)>>>,
+    fail_goals: Arc<Mutex<std::collections::HashSet<String>>>,
+    flaky_goals_seen: Arc<Mutex<std::collections::HashMap<String, usize>>>,
+    staged_dirs: Arc<Mutex<Vec<PathBuf>>>,
+    installed_app_paths: Arc<Mutex<Vec<PathBuf>>>,
+    fail_runtime_devices: BTreeMap<String, String>,
+    fail_create_devices: BTreeMap<String, String>,
+    create_delay_by_device: BTreeMap<String, Duration>,
+    stage_real_ios_bundle: bool,
+    on_goal: Option<AsyncGoalHook>,
+}
+
+impl BatchMockFactory {
+    fn new(runtime: Option<&str>) -> Self {
+        Self {
+            runtime: runtime.map(ToString::to_string),
+            resolve_runtime_calls: Arc::new(AtomicUsize::new(0)),
+            prepare_calls: Arc::new(AtomicUsize::new(0)),
+            create_calls_by_device: Arc::new(Mutex::new(BTreeMap::new())),
+            install_calls: Arc::new(AtomicUsize::new(0)),
+            shutdown_count: Arc::new(AtomicUsize::new(0)),
+            executed_log: Arc::new(Mutex::new(Vec::new())),
+            fail_goals: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            flaky_goals_seen: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            staged_dirs: Arc::new(Mutex::new(Vec::new())),
+            installed_app_paths: Arc::new(Mutex::new(Vec::new())),
+            fail_runtime_devices: BTreeMap::new(),
+            fail_create_devices: BTreeMap::new(),
+            create_delay_by_device: BTreeMap::new(),
+            stage_real_ios_bundle: false,
+            on_goal: None,
+        }
+    }
+
+    fn with_on_goal(mut self, hook: AsyncGoalHook) -> Self {
+        self.on_goal = Some(hook);
+        self
+    }
+
+    fn with_real_ios_staging(mut self) -> Self {
+        self.stage_real_ios_bundle = true;
+        self
+    }
+
+    fn add_failing_goal(&self, tag: &str) {
+        self.fail_goals.lock().unwrap().insert(tag.to_string());
+    }
+
+    fn add_flaky_goal(&self, tag: &str) {
+        self.flaky_goals_seen
+            .lock()
+            .unwrap()
+            .insert(tag.to_string(), 0);
+    }
+
+    fn total_create_calls(&self) -> usize {
+        self.create_calls_by_device.lock().unwrap().values().sum()
+    }
+}
+
+impl DriverFactory for BatchMockFactory {
+    fn resolve_runtime<'a>(
+        &'a self,
+        ctx: &'a DriverContext,
+        cancel: &'a CancellationToken,
+    ) -> FactoryFuture<'a, Result<Option<String>, DriverFactoryError>> {
+        Box::pin(async move {
+            if cancel.is_cancelled() {
+                return Err(DriverFactoryError::Cancelled);
+            }
+            self.resolve_runtime_calls.fetch_add(1, Ordering::SeqCst);
+            if let Some(err_msg) = self.fail_runtime_devices.get(&ctx.device) {
+                return Err(DriverFactoryError::Runtime(err_msg.clone()));
+            }
+            Ok(self.runtime.clone())
+        })
+    }
+
+    fn prepare_batch_build<'a>(
+        &'a self,
+        ctx: &'a DriverContext,
+        cancel: &'a CancellationToken,
+    ) -> FactoryFuture<'a, Result<Option<SharedStagedBuild>, DriverFactoryError>> {
+        Box::pin(async move {
+            if cancel.is_cancelled() {
+                return Err(DriverFactoryError::Cancelled);
+            }
+            self.prepare_calls.fetch_add(1, Ordering::SeqCst);
+            if self.stage_real_ios_bundle && ctx.platform == "ios" {
+                let staged = stage_and_verify_ios_app_bundle(
+                    &ctx.build_path,
+                    &ctx.app_id,
+                    ctx.expected_build_fingerprint.as_deref(),
+                )
+                .map_err(DriverFactoryError::UnsupportedOrConfig)?;
+                self.staged_dirs
+                    .lock()
+                    .unwrap()
+                    .push(staged.staging_dir().to_path_buf());
+                return Ok(Some(SharedStagedBuild::new(staged)));
+            }
+            Ok(None)
+        })
+    }
+
+    fn create<'a>(
+        &'a self,
+        ctx: &'a DriverContext,
+        cancel: &'a CancellationToken,
+    ) -> FactoryFuture<'a, Result<Box<dyn PlatformDriver>, DriverFactoryError>> {
+        Box::pin(async move {
+            if cancel.is_cancelled() {
+                return Err(DriverFactoryError::Cancelled);
+            }
+            if let Some(&delay) = self.create_delay_by_device.get(&ctx.device) {
+                tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => return Err(DriverFactoryError::Cancelled),
+                    _ = tokio::time::sleep(delay) => {}
+                }
+            }
+            if let Some(err_msg) = self.fail_create_devices.get(&ctx.device) {
+                return Err(DriverFactoryError::Runtime(err_msg.clone()));
+            }
+            if self.stage_real_ios_bundle {
+                assert!(
+                    ctx.staged_build.is_some(),
+                    "batch worker create() must receive shared staged_build"
+                );
+            }
+            *self
+                .create_calls_by_device
+                .lock()
+                .unwrap()
+                .entry(ctx.device.clone())
+                .or_insert(0) += 1;
+            Ok(Box::new(BatchMockDriver::new(
+                ctx.device.clone(),
+                Arc::clone(&self.executed_log),
+                Arc::clone(&self.shutdown_count),
+                Arc::clone(&self.fail_goals),
+                Arc::clone(&self.flaky_goals_seen),
+                self.on_goal.clone(),
+            )) as Box<dyn PlatformDriver>)
+        })
+    }
+
+    fn install_app<'a>(
+        &'a self,
+        ctx: &'a DriverContext,
+        cancel: &'a CancellationToken,
+    ) -> FactoryFuture<'a, Result<(), DriverFactoryError>> {
+        Box::pin(async move {
+            if cancel.is_cancelled() {
+                return Err(DriverFactoryError::Cancelled);
+            }
+            self.install_calls.fetch_add(1, Ordering::SeqCst);
+            if let Some(ref staged) = ctx.staged_build {
+                assert!(
+                    staged.app_path().exists(),
+                    "shared staged .app must remain alive during install_app"
+                );
+                self.installed_app_paths
+                    .lock()
+                    .unwrap()
+                    .push(staged.app_path().to_path_buf());
+            }
+            Ok(())
+        })
+    }
+}
+
+fn write_tagged_flow(ws: &TempWs, rel: &str, tag: &str) -> PathBuf {
+    ws.write(
+        rel,
+        &format!(
+            "appId: {TEST_APP_ID}\n---\n- launchApp\n- inputText: {tag:?}\n- tapOn:\n    id: done\n- assertVisible: Done\n"
+        ),
+    )
+}
+
+fn seed_manifest_walk(
+    ws: &TempWs,
+    entries: &[(&str, &str, &str, &str, &str)], // (goal, app_id, platform, adapter, flow_rel)
+) {
+    let mut walks = Vec::new();
+    for &(goal, app_id, platform, adapter, flow_rel) in entries {
+        let abs = ws.path.join(flow_rel);
+        let closure = collect_flow_closure(&ws.path, &abs).unwrap();
+        let assert_sha = assertions_sha256(&closure).unwrap();
+        let mut obj = json!({
+            "goal": goal,
+            "appId": app_id,
+            "platform": platform,
+            "adapter": adapter,
+            "flow": flow_rel,
+            "closureSha256": closure.sha256,
+            "assertionsSha256": assert_sha,
+        });
+        if platform == "web" {
+            obj["browser"] = json!("chromium");
+        }
+        walks.push(obj);
+    }
+    let manifest = json!({
+        "manifestVersion": 1,
+        "hashVersion": 1,
+        "walks": walks,
+    });
+    ws.write(
+        "deja.walks.json",
+        &serde_json::to_string_pretty(&manifest).unwrap(),
+    );
+}
+
+#[tokio::test]
+async fn batch_cli_goals_formats_all_filtering_and_validation_rejections() {
+    let ws = TempWs::new("deja66-validation");
+    ws.write_build("build/App.bin", b"build-v1");
+    ws.write(
+        "deja.config.json",
+        &json!({
+            "workspaceRoot": ".",
+            "platform": "ios",
+            "appId": TEST_APP_ID,
+            "adapter": "maestro-ios/v1",
+            "buildPath": "build/App.bin",
+            "device": TEST_UDID,
+            "manifest": "deja.walks.json",
+            "staleBuild": "replay-last-verified"
+        })
+        .to_string(),
+    );
+
+    write_tagged_flow(&ws, "flows/g1.yaml", "g1");
+    write_tagged_flow(&ws, "flows/g2.yaml", "g2");
+    ws.write(
+        "flows/android_only.yaml",
+        "appId: dev.deja.android.app\n---\n- launchApp\n- assertVisible: Android\n",
+    );
+    seed_manifest_walk(
+        &ws,
+        &[
+            (
+                "goal one",
+                TEST_APP_ID,
+                "ios",
+                "maestro-ios/v1",
+                "flows/g1.yaml",
+            ),
+            (
+                "goal two",
+                TEST_APP_ID,
+                "ios",
+                "maestro-ios/v1",
+                "flows/g2.yaml",
+            ),
+            (
+                "android only",
+                "dev.deja.android.app",
+                "android",
+                "maestro-android/v1",
+                "flows/android_only.yaml",
+            ),
+        ],
+    );
+
+    let goals_txt = ws.write("goals.txt", "# comment\n\ngoal one\ngoal two\n");
+    let goals_txt_before = fs::read_to_string(&goals_txt).unwrap();
+    ws.write("goals.json", r#"["goal one", "goal two"]"#);
+    ws.write("dup_goals.txt", "Goal One\n  goal   one  \n");
+
+    let factory = Arc::new(BatchMockFactory::new(Some("ios-27.2")));
+    let run_with_args = |argv: Vec<&str>, env_extra: Vec<(&str, &str)>| {
+        let ws_path = ws.path.clone();
+        let f = Arc::clone(&factory);
+        let argv_owned: Vec<String> = argv.into_iter().map(ToString::to_string).collect();
+        let env_owned: Vec<(String, String)> = env_extra
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        async move {
+            let (mut deps, cap) =
+                make_deps(&ws_path, f, default_probes(), CancellationToken::new());
+            for (k, v) in env_owned {
+                deps.env.insert(k, v);
+            }
+            let code = run_cli_from_args(argv_owned, &deps).await;
+            let out = cap.lock().unwrap().clone();
+            (code, out)
+        }
+    };
+
+    // 1. All invalid flag combinations fail closed exit 2 with ZERO driver attach.
+    let bad_cases: Vec<Vec<&str>> = vec![
+        vec!["deja", "run"],
+        vec!["deja", "run", "goal one", "--goals", "goals.txt"],
+        vec!["deja", "run", "goal one", "--all"],
+        vec!["deja", "run", "--goals", "goals.txt", "--all"],
+        vec!["deja", "run", "goal one", "--devices", TEST_UDID],
+        vec![
+            "deja",
+            "run",
+            "--goals",
+            "goals.txt",
+            "--device",
+            TEST_UDID,
+            "--devices",
+            TEST_UDID,
+        ],
+        vec![
+            "deja",
+            "run",
+            "--goals",
+            "goals.txt",
+            "--store",
+            "s1",
+            "--devices",
+            TEST_UDID,
+        ],
+        vec!["deja", "run", "--goals", "goals.txt", "--devices", ""],
+        vec![
+            "deja",
+            "run",
+            "--goals",
+            "goals.txt",
+            "--devices",
+            "11111111-2222-3333-4444-555555555555,,AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE",
+        ],
+        vec![
+            "deja",
+            "run",
+            "--goals",
+            "goals.txt",
+            "--devices",
+            "11111111-2222-3333-4444-555555555555,not-a-udid",
+        ],
+        vec!["deja", "run", "--goals", "dup_goals.txt"],
+        vec![
+            "deja",
+            "run",
+            "--goals",
+            "goals.txt",
+            "--report",
+            "goals.txt",
+        ],
+        vec![
+            "deja",
+            "run",
+            "--goals",
+            "goals.txt",
+            "--junit",
+            "goals.txt",
+        ],
+    ];
+    for case in bad_cases {
+        let (code, out) = run_with_args(case.clone(), vec![]).await;
+        assert_eq!(
+            code, 2,
+            "expected exit 2 for {case:?}, got {code} (stdout={}, stderr={})",
+            out.stdout, out.stderr
+        );
+    }
+    assert_eq!(
+        factory.total_create_calls(),
+        0,
+        "invalid invocations must never attach a driver"
+    );
+    assert_eq!(
+        fs::read_to_string(&goals_txt).unwrap(),
+        goals_txt_before,
+        "--report/--junit targeting goals.txt must not touch disk"
+    );
+
+    // Also reject bidi char in `--devices`.
+    let bidi_dev = format!("{TEST_UDID}\u{202E}");
+    let (code_bidi, _) = run_with_args(
+        vec![
+            "deja",
+            "run",
+            "--goals",
+            "goals.txt",
+            "--devices",
+            &bidi_dev,
+        ],
+        vec![],
+    )
+    .await;
+    assert_eq!(code_bidi, 2);
+
+    // Reject `--all` when `manifest` is absent from config.
+    ws.write(
+        "no_manifest.config.json",
+        &json!({
+            "workspaceRoot": ".",
+            "platform": "ios",
+            "appId": TEST_APP_ID,
+            "buildPath": "build/App.bin",
+            "device": TEST_UDID
+        })
+        .to_string(),
+    );
+    let (code_no_man, _) = run_with_args(
+        vec![
+            "deja",
+            "--config",
+            "no_manifest.config.json",
+            "run",
+            "--all",
+        ],
+        vec![],
+    )
+    .await;
+    assert_eq!(code_no_man, 2);
+
+    // Reject `--all` when manifest has zero entries matching config.
+    ws.write(
+        "other_app.config.json",
+        &json!({
+            "workspaceRoot": ".",
+            "platform": "ios",
+            "appId": "dev.deja.other.app",
+            "adapter": "maestro-ios/v1",
+            "buildPath": "build/App.bin",
+            "device": TEST_UDID,
+            "manifest": "deja.walks.json"
+        })
+        .to_string(),
+    );
+    let (code_empty_all, _) = run_with_args(
+        vec!["deja", "--config", "other_app.config.json", "run", "--all"],
+        vec![],
+    )
+    .await;
+    assert_eq!(code_empty_all, 2);
+
+    // 2. `--goals` supports plain text, JSON array, and `deja.walks.json` (plus `--all` filters
+    // out the Android entry!), and `--devices` overrides invalid/empty `DEJA_DEVICE`!
+    for (mode_name, argv) in [
+        (
+            "text",
+            vec!["deja", "run", "--goals", "goals.txt", "--json"],
+        ),
+        (
+            "json",
+            vec!["deja", "run", "--goals", "goals.json", "--json"],
+        ),
+        ("all", vec!["deja", "run", "--all", "--json"]),
+    ] {
+        let (code, out) = run_with_args(argv, vec![]).await;
+        assert_eq!(code, 0, "batch {mode_name} failed: {}", out.stderr);
+        let parsed: Value = serde_json::from_str(&out.stdout).unwrap();
+        assert_eq!(parsed["mode"], "batch");
+        assert_eq!(parsed["passed"], true);
+        let goals = parsed["goals"].as_array().unwrap();
+        assert_eq!(goals.len(), 2, "expected 2 iOS goals for {mode_name}");
+        assert_eq!(goals[0]["goal"], "goal one");
+        assert_eq!(goals[1]["goal"], "goal two");
+    }
+
+    // Also test `--goals` directly reading a manifest JSON file (single-platform manifest).
+    seed_manifest_walk(
+        &ws,
+        &[
+            (
+                "goal one",
+                TEST_APP_ID,
+                "ios",
+                "maestro-ios/v1",
+                "flows/g1.yaml",
+            ),
+            (
+                "goal two",
+                TEST_APP_ID,
+                "ios",
+                "maestro-ios/v1",
+                "flows/g2.yaml",
+            ),
+        ],
+    );
+    let devices_arg = format!("{},{}", TEST_UDID.to_lowercase(), TEST_UDID_2);
+    let (code_man, out_man) = run_with_args(
+        vec![
+            "deja",
+            "run",
+            "--goals",
+            "deja.walks.json",
+            "--devices",
+            &devices_arg,
+            "--json",
+        ],
+        vec![("DEJA_DEVICE", "   ")], // overridden by `--devices`!
+    )
+    .await;
+    assert_eq!(code_man, 0, "stderr: {}", out_man.stderr);
+    let parsed_man: Value = serde_json::from_str(&out_man.stdout).unwrap();
+    assert_eq!(parsed_man["devices"], json!([TEST_UDID, TEST_UDID_2]));
+}
+
+#[tokio::test]
+async fn batch_dynamic_devices_sharding_non_stalling_and_persistent_driver_reuse() {
+    let ws = TempWs::new("deja66-dynamic-sharding");
+    ws.write_build("build/App.bin", b"build-v1");
+    ws.write(
+        "deja.config.json",
+        &json!({
+            "workspaceRoot": ".",
+            "platform": "ios",
+            "appId": TEST_APP_ID,
+            "adapter": "maestro-ios/v1",
+            "buildPath": "build/App.bin",
+            "manifest": "deja.walks.json",
+            "staleBuild": "replay-last-verified"
+        })
+        .to_string(),
+    );
+
+    for tag in ["g1", "g2", "g3", "g4"] {
+        write_tagged_flow(&ws, &format!("flows/{tag}.yaml"), tag);
+    }
+    seed_manifest_walk(
+        &ws,
+        &[
+            ("g1", TEST_APP_ID, "ios", "maestro-ios/v1", "flows/g1.yaml"),
+            ("g2", TEST_APP_ID, "ios", "maestro-ios/v1", "flows/g2.yaml"),
+            ("g3", TEST_APP_ID, "ios", "maestro-ios/v1", "flows/g3.yaml"),
+            ("g4", TEST_APP_ID, "ios", "maestro-ios/v1", "flows/g4.yaml"),
+        ],
+    );
+
+    // Deterministic non-stalling proof via `Arc<tokio::sync::Notify>` (ZERO sleep flakiness!):
+    // Whichever shard pulls `g1` blocks on `release_g1`; the OTHER shard must dynamically pull
+    // and execute ALL 3 remaining goals (`g2`, `g3`, `g4`) before releasing `g1`.
+    let release_g1 = Arc::new(tokio::sync::Notify::new());
+    let fast_done = Arc::new(AtomicUsize::new(0));
+    let release_clone = Arc::clone(&release_g1);
+    let fast_done_clone = Arc::clone(&fast_done);
+
+    let hook: AsyncGoalHook = Arc::new(move |_device, tag, _cancel| {
+        let release = Arc::clone(&release_clone);
+        let done = Arc::clone(&fast_done_clone);
+        Box::pin(async move {
+            if tag == "g1" {
+                release.notified().await;
+            } else if done.fetch_add(1, Ordering::SeqCst) + 1 == 3 {
+                release.notify_one();
+            }
+        })
+    });
+
+    let factory = Arc::new(BatchMockFactory::new(Some("ios-27.2")).with_on_goal(hook));
+    let (deps, cap) = make_deps(
+        &ws.path,
+        Arc::clone(&factory) as Arc<dyn DriverFactory>,
+        default_probes(),
+        CancellationToken::new(),
+    );
+    let devices_arg = format!("{TEST_UDID},{TEST_UDID_2}");
+    let code = tokio::time::timeout(
+        Duration::from_secs(10),
+        run_cli_from_args(
+            ["deja", "run", "--all", "--devices", &devices_arg, "--json"],
+            &deps,
+        ),
+    )
+    .await
+    .expect("dynamic sharding must not deadlock/stall on slow worker");
+    assert_eq!(code, 0, "stderr: {}", cap.lock().unwrap().stderr);
+
+    let parsed: Value = serde_json::from_str(&cap.lock().unwrap().stdout).unwrap();
+    assert_eq!(parsed["passed"], true);
+    let shards = parsed["shards"].as_array().unwrap();
+    let mut counts: Vec<u64> = shards
+        .iter()
+        .map(|s| s["goalsExecuted"].as_u64().unwrap())
+        .collect();
+    counts.sort_unstable();
+    assert_eq!(
+        counts,
+        vec![1, 3],
+        "expected dynamic 1/3 split across 2 devices, got {counts:?}"
+    );
+
+    // Persistent single attach per shard across 4 goals (`attach_count == 1` per worker!).
+    let creates = factory.create_calls_by_device.lock().unwrap().clone();
+    assert_eq!(creates.get(TEST_UDID), Some(&1));
+    assert_eq!(creates.get(TEST_UDID_2), Some(&1));
+    assert_eq!(factory.shutdown_count.load(Ordering::SeqCst), 2);
+    assert_eq!(factory.resolve_runtime_calls.load(Ordering::SeqCst), 2);
+
+    // Refused-only batch must NEVER attach a driver or stage the build (`attach_count == 0`).
+    ws.write(
+        "unknown_goals.txt",
+        "unremembered alpha\nunremembered beta\n",
+    );
+    let refuse_factory = Arc::new(BatchMockFactory::new(Some("ios-27.2")));
+    let (deps_refuse, _) = make_deps(
+        &ws.path,
+        Arc::clone(&refuse_factory) as Arc<dyn DriverFactory>,
+        default_probes(),
+        CancellationToken::new(),
+    );
+    let refuse_code = run_cli_from_args(
+        [
+            "deja",
+            "run",
+            "--goals",
+            "unknown_goals.txt",
+            "--devices",
+            &devices_arg,
+            "--json",
+        ],
+        &deps_refuse,
+    )
+    .await;
+    assert_ne!(refuse_code, 0);
+    assert_eq!(
+        refuse_factory.total_create_calls(),
+        0,
+        "all-refused batch must have attach_count == 0"
+    );
+    assert_eq!(
+        refuse_factory.prepare_calls.load(Ordering::SeqCst),
+        0,
+        "all-refused batch must never stage the build"
+    );
+}
+
+#[tokio::test]
+async fn batch_lpt_scheduling_order_single_fingerprint_and_single_app_staging() {
+    let ws = TempWs::new("deja66-lpt-stage");
+    // Build a real iOS `.app` bundle directory so staging & tree fingerprinting exercise real code.
+    let app_dir = ws.path.join("build/Demo.app");
+    fs::create_dir_all(&app_dir).unwrap();
+    ws.write(
+        "build/Demo.app/Info.plist",
+        &format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict><key>CFBundleIdentifier</key><string>{TEST_APP_ID}</string></dict></plist>\n"
+        ),
+    );
+    ws.write_build("build/Demo.app/Demo", b"ios-macho-binary-v1");
+    let expected_fp = fingerprint_tree(&ws.path, &app_dir, "ios").unwrap();
+
+    ws.write(
+        "deja.config.json",
+        &json!({
+            "workspaceRoot": ".",
+            "platform": "ios",
+            "appId": TEST_APP_ID,
+            "adapter": "maestro-ios/v1",
+            "buildPath": "build/Demo.app",
+            "device": TEST_UDID,
+            "manifest": "deja.walks.json",
+            "staleBuild": "replay-last-verified"
+        })
+        .to_string(),
+    );
+
+    for tag in ["fast", "unseen", "slow", "medium"] {
+        write_tagged_flow(&ws, &format!("flows/{tag}.yaml"), tag);
+    }
+    seed_manifest_walk(
+        &ws,
+        &[
+            (
+                "fast",
+                TEST_APP_ID,
+                "ios",
+                "maestro-ios/v1",
+                "flows/fast.yaml",
+            ),
+            (
+                "unseen",
+                TEST_APP_ID,
+                "ios",
+                "maestro-ios/v1",
+                "flows/unseen.yaml",
+            ),
+            (
+                "slow",
+                TEST_APP_ID,
+                "ios",
+                "maestro-ios/v1",
+                "flows/slow.yaml",
+            ),
+            (
+                "medium",
+                TEST_APP_ID,
+                "ios",
+                "maestro-ios/v1",
+                "flows/medium.yaml",
+            ),
+        ],
+    );
+
+    // Seed historical durations in default store: slow=5000ms, medium=500ms, fast=100ms, unseen=none.
+    let store = SqliteWalkStore::open_writable(SqliteStoreOptions::new(&ws.path)).unwrap();
+    for (goal_name, flow_rel, dur_ms) in [
+        ("fast", "flows/fast.yaml", 100u64),
+        ("medium", "flows/medium.yaml", 500u64),
+        ("slow", "flows/slow.yaml", 5000u64),
+    ] {
+        let abs = ws.path.join(flow_rel);
+        let cl = collect_flow_closure(&ws.path, &abs).unwrap();
+        let main_sha = cl
+            .files
+            .iter()
+            .find(|f| f.path == cl.main)
+            .unwrap()
+            .sha256
+            .clone();
+        store
+            .upsert_walk(&deja_store::UpsertWalkInput {
+                identity: WalkIdentity {
+                    goal: goal_name.to_string(),
+                    app_id: TEST_APP_ID.to_string(),
+                    platform: "ios".to_string(),
+                    flow_schema_version: DEFAULT_FLOW_SCHEMA_VERSION.to_string(),
+                    build_fingerprint: expected_fp.clone(),
+                    adapter: Some("maestro-ios/v1".to_string()),
+                    browser: None,
+                },
+                flow_path: flow_rel.to_string(),
+                flow_sha256: main_sha,
+                subflow_files: None,
+                legacy_closure: false,
+                closure_sha256: Some(cl.sha256),
+                validation: RecordValidationInput::new(true, now_iso8601())
+                    .with_runtime("ios-27.2")
+                    .with_duration_ms(dur_ms),
+                exploration: None,
+                repair_history: None,
+            })
+            .unwrap();
+    }
+    store.close();
+
+    // 1. Single-shard LPT scheduling proof: input order is [fast, unseen, slow, medium],
+    // scheduledOrder & actual execution order MUST be [slow, medium, fast, unseen],
+    // while JSON `goals` and `--summary` lines remain in original input order!
+    ws.write("lpt_goals.txt", "fast\nunseen\nslow\nmedium\n");
+    let lpt_factory = Arc::new(BatchMockFactory::new(Some("ios-27.2")));
+    let (deps_lpt, cap_lpt) = make_deps(
+        &ws.path,
+        Arc::clone(&lpt_factory) as Arc<dyn DriverFactory>,
+        default_probes(),
+        CancellationToken::new(),
+    );
+    let code_lpt = run_cli_from_args(
+        [
+            "deja",
+            "run",
+            "--goals",
+            "lpt_goals.txt",
+            "--json",
+            "--summary",
+        ],
+        &deps_lpt,
+    )
+    .await;
+    assert_eq!(code_lpt, 0, "stderr: {}", cap_lpt.lock().unwrap().stderr);
+    let out_lpt = cap_lpt.lock().unwrap().clone();
+    let parsed_lpt: Value = serde_json::from_str(&out_lpt.stdout).unwrap();
+    assert_eq!(
+        parsed_lpt["scheduledOrder"],
+        json!(["slow", "medium", "fast", "unseen"])
+    );
+    let exec_order: Vec<String> = lpt_factory
+        .executed_log
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(_, tag)| tag.clone())
+        .collect();
+    assert_eq!(exec_order, vec!["slow", "medium", "fast", "unseen"]);
+
+    let out_goals: Vec<&str> = parsed_lpt["goals"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|g| g["goal"].as_str().unwrap())
+        .collect();
+    assert_eq!(out_goals, vec!["fast", "unseen", "slow", "medium"]);
+
+    // In `--json --summary` mode, summary lines are emitted to stderr in deterministic input order.
+    let summary_lines: Vec<&str> = out_lpt
+        .stderr
+        .lines()
+        .filter(|l| l.starts_with("deja-summary v=1 "))
+        .collect();
+    assert_eq!(summary_lines.len(), 4);
+    assert!(summary_lines[0].ends_with(" goal=fast"));
+    assert!(summary_lines[1].ends_with(" goal=unseen"));
+    assert!(summary_lines[2].ends_with(" goal=slow"));
+    assert!(summary_lines[3].ends_with(" goal=medium"));
+
+    // 2. Single `.app` staging + single build-fingerprint broadcast across `--devices`, with
+    // verified RAII temp staging directory cleanup after batch returns!
+    let stage_factory = Arc::new(BatchMockFactory::new(Some("ios-27.2")).with_real_ios_staging());
+    let (deps_stage, cap_stage) = make_deps(
+        &ws.path,
+        Arc::clone(&stage_factory) as Arc<dyn DriverFactory>,
+        default_probes(),
+        CancellationToken::new(),
+    );
+    let devices_arg = format!("{TEST_UDID},{TEST_UDID_2}");
+    let code_stage = run_cli_from_args(
+        [
+            "deja",
+            "run",
+            "--goals",
+            "lpt_goals.txt",
+            "--devices",
+            &devices_arg,
+            "--json",
+        ],
+        &deps_stage,
+    )
+    .await;
+    assert_eq!(
+        code_stage,
+        0,
+        "stderr: {}",
+        cap_stage.lock().unwrap().stderr
+    );
+    let parsed_stage: Value = serde_json::from_str(&cap_stage.lock().unwrap().stdout).unwrap();
+    assert_eq!(parsed_stage["buildFingerprint"], expected_fp);
+    assert_eq!(
+        stage_factory.prepare_calls.load(Ordering::SeqCst),
+        1,
+        "iOS `.app` bundle must be staged ONCE across all shards"
+    );
+    let installed_paths = stage_factory.installed_app_paths.lock().unwrap().clone();
+    assert!(
+        !installed_paths.is_empty(),
+        "at least one shard installed the staged bundle"
+    );
+    assert!(
+        installed_paths.iter().all(|p| p == &installed_paths[0]),
+        "every shard must reuse the exact same staged `.app` path"
+    );
+    let staged_dirs = stage_factory.staged_dirs.lock().unwrap().clone();
+    assert_eq!(staged_dirs.len(), 1);
+    assert!(
+        !staged_dirs[0].exists(),
+        "temporary `.app` staging directory must be cleaned up after batch returns: {}",
+        staged_dirs[0].display()
+    );
+}
+
+#[tokio::test]
+async fn batch_partial_failure_exit_priority_gate_interop_and_mixed_case_secret_redaction() {
+    let ws = TempWs::new("deja66-partial-gate-redact");
+    ws.write_build("build/App.bin", b"build-v1");
+    let mixed_secret = "MixedCaseSecret99";
+    let lower_secret = mixed_secret.to_lowercase();
+    let api_key = ["sk", "-1234567890abcdefghijklmnop"].concat();
+
+    ws.write(
+        "deja.config.json",
+        &json!({
+            "workspaceRoot": ".",
+            "platform": "ios",
+            "appId": TEST_APP_ID,
+            "adapter": "maestro-ios/v1",
+            "buildPath": "build/App.bin",
+            "device": TEST_UDID,
+            "manifest": "deja.walks.json",
+            "staleBuild": "replay-last-verified",
+            "fixtureCredentials": [
+                { "label": "password", "value": mixed_secret }
+            ]
+        })
+        .to_string(),
+    );
+
+    let secret_goal = format!("Checkout {mixed_secret} {api_key}");
+    write_tagged_flow(&ws, "flows/ok1.yaml", "ok1");
+    write_tagged_flow(&ws, "flows/ok2.yaml", "ok2");
+    write_tagged_flow(&ws, "flows/flaky.yaml", "flaky");
+    write_tagged_flow(&ws, "flows/fail.yaml", "fail");
+    seed_manifest_walk(
+        &ws,
+        &[
+            (
+                &secret_goal,
+                TEST_APP_ID,
+                "ios",
+                "maestro-ios/v1",
+                "flows/ok1.yaml",
+            ),
+            (
+                "ok two",
+                TEST_APP_ID,
+                "ios",
+                "maestro-ios/v1",
+                "flows/ok2.yaml",
+            ),
+            (
+                "flaky goal",
+                TEST_APP_ID,
+                "ios",
+                "maestro-ios/v1",
+                "flows/flaky.yaml",
+            ),
+            (
+                "fail goal",
+                TEST_APP_ID,
+                "ios",
+                "maestro-ios/v1",
+                "flows/fail.yaml",
+            ),
+        ],
+    );
+
+    // 1. Passing multi-device batch + `deja gate --store <UDID1> --store <UDID2>` interop +
+    // mixed-case secret & provider-key redaction across JSON, --report, --summary, and --junit!
+    ws.write("pass_goals.txt", &format!("{secret_goal}\nok two\n"));
+    let devices_arg = format!("{TEST_UDID},{TEST_UDID_2}");
+    let pass_factory = Arc::new(BatchMockFactory::new(Some("ios-27.2")));
+    let (mut deps_pass, cap_pass) = make_deps(
+        &ws.path,
+        Arc::clone(&pass_factory) as Arc<dyn DriverFactory>,
+        default_probes(),
+        CancellationToken::new(),
+    );
+    deps_pass
+        .env
+        .insert("OPENAI_API_KEY".to_string(), api_key.clone());
+
+    let code_pass = run_cli_from_args(
+        [
+            "deja",
+            "run",
+            "--goals",
+            "pass_goals.txt",
+            "--devices",
+            &devices_arg,
+            "--report",
+            "out/batch.json",
+            "--junit",
+            "out/batch.xml",
+            "--json",
+            "--summary",
+        ],
+        &deps_pass,
+    )
+    .await;
+    assert_eq!(code_pass, 0, "stderr: {}", cap_pass.lock().unwrap().stderr);
+
+    let pass_out = cap_pass.lock().unwrap().clone();
+    let batch_report_disk = fs::read_to_string(ws.path.join("out/batch.json")).unwrap();
+    let batch_latest_disk =
+        fs::read_to_string(ws.path.join(".deja/reports/batch-latest.json")).unwrap();
+    let batch_junit_disk = fs::read_to_string(ws.path.join("out/batch.xml")).unwrap();
+    for (label, text) in [
+        ("stdout", &pass_out.stdout),
+        ("stderr", &pass_out.stderr),
+        ("out/batch.json", &batch_report_disk),
+        ("batch-latest.json", &batch_latest_disk),
+        ("out/batch.xml", &batch_junit_disk),
+    ] {
+        assert!(
+            !text.contains(mixed_secret),
+            "mixed-case secret leaked in {label}: {text}"
+        );
+        assert!(
+            !text.contains(&lower_secret),
+            "lowercased secret leaked in {label}: {text}"
+        );
+        assert!(
+            !text.contains(&api_key),
+            "provider API key leaked in {label}: {text}"
+        );
+    }
+    let parsed_pass: Value = serde_json::from_str(&pass_out.stdout).unwrap();
+    assert!(
+        parsed_pass["goals"][0]["goalKey"]
+            .as_str()
+            .unwrap()
+            .contains("<redacted-fixture-value>")
+    );
+
+    // Run `deja gate --goals pass_goals.txt --store <UDID1> --store <UDID2> --json` -> exit 0!
+    let (deps_gate, cap_gate) = make_deps(
+        &ws.path,
+        Arc::clone(&pass_factory) as Arc<dyn DriverFactory>,
+        default_probes(),
+        CancellationToken::new(),
+    );
+    let gate_code = run_cli_from_args(
+        [
+            "deja",
+            "gate",
+            "--goals",
+            "pass_goals.txt",
+            "--store",
+            TEST_UDID,
+            "--store",
+            TEST_UDID_2,
+            "--json",
+        ],
+        &deps_gate,
+    )
+    .await;
+    assert_eq!(
+        gate_code,
+        0,
+        "gate stderr: {}",
+        cap_gate.lock().unwrap().stderr
+    );
+    let gate_json: Value = serde_json::from_str(&cap_gate.lock().unwrap().stdout).unwrap();
+    assert_eq!(gate_json["verdict"], "passed");
+
+    // 2. Partial failure continues remaining goals + exit code priority:
+    //    a) flaky + pass -> exit 7 (`EXIT_FLAKY`)
+    ws.write("flaky_batch.txt", "ok two\nflaky goal\n");
+    let flaky_factory = Arc::new(BatchMockFactory::new(Some("ios-27.2")));
+    flaky_factory.add_flaky_goal("flaky");
+    let (deps_flaky, _cap_flaky) = make_deps(
+        &ws.path,
+        Arc::clone(&flaky_factory) as Arc<dyn DriverFactory>,
+        default_probes(),
+        CancellationToken::new(),
+    );
+    let code_flaky = run_cli_from_args(
+        [
+            "deja",
+            "run",
+            "--goals",
+            "flaky_batch.txt",
+            "--devices",
+            &devices_arg,
+            "--rerun-failed",
+            "--junit",
+            "out/flaky.xml",
+            "--json",
+        ],
+        &deps_flaky,
+    )
+    .await;
+    assert_eq!(code_flaky, 7, "flaky-only batch must exit 7");
+    let flaky_xml = fs::read_to_string(ws.path.join("out/flaky.xml")).unwrap();
+    assert!(deja_flow::reports_failure(&flaky_xml));
+    assert!(flaky_xml.contains("outcome: flaky"));
+    assert!(flaky_xml.contains("attempt 1: failed"));
+    assert!(flaky_xml.contains("attempt 2: passed"));
+
+    // `deja gate` on flaky_batch.txt MUST close (exit 10) because `flaky goal` was flaky!
+    let (deps_gate2, _) = make_deps(
+        &ws.path,
+        Arc::clone(&flaky_factory) as Arc<dyn DriverFactory>,
+        default_probes(),
+        CancellationToken::new(),
+    );
+    let gate_code2 = run_cli_from_args(
+        [
+            "deja",
+            "gate",
+            "--goals",
+            "flaky_batch.txt",
+            "--store",
+            TEST_UDID,
+            "--store",
+            TEST_UDID_2,
+            "--json",
+        ],
+        &deps_gate2,
+    )
+    .await;
+    assert_eq!(
+        gate_code2, 10,
+        "gate must close when any shard recorded flaky"
+    );
+
+    //    b) fail + pass + flaky -> fail continues remaining goals, exit 1 beats exit 7!
+    ws.write("mixed_batch.txt", "fail goal\nok two\nflaky goal\n");
+    let mixed_factory = Arc::new(BatchMockFactory::new(Some("ios-27.2")));
+    mixed_factory.add_failing_goal("fail");
+    mixed_factory.add_flaky_goal("flaky");
+    let (deps_mixed, cap_mixed) = make_deps(
+        &ws.path,
+        Arc::clone(&mixed_factory) as Arc<dyn DriverFactory>,
+        default_probes(),
+        CancellationToken::new(),
+    );
+    let code_mixed = run_cli_from_args(
+        [
+            "deja",
+            "run",
+            "--goals",
+            "mixed_batch.txt",
+            "--devices",
+            &devices_arg,
+            "--rerun-failed",
+            "--json",
+        ],
+        &deps_mixed,
+    )
+    .await;
+    assert_eq!(code_mixed, 1, "failure (1) must outrank flaky (7)");
+    let parsed_mixed: Value = serde_json::from_str(&cap_mixed.lock().unwrap().stdout).unwrap();
+    assert_eq!(parsed_mixed["counts"]["passed"], 1);
+    assert_eq!(parsed_mixed["counts"]["failed"], 1);
+    assert_eq!(parsed_mixed["counts"]["flaky"], 1);
+    assert_eq!(
+        parsed_mixed["goals"][1]["outcome"], "passed",
+        "partial failure must still execute remaining goals"
+    );
+}
+
+#[tokio::test]
+async fn batch_in_process_cancellation_teardown_locks_sqlite_and_junit() {
+    let ws = TempWs::new("deja66-cancel-inproc");
+    ws.write_build("build/App.bin", b"build-v1");
+    ws.write(
+        "deja.config.json",
+        &json!({
+            "workspaceRoot": ".",
+            "platform": "ios",
+            "appId": TEST_APP_ID,
+            "adapter": "maestro-ios/v1",
+            "buildPath": "build/App.bin",
+            "device": TEST_UDID,
+            "manifest": "deja.walks.json",
+            "staleBuild": "replay-last-verified"
+        })
+        .to_string(),
+    );
+
+    for tag in ["g1", "g2", "g3"] {
+        write_tagged_flow(&ws, &format!("flows/{tag}.yaml"), tag);
+    }
+    seed_manifest_walk(
+        &ws,
+        &[
+            ("g1", TEST_APP_ID, "ios", "maestro-ios/v1", "flows/g1.yaml"),
+            ("g2", TEST_APP_ID, "ios", "maestro-ios/v1", "flows/g2.yaml"),
+            ("g3", TEST_APP_ID, "ios", "maestro-ios/v1", "flows/g3.yaml"),
+        ],
+    );
+    ws.write("goals.txt", "g1\ng2\ng3\n");
+
+    let cancel = CancellationToken::new();
+    let cancel_for_hook = cancel.clone();
+    let hook: AsyncGoalHook = Arc::new(move |_device, tag, _token| {
+        let cancel_trigger = cancel_for_hook.clone();
+        Box::pin(async move {
+            if tag == "g2" {
+                cancel_trigger.cancel();
+            }
+        })
+    });
+
+    let factory = Arc::new(BatchMockFactory::new(Some("ios-27.2")).with_on_goal(hook));
+    let (deps, cap) = make_deps(
+        &ws.path,
+        Arc::clone(&factory) as Arc<dyn DriverFactory>,
+        default_probes(),
+        cancel,
+    );
+    let code = run_cli_from_args(
+        [
+            "deja",
+            "run",
+            "--goals",
+            "goals.txt",
+            "--junit",
+            "out/cancelled.xml",
+            "--json",
+            "--summary",
+        ],
+        &deps,
+    )
+    .await;
+    assert_eq!(code, 1, "token-cancel must exit 1");
+
+    // Driver shutdown MUST run cleanly and zero `.lock` files may remain.
+    assert_eq!(factory.shutdown_count.load(Ordering::SeqCst), 1);
+    assert!(
+        !ws.path.join(".deja/memory/walks.sqlite.lock").exists(),
+        "stale SQLite writer lock must not remain after cancellation"
+    );
+
+    let out = cap.lock().unwrap().clone();
+    let parsed: Value = serde_json::from_str(&out.stdout).unwrap();
+    assert_eq!(parsed["cancelled"], true);
+    assert_eq!(parsed["outcome"], "cancelled");
+    assert_eq!(parsed["goals"][0]["outcome"], "passed");
+    assert_eq!(parsed["goals"][1]["outcome"], "cancelled");
+    assert_eq!(parsed["goals"][2]["outcome"], "skipped");
+
+    // Verify SQLite: `g1` WAS persisted, `g2` (cancelled mid-flight) was NOT persisted!
+    let fp = fingerprint_file(&ws.path, &ws.path.join("build/App.bin")).unwrap();
+    let ro = SqliteWalkStore::open_readonly(SqliteStoreOptions::new(&ws.path)).unwrap();
+    let g1_runs = ro
+        .list_validation_runs(&WalkIdentity {
+            goal: "g1".to_string(),
+            app_id: TEST_APP_ID.to_string(),
+            platform: "ios".to_string(),
+            flow_schema_version: DEFAULT_FLOW_SCHEMA_VERSION.to_string(),
+            build_fingerprint: fp.clone(),
+            adapter: Some("maestro-ios/v1".to_string()),
+            browser: None,
+        })
+        .unwrap();
+    assert_eq!(g1_runs.len(), 1, "completed g1 must be persisted in SQLite");
+    let g2_runs = ro
+        .list_validation_runs(&WalkIdentity {
+            goal: "g2".to_string(),
+            app_id: TEST_APP_ID.to_string(),
+            platform: "ios".to_string(),
+            flow_schema_version: DEFAULT_FLOW_SCHEMA_VERSION.to_string(),
+            build_fingerprint: fp,
+            adapter: Some("maestro-ios/v1".to_string()),
+            browser: None,
+        })
+        .unwrap();
+    assert!(
+        g2_runs.is_empty(),
+        "cancelled g2 must NOT write aborted validation row to SQLite"
+    );
+
+    // Merged JUnit contains g1 pass + g2 <error type="Cancelled"> + g3 <skipped status="SKIPPED">.
+    let xml = fs::read_to_string(ws.path.join("out/cancelled.xml")).unwrap();
+    assert!(deja_flow::reports_failure(&xml));
+    assert!(xml.contains(r#"<testsuites tests="3" failures="0" errors="1" skipped="1""#));
+    assert!(xml.contains(r#"<error type="Cancelled""#));
+    assert!(xml.contains(r#"status="SKIPPED""#));
+    assert!(xml.contains(r#"<skipped message="cancelled before execution"/>"#));
+
+    // `--summary` lines MUST strictly obey the `deja-summary v=1` grammar (`outcome=error` and
+    // `failure=error` when no `RunResult` exists; never non-v1 `outcome=cancelled`/`skipped` or
+    // `failure=cancelled`/`skipped`).
+    let summary_lines: Vec<&str> = out
+        .stderr
+        .lines()
+        .filter(|l| l.starts_with("deja-summary v=1 "))
+        .collect();
+    assert_eq!(
+        summary_lines.len(),
+        3,
+        "expected 3 summary lines, got: {summary_lines:?}"
+    );
+    assert!(
+        summary_lines[0].contains("outcome=passed ")
+            && summary_lines[0].contains(" failure=none goal=g1"),
+        "unexpected g1 summary line: {}",
+        summary_lines[0]
+    );
+    for (idx, goal) in [(1usize, "g2"), (2usize, "g3")] {
+        let line = summary_lines[idx];
+        assert!(
+            line.contains("outcome=error ")
+                && line.contains(" cache=not-checked ")
+                && line.contains(" model_calls=0 ")
+                && line.contains(&format!(" failure=error goal={goal}")),
+            "cancelled/skipped goal {goal} must emit strict v1 outcome=error failure=error summary, got: {line}"
+        );
+        assert!(
+            !line.contains("cancelled") && !line.contains("skipped"),
+            "deja-summary v=1 must not emit non-v1 cancelled/skipped tokens: {line}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn subprocess_batch_sigterm_exits_143_cleans_locks_and_writes_failing_junit() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let ws = TempWs::new("deja66-sigterm");
+    ws.write_build("build/App.bin", b"build-v1");
+    ws.write(
+        "deja.config.json",
+        &json!({
+            "workspaceRoot": ".",
+            "platform": "ios",
+            "appId": TEST_APP_ID,
+            "adapter": "maestro-ios/v1",
+            "buildPath": "build/App.bin",
+            "manifest": "deja.walks.json",
+            "staleBuild": "replay-last-verified"
+        })
+        .to_string(),
+    );
+    write_tagged_flow(&ws, "flows/g1.yaml", "g1");
+    write_tagged_flow(&ws, "flows/g2.yaml", "g2");
+    seed_manifest_walk(
+        &ws,
+        &[
+            ("g1", TEST_APP_ID, "ios", "maestro-ios/v1", "flows/g1.yaml"),
+            ("g2", TEST_APP_ID, "ios", "maestro-ios/v1", "flows/g2.yaml"),
+        ],
+    );
+    ws.write("goals.txt", "g1\ng2\n");
+
+    // Fake `xcrun` in temp PATH: writes a ready marker once BOTH shard store locks are already
+    // held by `deja`, then sleeps until `deja` handles SIGTERM and drops the child.
+    let bin_dir = ws.path.join("fake-bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    let ready_marker = ws.path.join("xcrun.ready");
+    let fake_xcrun = bin_dir.join("xcrun");
+    fs::write(
+        &fake_xcrun,
+        format!(
+            "#!/bin/sh\ntouch '{}'\nexec sleep 30\n",
+            ready_marker.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&fake_xcrun, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let orig_path = std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".to_string());
+    let custom_path = format!("{}:{orig_path}", bin_dir.display());
+    let devices_arg = format!("{TEST_UDID},{TEST_UDID_2}");
+
+    let child = deja_bin()
+        .current_dir(&ws.path)
+        .env("PATH", &custom_path)
+        .args([
+            "run",
+            "--goals",
+            "goals.txt",
+            "--devices",
+            &devices_arg,
+            "--junit",
+            "out/sigterm.xml",
+            "--json",
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn deja subprocess");
+
+    let lock1 = ws
+        .path
+        .join(format!(".deja/memory/stores/{TEST_UDID}/walks.sqlite.lock"));
+    let lock2 = ws.path.join(format!(
+        ".deja/memory/stores/{TEST_UDID_2}/walks.sqlite.lock"
+    ));
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !ready_marker.exists() || !lock1.exists() || !lock2.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for deja to acquire both shard locks and invoke xcrun (ready={}, lock1={}, lock2={})",
+            ready_marker.exists(),
+            lock1.exists(),
+            lock2.exists()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    // Send real POSIX SIGTERM to the running `deja` subprocess!
+    deja_driver_ios::send_sigterm_to_pid(child.id()).expect("send SIGTERM to deja");
+
+    let output = child.wait_with_output().expect("wait for deja exit");
+    assert_eq!(
+        output.status.code(),
+        Some(143),
+        "SIGTERM must exit 143 (stdout={}, stderr={})",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !lock1.exists() && !lock2.exists(),
+        "both shard store .lock files must be cleaned up on SIGTERM"
+    );
+
+    let xml = fs::read_to_string(ws.path.join("out/sigterm.xml"))
+        .expect("valid failing merged JUnit must be written on SIGTERM");
+    assert!(deja_flow::reports_failure(&xml));
+    assert!(xml.contains(r#"<property name="mode" value="batch"/>"#));
+    assert!(xml.contains(r#"status="SKIPPED""#));
+    assert!(xml.contains(r#"<skipped message="cancelled before execution"/>"#));
+}
+
+#[tokio::test]
+async fn batch_verify_serializes_manifest_commits_across_shards_and_real_factory_reuses_staged_build()
+ {
+    let ws = TempWs::new("deja66-verify-real-stage");
+    let app_dir = ws.path.join("build/VerifyApp.app");
+    fs::create_dir_all(&app_dir).unwrap();
+    ws.write(
+        "build/VerifyApp.app/Info.plist",
+        &format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict><key>CFBundleIdentifier</key><string>{TEST_APP_ID}</string></dict></plist>\n"
+        ),
+    );
+    ws.write_build("build/VerifyApp.app/VerifyApp", b"verify-binary-v1");
+    let expected_fp = fingerprint_tree(&ws.path, &app_dir, "ios").unwrap();
+
+    // 1. Direct `RealDriverFactory::prepare_batch_build` + `create` reuse + RAII drop cleanup.
+    let cancel = CancellationToken::new();
+    let base_ctx = DriverContext {
+        platform: "ios".to_string(),
+        device: TEST_UDID.to_string(),
+        app_id: TEST_APP_ID.to_string(),
+        build_path: app_dir.clone(),
+        expected_build_fingerprint: Some(expected_fp.clone()),
+        workspace_root: ws.path.clone(),
+        disable_animations: true,
+        crash_report_grace_ms: 0,
+        crash_report_dir: None,
+        deja_home: None,
+        headless: None,
+        screen_size: None,
+        timeout_ms: 5_000,
+        env: BTreeMap::new(),
+        staged_build: None,
+    };
+    let staged = RealDriverFactory
+        .prepare_batch_build(&base_ctx, &cancel)
+        .await
+        .expect("prepare_batch_build succeeds")
+        .expect("iOS returns SharedStagedBuild");
+    let stage_dir = staged.staging_dir().to_path_buf();
+    assert!(stage_dir.exists());
+    assert_eq!(staged.fingerprint(), expected_fp);
+
+    let mut ctx_with_stage = base_ctx.clone();
+    ctx_with_stage.staged_build = Some(staged.clone());
+    // `RealDriverFactory::create` reuses `staged_build` cleanly.
+    let driver = RealDriverFactory
+        .create(&ctx_with_stage, &cancel)
+        .await
+        .expect("create reuses staged_build");
+    drop(driver);
+    drop(ctx_with_stage);
+    drop(staged);
+    assert!(
+        !stage_dir.exists(),
+        "SharedStagedBuild drop must clean up temporary staging directory"
+    );
+
+    // 2. Concurrent `--verify --devices` across 2 shards updates BOTH changed flows in
+    // `deja.walks.json` without lost updates (serialized via `manifest_mutex`)!
+    ws.write(
+        "deja.config.json",
+        &json!({
+            "workspaceRoot": ".",
+            "platform": "ios",
+            "appId": TEST_APP_ID,
+            "adapter": "maestro-ios/v1",
+            "buildPath": "build/VerifyApp.app",
+            "manifest": "deja.walks.json"
+        })
+        .to_string(),
+    );
+    write_tagged_flow(&ws, "flows/v1.yaml", "v1");
+    write_tagged_flow(&ws, "flows/v2.yaml", "v2");
+    seed_manifest_walk(
+        &ws,
+        &[
+            (
+                "verify one",
+                TEST_APP_ID,
+                "ios",
+                "maestro-ios/v1",
+                "flows/v1.yaml",
+            ),
+            (
+                "verify two",
+                TEST_APP_ID,
+                "ios",
+                "maestro-ios/v1",
+                "flows/v2.yaml",
+            ),
+        ],
+    );
+    // Modify non-assertion steps in BOTH flows so both need `--verify` manifest updates!
+    ws.write(
+        "flows/v1.yaml",
+        &format!(
+            "appId: {TEST_APP_ID}\n---\n- launchApp\n- hideKeyboard\n- inputText: \"v1\"\n- tapOn:\n    id: done\n- assertVisible: Done\n"
+        ),
+    );
+    ws.write(
+        "flows/v2.yaml",
+        &format!(
+            "appId: {TEST_APP_ID}\n---\n- launchApp\n- hideKeyboard\n- inputText: \"v2\"\n- tapOn:\n    id: done\n- assertVisible: Done\n"
+        ),
+    );
+
+    let factory = Arc::new(BatchMockFactory::new(Some("ios-27.2")));
+    let (deps, cap) = make_deps(
+        &ws.path,
+        Arc::clone(&factory) as Arc<dyn DriverFactory>,
+        default_probes(),
+        CancellationToken::new(),
+    );
+    let devices_arg = format!("{TEST_UDID},{TEST_UDID_2}");
+    let code = run_cli_from_args(
+        [
+            "deja",
+            "run",
+            "--all",
+            "--verify",
+            "--devices",
+            &devices_arg,
+            "--json",
+        ],
+        &deps,
+    )
+    .await;
+    assert_eq!(code, 0, "stderr: {}", cap.lock().unwrap().stderr);
+
+    // `deja manifest check --json` must now pass with exit 0 for BOTH updated entries!
+    let (deps_chk, cap_chk) = make_deps(
+        &ws.path,
+        Arc::clone(&factory) as Arc<dyn DriverFactory>,
+        default_probes(),
+        CancellationToken::new(),
+    );
+    let chk_code = run_cli_from_args(["deja", "manifest", "check", "--json"], &deps_chk).await;
+    assert_eq!(
+        chk_code,
+        0,
+        "both --verify manifest updates must persist cleanly: {}",
+        cap_chk.lock().unwrap().stdout
+    );
+}
+
+#[tokio::test]
+async fn regression_deja66_r1_f1_failed_replay_on_new_shard_closes_multi_store_gate() {
+    let ws = TempWs::new("deja66-r1-f1-shard-fail");
+    ws.write_build("build/App.bin", b"build-v1");
+    ws.write(
+        "deja.config.json",
+        &json!({
+            "workspaceRoot": ".",
+            "platform": "ios",
+            "appId": TEST_APP_ID,
+            "adapter": "maestro-ios/v1",
+            "buildPath": "build/App.bin",
+            "device": TEST_UDID,
+            "manifest": "deja.walks.json",
+            "staleBuild": "replay-last-verified"
+        })
+        .to_string(),
+    );
+    write_tagged_flow(&ws, "flows/checkout.yaml", "checkout");
+    seed_manifest_walk(
+        &ws,
+        &[(
+            "checkout",
+            TEST_APP_ID,
+            "ios",
+            "maestro-ios/v1",
+            "flows/checkout.yaml",
+        )],
+    );
+    ws.write("goals.txt", "checkout\n");
+
+    // 1. Goal passes on shard A (`TEST_UDID`).
+    let pass_factory = Arc::new(BatchMockFactory::new(Some("ios-27.2")));
+    let (deps_a, cap_a) = make_deps(
+        &ws.path,
+        Arc::clone(&pass_factory) as Arc<dyn DriverFactory>,
+        default_probes(),
+        CancellationToken::new(),
+    );
+    let code_a = run_cli_from_args(
+        [
+            "deja",
+            "run",
+            "--goals",
+            "goals.txt",
+            "--devices",
+            TEST_UDID,
+            "--json",
+        ],
+        &deps_a,
+    )
+    .await;
+    assert_eq!(code_a, 0, "stderr: {}", cap_a.lock().unwrap().stderr);
+
+    // 2. Goal now moves to brand-new shard B (`TEST_UDID_2`, zero prior history in shard B) and
+    // FAILS consistently on the exact same build!
+    let fail_factory = Arc::new(BatchMockFactory::new(Some("ios-27.2")));
+    fail_factory.add_failing_goal("checkout");
+    let (deps_b, _) = make_deps(
+        &ws.path,
+        Arc::clone(&fail_factory) as Arc<dyn DriverFactory>,
+        default_probes(),
+        CancellationToken::new(),
+    );
+    let code_b = run_cli_from_args(
+        [
+            "deja",
+            "run",
+            "--goals",
+            "goals.txt",
+            "--devices",
+            TEST_UDID_2,
+            "--json",
+        ],
+        &deps_b,
+    )
+    .await;
+    assert_eq!(code_b, 1, "consistent failure on shard B must exit 1");
+
+    // 3. `deja gate --store A --store B` MUST see shard B's failure and close (exit 10),
+    // NEVER passing on shard A's stale success!
+    let (deps_gate, cap_gate) = make_deps(
+        &ws.path,
+        Arc::clone(&pass_factory) as Arc<dyn DriverFactory>,
+        default_probes(),
+        CancellationToken::new(),
+    );
+    let gate_code = run_cli_from_args(
+        [
+            "deja",
+            "gate",
+            "--goals",
+            "goals.txt",
+            "--store",
+            TEST_UDID,
+            "--store",
+            TEST_UDID_2,
+            "--json",
+        ],
+        &deps_gate,
+    )
+    .await;
+    assert_eq!(
+        gate_code,
+        10,
+        "gate must close when shard B failed replay (stdout={})",
+        cap_gate.lock().unwrap().stdout
+    );
+    let gate_json: Value = serde_json::from_str(&cap_gate.lock().unwrap().stdout).unwrap();
+    assert_eq!(gate_json["verdict"], "closed");
+    assert_eq!(gate_json["goals"][0]["outcome"], "failed");
+}
+
+#[tokio::test]
+async fn regression_deja66_r1_f2_config_junit_protects_manifest_flows_and_closures() {
+    let ws = TempWs::new("deja66-r1-f2-cfg-junit");
+    ws.write_build("build/App.bin", b"build-v1");
+    let flow_text = format!(
+        "appId: {TEST_APP_ID}\n---\n- launchApp\n- runFlow: sub.yaml\n- assertVisible: Done\n"
+    );
+    let sub_text = format!("appId: {TEST_APP_ID}\n---\n- assertVisible: Done\n");
+    let flow_path = ws.write("flows/checkout.yaml", &flow_text);
+    let sub_path = ws.write("flows/sub.yaml", &sub_text);
+    seed_manifest_walk(
+        &ws,
+        &[(
+            "checkout",
+            TEST_APP_ID,
+            "ios",
+            "maestro-ios/v1",
+            "flows/checkout.yaml",
+        )],
+    );
+
+    for protected_junit in ["flows/checkout.yaml", "flows/sub.yaml"] {
+        ws.write(
+            "deja.config.json",
+            &json!({
+                "workspaceRoot": ".",
+                "platform": "ios",
+                "appId": TEST_APP_ID,
+                "adapter": "maestro-ios/v1",
+                "buildPath": "build/App.bin",
+                "device": TEST_UDID,
+                "manifest": "deja.walks.json",
+                "junit": protected_junit
+            })
+            .to_string(),
+        );
+        let factory = Arc::new(BatchMockFactory::new(Some("ios-27.2")));
+        let (deps, _) = make_deps(
+            &ws.path,
+            Arc::clone(&factory) as Arc<dyn DriverFactory>,
+            default_probes(),
+            CancellationToken::new(),
+        );
+        let code = run_cli_from_args(["deja", "run", "--all", "--json"], &deps).await;
+        assert_eq!(
+            code, 2,
+            "config.junit targeting {protected_junit} must fail closed exit 2"
+        );
+        assert_eq!(factory.total_create_calls(), 0);
+    }
+
+    assert_eq!(
+        fs::read_to_string(&flow_path).unwrap(),
+        flow_text,
+        "flows/checkout.yaml must remain untouched"
+    );
+    assert_eq!(
+        fs::read_to_string(&sub_path).unwrap(),
+        sub_text,
+        "flows/sub.yaml must remain untouched"
+    );
+}
+
+#[tokio::test]
+async fn regression_deja66_r1_f3_implicit_batch_reports_never_overwrite_goals_or_explicit_outputs()
+{
+    let ws = TempWs::new("deja66-r1-f3-implicit");
+    ws.write_build("build/App.bin", b"build-v1");
+    ws.write(
+        "deja.config.json",
+        &json!({
+            "workspaceRoot": ".",
+            "platform": "ios",
+            "appId": TEST_APP_ID,
+            "adapter": "maestro-ios/v1",
+            "buildPath": "build/App.bin",
+            "device": TEST_UDID,
+            "manifest": "deja.walks.json",
+            "staleBuild": "replay-last-verified"
+        })
+        .to_string(),
+    );
+    write_tagged_flow(&ws, "flows/g1.yaml", "g1");
+    seed_manifest_walk(
+        &ws,
+        &[("g1", TEST_APP_ID, "ios", "maestro-ios/v1", "flows/g1.yaml")],
+    );
+
+    let batch_latest_content = "g1\n";
+    let batch_latest = ws.write(".deja/reports/batch-latest.json", batch_latest_content);
+    let default_latest_content = "g1\n";
+    let default_latest = ws.write(".deja/reports/latest.json", default_latest_content);
+
+    let factory = Arc::new(BatchMockFactory::new(Some("ios-27.2")));
+    for argv in [
+        vec![
+            "deja",
+            "run",
+            "--goals",
+            ".deja/reports/batch-latest.json",
+            "--json",
+        ],
+        vec![
+            "deja",
+            "run",
+            "--goals",
+            ".deja/reports/latest.json",
+            "--json",
+        ],
+        vec![
+            "deja",
+            "run",
+            "--all",
+            "--report",
+            ".deja/reports/batch-latest.json",
+            "--json",
+        ],
+        vec![
+            "deja",
+            "run",
+            "--all",
+            "--junit",
+            ".deja/reports/batch-latest.json",
+            "--json",
+        ],
+    ] {
+        let (deps, _) = make_deps(
+            &ws.path,
+            Arc::clone(&factory) as Arc<dyn DriverFactory>,
+            default_probes(),
+            CancellationToken::new(),
+        );
+        let code = run_cli_from_args(argv.clone(), &deps).await;
+        assert_eq!(
+            code, 2,
+            "implicit report collision for {argv:?} must fail closed exit 2"
+        );
+    }
+    assert_eq!(factory.total_create_calls(), 0);
+    assert_eq!(
+        fs::read_to_string(&batch_latest).unwrap(),
+        batch_latest_content,
+        ".deja/reports/batch-latest.json used as --goals must NEVER be overwritten"
+    );
+    assert_eq!(
+        fs::read_to_string(&default_latest).unwrap(),
+        default_latest_content,
+        ".deja/reports/latest.json used as --goals must NEVER be overwritten"
+    );
+}
+
+#[tokio::test]
+async fn regression_deja66_r1_f4_goals_manifest_filters_multi_platform_same_goal_entries() {
+    let ws = TempWs::new("deja66-r1-f4-multiplat");
+    ws.write_build("build/App.bin", b"build-v1");
+    ws.write(
+        "deja.config.json",
+        &json!({
+            "workspaceRoot": ".",
+            "platform": "ios",
+            "appId": TEST_APP_ID,
+            "adapter": "maestro-ios/v1",
+            "buildPath": "build/App.bin",
+            "device": TEST_UDID,
+            "manifest": "deja.walks.json",
+            "staleBuild": "replay-last-verified"
+        })
+        .to_string(),
+    );
+    write_tagged_flow(&ws, "flows/ios_checkout.yaml", "ios_checkout");
+    ws.write(
+        "flows/android_checkout.yaml",
+        &format!("appId: {TEST_APP_ID}\n---\n- launchApp\n- assertVisible: Done\n"),
+    );
+
+    // Same goal name `"checkout"` for BOTH `ios` and `android` in the same `deja.walks.json`!
+    seed_manifest_walk(
+        &ws,
+        &[
+            (
+                "checkout",
+                TEST_APP_ID,
+                "ios",
+                "maestro-ios/v1",
+                "flows/ios_checkout.yaml",
+            ),
+            (
+                "checkout",
+                TEST_APP_ID,
+                "android",
+                "maestro-android/v1",
+                "flows/android_checkout.yaml",
+            ),
+        ],
+    );
+
+    let factory = Arc::new(BatchMockFactory::new(Some("ios-27.2")));
+    let (deps, cap) = make_deps(
+        &ws.path,
+        Arc::clone(&factory) as Arc<dyn DriverFactory>,
+        default_probes(),
+        CancellationToken::new(),
+    );
+    let code = run_cli_from_args(
+        ["deja", "run", "--goals", "deja.walks.json", "--json"],
+        &deps,
+    )
+    .await;
+    assert_eq!(
+        code,
+        0,
+        "multi-platform manifest passed to --goals must filter cleanly without duplicate-goal error (stderr={})",
+        cap.lock().unwrap().stderr
+    );
+    let parsed: Value = serde_json::from_str(&cap.lock().unwrap().stdout).unwrap();
+    assert_eq!(parsed["goals"].as_array().unwrap().len(), 1);
+    assert_eq!(parsed["goals"][0]["goal"], "checkout");
+    assert_eq!(parsed["goals"][0]["outcome"], "passed");
+
+    // `deja gate --goals deja.walks.json` also filters cleanly and passes!
+    let (deps_gate, cap_gate) = make_deps(
+        &ws.path,
+        Arc::clone(&factory) as Arc<dyn DriverFactory>,
+        default_probes(),
+        CancellationToken::new(),
+    );
+    let gate_code = run_cli_from_args(
+        ["deja", "gate", "--goals", "deja.walks.json", "--json"],
+        &deps_gate,
+    )
+    .await;
+    assert_eq!(
+        gate_code,
+        0,
+        "gate --goals deja.walks.json must pass (stdout={})",
+        cap_gate.lock().unwrap().stdout
+    );
+}
+
+#[tokio::test]
+async fn regression_deja66_r1_f5_unwritable_explicit_report_reflected_in_emitted_batch_json() {
+    let ws = TempWs::new("deja66-r1-f5-report-err");
+    ws.write_build("build/App.bin", b"build-v1");
+    ws.write(
+        "deja.config.json",
+        &json!({
+            "workspaceRoot": ".",
+            "platform": "ios",
+            "appId": TEST_APP_ID,
+            "adapter": "maestro-ios/v1",
+            "buildPath": "build/App.bin",
+            "device": TEST_UDID,
+            "manifest": "deja.walks.json",
+            "staleBuild": "replay-last-verified"
+        })
+        .to_string(),
+    );
+    write_tagged_flow(&ws, "flows/g1.yaml", "g1");
+    seed_manifest_walk(
+        &ws,
+        &[("g1", TEST_APP_ID, "ios", "maestro-ios/v1", "flows/g1.yaml")],
+    );
+    ws.write("not_a_dir", "blocking file");
+
+    let factory = Arc::new(BatchMockFactory::new(Some("ios-27.2")));
+    let (deps, cap) = make_deps(
+        &ws.path,
+        Arc::clone(&factory) as Arc<dyn DriverFactory>,
+        default_probes(),
+        CancellationToken::new(),
+    );
+    let code = run_cli_from_args(
+        [
+            "deja",
+            "run",
+            "--all",
+            "--report",
+            "not_a_dir/batch.json",
+            "--json",
+        ],
+        &deps,
+    )
+    .await;
+    assert_eq!(code, 2, "unwritable explicit --report must exit 2");
+
+    let out = cap.lock().unwrap().clone();
+    let parsed: Value = serde_json::from_str(&out.stdout).unwrap();
+    assert_eq!(parsed["exitCode"], 2);
+    assert_eq!(parsed["passed"], false);
+    assert_eq!(parsed["outcome"], "error");
+    assert!(
+        parsed["errors"].as_array().unwrap().iter().any(|e| e
+            .as_str()
+            .unwrap_or("")
+            .contains("failed to write explicit --report")),
+        "stdout JSON errors must include explicit --report write error: {parsed}"
+    );
+}
+
+#[tokio::test]
+async fn regression_deja66_r1_f7_parallel_batch_goals_isolate_shared_take_screenshot_paths() {
+    let ws = TempWs::new("deja66-r1-f7-shots");
+    ws.write_build("build/App.bin", b"build-v1");
+    ws.write(
+        "deja.config.json",
+        &json!({
+            "workspaceRoot": ".",
+            "platform": "ios",
+            "appId": TEST_APP_ID,
+            "adapter": "maestro-ios/v1",
+            "buildPath": "build/App.bin",
+            "manifest": "deja.walks.json",
+            "staleBuild": "replay-last-verified"
+        })
+        .to_string(),
+    );
+    // Shared subflow writing to identical relative path `shared.png`!
+    ws.write(
+        "flows/capture_sub.yaml",
+        &format!(
+            "appId: {TEST_APP_ID}\n---\n- takeScreenshot: shared.png\n- assertVisible: Done\n"
+        ),
+    );
+    ws.write(
+        "flows/g1.yaml",
+        &format!("appId: {TEST_APP_ID}\n---\n- launchApp\n- inputText: \"g1\"\n- runFlow: capture_sub.yaml\n"),
+    );
+    ws.write(
+        "flows/g2.yaml",
+        &format!("appId: {TEST_APP_ID}\n---\n- launchApp\n- inputText: \"g2\"\n- runFlow: capture_sub.yaml\n"),
+    );
+    seed_manifest_walk(
+        &ws,
+        &[
+            ("g1", TEST_APP_ID, "ios", "maestro-ios/v1", "flows/g1.yaml"),
+            ("g2", TEST_APP_ID, "ios", "maestro-ios/v1", "flows/g2.yaml"),
+        ],
+    );
+
+    // Synchronize both shards with a 2-party Barrier so both goals run concurrently!
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let barrier_clone = Arc::clone(&barrier);
+    let hook: AsyncGoalHook = Arc::new(move |_device, _tag, _cancel| {
+        let b = Arc::clone(&barrier_clone);
+        Box::pin(async move {
+            b.wait().await;
+        })
+    });
+
+    let factory = Arc::new(BatchMockFactory::new(Some("ios-27.2")).with_on_goal(hook));
+    let (deps, cap) = make_deps(
+        &ws.path,
+        Arc::clone(&factory) as Arc<dyn DriverFactory>,
+        default_probes(),
+        CancellationToken::new(),
+    );
+    let devices_arg = format!("{TEST_UDID},{TEST_UDID_2}");
+    let code = tokio::time::timeout(
+        Duration::from_secs(10),
+        run_cli_from_args(
+            ["deja", "run", "--all", "--devices", &devices_arg, "--json"],
+            &deps,
+        ),
+    )
+    .await
+    .expect("parallel screenshot batch must not stall");
+    assert_eq!(code, 0, "stderr: {}", cap.lock().unwrap().stderr);
+
+    let parsed: Value = serde_json::from_str(&cap.lock().unwrap().stdout).unwrap();
+    let goals = parsed["goals"].as_array().unwrap();
+    assert_eq!(goals.len(), 2);
+
+    let extract_shot = |g: &Value| -> String {
+        g["report"]["artifacts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["kind"] == "output")
+            .expect("goal report must contain screenshot output artifact")["path"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    let shot0 = extract_shot(&goals[0]);
+    let shot1 = extract_shot(&goals[1]);
+    assert_ne!(
+        shot0, shot1,
+        "parallel goals must NOT share or overwrite the same screenshot path ({shot0})"
+    );
+    assert!(
+        shot0.contains("goal-0-attempt-1") && shot0.ends_with("/shared.png"),
+        "unexpected shot0 path: {shot0}"
+    );
+    assert!(
+        shot1.contains("goal-1-attempt-1") && shot1.ends_with("/shared.png"),
+        "unexpected shot1 path: {shot1}"
+    );
+    assert!(ws.path.join(&shot0).is_file());
+    assert!(ws.path.join(&shot1).is_file());
+    assert!(
+        !ws.path.join("shared.png").exists(),
+        "batch goals must not write shared.png at workspace root"
+    );
+}
+
+#[tokio::test]
+async fn regression_deja66_r1_f8_lpt_uses_pooled_samples_not_median_of_shard_medians() {
+    let ws = TempWs::new("deja66-r1-f8-pooled-lpt");
+    ws.write_build("build/App.bin", b"build-v-current");
+    ws.write(
+        "deja.config.json",
+        &json!({
+            "workspaceRoot": ".",
+            "platform": "ios",
+            "appId": TEST_APP_ID,
+            "adapter": "maestro-ios/v1",
+            "buildPath": "build/App.bin",
+            "manifest": "deja.walks.json",
+            "staleBuild": "replay-last-verified"
+        })
+        .to_string(),
+    );
+    write_tagged_flow(&ws, "flows/x.yaml", "x");
+    write_tagged_flow(&ws, "flows/y.yaml", "y");
+    seed_manifest_walk(
+        &ws,
+        &[
+            (
+                "goal x",
+                TEST_APP_ID,
+                "ios",
+                "maestro-ios/v1",
+                "flows/x.yaml",
+            ),
+            (
+                "goal y",
+                TEST_APP_ID,
+                "ios",
+                "maestro-ios/v1",
+                "flows/y.yaml",
+            ),
+        ],
+    );
+    ws.write("goals.txt", "goal x\ngoal y\n");
+
+    let x_cl = collect_flow_closure(&ws.path, &ws.path.join("flows/x.yaml")).unwrap();
+    let x_main = x_cl
+        .files
+        .iter()
+        .find(|f| f.path == x_cl.main)
+        .unwrap()
+        .sha256
+        .clone();
+    let y_cl = collect_flow_closure(&ws.path, &ws.path.join("flows/y.yaml")).unwrap();
+    let y_main = y_cl
+        .files
+        .iter()
+        .find(|f| f.path == y_cl.main)
+        .unwrap()
+        .sha256
+        .clone();
+
+    // Seed Shard A (`TEST_UDID`) with NINE 100ms runs for `goal x` AND one 500ms run for `goal y`.
+    let store_a =
+        SqliteWalkStore::open_writable(SqliteStoreOptions::new(&ws.path).with_store_id(TEST_UDID))
+            .unwrap();
+    for i in 0..9 {
+        let fp = format!("{i:064x}");
+        store_a
+            .upsert_walk(&deja_store::UpsertWalkInput {
+                identity: WalkIdentity {
+                    goal: "goal x".to_string(),
+                    app_id: TEST_APP_ID.to_string(),
+                    platform: "ios".to_string(),
+                    flow_schema_version: DEFAULT_FLOW_SCHEMA_VERSION.to_string(),
+                    build_fingerprint: fp,
+                    adapter: Some("maestro-ios/v1".to_string()),
+                    browser: None,
+                },
+                flow_path: "flows/x.yaml".to_string(),
+                flow_sha256: x_main.clone(),
+                subflow_files: None,
+                legacy_closure: false,
+                closure_sha256: Some(x_cl.sha256.clone()),
+                validation: RecordValidationInput::new(true, now_iso8601())
+                    .with_runtime("ios-27.2")
+                    .with_duration_ms(100),
+                exploration: None,
+                repair_history: None,
+            })
+            .unwrap();
+    }
+    store_a
+        .upsert_walk(&deja_store::UpsertWalkInput {
+            identity: WalkIdentity {
+                goal: "goal y".to_string(),
+                app_id: TEST_APP_ID.to_string(),
+                platform: "ios".to_string(),
+                flow_schema_version: DEFAULT_FLOW_SCHEMA_VERSION.to_string(),
+                build_fingerprint: format!("{:064x}", 100),
+                adapter: Some("maestro-ios/v1".to_string()),
+                browser: None,
+            },
+            flow_path: "flows/y.yaml".to_string(),
+            flow_sha256: y_main,
+            subflow_files: None,
+            legacy_closure: false,
+            closure_sha256: Some(y_cl.sha256),
+            validation: RecordValidationInput::new(true, now_iso8601())
+                .with_runtime("ios-27.2")
+                .with_duration_ms(500),
+            exploration: None,
+            repair_history: None,
+        })
+        .unwrap();
+    store_a.close();
+
+    // Seed Shard B (`TEST_UDID_2`) with ONE 9_900ms outlier run for `goal x`.
+    // Median-of-medians would compute (100 + 9900)/2 = 5000ms (scheduling X first — WRONG!).
+    // Pooled median computes median([100 x 9, 9900]) = 100ms (scheduling Y=500ms BEFORE X=100ms!).
+    let store_b = SqliteWalkStore::open_writable(
+        SqliteStoreOptions::new(&ws.path).with_store_id(TEST_UDID_2),
+    )
+    .unwrap();
+    store_b
+        .upsert_walk(&deja_store::UpsertWalkInput {
+            identity: WalkIdentity {
+                goal: "goal x".to_string(),
+                app_id: TEST_APP_ID.to_string(),
+                platform: "ios".to_string(),
+                flow_schema_version: DEFAULT_FLOW_SCHEMA_VERSION.to_string(),
+                build_fingerprint: format!("{:064x}", 200),
+                adapter: Some("maestro-ios/v1".to_string()),
+                browser: None,
+            },
+            flow_path: "flows/x.yaml".to_string(),
+            flow_sha256: x_main,
+            subflow_files: None,
+            legacy_closure: false,
+            closure_sha256: Some(x_cl.sha256),
+            validation: RecordValidationInput::new(true, now_iso8601())
+                .with_runtime("ios-27.2")
+                .with_duration_ms(9_900),
+            exploration: None,
+            repair_history: None,
+        })
+        .unwrap();
+    store_b.close();
+
+    let factory = Arc::new(BatchMockFactory::new(Some("ios-27.2")));
+    let (deps, cap) = make_deps(
+        &ws.path,
+        Arc::clone(&factory) as Arc<dyn DriverFactory>,
+        default_probes(),
+        CancellationToken::new(),
+    );
+    let devices_arg = format!("{TEST_UDID},{TEST_UDID_2}");
+    let code = run_cli_from_args(
+        [
+            "deja",
+            "run",
+            "--goals",
+            "goals.txt",
+            "--devices",
+            &devices_arg,
+            "--json",
+        ],
+        &deps,
+    )
+    .await;
+    assert_eq!(code, 0, "stderr: {}", cap.lock().unwrap().stderr);
+    let parsed: Value = serde_json::from_str(&cap.lock().unwrap().stdout).unwrap();
+    assert_eq!(
+        parsed["scheduledOrder"],
+        json!(["goal y", "goal x"]),
+        "pooled LPT median must schedule goal y (500ms) BEFORE goal x (100ms)"
+    );
+    assert_eq!(parsed["goals"][0]["historicalMedianMs"], 100);
+    assert_eq!(parsed["goals"][1]["historicalMedianMs"], 500);
+}
+
+#[tokio::test]
+async fn regression_deja66_r2_f1_strict_replay_schedules_each_goal_on_its_eligible_shard() {
+    let ws = TempWs::new("deja66-r2-f1-shard-elig");
+    ws.write_build("build/App.bin", b"build-v1");
+    // Strict replay mode (NO `staleBuild: replay-last-verified`!): a shard can only replay a goal
+    // if THAT shard's store has a verified validation for the current build + runtime.
+    ws.write(
+        "deja.config.json",
+        &json!({
+            "workspaceRoot": ".",
+            "platform": "ios",
+            "appId": TEST_APP_ID,
+            "adapter": "maestro-ios/v1",
+            "buildPath": "build/App.bin",
+            "manifest": "deja.walks.json"
+        })
+        .to_string(),
+    );
+    write_tagged_flow(&ws, "flows/a.yaml", "goal a");
+    write_tagged_flow(&ws, "flows/b.yaml", "goal b");
+    seed_manifest_walk(
+        &ws,
+        &[
+            (
+                "goal a",
+                TEST_APP_ID,
+                "ios",
+                "maestro-ios/v1",
+                "flows/a.yaml",
+            ),
+            (
+                "goal b",
+                TEST_APP_ID,
+                "ios",
+                "maestro-ios/v1",
+                "flows/b.yaml",
+            ),
+        ],
+    );
+
+    // 1. Verify `--all --verify --devices TEST_UDID,TEST_UDID_2` so each shard verifies ONE goal
+    //    into its own isolated store (use a 2-party barrier so each shard claims exactly 1 goal).
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let verify_hook: AsyncGoalHook = {
+        let b = Arc::clone(&barrier);
+        Arc::new(
+            move |_device: String, _tag: String, _cancel: CancellationToken| {
+                let b = Arc::clone(&b);
+                Box::pin(async move {
+                    let _ = tokio::time::timeout(Duration::from_secs(3), b.wait()).await;
+                })
+            },
+        )
+    };
+    let verify_factory =
+        Arc::new(BatchMockFactory::new(Some("ios-27.2")).with_on_goal(verify_hook));
+    let (verify_deps, verify_cap) = make_deps(
+        &ws.path,
+        Arc::clone(&verify_factory) as Arc<dyn DriverFactory>,
+        default_probes(),
+        CancellationToken::new(),
+    );
+    let devices_forward = format!("{TEST_UDID},{TEST_UDID_2}");
+    let verify_code = run_cli_from_args(
+        [
+            "deja",
+            "run",
+            "--all",
+            "--verify",
+            "--devices",
+            &devices_forward,
+            "--json",
+        ],
+        &verify_deps,
+    )
+    .await;
+    assert_eq!(
+        verify_code,
+        0,
+        "verify stderr: {}",
+        verify_cap.lock().unwrap().stderr
+    );
+    let verify_json: Value = serde_json::from_str(&verify_cap.lock().unwrap().stdout).unwrap();
+    let goal_a_dev = verify_json["goals"][0]["device"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let goal_b_dev = verify_json["goals"][1]["device"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_ne!(
+        goal_a_dev, goal_b_dev,
+        "barrier must assign goal a and goal b to distinct shards"
+    );
+
+    // 2. Now run strict replay `--all --devices <goal_b_dev>,<goal_a_dev>` (NO `--verify`!)
+    //    putting `goal_b_dev` FIRST as shard 0 while `goal a` sits ahead in the queue (or even if
+    //    shard 0 wakes up first!). Both goals MUST route to their respective verified shards and
+    //    pass with exit 0!
+    let devices_reversed = format!("{goal_b_dev},{goal_a_dev}");
+    let replay_factory = Arc::new(BatchMockFactory::new(Some("ios-27.2")));
+    let (replay_deps, replay_cap) = make_deps(
+        &ws.path,
+        Arc::clone(&replay_factory) as Arc<dyn DriverFactory>,
+        default_probes(),
+        CancellationToken::new(),
+    );
+    let replay_code = run_cli_from_args(
+        [
+            "deja",
+            "run",
+            "--all",
+            "--devices",
+            &devices_reversed,
+            "--json",
+        ],
+        &replay_deps,
+    )
+    .await;
+    assert_eq!(
+        replay_code,
+        0,
+        "strict replay must route each goal to its eligible shard; stdout={} stderr={}",
+        replay_cap.lock().unwrap().stdout,
+        replay_cap.lock().unwrap().stderr
+    );
+    let replay_json: Value = serde_json::from_str(&replay_cap.lock().unwrap().stdout).unwrap();
+    assert_eq!(replay_json["passed"], true);
+    assert_eq!(replay_json["goals"][0]["outcome"], "passed");
+    assert_eq!(replay_json["goals"][0]["device"], goal_a_dev);
+    assert_eq!(replay_json["goals"][1]["outcome"], "passed");
+    assert_eq!(replay_json["goals"][1]["device"], goal_b_dev);
+
+    // 3. Verify no hang if one eligible shard fails driver attach: the healthy shard executes its
+    //    eligible goal cleanly and exits, and the stranded goal reports the failed shard's error.
+    let mut failing_factory = BatchMockFactory::new(Some("ios-27.2"));
+    failing_factory.fail_create_devices.insert(
+        goal_a_dev.clone(),
+        "simulator unavailable on shard a".to_string(),
+    );
+    let (fail_deps, fail_cap) = make_deps(
+        &ws.path,
+        Arc::new(failing_factory) as Arc<dyn DriverFactory>,
+        default_probes(),
+        CancellationToken::new(),
+    );
+    let fail_code = tokio::time::timeout(
+        Duration::from_secs(5),
+        run_cli_from_args(
+            [
+                "deja",
+                "run",
+                "--all",
+                "--devices",
+                &devices_reversed,
+                "--json",
+            ],
+            &fail_deps,
+        ),
+    )
+    .await
+    .expect("batch run must not hang when an eligible shard fails to attach");
+    assert_eq!(fail_code, 1);
+    let fail_json: Value = serde_json::from_str(&fail_cap.lock().unwrap().stdout).unwrap();
+    assert_eq!(fail_json["goals"][0]["outcome"], "error");
+    assert!(
+        fail_json["goals"][0]["errors"][0]
+            .as_str()
+            .unwrap_or("")
+            .contains("simulator unavailable on shard a")
+    );
+    assert_eq!(fail_json["goals"][1]["outcome"], "passed");
+    assert_eq!(fail_json["goals"][1]["device"], goal_b_dev);
+}
+
+#[tokio::test]
+async fn regression_deja66_r2_f2_rejects_overlapping_junit_and_report_destinations() {
+    let ws = TempWs::new("deja66-r2-f2-overlap");
+    ws.write_build("build/App.bin", b"build-v1");
+    ws.write(
+        "flows/g1.yaml",
+        &format!("appId: {TEST_APP_ID}\n---\n- assertVisible: g1\n"),
+    );
+    ws.write("goals.txt", "g1\n");
+    let sentinel = "SENTINEL_MUST_STAY_UNTOUCHED\n";
+    ws.write("out/shared.xml", sentinel);
+
+    // Case A: batch `deja run --goals goals.txt --junit out/shared.xml --report out/shared.xml`
+    ws.write(
+        "deja.config.json",
+        &json!({
+            "workspaceRoot": ".",
+            "platform": "ios",
+            "appId": TEST_APP_ID,
+            "device": TEST_UDID,
+            "buildPath": "build/App.bin"
+        })
+        .to_string(),
+    );
+    let (deps_a, cap_a) = make_deps(
+        &ws.path,
+        Arc::new(BatchMockFactory::new(Some("ios-27.2"))),
+        default_probes(),
+        CancellationToken::new(),
+    );
+    let code_a = run_cli_from_args(
+        [
+            "deja",
+            "run",
+            "--goals",
+            "goals.txt",
+            "--junit",
+            "out/shared.xml",
+            "--report",
+            "out/shared.xml",
+            "--json",
+        ],
+        &deps_a,
+    )
+    .await;
+    assert_eq!(code_a, 2, "stderr: {}", cap_a.lock().unwrap().stderr);
+    assert_eq!(
+        fs::read_to_string(ws.path.join("out/shared.xml")).unwrap(),
+        sentinel,
+        "overlapping --junit and --report must fail before touching disk"
+    );
+
+    // Case B: single-goal `deja run g1 --junit out/shared.xml --report ./out/../out/shared.xml`
+    let (deps_b, _) = make_deps(
+        &ws.path,
+        Arc::new(BatchMockFactory::new(Some("ios-27.2"))),
+        default_probes(),
+        CancellationToken::new(),
+    );
+    let code_b = run_cli_from_args(
+        [
+            "deja",
+            "run",
+            "g1",
+            "--junit",
+            "out/shared.xml",
+            "--report",
+            "./out/../out/shared.xml",
+            "--json",
+        ],
+        &deps_b,
+    )
+    .await;
+    assert_eq!(code_b, 2);
+    assert_eq!(
+        fs::read_to_string(ws.path.join("out/shared.xml")).unwrap(),
+        sentinel
+    );
+
+    // Case C: `deja remember g1 --flow flows/g1.yaml --junit out/shared.xml --report out/shared.xml`
+    let (deps_c, _) = make_deps(
+        &ws.path,
+        Arc::new(BatchMockFactory::new(Some("ios-27.2"))),
+        default_probes(),
+        CancellationToken::new(),
+    );
+    let code_c = run_cli_from_args(
+        [
+            "deja",
+            "remember",
+            "g1",
+            "--flow",
+            "flows/g1.yaml",
+            "--junit",
+            "out/shared.xml",
+            "--report",
+            "out/shared.xml",
+            "--json",
+        ],
+        &deps_c,
+    )
+    .await;
+    assert_eq!(code_c, 2);
+    assert_eq!(
+        fs::read_to_string(ws.path.join("out/shared.xml")).unwrap(),
+        sentinel
+    );
+
+    // Case D: `config.junit` matches `--report` across batch `run`, single-goal `run`, and `remember`.
+    ws.write(
+        "deja.config.json",
+        &json!({
+            "workspaceRoot": ".",
+            "platform": "ios",
+            "appId": TEST_APP_ID,
+            "device": TEST_UDID,
+            "buildPath": "build/App.bin",
+            "junit": "out/shared.xml"
+        })
+        .to_string(),
+    );
+    for argv in [
+        vec![
+            "deja",
+            "run",
+            "--goals",
+            "goals.txt",
+            "--report",
+            "out/shared.xml",
+            "--json",
+        ],
+        vec!["deja", "run", "g1", "--report", "out/shared.xml", "--json"],
+        vec![
+            "deja",
+            "remember",
+            "g1",
+            "--flow",
+            "flows/g1.yaml",
+            "--report",
+            "out/shared.xml",
+            "--json",
+        ],
+    ] {
+        let (deps_d, _) = make_deps(
+            &ws.path,
+            Arc::new(BatchMockFactory::new(Some("ios-27.2"))),
+            default_probes(),
+            CancellationToken::new(),
+        );
+        let code_d = run_cli_from_args(argv, &deps_d).await;
+        assert_eq!(code_d, 2);
+        assert_eq!(
+            fs::read_to_string(ws.path.join("out/shared.xml")).unwrap(),
+            sentinel,
+            "config.junit overlapping --report must fail before prepare_safe_junit unlinks file"
+        );
+    }
+}
+
+#[tokio::test]
+async fn regression_deja66_r2_f4_batch_build_fingerprint_cancellation_closes_stores_and_exits_cleanly()
+ {
+    let ws = TempWs::new("deja66-r2-f4-fp-cancel");
+    let app_dir = ws.path.join("build/Big.app");
+    fs::create_dir_all(&app_dir).unwrap();
+    let blob = vec![0x77u8; deja_core::FINGERPRINT_CHUNK_BYTES * 2];
+    for i in 0..8 {
+        fs::write(app_dir.join(format!("blob-{i:02}.bin")), &blob).unwrap();
+    }
+    ws.write(
+        "deja.config.json",
+        &json!({
+            "workspaceRoot": ".",
+            "platform": "ios",
+            "appId": TEST_APP_ID,
+            "adapter": "maestro-ios/v1",
+            "device": TEST_UDID,
+            "buildPath": "build/Big.app",
+            "manifest": "deja.walks.json"
+        })
+        .to_string(),
+    );
+    write_tagged_flow(&ws, "flows/g1.yaml", "g1");
+    seed_manifest_walk(
+        &ws,
+        &[("g1", TEST_APP_ID, "ios", "maestro-ios/v1", "flows/g1.yaml")],
+    );
+
+    let cancel = CancellationToken::new();
+    let (deps, cap) = make_deps(
+        &ws.path,
+        Arc::new(BatchMockFactory::new(Some("ios-27.2"))),
+        default_probes(),
+        cancel.clone(),
+    );
+    deps.cancel_signal.store(
+        deja_cli::exit_codes::CANCEL_SIGNAL_SIGTERM,
+        Ordering::SeqCst,
+    );
+    cancel.cancel();
+
+    let code = run_cli_from_args(
+        [
+            "deja",
+            "run",
+            "--all",
+            "--junit",
+            "out/fp-cancel.xml",
+            "--json",
+        ],
+        &deps,
+    )
+    .await;
+    assert_eq!(
+        code, 143,
+        "SIGTERM cancel before/during fingerprinting must exit 143"
+    );
+    assert!(
+        !ws.path.join(".deja/memory/walks.sqlite.lock").exists(),
+        "all shard store locks must be released when cancelled during fingerprinting"
+    );
+
+    let parsed: Value = serde_json::from_str(&cap.lock().unwrap().stdout).unwrap();
+    assert_eq!(parsed["cancelled"], true);
+    assert_eq!(parsed["outcome"], "cancelled");
+    assert_eq!(parsed["goals"][0]["outcome"], "skipped");
+
+    let xml = fs::read_to_string(ws.path.join("out/fp-cancel.xml")).unwrap();
+    assert!(deja_flow::reports_failure(&xml));
+    assert!(xml.contains(r#"status="SKIPPED""#));
+}
+
 #[tokio::test]
 async fn web_real_driver_factory_runtime_create_install_doctor_and_invalid_device_exit_2() {
     let ws = TempWs::new("web-factory");
@@ -4659,6 +7589,7 @@ async fn web_real_driver_factory_runtime_create_install_doctor_and_invalid_devic
         screen_size,
         timeout_ms: 30_000,
         env: env.clone(),
+        staged_build: None,
     };
 
     let cancel = CancellationToken::new();
@@ -5061,6 +7992,7 @@ async fn codex_r3_f3_doctor_and_runtime_skip_broken_path_chromium_candidate() {
         screen_size: Some(json!("1280x800")),
         timeout_ms: 30_000,
         env: env.clone(),
+        staged_build: None,
     };
     let cancel = CancellationToken::new();
     let rt = RealDriverFactory
@@ -5096,5 +8028,652 @@ async fn codex_r3_f3_doctor_and_runtime_skip_broken_path_chromium_candidate() {
             .await
             .is_err(),
         "explicit broken DEJA_CHROME must fail closed"
+    );
+}
+
+#[tokio::test]
+async fn regression_deja66_r3_f1_batch_take_screenshot_parent_escape_fails_closed() {
+    let ws = TempWs::new("deja66-r3-f1-batch-shot-escape");
+    ws.write_build("build/App.bin", b"build-v1");
+    ws.write(
+        "deja.config.json",
+        &json!({
+            "workspaceRoot": ".",
+            "platform": "ios",
+            "appId": TEST_APP_ID,
+            "adapter": "maestro-ios/v1",
+            "device": TEST_UDID,
+            "buildPath": "build/App.bin",
+            "manifest": "deja.walks.json",
+            "staleBuild": "replay-last-verified"
+        })
+        .to_string(),
+    );
+    ws.write(
+        "flows/escape.yaml",
+        &format!(
+            "appId: {TEST_APP_ID}\n---\n- takeScreenshot: \"../shared.png\"\n- assertVisible: Done\n"
+        ),
+    );
+    seed_manifest_walk(
+        &ws,
+        &[(
+            "escape goal",
+            TEST_APP_ID,
+            "ios",
+            "maestro-ios/v1",
+            "flows/escape.yaml",
+        )],
+    );
+
+    let (deps, cap) = make_deps(
+        &ws.path,
+        Arc::new(BatchMockFactory::new(Some("ios-27.2"))),
+        default_probes(),
+        CancellationToken::new(),
+    );
+    let code = run_cli_from_args(["deja", "run", "--all", "--json"], &deps).await;
+    assert_ne!(
+        code,
+        0,
+        "batch goal escaping its attempt screenshot directory must fail closed; stdout={}",
+        cap.lock().unwrap().stdout
+    );
+    let parsed: Value = serde_json::from_str(&cap.lock().unwrap().stdout).unwrap();
+    assert_eq!(parsed["goals"][0]["passed"], false);
+
+    // Ensure `shared.png` was NEVER written anywhere under `.deja/reports/batch-screenshots/`.
+    let shot_root = ws.path.join(".deja/reports/batch-screenshots");
+    if shot_root.exists() {
+        for entry in fs::read_dir(&shot_root).unwrap() {
+            let entry = entry.unwrap();
+            assert!(
+                !entry.path().join("shared.png").exists(),
+                "escaping screenshot ../shared.png must never exist in {}",
+                entry.path().display()
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn regression_deja66_r3_f2_runtime_lookup_failure_on_one_shard_continues_on_healthy_shard() {
+    let ws = TempWs::new("deja66-r3-f2-rt-fail-shard");
+    ws.write_build("build/App.bin", b"build-v1");
+    ws.write(
+        "deja.config.json",
+        &json!({
+            "workspaceRoot": ".",
+            "platform": "ios",
+            "appId": TEST_APP_ID,
+            "adapter": "maestro-ios/v1",
+            "buildPath": "build/App.bin",
+            "manifest": "deja.walks.json",
+            "staleBuild": "replay-last-verified"
+        })
+        .to_string(),
+    );
+    write_tagged_flow(&ws, "flows/g1.yaml", "g1");
+    write_tagged_flow(&ws, "flows/g2.yaml", "g2");
+    seed_manifest_walk(
+        &ws,
+        &[
+            ("g1", TEST_APP_ID, "ios", "maestro-ios/v1", "flows/g1.yaml"),
+            ("g2", TEST_APP_ID, "ios", "maestro-ios/v1", "flows/g2.yaml"),
+        ],
+    );
+
+    // 1. Shard 0 (`TEST_UDID`) fails `resolve_runtime`, shard 1 (`TEST_UDID_2`) is healthy.
+    //    Batch MUST continue on `TEST_UDID_2`, execute ALL goals cleanly, release `TEST_UDID`'s
+    //    store lock, and record the runtime lookup failure on `shards[0]`.
+    let mut factory = BatchMockFactory::new(Some("ios-27.2"));
+    factory
+        .fail_runtime_devices
+        .insert(TEST_UDID.to_string(), "simulator UDID deleted".to_string());
+    let (deps, cap) = make_deps(
+        &ws.path,
+        Arc::new(factory) as Arc<dyn DriverFactory>,
+        default_probes(),
+        CancellationToken::new(),
+    );
+    let devices_arg = format!("{TEST_UDID},{TEST_UDID_2}");
+    let code = run_cli_from_args(
+        ["deja", "run", "--all", "--devices", &devices_arg, "--json"],
+        &deps,
+    )
+    .await;
+    assert_eq!(
+        code,
+        0,
+        "healthy shard must execute all eligible goals; stdout={} stderr={}",
+        cap.lock().unwrap().stdout,
+        cap.lock().unwrap().stderr
+    );
+    let parsed: Value = serde_json::from_str(&cap.lock().unwrap().stdout).unwrap();
+    assert_eq!(parsed["passed"], true);
+    assert_eq!(parsed["counts"]["passed"], 2);
+    assert_eq!(parsed["goals"][0]["device"], TEST_UDID_2);
+    assert_eq!(parsed["goals"][1]["device"], TEST_UDID_2);
+
+    assert_eq!(parsed["shards"][0]["device"], TEST_UDID);
+    assert!(parsed["shards"][0]["runtime"].is_null());
+    assert_eq!(parsed["shards"][0]["goalsExecuted"], 0);
+    assert!(
+        parsed["shards"][0]["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("simulator UDID deleted")
+    );
+    assert_eq!(parsed["shards"][1]["device"], TEST_UDID_2);
+    assert_eq!(parsed["shards"][1]["runtime"], "ios-27.2");
+    assert_eq!(parsed["shards"][1]["goalsExecuted"], 2);
+    assert!(parsed["shards"][1].get("error").is_none());
+
+    assert!(
+        !ws.path
+            .join(format!(".deja/memory/stores/{TEST_UDID}/walks.sqlite.lock"))
+            .exists(),
+        "failed shard's store lock must be released"
+    );
+
+    // 2. When ALL shards fail `resolve_runtime`, batch emits per-goal error records + failing JUnit.
+    let mut all_fail_factory = BatchMockFactory::new(Some("ios-27.2"));
+    all_fail_factory
+        .fail_runtime_devices
+        .insert(TEST_UDID.to_string(), "sim 1 missing".to_string());
+    all_fail_factory
+        .fail_runtime_devices
+        .insert(TEST_UDID_2.to_string(), "sim 2 missing".to_string());
+    let (deps2, cap2) = make_deps(
+        &ws.path,
+        Arc::new(all_fail_factory) as Arc<dyn DriverFactory>,
+        default_probes(),
+        CancellationToken::new(),
+    );
+    let code2 = run_cli_from_args(
+        [
+            "deja",
+            "run",
+            "--all",
+            "--devices",
+            &devices_arg,
+            "--junit",
+            "out/all-rt-fail.xml",
+            "--json",
+        ],
+        &deps2,
+    )
+    .await;
+    assert_eq!(code2, 1);
+    let parsed2: Value = serde_json::from_str(&cap2.lock().unwrap().stdout).unwrap();
+    assert_eq!(parsed2["counts"]["errored"], 2);
+    assert_eq!(parsed2["goals"][0]["outcome"], "error");
+    assert_eq!(parsed2["goals"][1]["outcome"], "error");
+    let xml = fs::read_to_string(ws.path.join("out/all-rt-fail.xml")).unwrap();
+    assert!(deja_flow::reports_failure(&xml));
+    assert!(xml.contains(r#"errors="2""#));
+}
+
+#[tokio::test]
+async fn regression_deja66_r3_f3_unstarted_goal_reassigned_when_shard_cannot_attach() {
+    let ws = TempWs::new("deja66-r3-f3-reassign-attach");
+    ws.write_build("build/App.bin", b"build-v1");
+    ws.write(
+        "deja.config.json",
+        &json!({
+            "workspaceRoot": ".",
+            "platform": "ios",
+            "appId": TEST_APP_ID,
+            "adapter": "maestro-ios/v1",
+            "buildPath": "build/App.bin",
+            "manifest": "deja.walks.json",
+            "staleBuild": "replay-last-verified"
+        })
+        .to_string(),
+    );
+    write_tagged_flow(&ws, "flows/g1.yaml", "g1");
+    write_tagged_flow(&ws, "flows/g2.yaml", "g2");
+    seed_manifest_walk(
+        &ws,
+        &[
+            ("g1", TEST_APP_ID, "ios", "maestro-ios/v1", "flows/g1.yaml"),
+            ("g2", TEST_APP_ID, "ios", "maestro-ios/v1", "flows/g2.yaml"),
+        ],
+    );
+
+    // Shard 0 (`TEST_UDID`) delays 50ms in `create()` and then fails attach AFTER shard 1
+    // (`TEST_UDID_2`) has already finished `g2`! Shard 1 MUST wait for the attaching shard, wake
+    // up when `g1` is pushed back onto the queue, and execute BOTH `g1` and `g2` to exit 0!
+    let mut factory = BatchMockFactory::new(Some("ios-27.2"));
+    factory
+        .create_delay_by_device
+        .insert(TEST_UDID.to_string(), Duration::from_millis(50));
+    factory.fail_create_devices.insert(
+        TEST_UDID.to_string(),
+        "WDA attach failed on shard 0".to_string(),
+    );
+    let (deps, cap) = make_deps(
+        &ws.path,
+        Arc::new(factory) as Arc<dyn DriverFactory>,
+        default_probes(),
+        CancellationToken::new(),
+    );
+    let devices_arg = format!("{TEST_UDID},{TEST_UDID_2}");
+    let code = tokio::time::timeout(
+        Duration::from_secs(5),
+        run_cli_from_args(
+            ["deja", "run", "--all", "--devices", &devices_arg, "--json"],
+            &deps,
+        ),
+    )
+    .await
+    .expect("reassignment across shards must not hang");
+    assert_eq!(
+        code,
+        0,
+        "healthy shard must execute reassigned unstarted goal; stdout={} stderr={}",
+        cap.lock().unwrap().stdout,
+        cap.lock().unwrap().stderr
+    );
+    let parsed: Value = serde_json::from_str(&cap.lock().unwrap().stdout).unwrap();
+    assert_eq!(parsed["passed"], true);
+    assert_eq!(parsed["counts"]["passed"], 2);
+    assert_eq!(parsed["goals"][0]["outcome"], "passed");
+    assert_eq!(parsed["goals"][0]["device"], TEST_UDID_2);
+    assert_eq!(parsed["goals"][1]["outcome"], "passed");
+    assert_eq!(parsed["goals"][1]["device"], TEST_UDID_2);
+    assert_eq!(parsed["shards"][0]["goalsExecuted"], 0);
+    assert!(
+        parsed["shards"][0]["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("WDA attach failed on shard 0")
+    );
+    assert_eq!(parsed["shards"][1]["goalsExecuted"], 2);
+}
+
+#[tokio::test]
+async fn regression_deja66_r3_f5_lpt_dequeues_longest_unconstrained_goal_before_shorter_constrained_goals()
+ {
+    let ws = TempWs::new("deja66-r3-f5-lpt-longest-first");
+    ws.write_build("build/App.bin", b"build-v1");
+    // Strict replay (no `staleBuild: replay-last-verified`): each shard can only replay goals
+    // verified in its own store for this build + runtime.
+    ws.write(
+        "deja.config.json",
+        &json!({
+            "workspaceRoot": ".",
+            "platform": "ios",
+            "appId": TEST_APP_ID,
+            "adapter": "maestro-ios/v1",
+            "buildPath": "build/App.bin",
+            "manifest": "deja.walks.json"
+        })
+        .to_string(),
+    );
+    write_tagged_flow(&ws, "flows/short_d1.yaml", "short-d1");
+    write_tagged_flow(&ws, "flows/short_d2.yaml", "short-d2");
+    write_tagged_flow(&ws, "flows/long_both.yaml", "long-both");
+    seed_manifest_walk(
+        &ws,
+        &[
+            (
+                "short d1",
+                TEST_APP_ID,
+                "ios",
+                "maestro-ios/v1",
+                "flows/short_d1.yaml",
+            ),
+            (
+                "short d2",
+                TEST_APP_ID,
+                "ios",
+                "maestro-ios/v1",
+                "flows/short_d2.yaml",
+            ),
+            (
+                "long both",
+                TEST_APP_ID,
+                "ios",
+                "maestro-ios/v1",
+                "flows/long_both.yaml",
+            ),
+        ],
+    );
+
+    let fp = fingerprint_file(&ws.path, &ws.path.join("build/App.bin")).unwrap();
+    let seed_store_goal = |store_id: &str, goal: &str, flow_rel: &str, dur_ms: u64| {
+        let cl = collect_flow_closure(&ws.path, &ws.path.join(flow_rel)).unwrap();
+        let main_sha = cl
+            .files
+            .iter()
+            .find(|f| f.path == cl.main)
+            .unwrap()
+            .sha256
+            .clone();
+        let store = SqliteWalkStore::open_writable(
+            SqliteStoreOptions::new(&ws.path).with_store_id(store_id),
+        )
+        .unwrap();
+        store
+            .upsert_walk(&deja_store::UpsertWalkInput {
+                identity: WalkIdentity {
+                    goal: goal.to_string(),
+                    app_id: TEST_APP_ID.to_string(),
+                    platform: "ios".to_string(),
+                    flow_schema_version: DEFAULT_FLOW_SCHEMA_VERSION.to_string(),
+                    build_fingerprint: fp.clone(),
+                    adapter: Some("maestro-ios/v1".to_string()),
+                    browser: None,
+                },
+                flow_path: flow_rel.to_string(),
+                flow_sha256: main_sha,
+                subflow_files: None,
+                legacy_closure: false,
+                closure_sha256: Some(cl.sha256),
+                validation: RecordValidationInput::new(true, now_iso8601())
+                    .with_runtime("ios-27.2")
+                    .with_duration_ms(dur_ms),
+                exploration: None,
+                repair_history: None,
+            })
+            .unwrap();
+        store.close();
+    };
+
+    // `long both` (2000ms) is eligible on BOTH `TEST_UDID` and `TEST_UDID_2`.
+    // `short d1` (100ms) is constrained to `TEST_UDID` ONLY.
+    // `short d2` (100ms) is constrained to `TEST_UDID_2` ONLY.
+    seed_store_goal(TEST_UDID, "long both", "flows/long_both.yaml", 2_000);
+    seed_store_goal(TEST_UDID_2, "long both", "flows/long_both.yaml", 2_000);
+    seed_store_goal(TEST_UDID, "short d1", "flows/short_d1.yaml", 100);
+    seed_store_goal(TEST_UDID_2, "short d2", "flows/short_d2.yaml", 100);
+
+    // Synchronize the very first goal dequeued by BOTH shards with a 2-party barrier:
+    // under pure LPT-first eligible selection, one of the first two concurrently started goals
+    // MUST be `"long-both"` (NEVER both `"short-d1"` and `"short-d2"` jumping ahead!).
+    let first_wave: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let hook: AsyncGoalHook = {
+        let wave = Arc::clone(&first_wave);
+        let b = Arc::clone(&barrier);
+        Arc::new(
+            move |_dev: String, tag: String, _cancel: CancellationToken| {
+                let wave = Arc::clone(&wave);
+                let b = Arc::clone(&b);
+                Box::pin(async move {
+                    let in_first_wave = {
+                        let mut g = wave.lock().unwrap();
+                        if g.len() < 2 {
+                            g.push(tag);
+                            true
+                        } else {
+                            false
+                        }
+                    };
+                    if in_first_wave {
+                        let _ = tokio::time::timeout(Duration::from_secs(2), b.wait()).await;
+                    }
+                })
+            },
+        )
+    };
+
+    let factory = Arc::new(BatchMockFactory::new(Some("ios-27.2")).with_on_goal(hook));
+    let (deps, cap) = make_deps(
+        &ws.path,
+        Arc::clone(&factory) as Arc<dyn DriverFactory>,
+        default_probes(),
+        CancellationToken::new(),
+    );
+    let devices_arg = format!("{TEST_UDID},{TEST_UDID_2}");
+    let code = run_cli_from_args(
+        ["deja", "run", "--all", "--devices", &devices_arg, "--json"],
+        &deps,
+    )
+    .await;
+    assert_eq!(
+        code,
+        0,
+        "all 3 goals must pass; stdout={} stderr={}",
+        cap.lock().unwrap().stdout,
+        cap.lock().unwrap().stderr
+    );
+    let wave = first_wave.lock().unwrap().clone();
+    assert!(
+        wave.iter().any(|t| t == "long-both"),
+        "longest unconstrained goal (2000ms) MUST be dequeued in the first wave before both 100ms constrained goals; got first_wave={wave:?}"
+    );
+}
+
+#[test]
+fn mcp_subprocess_stdio_roundtrip_zero_stdout_leak_and_rejects_json_flag() {
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::process::Stdio;
+
+    let ws = TempWs::new("mcp-subprocess");
+    ws.write(
+        "deja.config.json",
+        &json!({
+            "workspaceRoot": ".",
+            "platform": "ios",
+            "appId": TEST_APP_ID,
+            "adapter": "maestro-ios/v1"
+        })
+        .to_string(),
+    );
+
+    // 1. `deja mcp --json` must exit 2 with zero stdout bytes.
+    let bad = deja_bin()
+        .current_dir(&ws.path)
+        .args(["mcp", "--json"])
+        .output()
+        .expect("spawn deja mcp --json");
+    assert_eq!(bad.status.code(), Some(2));
+    assert!(
+        bad.stdout.is_empty(),
+        "deja mcp --json must not write anything to stdout, got: {:?}",
+        String::from_utf8_lossy(&bad.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&bad.stderr).contains("--json"),
+        "expected stderr usage message for --json"
+    );
+
+    // 2. Real stdin/stdout JSON-RPC 2.0 session with DEJA_LOG=debug verifying ZERO stdout log leakage.
+    let mut child = deja_bin()
+        .current_dir(&ws.path)
+        .env("DEJA_LOG", "debug")
+        .args(["mcp"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn deja mcp");
+
+    let mut stdin = child.stdin.take().expect("piped stdin");
+    let mut stdout_reader = BufReader::new(child.stdout.take().expect("piped stdout"));
+    let mut stderr = child.stderr.take().expect("piped stderr");
+
+    let read_json_line = |reader: &mut BufReader<std::process::ChildStdout>| -> Value {
+        let mut line = String::new();
+        let n = reader.read_line(&mut line).expect("read stdout line");
+        assert!(n > 0, "unexpected EOF reading MCP stdout");
+        serde_json::from_str(line.trim())
+            .unwrap_or_else(|err| panic!("stdout contained non-JSON-RPC output ({err}): {line:?}"))
+    };
+
+    writeln!(
+        stdin,
+        "{}",
+        json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18"}})
+    )
+    .unwrap();
+    stdin.flush().unwrap();
+    let r1 = read_json_line(&mut stdout_reader);
+    assert_eq!(r1["id"], 1);
+    assert_eq!(r1["result"]["protocolVersion"], "2025-06-18");
+    assert_eq!(r1["result"]["serverInfo"]["name"], "deja");
+
+    writeln!(
+        stdin,
+        "{}",
+        json!({"jsonrpc": "2.0", "method": "notifications/initialized"})
+    )
+    .unwrap();
+    writeln!(
+        stdin,
+        "{}",
+        json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
+    )
+    .unwrap();
+    stdin.flush().unwrap();
+    let r2 = read_json_line(&mut stdout_reader);
+    assert_eq!(r2["id"], 2);
+    let tool_names: Vec<&str> = r2["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    assert!(tool_names.contains(&"deja_list"));
+    assert!(tool_names.contains(&"deja_exec_batch"));
+    assert!(!tool_names.contains(&"deja_explore"));
+
+    writeln!(
+        stdin,
+        "{}",
+        json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "deja_list", "arguments": {}}})
+    )
+    .unwrap();
+    stdin.flush().unwrap();
+    let r3 = read_json_line(&mut stdout_reader);
+    assert_eq!(r3["id"], 3);
+    assert_eq!(r3["result"]["isError"], false);
+    assert_eq!(r3["result"]["structuredContent"]["count"], 0);
+
+    // Close stdin (EOF) -> server must exit 0 with zero trailing stdout bytes.
+    drop(stdin);
+    let mut trailing = String::new();
+    stdout_reader.read_to_string(&mut trailing).unwrap();
+    assert!(
+        trailing.is_empty(),
+        "expected zero trailing stdout bytes after EOF, got: {trailing:?}"
+    );
+
+    let status = child.wait().expect("wait on deja mcp");
+    let mut stderr_text = String::new();
+    let _ = stderr.read_to_string(&mut stderr_text);
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "deja mcp must exit 0 on EOF; stderr:\n{stderr_text}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn regression_r1_f3_mcp_exits_promptly_on_sigterm_with_stdin_open() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::process::Stdio;
+    use std::time::Instant;
+
+    let ws = TempWs::new("r1-f3-mcp-sigterm");
+    ws.write(
+        "deja.config.json",
+        &json!({
+            "workspaceRoot": ".",
+            "platform": "ios",
+            "appId": TEST_APP_ID,
+            "adapter": "maestro-ios/v1"
+        })
+        .to_string(),
+    );
+
+    let mut child = deja_bin()
+        .current_dir(&ws.path)
+        .args(["mcp"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn deja mcp");
+
+    // Keep `_stdin` OPEN throughout SIGTERM handling!
+    let mut _stdin = child.stdin.take().expect("piped stdin");
+    let mut stdout_reader = BufReader::new(child.stdout.take().expect("piped stdout"));
+
+    writeln!(
+        _stdin,
+        "{}",
+        json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18"}})
+    )
+    .unwrap();
+    _stdin.flush().unwrap();
+
+    let mut init_line = String::new();
+    let n = stdout_reader
+        .read_line(&mut init_line)
+        .expect("read initialize response");
+    assert!(n > 0);
+    let init_resp: Value = serde_json::from_str(init_line.trim()).unwrap();
+    assert_eq!(init_resp["id"], 1);
+
+    // Send SIGTERM while parent STILL holds `_stdin` open!
+    deja_driver_ios::send_sigterm_to_pid(child.id()).expect("send SIGTERM to deja mcp");
+
+    let start = Instant::now();
+    let exit_status = loop {
+        if let Some(status) = child.try_wait().expect("try_wait on deja mcp") {
+            break status;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(3),
+            "deja mcp hung on SIGTERM while stdin remained open"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    };
+
+    assert_eq!(
+        exit_status.code(),
+        Some(143),
+        "expected exit code 143 on SIGTERM, got: {exit_status:?}"
+    );
+}
+
+#[test]
+fn regression_r2_f8_invalid_mcp_store_arg_not_echoed_to_stderr() {
+    let ws = TempWs::new("r2-f8-store-redact");
+    ws.write(
+        "deja.config.json",
+        &json!({
+            "workspaceRoot": ".",
+            "platform": "ios",
+            "appId": TEST_APP_ID,
+            "adapter": "maestro-ios/v1"
+        })
+        .to_string(),
+    );
+
+    let secret_store_path = ["/", "Users", "/secret-home/foo"].concat();
+    let out = deja_bin()
+        .current_dir(&ws.path)
+        .args(["mcp", "--store", &secret_store_path])
+        .output()
+        .expect("spawn deja mcp --store");
+
+    assert_eq!(out.status.code(), Some(2));
+    assert!(
+        out.stdout.is_empty(),
+        "invalid --store must not write to stdout"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("invalid `--store`"),
+        "expected invalid --store diagnostic, got: {stderr}"
+    );
+    assert!(
+        !stderr.contains(&secret_store_path) && !stderr.contains("secret-home"),
+        "raw rejected --store path must never be echoed to stderr: {stderr}"
     );
 }

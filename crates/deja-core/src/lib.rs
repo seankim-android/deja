@@ -37,7 +37,8 @@ pub use contracts::{
 };
 pub use error::CoreError;
 pub use fingerprint::{
-    BuildFingerprintCache, FINGERPRINT_CHUNK_BYTES, fingerprint_file, fingerprint_tree,
+    BuildFingerprintCache, FINGERPRINT_CHUNK_BYTES, fingerprint_file, fingerprint_file_cancellable,
+    fingerprint_tree, fingerprint_tree_cancellable,
 };
 pub use flow_assertions::{
     ASSERTION_HASH_VERSION, ClosureAssertion, FlowAssertion, FlowAssertionCall,

@@ -26,6 +26,7 @@ const ZIP_MAGIC: &[u8; 4] = b"PK\x03\x04";
 const APK_FILENAME: &str = "deja-android-agent.apk";
 const APK_SHA256_FILENAME: &str = "deja-android-agent.apk.sha256";
 const READY_MARKER_FILENAME: &str = "ready.marker";
+const DEBUG_KEYSTORE_FILENAME: &str = "debug.keystore";
 const HASH_CHUNK_BYTES: usize = 65_536;
 
 static STAGING_NONCE: AtomicU64 = AtomicU64::new(0);
@@ -35,6 +36,8 @@ static STAGING_NONCE: AtomicU64 = AtomicU64::new(0);
 pub enum ApkSource {
     /// Explicit prebuilt APK supplied via `DEJA_ANDROID_AGENT_APK`.
     PrebuiltEnv,
+    /// Embedded prebuilt APK shipped inside `deja` (zero JDK / zero Android SDK required).
+    EmbeddedPrebuilt,
     /// On-demand compiled and cached APK under `$DEJA_HOME/drivers/android/<source_sha256>/`.
     CachedBuild,
 }
@@ -69,6 +72,9 @@ pub enum AgentApkReadiness {
     },
     PrebuiltInvalid {
         detail: String,
+    },
+    EmbeddedPrebuiltReady {
+        sha256: String,
     },
     CacheHit {
         apk_path: PathBuf,
@@ -512,7 +518,20 @@ pub(crate) fn is_executable_file(path: &Path) -> bool {
     })
 }
 
-fn check_cached_apk(cache_dir: &Path, source_sha: &str) -> Option<ResolvedAgentApk> {
+fn wants_source_build(env: &BTreeMap<String, String>) -> bool {
+    env.get("DEJA_ANDROID_BUILD_AGENT_FROM_SOURCE")
+        .map(|s| s.trim())
+        .is_some_and(|v| {
+            v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("yes")
+        })
+}
+
+fn check_cached_apk(
+    cache_dir: &Path,
+    source_sha: &str,
+    source: ApkSource,
+    required_apk_sha: Option<&str>,
+) -> Option<ResolvedAgentApk> {
     let marker = cache_dir.join(READY_MARKER_FILENAME);
     let apk_path = cache_dir.join(APK_FILENAME);
     let sha_path = cache_dir.join(APK_SHA256_FILENAME);
@@ -526,6 +545,11 @@ fn check_cached_apk(cache_dir: &Path, source_sha: &str) -> Option<ResolvedAgentA
     if expected_sha.len() != 64 || !expected_sha.bytes().all(|b| b.is_ascii_hexdigit()) {
         return None;
     }
+    if let Some(pin) = required_apk_sha
+        && expected_sha != pin
+    {
+        return None;
+    }
     let actual_sha = verify_and_hash_apk(&apk_path).ok()?;
     if actual_sha != expected_sha {
         return None;
@@ -534,7 +558,7 @@ fn check_cached_apk(cache_dir: &Path, source_sha: &str) -> Option<ResolvedAgentA
         apk_path,
         sha256: actual_sha,
         source_sha256: source_sha.to_string(),
-        source: ApkSource::CachedBuild,
+        source,
         was_cache_hit: true,
         build_duration_ms: 0,
     })
@@ -565,10 +589,16 @@ pub fn inspect_agent_apk_readiness(
         };
     }
 
+    if !wants_source_build(env) {
+        return AgentApkReadiness::EmbeddedPrebuiltReady {
+            sha256: embed::PREBUILT_AGENT_APK_SHA256.to_string(),
+        };
+    }
+
     let source_sha = embed::source_sha256();
     if let Ok(deja_home) = resolve_deja_home(deja_home_override, env) {
         let cache_dir = deja_home.join("drivers").join("android").join(&source_sha);
-        if let Some(hit) = check_cached_apk(&cache_dir, &source_sha) {
+        if let Some(hit) = check_cached_apk(&cache_dir, &source_sha, ApkSource::CachedBuild, None) {
             return AgentApkReadiness::CacheHit {
                 apk_path: hit.apk_path,
                 source_sha256: source_sha,
@@ -594,9 +624,152 @@ pub fn inspect_agent_apk_readiness(
     }
 }
 
-/// Resolves `deja-android-agent.apk` via `DEJA_ANDROID_AGENT_APK` (if configured) or from
-/// `$DEJA_HOME/drivers/android/<source_sha256>/`, building it on demand with an advisory file
-/// lock and cancellation-safe `BuildGuard` if the cache is cold.
+async fn materialize_embedded_prebuilt_apk(
+    deja_home: &Path,
+    source_sha: &str,
+    cancel: &CancellationToken,
+) -> Result<ResolvedAgentApk> {
+    let actual_embedded_sha = hex::encode(Sha256::digest(embed::PREBUILT_AGENT_APK));
+    if actual_embedded_sha != embed::PREBUILT_AGENT_APK_SHA256 {
+        return Err(AndroidDriverError::ApkHashMismatch {
+            path: PathBuf::from("<embedded:deja-android-agent.apk>"),
+            expected: embed::PREBUILT_AGENT_APK_SHA256.to_string(),
+            actual: actual_embedded_sha,
+        });
+    }
+
+    let android_root = deja_home.join("drivers").join("android");
+    let cache_dir = android_root.join(format!("prebuilt-{}", embed::PREBUILT_AGENT_APK_SHA256));
+    let locks_dir = android_root.join("locks");
+
+    if let Some(hit) = check_cached_apk(
+        &cache_dir,
+        source_sha,
+        ApkSource::EmbeddedPrebuilt,
+        Some(embed::PREBUILT_AGENT_APK_SHA256),
+    ) {
+        debug!(
+            apk_sha = %embed::PREBUILT_AGENT_APK_SHA256,
+            "embedded prebuilt deja-android-agent.apk cache hit"
+        );
+        return Ok(hit);
+    }
+
+    fs::create_dir_all(&locks_dir).map_err(|source| AndroidDriverError::Io {
+        context: format!("create Android cache locks dir {}", locks_dir.display()),
+        source,
+    })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&locks_dir, fs::Permissions::from_mode(0o700));
+    }
+
+    let lock_path = locks_dir.join(format!(
+        "prebuilt-{}.lock",
+        embed::PREBUILT_AGENT_APK_SHA256
+    ));
+    let _lock = acquire_advisory_lock_cancellable(&lock_path, cancel).await?;
+
+    if let Some(hit) = check_cached_apk(
+        &cache_dir,
+        source_sha,
+        ApkSource::EmbeddedPrebuilt,
+        Some(embed::PREBUILT_AGENT_APK_SHA256),
+    ) {
+        return Ok(hit);
+    }
+
+    let nonce = STAGING_NONCE.fetch_add(1, Ordering::Relaxed);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let staging_dir = android_root.join(format!(
+        ".staging-prebuilt-{}-{nanos:x}-{nonce}",
+        std::process::id()
+    ));
+    let mut guard = BuildGuard::new(staging_dir.clone());
+    fs::create_dir_all(&staging_dir).map_err(|source| AndroidDriverError::Io {
+        context: format!(
+            "create Android prebuilt stage dir {}",
+            staging_dir.display()
+        ),
+        source,
+    })?;
+
+    let staged_apk = staging_dir.join(APK_FILENAME);
+    fs::write(&staged_apk, embed::PREBUILT_AGENT_APK).map_err(|source| AndroidDriverError::Io {
+        context: format!("write embedded prebuilt APK {}", staged_apk.display()),
+        source,
+    })?;
+    let verified_sha = verify_and_hash_apk(&staged_apk)?;
+    if verified_sha != embed::PREBUILT_AGENT_APK_SHA256 {
+        return Err(AndroidDriverError::ApkHashMismatch {
+            path: staged_apk,
+            expected: embed::PREBUILT_AGENT_APK_SHA256.to_string(),
+            actual: verified_sha,
+        });
+    }
+    fs::write(
+        staging_dir.join(APK_SHA256_FILENAME),
+        format!("{verified_sha}\n"),
+    )
+    .map_err(|source| AndroidDriverError::Io {
+        context: "write prebuilt Android agent APK sha256 sidecar".to_string(),
+        source,
+    })?;
+    let marker = ReadyMarker {
+        source_sha256: source_sha.to_string(),
+        apk_sha256: verified_sha.clone(),
+        build_tools: "embedded-prebuilt".to_string(),
+        platform: "android-36".to_string(),
+    };
+    let marker_json =
+        serde_json::to_vec_pretty(&marker).map_err(|source| AndroidDriverError::Json {
+            context: "serialize prebuilt Android agent ready.marker".to_string(),
+            source,
+        })?;
+    fs::write(staging_dir.join(READY_MARKER_FILENAME), marker_json).map_err(|source| {
+        AndroidDriverError::Io {
+            context: "write prebuilt Android agent ready.marker".to_string(),
+            source,
+        }
+    })?;
+
+    if cache_dir.exists() {
+        let _ = fs::remove_dir_all(&cache_dir);
+    }
+    fs::rename(&staging_dir, &cache_dir).map_err(|source| AndroidDriverError::Io {
+        context: format!(
+            "promote prebuilt Android agent cache dir {}",
+            cache_dir.display()
+        ),
+        source,
+    })?;
+    guard.disarm();
+
+    info!(
+        apk_sha = %verified_sha,
+        "materialized embedded prebuilt deja-android-agent.apk"
+    );
+
+    Ok(ResolvedAgentApk {
+        apk_path: cache_dir.join(APK_FILENAME),
+        sha256: verified_sha,
+        source_sha256: source_sha.to_string(),
+        source: ApkSource::EmbeddedPrebuilt,
+        was_cache_hit: false,
+        build_duration_ms: 0,
+    })
+}
+
+/// Resolves `deja-android-agent.apk` using the following precedence:
+///
+/// 1. Explicit `DEJA_ANDROID_AGENT_APK` (+ optional `DEJA_ANDROID_AGENT_APK_SHA256` pin).
+/// 2. Default zero-JDK embedded prebuilt APK materialized into `$DEJA_HOME/drivers/android/prebuilt-<sha256>/`.
+/// 3. Opt-in source compilation (`DEJA_ANDROID_BUILD_AGENT_FROM_SOURCE=1`) into
+///    `$DEJA_HOME/drivers/android/<source_sha256>/` with a persistent signing keystore.
 pub async fn resolve_or_build_agent_apk(
     deja_home: &Path,
     env: &BTreeMap<String, String>,
@@ -611,11 +784,15 @@ pub async fn resolve_or_build_agent_apk(
     }
 
     let source_sha = embed::source_sha256();
+    if !wants_source_build(env) {
+        return materialize_embedded_prebuilt_apk(deja_home, &source_sha, cancel).await;
+    }
+
     let android_root = deja_home.join("drivers").join("android");
     let cache_dir = android_root.join(&source_sha);
     let locks_dir = android_root.join("locks");
 
-    if let Some(hit) = check_cached_apk(&cache_dir, &source_sha) {
+    if let Some(hit) = check_cached_apk(&cache_dir, &source_sha, ApkSource::CachedBuild, None) {
         debug!(source_sha = %source_sha, "deja-android-agent APK cache hit");
         return Ok(hit);
     }
@@ -633,7 +810,7 @@ pub async fn resolve_or_build_agent_apk(
     let lock_path = locks_dir.join(format!("{source_sha}.lock"));
     let _lock = acquire_advisory_lock_cancellable(&lock_path, cancel).await?;
 
-    if let Some(hit) = check_cached_apk(&cache_dir, &source_sha) {
+    if let Some(hit) = check_cached_apk(&cache_dir, &source_sha, ApkSource::CachedBuild, None) {
         debug!(source_sha = %source_sha, "deja-android-agent APK cache hit after lock");
         return Ok(hit);
     }
@@ -651,6 +828,7 @@ pub async fn resolve_or_build_agent_apk(
     ));
     let src_dir = staging_dir.join("src");
     let out_apk = staging_dir.join(APK_FILENAME);
+    let persistent_keystore = android_root.join(DEBUG_KEYSTORE_FILENAME);
 
     let mut guard = BuildGuard::new(staging_dir.clone());
     embed::materialize_project(&src_dir)?;
@@ -664,6 +842,8 @@ pub async fn resolve_or_build_agent_apk(
         .arg(&tools.build_tools_dir)
         .arg("--platform")
         .arg(&tools.android_jar)
+        .arg("--keystore")
+        .arg(&persistent_keystore)
         .arg("--out")
         .arg(&out_apk);
 
@@ -849,24 +1029,64 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fails_closed_with_remediation_when_no_prebuilt_and_no_sdk() {
-        let dir = temp_dir("no-sdk");
+    async fn default_zero_jdk_env_materializes_embedded_prebuilt_apk_and_hits_cache() {
+        let dir = temp_dir("embedded-prebuilt");
         let empty_env = BTreeMap::new();
         let cancel = CancellationToken::new();
-        let err = resolve_or_build_agent_apk(&dir, &empty_env, &cancel)
+
+        // Read-only readiness reports EmbeddedPrebuiltReady on a JDK-free / SDK-free host.
+        assert!(matches!(
+            inspect_agent_apk_readiness(Some(&dir), &empty_env),
+            AgentApkReadiness::EmbeddedPrebuiltReady { ref sha256 }
+                if sha256 == crate::embed::PREBUILT_AGENT_APK_SHA256
+        ));
+
+        // First resolution materializes the embedded prebuilt APK with zero JDK/SDK.
+        let first = resolve_or_build_agent_apk(&dir, &empty_env, &cancel)
             .await
-            .expect_err("must fail closed without SDK or prebuilt APK");
+            .expect("embedded prebuilt APK must materialize without JDK or Android SDK");
+        assert_eq!(first.source, ApkSource::EmbeddedPrebuilt);
+        assert_eq!(first.sha256, crate::embed::PREBUILT_AGENT_APK_SHA256);
+        assert!(!first.was_cache_hit);
+        assert_eq!(
+            crate::apk::extract_apk_package_id_from_path(&first.apk_path).unwrap(),
+            crate::process::AGENT_PACKAGE_ID
+        );
+
+        // Second resolution hits the verified cache without rewriting.
+        let second = resolve_or_build_agent_apk(&dir, &empty_env, &cancel)
+            .await
+            .expect("second resolution hits materialized prebuilt cache");
+        assert_eq!(second.source, ApkSource::EmbeddedPrebuilt);
+        assert!(second.was_cache_hit);
+        assert_eq!(second.apk_path, first.apk_path);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn source_build_opt_in_fails_closed_when_no_sdk_present() {
+        let dir = temp_dir("no-sdk");
+        let mut env = BTreeMap::new();
+        env.insert(
+            "DEJA_ANDROID_BUILD_AGENT_FROM_SOURCE".to_string(),
+            "1".to_string(),
+        );
+        let cancel = CancellationToken::new();
+        let err = resolve_or_build_agent_apk(&dir, &env, &cancel)
+            .await
+            .expect_err("source build opt-in must fail closed without SDK");
         assert!(matches!(err, AndroidDriverError::ApkUnavailable(_)));
         assert!(err.to_string().contains("DEJA_ANDROID_AGENT_APK"));
 
-        let readiness = inspect_agent_apk_readiness(Some(&dir), &empty_env);
+        let readiness = inspect_agent_apk_readiness(Some(&dir), &env);
         assert!(matches!(readiness, AgentApkReadiness::Unavailable { .. }));
 
         let _ = fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
-    async fn cached_apk_hit_requires_valid_marker_and_matching_sidecar() {
+    async fn cached_source_build_hit_requires_valid_marker_and_matching_sidecar() {
         let dir = temp_dir("cache-hit");
         let source_sha = crate::embed::source_sha256();
         let cache_dir = dir.join("drivers").join("android").join(&source_sha);
@@ -881,23 +1101,27 @@ mod tests {
         .unwrap();
         fs::write(cache_dir.join("ready.marker"), b"{}").unwrap();
 
-        let empty_env = BTreeMap::new();
+        let mut env = BTreeMap::new();
+        env.insert(
+            "DEJA_ANDROID_BUILD_AGENT_FROM_SOURCE".to_string(),
+            "1".to_string(),
+        );
         let cancel = CancellationToken::new();
-        let hit = resolve_or_build_agent_apk(&dir, &empty_env, &cancel)
+        let hit = resolve_or_build_agent_apk(&dir, &env, &cancel)
             .await
             .expect("valid cache must hit without SDK");
         assert_eq!(hit.source, ApkSource::CachedBuild);
         assert!(hit.was_cache_hit);
         assert_eq!(hit.sha256, sha);
         assert!(matches!(
-            inspect_agent_apk_readiness(Some(&dir), &empty_env),
+            inspect_agent_apk_readiness(Some(&dir), &env),
             AgentApkReadiness::CacheHit { .. }
         ));
 
         // Tampered APK invalidates cache.
         fs::write(&apk, b"PK\x03\x04tampered-bytes").unwrap();
         assert!(matches!(
-            inspect_agent_apk_readiness(Some(&dir), &empty_env),
+            inspect_agent_apk_readiness(Some(&dir), &env),
             AgentApkReadiness::Unavailable { .. }
         ));
 
