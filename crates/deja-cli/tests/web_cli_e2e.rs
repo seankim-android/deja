@@ -1,0 +1,483 @@
+//! Live headless Chromium E2E test exercising the real `deja` CLI binary end-to-end against
+//! the `spikes/002-web-deja` web shop fixture with zero Maestro, Node, Bun, or Playwright.
+//!
+//! Run explicitly:
+//! `cargo test --locked --offline -p deja-cli --test web_cli_e2e -- --ignored --nocapture`
+
+use std::fs;
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use serde_json::Value;
+
+const SANITIZED_SYSTEM_PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin";
+const CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self'";
+
+struct TempDirGuard {
+    path: PathBuf,
+}
+
+impl TempDirGuard {
+    fn new(prefix: &str) -> Self {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "deja-cli-web-e2e-{prefix}-{}-{nanos}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&path).expect("create temp dir");
+        Self {
+            path: fs::canonicalize(&path).expect("canonical temp dir"),
+        }
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for TempDirGuard {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.path);
+    }
+}
+
+fn repo_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .expect("repo root should exist")
+}
+
+/// Minimal in-process loopback HTTP/1.1 fixture server matching `spikes/002-web-deja/server.py`,
+/// with a live-toggleable `order_number` (`WC-1001` vs `WC-9999`).
+struct FixtureWebServer {
+    port: u16,
+    order_number: Arc<Mutex<String>>,
+    stop: Arc<AtomicBool>,
+    handle: Option<thread::JoinHandle<()>>,
+}
+
+impl FixtureWebServer {
+    fn start(public_root: PathBuf, initial_order: &str) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback HTTP server");
+        listener
+            .set_nonblocking(true)
+            .expect("set nonblocking listener");
+        let port = listener.local_addr().expect("local_addr").port();
+        let order_number = Arc::new(Mutex::new(initial_order.to_string()));
+        let stop = Arc::new(AtomicBool::new(false));
+
+        let order_c = Arc::clone(&order_number);
+        let stop_c = Arc::clone(&stop);
+        let root = fs::canonicalize(&public_root).expect("canonical public root");
+        let handle = thread::spawn(move || {
+            while !stop_c.load(Ordering::SeqCst) {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        let root_c = root.clone();
+                        let ord = Arc::clone(&order_c);
+                        thread::spawn(move || {
+                            handle_http_conn(stream, &root_c, &ord);
+                        });
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
+        Self {
+            port,
+            order_number,
+            stop,
+            handle: Some(handle),
+        }
+    }
+
+    fn port(&self) -> u16 {
+        self.port
+    }
+
+    fn set_order_number(&self, order: &str) {
+        *self.order_number.lock().unwrap() = order.to_string();
+    }
+}
+
+impl Drop for FixtureWebServer {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
+        }
+    }
+}
+
+fn handle_http_conn(mut stream: TcpStream, root: &Path, order_number: &Arc<Mutex<String>>) {
+    let _ = stream.set_nonblocking(false);
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
+
+    let mut buf = [0u8; 8192];
+    let Ok(n) = stream.read(&mut buf) else {
+        return;
+    };
+    if n == 0 {
+        return;
+    }
+    let req = String::from_utf8_lossy(&buf[..n]);
+    let Some(first_line) = req.lines().next() else {
+        return;
+    };
+    let mut parts = first_line.split_whitespace();
+    let method = parts.next().unwrap_or("");
+    let raw_target = parts.next().unwrap_or("/");
+    let send_body = method != "HEAD";
+    let pathname = raw_target.split(['?', '#']).next().unwrap_or("/");
+
+    if pathname == "/api/order" {
+        let ord = order_number.lock().unwrap().clone();
+        let body = format!(r#"{{"orderNumber":"{ord}"}}"#);
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\nCache-Control: no-store\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        let _ = stream.write_all(resp.as_bytes());
+        if send_body {
+            let _ = stream.write_all(body.as_bytes());
+        }
+        return;
+    }
+
+    let rel = if pathname == "/" {
+        "index.html"
+    } else {
+        pathname.trim_start_matches('/')
+    };
+    let candidate = root.join(rel);
+    let Ok(canon) = fs::canonicalize(&candidate) else {
+        send_404(&mut stream, send_body);
+        return;
+    };
+    if !canon.starts_with(root) || !canon.is_file() {
+        send_404(&mut stream, send_body);
+        return;
+    }
+    let Ok(data) = fs::read(&canon) else {
+        send_404(&mut stream, send_body);
+        return;
+    };
+    let content_type = match canon.extension().and_then(|e| e.to_str()) {
+        Some("html") => "text/html; charset=utf-8",
+        Some("js") => "text/javascript; charset=utf-8",
+        Some("css") => "text/css; charset=utf-8",
+        Some("json") => "application/json; charset=utf-8",
+        _ => "application/octet-stream",
+    };
+    let resp = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nCache-Control: no-store\r\nContent-Security-Policy: {CSP}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        data.len()
+    );
+    let _ = stream.write_all(resp.as_bytes());
+    if send_body {
+        let _ = stream.write_all(&data);
+    }
+}
+
+fn send_404(stream: &mut TcpStream, send_body: bool) {
+    let body = b"Not found";
+    let resp = format!(
+        "HTTP/1.1 404 Not Found\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    let _ = stream.write_all(resp.as_bytes());
+    if send_body {
+        let _ = stream.write_all(body);
+    }
+}
+
+fn run_deja(ws: &Path, tmp_dir: &Path, args: &[&str]) -> std::process::Output {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_deja"));
+    cmd.current_dir(ws)
+        .args(args)
+        .env("PATH", SANITIZED_SYSTEM_PATH)
+        .env("TMPDIR", tmp_dir)
+        .env_remove("DEJA_MAESTRO")
+        .env_remove("DEJA_DEVICE")
+        .stdin(Stdio::null());
+    if let Ok(chrome) = std::env::var("DEJA_CHROME") {
+        cmd.env("DEJA_CHROME", chrome);
+    }
+    if let Ok(chrome) = std::env::var("CHROME_PATH") {
+        cmd.env("CHROME_PATH", chrome);
+    }
+    cmd.output().expect("spawn deja binary")
+}
+
+#[test]
+#[ignore = "requires live local Chromium / Google Chrome binary"]
+fn live_web_cli_end_to_end_lifecycle_without_maestro_node_or_playwright() {
+    // Confirm Maestro, Node, and Playwright are absent on the sanitized PATH.
+    for tool in ["maestro", "node", "playwright"] {
+        let which = Command::new("/usr/bin/which")
+            .arg(tool)
+            .env("PATH", SANITIZED_SYSTEM_PATH)
+            .output()
+            .expect("which");
+        assert!(
+            !which.status.success(),
+            "{tool} must not exist on sanitized PATH"
+        );
+    }
+
+    let spike_dir = repo_root().join("spikes/002-web-deja");
+    let ws = TempDirGuard::new("ws");
+    let isolated_tmp = TempDirGuard::new("tmp");
+
+    // Copy public/, flows/checkout.yaml, and deja.config.json into temp workspace.
+    let public_dst = ws.path().join("public");
+    fs::create_dir_all(&public_dst).unwrap();
+    for file in ["index.html", "app.js", "styles.css"] {
+        fs::copy(spike_dir.join("public").join(file), public_dst.join(file))
+            .expect("copy public fixture file");
+    }
+
+    let server = FixtureWebServer::start(public_dst, "WC-1001");
+    let old_origin = "127.0.0.1:4174";
+    let new_origin = format!("127.0.0.1:{}", server.port());
+
+    let raw_cfg = fs::read_to_string(spike_dir.join("deja.config.json")).unwrap();
+    fs::write(
+        ws.path().join("deja.config.json"),
+        raw_cfg.replace(old_origin, &new_origin),
+    )
+    .unwrap();
+
+    fs::create_dir_all(ws.path().join("flows")).unwrap();
+    let raw_flow = fs::read_to_string(spike_dir.join("flows/checkout.yaml")).unwrap();
+    fs::write(
+        ws.path().join("flows/checkout.yaml"),
+        raw_flow.replace(old_origin, &new_origin),
+    )
+    .unwrap();
+    fs::write(ws.path().join("goals.txt"), "complete checkout\n").unwrap();
+
+    // 1. `deja doctor --json`
+    let doc = run_deja(ws.path(), isolated_tmp.path(), &["doctor", "--json"]);
+    assert_eq!(
+        doc.status.code(),
+        Some(0),
+        "doctor failed:\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&doc.stdout),
+        String::from_utf8_lossy(&doc.stderr)
+    );
+    let doc_json: Value = serde_json::from_slice(&doc.stdout).expect("doctor JSON");
+    assert_eq!(doc_json["ready"], true);
+    let web_check = doc_json["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == "web-chromium")
+        .expect("web-chromium doctor check");
+    assert_eq!(web_check["status"], "ready");
+    eprintln!("LIVE WEB E2E doctor: {web_check}");
+
+    // 2. `deja remember "complete checkout" --flow flows/checkout.yaml --summary --json`
+    let rem = run_deja(
+        ws.path(),
+        isolated_tmp.path(),
+        &[
+            "remember",
+            "complete checkout",
+            "--flow",
+            "flows/checkout.yaml",
+            "--summary",
+            "--json",
+        ],
+    );
+    assert_eq!(
+        rem.status.code(),
+        Some(0),
+        "remember failed:\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&rem.stdout),
+        String::from_utf8_lossy(&rem.stderr)
+    );
+    let rem_json: Value = serde_json::from_slice(&rem.stdout).expect("remember JSON");
+    assert_eq!(rem_json["outcome"], "remembered");
+    assert_eq!(rem_json["modelCalls"], 0);
+    assert_eq!(rem_json["assertions"], 12);
+    let runtime = rem_json["runtime"]
+        .as_str()
+        .expect("remember must record chromium-<version> runtime")
+        .to_string();
+    assert!(
+        runtime.starts_with("chromium-"),
+        "expected chromium-<version> runtime, got {runtime}"
+    );
+    eprintln!(
+        "LIVE WEB E2E remember: runtime={runtime}, assertions={}, durationMs={}, timing={}",
+        rem_json["assertions"], rem_json["durationMs"], rem_json["timing"]
+    );
+
+    // 3. `deja run "complete checkout" --summary --json` -> cache hit, passed, 0 model calls
+    let run_ok = run_deja(
+        ws.path(),
+        isolated_tmp.path(),
+        &["run", "complete checkout", "--summary", "--json"],
+    );
+    assert_eq!(
+        run_ok.status.code(),
+        Some(0),
+        "run pass failed:\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&run_ok.stdout),
+        String::from_utf8_lossy(&run_ok.stderr)
+    );
+    let run_ok_json: Value = serde_json::from_slice(&run_ok.stdout).expect("run pass JSON");
+    assert_eq!(run_ok_json["cacheStatus"], "hit");
+    assert_eq!(run_ok_json["outcome"], "passed");
+    assert_eq!(run_ok_json["modelCalls"], 0);
+    eprintln!(
+        "LIVE WEB E2E run pass: durationMs={}, timing={}",
+        run_ok_json["durationMs"], run_ok_json["timing"]
+    );
+
+    // 4. Toggle server to `WC-9999` -> `deja run` exits 1 with `product_assertion`, `repairEligible: false`
+    server.set_order_number("WC-9999");
+    let run_fail = run_deja(
+        ws.path(),
+        isolated_tmp.path(),
+        &["run", "complete checkout", "--summary", "--json"],
+    );
+    assert_eq!(
+        run_fail.status.code(),
+        Some(1),
+        "expected exit 1 on WC-9999 regression:\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&run_fail.stdout),
+        String::from_utf8_lossy(&run_fail.stderr)
+    );
+    let run_fail_json: Value = serde_json::from_slice(&run_fail.stdout).expect("run fail JSON");
+    assert_eq!(run_fail_json["passed"], false);
+    assert_eq!(run_fail_json["failure"]["category"], "product_assertion");
+    assert_eq!(run_fail_json["failure"]["repairEligible"], false);
+    eprintln!(
+        "LIVE WEB E2E WC-9999 regression: failure={}",
+        run_fail_json["failure"]
+    );
+
+    // 5. Restore `WC-1001`: per WALK-010 classic-mode rules, re-remember the known-good YAML to
+    // clear failed validation, then `deja run` passes with a warm cache hit.
+    server.set_order_number("WC-1001");
+    let rem_recover = run_deja(
+        ws.path(),
+        isolated_tmp.path(),
+        &[
+            "remember",
+            "complete checkout",
+            "--flow",
+            "flows/checkout.yaml",
+            "--summary",
+            "--json",
+        ],
+    );
+    assert_eq!(
+        rem_recover.status.code(),
+        Some(0),
+        "recovery remember failed:\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&rem_recover.stdout),
+        String::from_utf8_lossy(&rem_recover.stderr)
+    );
+    let rem_recover_json: Value =
+        serde_json::from_slice(&rem_recover.stdout).expect("remember recover JSON");
+    assert_eq!(rem_recover_json["outcome"], "remembered");
+
+    let run_recover = run_deja(
+        ws.path(),
+        isolated_tmp.path(),
+        &["run", "complete checkout", "--summary", "--json"],
+    );
+    assert_eq!(
+        run_recover.status.code(),
+        Some(0),
+        "recovery run failed:\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&run_recover.stdout),
+        String::from_utf8_lossy(&run_recover.stderr)
+    );
+    let run_recover_json: Value =
+        serde_json::from_slice(&run_recover.stdout).expect("run recover JSON");
+    assert_eq!(run_recover_json["outcome"], "passed");
+    assert_eq!(run_recover_json["cacheStatus"], "hit");
+
+    // 6. `deja gate --goals goals.txt --runtime <runtime> --json` -> `verdict: "passed"`
+    let ev_path = ws.path().join(".deja/gate/web-e2e-evidence.json");
+    let gate = run_deja(
+        ws.path(),
+        isolated_tmp.path(),
+        &[
+            "gate",
+            "--goals",
+            "goals.txt",
+            "--runtime",
+            &runtime,
+            "--label",
+            "deja-69-web-e2e",
+            "--evidence",
+            ev_path.to_str().unwrap(),
+            "--json",
+        ],
+    );
+    assert_eq!(
+        gate.status.code(),
+        Some(0),
+        "gate failed:\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&gate.stdout),
+        String::from_utf8_lossy(&gate.stderr)
+    );
+    let gate_json: Value = serde_json::from_slice(&gate.stdout).expect("gate JSON");
+    assert_eq!(gate_json["verdict"], "passed");
+    assert!(ev_path.is_file());
+    assert!(ws.path().join(".deja/gate/web-e2e-evidence.txt").is_file());
+    eprintln!("LIVE WEB E2E gate: verdict={}", gate_json["verdict"]);
+
+    // 7. Verify ZERO leftover `deja-web-profile-*` temp dirs and ZERO orphaned Chromium processes.
+    let leftover_profiles: Vec<String> = fs::read_dir(isolated_tmp.path())
+        .unwrap()
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            name.starts_with("deja-web-profile-").then_some(name)
+        })
+        .collect();
+    assert!(
+        leftover_profiles.is_empty(),
+        "leftover Chromium profile dirs in TMPDIR: {leftover_profiles:?}"
+    );
+
+    #[cfg(unix)]
+    {
+        let marker = isolated_tmp.path().to_string_lossy().into_owned();
+        let ps = Command::new("/bin/ps")
+            .args(["-eo", "pid,args"])
+            .output()
+            .expect("ps");
+        let ps_out = String::from_utf8_lossy(&ps.stdout);
+        let orphans: Vec<&str> = ps_out
+            .lines()
+            .filter(|line| line.contains(&marker))
+            .collect();
+        assert!(
+            orphans.is_empty(),
+            "orphaned Chromium processes referencing test TMPDIR survived:\n{}",
+            orphans.join("\n")
+        );
+    }
+}

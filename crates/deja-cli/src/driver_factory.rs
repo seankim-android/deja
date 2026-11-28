@@ -23,6 +23,10 @@ use deja_driver_ios::{
     IosDriver, IosDriverConfig, Simctl, SimctlEnv, default_crash_report_dir, embed,
     find_device_runtime_version,
 };
+use deja_driver_web::{
+    ScreenSize, WebDriver, WebDriverConfig, WebDriverError, discover_chromium,
+    probe_chromium_version,
+};
 use deja_flow::{PlatformDriver, decode_xml};
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
@@ -73,6 +77,8 @@ pub struct DriverContext {
     pub crash_report_grace_ms: u64,
     pub crash_report_dir: Option<PathBuf>,
     pub deja_home: Option<PathBuf>,
+    pub headless: Option<bool>,
+    pub screen_size: Option<serde_json::Value>,
     pub timeout_ms: u64,
     pub env: BTreeMap<String, String>,
 }
@@ -101,7 +107,7 @@ pub trait DriverFactory: Send + Sync {
     ) -> FactoryFuture<'a, Result<(), DriverFactoryError>>;
 }
 
-/// Production [`DriverFactory`] wiring `IosDriver` (and clear exit-2 notices for Phase 4 stubs).
+/// Production [`DriverFactory`] wiring `IosDriver` and `WebDriver` (with clear exit-2 notice for Android Phase 4 stub).
 #[derive(Debug, Default, Clone, Copy)]
 pub struct RealDriverFactory;
 
@@ -141,10 +147,30 @@ impl DriverFactory for RealDriverFactory {
                     "native Android driver execution is not wired yet (tracked in Phase 4 / DEJA-66)"
                         .to_string(),
                 )),
-                "web" => Err(DriverFactoryError::UnsupportedOrConfig(
-                    "native Web CDP driver execution is not wired yet (tracked in Phase 4 / DEJA-67)"
-                        .to_string(),
-                )),
+                "web" => {
+                    if ctx.device != "chromium" {
+                        return Err(DriverFactoryError::UnsupportedOrConfig(format!(
+                            "web `device` must be \"chromium\" (got {:?})",
+                            ctx.device
+                        )));
+                    }
+                    let binary = discover_chromium(&ctx.env).map_err(|err| match err {
+                        WebDriverError::InvalidChromiumPath { .. } => {
+                            DriverFactoryError::UnsupportedOrConfig(err.to_string())
+                        }
+                        other => DriverFactoryError::Runtime(other.to_string()),
+                    })?;
+                    let version = probe_chromium_version(&binary, cancel)
+                        .await
+                        .map_err(|err| match err {
+                            WebDriverError::Cancelled => DriverFactoryError::Cancelled,
+                            other => DriverFactoryError::Runtime(format!(
+                                "failed to probe Chromium version at {}: {other}",
+                                binary.display()
+                            )),
+                        })?;
+                    Ok(Some(format!("chromium-{version}")))
+                }
                 other => Err(DriverFactoryError::UnsupportedOrConfig(format!(
                     "unsupported platform {other:?}"
                 ))),
@@ -191,10 +217,30 @@ impl DriverFactory for RealDriverFactory {
                     "native Android driver execution is not wired yet (tracked in Phase 4 / DEJA-66)"
                         .to_string(),
                 )),
-                "web" => Err(DriverFactoryError::UnsupportedOrConfig(
-                    "native Web CDP driver execution is not wired yet (tracked in Phase 4 / DEJA-67)"
-                        .to_string(),
-                )),
+                "web" => {
+                    if ctx.device != "chromium" {
+                        return Err(DriverFactoryError::UnsupportedOrConfig(format!(
+                            "web `device` must be \"chromium\" (got {:?})",
+                            ctx.device
+                        )));
+                    }
+                    let screen_size = match ctx.screen_size.as_ref() {
+                        Some(val) => ScreenSize::parse(val).map_err(|err| {
+                            DriverFactoryError::UnsupportedOrConfig(err.to_string())
+                        })?,
+                        None => ScreenSize::default(),
+                    };
+                    let mut cfg = WebDriverConfig::new()
+                        .with_headless(ctx.headless.unwrap_or(true))
+                        .with_screen_size(screen_size)
+                        .with_disable_animations(ctx.disable_animations)
+                        .with_env(ctx.env.clone());
+                    let timeout_cap = Duration::from_millis(ctx.timeout_ms.max(1_000));
+                    cfg.startup_timeout = cfg.startup_timeout.min(timeout_cap);
+                    cfg.request_timeout = cfg.request_timeout.min(timeout_cap);
+                    cfg.navigation_timeout = cfg.navigation_timeout.min(timeout_cap);
+                    Ok(Box::new(WebDriver::new(cfg)) as Box<dyn PlatformDriver>)
+                }
                 other => Err(DriverFactoryError::UnsupportedOrConfig(format!(
                     "unsupported platform {other:?}"
                 ))),
@@ -962,48 +1008,47 @@ async fn probe_adb(env: &BTreeMap<String, String>, required: bool) -> DoctorChec
 }
 
 async fn probe_chromium(env: &BTreeMap<String, String>, required: bool) -> DoctorCheck {
-    let candidates = [
-        "chromium",
-        "chromium-browser",
-        "google-chrome",
-        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-        "/Applications/Chromium.app/Contents/MacOS/Chromium",
-    ];
-    for candidate in candidates {
-        let mut cmd = Command::new(candidate);
-        cmd.arg("--version").stdin(Stdio::null());
-        if let Some(path) = env.get("PATH") {
-            cmd.env("PATH", path);
-        }
-        if let Ok(out) = cmd.output().await
-            && out.status.success()
-        {
-            let version = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            return DoctorCheck {
+    let cancel = CancellationToken::new();
+    match discover_chromium(env) {
+        Ok(binary) => match probe_chromium_version(&binary, &cancel).await {
+            Ok(version) => DoctorCheck {
                 name: "web-chromium".to_string(),
                 status: DoctorCheckStatus::Ready,
                 required,
-                detail: if version.is_empty() {
-                    format!("Chromium available ({candidate})")
-                } else {
-                    version
-                },
+                detail: format!("Chromium {version} ({})", binary.display()),
                 remediation: None,
-            };
-        }
-    }
-    DoctorCheck {
-        name: "web-chromium".to_string(),
-        status: if required {
-            DoctorCheckStatus::NotReady
-        } else {
-            DoctorCheckStatus::Warn
+            },
+            Err(err) => DoctorCheck {
+                name: "web-chromium".to_string(),
+                status: if required {
+                    DoctorCheckStatus::NotReady
+                } else {
+                    DoctorCheckStatus::Warn
+                },
+                required,
+                detail: format!(
+                    "Chromium binary at {} failed version probe: {err}",
+                    binary.display()
+                ),
+                remediation: Some(
+                    "Install Chromium or Google Chrome, ensure it is executable on PATH or in /Applications, or set DEJA_CHROME"
+                        .to_string(),
+                ),
+            },
         },
-        required,
-        detail: "Chromium / Google Chrome executable not found".to_string(),
-        remediation: Some(
-            "Install Chromium or Google Chrome and ensure it is available on PATH or in /Applications"
-                .to_string(),
-        ),
+        Err(err) => DoctorCheck {
+            name: "web-chromium".to_string(),
+            status: if required {
+                DoctorCheckStatus::NotReady
+            } else {
+                DoctorCheckStatus::Warn
+            },
+            required,
+            detail: err.to_string(),
+            remediation: Some(
+                "Install Chromium or Google Chrome and ensure it is available on PATH, in /Applications, or via DEJA_CHROME"
+                    .to_string(),
+            ),
+        },
     }
 }
