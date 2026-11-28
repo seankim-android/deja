@@ -1,4 +1,19 @@
-//! Stdio JSON-RPC 2.0 MCP server for Déjà.
+//! Stdio JSON-RPC 2.0 MCP server for Déjà with cancellation, workspace/app confinement,
+//! warm-driver & build-fingerprint reuse, pruned visible-element diagnostics (`DEJA-83`),
+//! and batch step execution (`DEJA-84`).
+
+pub mod backend;
+pub mod fs_safe;
+pub mod protocol;
+pub mod redaction;
+pub mod server;
+pub mod tools;
+
+pub use backend::{
+    McpBoxFuture, McpDriverContext, McpDriverFactory, McpServerConfig, McpServerError,
+};
+pub use protocol::{FramingMode, MAX_FRAME_BYTES};
+pub use server::serve;
 
 /// Canonical crate identifier used by workspace smoke checks.
 pub const CRATE_NAME: &str = "deja-mcp";

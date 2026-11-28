@@ -257,6 +257,10 @@ pub struct FlowExecutionConfig {
     /// and nested `runFlow`/`retry` file steps read exclusively from this in-memory map and
     /// never reopen flow files from disk.
     pub closure_snapshot: Option<BTreeMap<String, Vec<u8>>>,
+    /// When `true`, captures a scrubbed, bounded [`VisibleContext`] snapshot of the final screen
+    /// on passing flows (reusing a fresh cached hierarchy observation or issuing one fresh
+    /// `driver.hierarchy` call if none is fresh yet).
+    pub capture_final_visible_context: bool,
 }
 
 impl FlowExecutionConfig {
@@ -277,6 +281,7 @@ impl FlowExecutionConfig {
             provider_redactor: provider_key_redactor(std::iter::empty::<(&str, &str)>()),
             raw_artifact_path: None,
             closure_snapshot: None,
+            capture_final_visible_context: false,
         }
     }
 
@@ -316,6 +321,10 @@ pub struct FlowExecutionOutcome {
     /// crash-report grace window.
     #[serde(default)]
     pub crash_probe_completed: bool,
+    /// Optional scrubbed, bounded final visible context captured on passing flows when
+    /// [`FlowExecutionConfig::capture_final_visible_context`] is enabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub final_visible_context: Option<VisibleContext>,
 }
 
 /// Platform-neutral `maestro/v1` YAML flow executor.
@@ -628,18 +637,79 @@ impl FlowExecutor {
         let scrubbed_app_id = state.app_id.as_deref().map(|id| self.scrub(id));
 
         match result {
-            Ok(()) if !did_time_out => FlowExecutionOutcome {
-                passed: true,
-                app_id: scrubbed_app_id,
-                duration_ms: total_ms,
-                timing: state.timing,
-                assertions_executed: state.assertions_executed,
-                failed_step: None,
-                failure: None,
-                hook_errors: state.hook_errors,
-                screenshots: state.screenshots,
-                crash_probe_completed: false,
-            },
+            Ok(()) if !did_time_out => {
+                let final_visible_context = if self.config.capture_final_visible_context {
+                    let final_hierarchy =
+                        if state.last_hierarchy_is_fresh && state.last_hierarchy.is_some() {
+                            state.last_hierarchy.clone()
+                        } else if !child_cancel.is_cancelled()
+                            && let Some(app_id) = state.app_id.clone().filter(|id| !id.is_empty())
+                        {
+                            let remaining = self
+                                .config
+                                .flow_timeout
+                                .map(|limit| limit.saturating_sub(started.elapsed()));
+                            let fetched = match remaining {
+                                Some(rem) if rem.is_zero() => None,
+                                Some(rem) => tokio::select! {
+                                    biased;
+                                    _ = child_cancel.cancelled() => None,
+                                    res = tokio::time::timeout(
+                                        rem,
+                                        self.fetch_fresh_hierarchy_with_cache(
+                                            driver,
+                                            &app_id,
+                                            false,
+                                            &mut state,
+                                            &child_cancel,
+                                        ),
+                                    ) => res.ok().and_then(Result::ok),
+                                },
+                                None => tokio::select! {
+                                    biased;
+                                    _ = child_cancel.cancelled() => None,
+                                    res = self.fetch_fresh_hierarchy_with_cache(
+                                        driver,
+                                        &app_id,
+                                        false,
+                                        &mut state,
+                                        &child_cancel,
+                                    ) => res.ok(),
+                                },
+                            };
+                            fetched.or_else(|| state.last_hierarchy.clone())
+                        } else {
+                            state.last_hierarchy.clone()
+                        };
+                    final_hierarchy.map(|h| {
+                        build_visible_context(
+                            &h.nodes,
+                            Some(&self.config.redactor),
+                            Some(&self.config.provider_redactor),
+                            VisibleContext::DEFAULT_LIMIT,
+                        )
+                    })
+                } else {
+                    None
+                };
+
+                let total_ms = started.elapsed().as_millis() as u64;
+                state.timing.total_ms = total_ms;
+
+                FlowExecutionOutcome {
+                    passed: true,
+                    app_id: scrubbed_app_id,
+                    duration_ms: total_ms,
+                    timing: state.timing,
+                    assertions_executed: state.assertions_executed,
+                    failed_step: None,
+                    failure: None,
+                    hook_errors: state.hook_errors,
+                    screenshots: state.screenshots,
+                    crash_probe_completed: false,
+                    final_visible_context,
+                }
+            }
             Ok(()) => {
                 let failed_step = FailedStepContext {
                     step_index: state.step_counter,
@@ -669,6 +739,7 @@ impl FlowExecutor {
                     hook_errors: state.hook_errors,
                     screenshots: state.screenshots,
                     crash_probe_completed: false,
+                    final_visible_context: None,
                 }
             }
             Err(mut failed_step) => {
@@ -766,6 +837,7 @@ impl FlowExecutor {
                     hook_errors: state.hook_errors,
                     screenshots: state.screenshots,
                     crash_probe_completed,
+                    final_visible_context: None,
                 }
             }
         }
@@ -815,6 +887,7 @@ impl FlowExecutor {
             hook_errors: Vec::new(),
             screenshots: Vec::new(),
             crash_probe_completed: false,
+            final_visible_context: None,
         }
     }
 
@@ -4045,5 +4118,227 @@ mod scrub_tests {
         assert!(joined.contains("<redacted-fixture-value>"));
         assert!(!joined.contains(fixture_pw));
         assert!(!joined.contains(&secret_token));
+    }
+
+    #[tokio::test]
+    async fn capture_final_visible_context_populates_scrubbed_bounded_snapshot_on_pass() {
+        use crate::capabilities::{DriverCapabilities, DriverCapability};
+        use crate::driver::{
+            DriverCrashSignal, DriverError, DriverFuture, KeyPress, LaunchOptions, OpenLinkOptions,
+            PlatformDriver, SwipeParams, UiHierarchy, UiNode, UiPoint, UiRect, UiSize,
+        };
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio_util::sync::CancellationToken;
+
+        struct MiniDriver {
+            caps: DriverCapabilities,
+            hierarchy: UiHierarchy,
+            hierarchy_calls: AtomicUsize,
+        }
+
+        impl PlatformDriver for MiniDriver {
+            fn platform(&self) -> &'static str {
+                "ios"
+            }
+            fn capabilities(&self) -> &DriverCapabilities {
+                &self.caps
+            }
+            fn ensure_session<'a>(&'a self, _c: &'a CancellationToken) -> DriverFuture<'a, ()> {
+                Box::pin(async { Ok(()) })
+            }
+            fn launch_app<'a>(
+                &'a self,
+                _a: &'a str,
+                _o: &'a LaunchOptions,
+                _c: &'a CancellationToken,
+            ) -> DriverFuture<'a, ()> {
+                Box::pin(async { Ok(()) })
+            }
+            fn stop_app<'a>(
+                &'a self,
+                _a: &'a str,
+                _c: &'a CancellationToken,
+            ) -> DriverFuture<'a, ()> {
+                Box::pin(async { Ok(()) })
+            }
+            fn kill_app<'a>(
+                &'a self,
+                _a: &'a str,
+                _c: &'a CancellationToken,
+            ) -> DriverFuture<'a, ()> {
+                Box::pin(async { Ok(()) })
+            }
+            fn clear_state<'a>(
+                &'a self,
+                _a: &'a str,
+                _c: &'a CancellationToken,
+            ) -> DriverFuture<'a, ()> {
+                Box::pin(async { Ok(()) })
+            }
+            fn clear_keychain<'a>(&'a self, _c: &'a CancellationToken) -> DriverFuture<'a, ()> {
+                Box::pin(async { Ok(()) })
+            }
+            fn open_link<'a>(
+                &'a self,
+                _a: Option<&'a str>,
+                _u: &'a str,
+                _o: &'a OpenLinkOptions,
+                _c: &'a CancellationToken,
+            ) -> DriverFuture<'a, ()> {
+                Box::pin(async { Ok(()) })
+            }
+            fn add_media<'a>(
+                &'a self,
+                _p: &'a [PathBuf],
+                _c: &'a CancellationToken,
+            ) -> DriverFuture<'a, ()> {
+                Box::pin(async { Ok(()) })
+            }
+            fn hierarchy<'a>(
+                &'a self,
+                _a: &'a str,
+                _s: bool,
+                _k: Option<&'a str>,
+                _c: &'a CancellationToken,
+            ) -> DriverFuture<'a, UiHierarchy> {
+                Box::pin(async move {
+                    self.hierarchy_calls.fetch_add(1, Ordering::SeqCst);
+                    Ok(self.hierarchy.clone())
+                })
+            }
+            fn tap_point<'a>(
+                &'a self,
+                _a: &'a str,
+                _p: UiPoint,
+                _c: &'a CancellationToken,
+            ) -> DriverFuture<'a, ()> {
+                Box::pin(async { Ok(()) })
+            }
+            fn long_press_point<'a>(
+                &'a self,
+                _a: &'a str,
+                _p: UiPoint,
+                _d: Option<u64>,
+                _c: &'a CancellationToken,
+            ) -> DriverFuture<'a, ()> {
+                Box::pin(async { Ok(()) })
+            }
+            fn double_tap_point<'a>(
+                &'a self,
+                _a: &'a str,
+                _p: UiPoint,
+                _c: &'a CancellationToken,
+            ) -> DriverFuture<'a, ()> {
+                Box::pin(async { Ok(()) })
+            }
+            fn swipe<'a>(
+                &'a self,
+                _p: &'a SwipeParams,
+                _c: &'a CancellationToken,
+            ) -> DriverFuture<'a, ()> {
+                Box::pin(async { Ok(()) })
+            }
+            fn input_text<'a>(
+                &'a self,
+                _a: &'a str,
+                _t: &'a str,
+                _c: &'a CancellationToken,
+            ) -> DriverFuture<'a, ()> {
+                Box::pin(async { Ok(()) })
+            }
+            fn erase_text<'a>(
+                &'a self,
+                _a: &'a str,
+                _n: u32,
+                _c: &'a CancellationToken,
+            ) -> DriverFuture<'a, ()> {
+                Box::pin(async { Ok(()) })
+            }
+            fn press_key<'a>(
+                &'a self,
+                _a: &'a str,
+                _k: &'a KeyPress,
+                _c: &'a CancellationToken,
+            ) -> DriverFuture<'a, ()> {
+                Box::pin(async { Ok(()) })
+            }
+            fn hide_keyboard<'a>(
+                &'a self,
+                _a: &'a str,
+                _c: &'a CancellationToken,
+            ) -> DriverFuture<'a, ()> {
+                Box::pin(async { Ok(()) })
+            }
+            fn back<'a>(&'a self, _a: &'a str, _c: &'a CancellationToken) -> DriverFuture<'a, ()> {
+                Box::pin(async { Ok(()) })
+            }
+            fn take_screenshot<'a>(
+                &'a self,
+                _a: &'a str,
+                _c: &'a CancellationToken,
+            ) -> DriverFuture<'a, Vec<u8>> {
+                Box::pin(async { Err(DriverError::InvalidArgument("unused".to_string())) })
+            }
+            fn check_app_crash<'a>(
+                &'a self,
+                _a: &'a str,
+                _s: u64,
+                _c: &'a CancellationToken,
+            ) -> DriverFuture<'a, Option<DriverCrashSignal>> {
+                Box::pin(async { Ok(None) })
+            }
+            fn shutdown<'a>(&'a self) -> DriverFuture<'a, ()> {
+                Box::pin(async { Ok(()) })
+            }
+        }
+
+        let secret = ["sk", "-1234567890abcdefghijklmnop"].concat();
+        let mut nodes = Vec::new();
+        for i in 0..35 {
+            nodes.push(UiNode {
+                index: i,
+                label: if i == 0 {
+                    format!("Token {secret}")
+                } else {
+                    format!("Row {i:02}")
+                },
+                enabled: true,
+                hittable: true,
+                is_on_screen: true,
+                frame: UiRect::new(0.0, i as f64 * 10.0, 100.0, 10.0),
+                ..UiNode::default()
+            });
+        }
+        let mut h = UiHierarchy {
+            app_id: "dev.deja.app".to_string(),
+            viewport: Some(UiSize::new(390.0, 844.0)),
+            nodes,
+            ..UiHierarchy::default()
+        };
+        h.hierarchy_hash = h.hierarchy_hash_hex();
+
+        let driver = MiniDriver {
+            caps: DriverCapabilities::with([DriverCapability::AccessibilityTree]),
+            hierarchy: h,
+            hierarchy_calls: AtomicUsize::new(0),
+        };
+        let ws = std::env::temp_dir();
+        let mut cfg = FlowExecutionConfig::new(ws);
+        cfg.app_id_override = Some("dev.deja.app".to_string());
+        cfg.capture_final_visible_context = true;
+        let exec = FlowExecutor::new(cfg);
+
+        // Flow with only `launchApp` has no cached hierarchy yet -> must fetch 1 fresh hierarchy.
+        let outcome = exec
+            .execute_yaml(&driver, "- launchApp\n", &CancellationToken::new())
+            .await;
+        assert!(outcome.passed);
+        assert_eq!(driver.hierarchy_calls.load(Ordering::SeqCst), 1);
+        let vc = outcome
+            .final_visible_context
+            .expect("final_visible_context populated");
+        assert_eq!(vc.items().len(), VisibleContext::DEFAULT_LIMIT);
+        assert!(vc.is_truncated());
+        assert!(!vc.items().join(" ").contains(&secret));
     }
 }

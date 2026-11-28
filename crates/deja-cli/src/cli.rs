@@ -56,6 +56,9 @@ pub enum Commands {
 
     /// Legacy engine command (Déjà now executes flows natively without Maestro).
     Engine(EngineArgs),
+
+    /// Start the stdio JSON-RPC 2.0 MCP server confined to this workspace and app.
+    Mcp(McpArgs),
 }
 
 /// Arguments for `deja run <goal>...`.
@@ -249,6 +252,18 @@ pub struct EngineArgs {
 pub enum EngineCommand {
     /// Retired Maestro installer subcommand (exits 2 with native-runner notice).
     Install,
+}
+
+/// Arguments for `deja mcp`.
+#[derive(Debug, Args)]
+pub struct McpArgs {
+    /// Isolated store identifier under `.deja/memory/stores/<id>/`.
+    #[arg(long, value_name = "ID")]
+    pub store: Option<String>,
+
+    /// Override target device / simulator UDID (`--device` > `DEJA_DEVICE` > `config.device`).
+    #[arg(long, value_name = "ID")]
+    pub device: Option<String>,
 }
 
 #[cfg(test)]

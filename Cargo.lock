@@ -373,6 +373,13 @@ dependencies = [
  "deja-explore",
  "deja-flow",
  "deja-store",
+ "libc",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "tracing",
 ]
 
 [[package]]

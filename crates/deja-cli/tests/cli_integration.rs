@@ -4617,3 +4617,128 @@ async fn regression_r3_f8_inspect_resolves_path_like_goals_and_explicit_goal_fla
     let j3: Value = serde_json::from_str(&cap3.lock().unwrap().stdout).unwrap();
     assert_eq!(j3["walk"]["goal"], "flows/export.json");
 }
+
+#[test]
+fn mcp_subprocess_stdio_roundtrip_zero_stdout_leak_and_rejects_json_flag() {
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::process::Stdio;
+
+    let ws = TempWs::new("mcp-subprocess");
+    ws.write(
+        "deja.config.json",
+        &json!({
+            "workspaceRoot": ".",
+            "platform": "ios",
+            "appId": TEST_APP_ID,
+            "adapter": "maestro-ios/v1"
+        })
+        .to_string(),
+    );
+
+    // 1. `deja mcp --json` must exit 2 with zero stdout bytes.
+    let bad = deja_bin()
+        .current_dir(&ws.path)
+        .args(["mcp", "--json"])
+        .output()
+        .expect("spawn deja mcp --json");
+    assert_eq!(bad.status.code(), Some(2));
+    assert!(
+        bad.stdout.is_empty(),
+        "deja mcp --json must not write anything to stdout, got: {:?}",
+        String::from_utf8_lossy(&bad.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&bad.stderr).contains("--json"),
+        "expected stderr usage message for --json"
+    );
+
+    // 2. Real stdin/stdout JSON-RPC 2.0 session with DEJA_LOG=debug verifying ZERO stdout log leakage.
+    let mut child = deja_bin()
+        .current_dir(&ws.path)
+        .env("DEJA_LOG", "debug")
+        .args(["mcp"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn deja mcp");
+
+    let mut stdin = child.stdin.take().expect("piped stdin");
+    let mut stdout_reader = BufReader::new(child.stdout.take().expect("piped stdout"));
+    let mut stderr = child.stderr.take().expect("piped stderr");
+
+    let read_json_line = |reader: &mut BufReader<std::process::ChildStdout>| -> Value {
+        let mut line = String::new();
+        let n = reader.read_line(&mut line).expect("read stdout line");
+        assert!(n > 0, "unexpected EOF reading MCP stdout");
+        serde_json::from_str(line.trim())
+            .unwrap_or_else(|err| panic!("stdout contained non-JSON-RPC output ({err}): {line:?}"))
+    };
+
+    writeln!(
+        stdin,
+        "{}",
+        json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-03-26"}})
+    )
+    .unwrap();
+    stdin.flush().unwrap();
+    let r1 = read_json_line(&mut stdout_reader);
+    assert_eq!(r1["id"], 1);
+    assert_eq!(r1["result"]["protocolVersion"], "2025-03-26");
+    assert_eq!(r1["result"]["serverInfo"]["name"], "deja");
+
+    writeln!(
+        stdin,
+        "{}",
+        json!({"jsonrpc": "2.0", "method": "notifications/initialized"})
+    )
+    .unwrap();
+    writeln!(
+        stdin,
+        "{}",
+        json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
+    )
+    .unwrap();
+    stdin.flush().unwrap();
+    let r2 = read_json_line(&mut stdout_reader);
+    assert_eq!(r2["id"], 2);
+    let tool_names: Vec<&str> = r2["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    assert!(tool_names.contains(&"deja_list"));
+    assert!(tool_names.contains(&"deja_exec_batch"));
+    assert!(!tool_names.contains(&"deja_explore"));
+
+    writeln!(
+        stdin,
+        "{}",
+        json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "deja_list", "arguments": {}}})
+    )
+    .unwrap();
+    stdin.flush().unwrap();
+    let r3 = read_json_line(&mut stdout_reader);
+    assert_eq!(r3["id"], 3);
+    assert_eq!(r3["result"]["isError"], false);
+    assert_eq!(r3["result"]["structuredContent"]["count"], 0);
+
+    // Close stdin (EOF) -> server must exit 0 with zero trailing stdout bytes.
+    drop(stdin);
+    let mut trailing = String::new();
+    stdout_reader.read_to_string(&mut trailing).unwrap();
+    assert!(
+        trailing.is_empty(),
+        "expected zero trailing stdout bytes after EOF, got: {trailing:?}"
+    );
+
+    let status = child.wait().expect("wait on deja mcp");
+    let mut stderr_text = String::new();
+    let _ = stderr.read_to_string(&mut stderr_text);
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "deja mcp must exit 0 on EOF; stderr:\n{stderr_text}"
+    );
+}
