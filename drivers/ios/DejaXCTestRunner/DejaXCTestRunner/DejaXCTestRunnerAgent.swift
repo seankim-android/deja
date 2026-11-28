@@ -5,15 +5,10 @@ final class DejaXCTestRunnerAgent: XCTestCase {
     private let issueLock = NSLock()
     private var capturedIssues: [String]?
 
-    private struct PendingRequest {
-        let request: HttpRequest
-        let respond: (HttpResponse) -> Void
-    }
-
-    // Serializes all non-/health requests on the main queue even when handlers pump
-    // RunLoop.current.run(until:) during polling/settle, preventing re-entrant mutations
-    // of capturedIssues or interleaved XCUI actions.
-    private var pendingRequests: [PendingRequest] = []
+    // Guards overlapping non-/health requests on the HTTP server thread BEFORE dispatching
+    // onto DispatchQueue.main so a concurrent request never queues behind a long wait in GCD
+    // and executes late after a client timeout.
+    private let busyLock = NSLock()
     private var isExecutingRequest = false
 
     override func setUp() {
@@ -54,43 +49,49 @@ final class DejaXCTestRunnerAgent: XCTestCase {
         return (result, issues)
     }
 
-    private func enqueueMainRequest(
+    private func tryAcquireExecutionSlot() -> Bool {
+        busyLock.lock()
+        defer { busyLock.unlock() }
+        if isExecutingRequest {
+            return false
+        }
+        isExecutingRequest = true
+        return true
+    }
+
+    private func releaseExecutionSlot() {
+        busyLock.lock()
+        isExecutingRequest = false
+        busyLock.unlock()
+    }
+
+    private func executeMainRequest(
         _ request: HttpRequest,
         actions: XcuiActions,
         respond: @escaping (HttpResponse) -> Void
     ) {
-        pendingRequests.append(PendingRequest(request: request, respond: respond))
-        guard !isExecutingRequest else { return }
-        drainMainRequests(actions: actions)
-    }
+        defer { releaseExecutionSlot() }
 
-    private func drainMainRequests(actions: XcuiActions) {
-        isExecutingRequest = true
-        defer { isExecutingRequest = false }
-
-        while !pendingRequests.isEmpty {
-            let next = pendingRequests.removeFirst()
-            let (result, issues) = runCapturingIssues {
-                actions.handle(next.request)
-            }
-            switch result {
-            case .success(let response):
-                if !issues.isEmpty && response.status < 400 {
-                    next.respond(
-                        HttpResponse.jsonError(
-                            status: 500,
-                            message: "XCTest recorded issue(s): \(issues.joined(separator: "; "))"
-                        )
+        let (result, issues) = runCapturingIssues {
+            actions.handle(request)
+        }
+        switch result {
+        case .success(let response):
+            if !issues.isEmpty && response.status < 400 {
+                respond(
+                    HttpResponse.jsonError(
+                        status: 500,
+                        message: "XCTest recorded issue(s): \(issues.joined(separator: "; "))"
                     )
-                } else {
-                    next.respond(response)
-                }
-            case .failure(let error):
-                let detail = issues.isEmpty
-                    ? error.localizedDescription
-                    : "\(error.localizedDescription) (issues: \(issues.joined(separator: "; ")))"
-                next.respond(HttpResponse.jsonError(status: 500, message: detail))
+                )
+            } else {
+                respond(response)
             }
+        case .failure(let error):
+            let detail = issues.isEmpty
+                ? error.localizedDescription
+                : "\(error.localizedDescription) (issues: \(issues.joined(separator: "; ")))"
+            respond(HttpResponse.jsonError(status: 500, message: detail))
         }
     }
 
@@ -113,12 +114,27 @@ final class DejaXCTestRunnerAgent: XCTestCase {
                 return
             }
 
-            DispatchQueue.main.async {
+            guard let self else {
+                respond(HttpResponse.jsonError(status: 503, message: "agent shutting down"))
+                return
+            }
+
+            guard self.tryAcquireExecutionSlot() else {
+                respond(
+                    HttpResponse.jsonError(
+                        status: 409,
+                        message: "runner busy executing another request"
+                    )
+                )
+                return
+            }
+
+            DispatchQueue.main.async { [weak self] in
                 guard let self else {
                     respond(HttpResponse.jsonError(status: 503, message: "agent shutting down"))
                     return
                 }
-                self.enqueueMainRequest(request, actions: actions, respond: respond)
+                self.executeMainRequest(request, actions: actions, respond: respond)
             }
         }
 

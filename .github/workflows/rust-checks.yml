@@ -14,14 +14,72 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  rust:
-    name: ${{ matrix.os }} / Rust workspace
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
+  ubuntu:
+    name: ubuntu-latest / Rust workspace
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      run_macos: ${{ steps.macos_gate.outputs.run_macos }}
+    steps:
+      - name: Checkout exact commit
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Decide whether macOS runner is needed
+        id: macos_gate
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PUSH_BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            echo "run_macos=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          changed=""
+          if [ "$EVENT_NAME" = "pull_request" ] && git rev-parse --verify HEAD^2 >/dev/null 2>&1; then
+            changed=$(git diff --name-only HEAD^1 HEAD)
+          elif [ "$EVENT_NAME" = "push" ] && [ -n "${PUSH_BEFORE:-}" ] && [ "$PUSH_BEFORE" != "0000000000000000000000000000000000000000" ] && git rev-parse --verify "$PUSH_BEFORE^{commit}" >/dev/null 2>&1; then
+            changed=$(git diff --name-only "$PUSH_BEFORE" HEAD)
+          else
+            echo "run_macos=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if printf '%s\n' "$changed" | grep -Eq '^(crates/deja-driver-ios/|drivers/ios/|Cargo\.lock$|rustfmt\.toml$|\.github/workflows/rust-checks\.yml$)|(^|/)Cargo\.toml$'; then
+            echo "run_macos=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run_macos=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Fetch locked dependencies for all targets
+        run: cargo fetch --locked
+      - name: Clippy
+        run: cargo clippy --locked --offline --workspace --all-targets --all-features -- -D warnings
+      - name: Test workspace
+        run: cargo test --locked --offline --workspace --all-features
+      - name: Verify workspace boundaries (all targets)
+        env:
+          DEJA_BOUNDARIES_ALL_TARGETS: "1"
+        run: cargo test --locked --offline -p deja-cli --test workspace_boundaries --all-features
+      - name: Validate tracked artifacts, links, leaks, and results chart
+        run: cargo run --locked --offline --bin deja-repo-check -- --require-clean --check-chart
+
+  macos:
+    name: macos-latest / Rust workspace
+    needs: ubuntu
+    if: ${{ needs.ubuntu.outputs.run_macos == 'true' }}
+    runs-on: macos-latest
+    timeout-minutes: 10
     steps:
       - name: Checkout exact commit
         uses: actions/checkout@v4

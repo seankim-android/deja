@@ -29,6 +29,7 @@ final class XcuiActions {
         let selected: Bool
         let hasFocus: Bool
         let hittable: Bool
+        let isOnScreen: Bool
         let frame: CGRect
         let inVolatileChrome: Bool
 
@@ -371,8 +372,8 @@ final class XcuiActions {
         }
 
         let postActionDelayMs = max(0, min(5_000, intValue(json["postActionDelayMs"]) ?? 0))
-        let returnHierarchy = (json["returnHierarchy"] as? Bool) ?? false
-        let includeSystemUi = (json["includeSystemUi"] as? Bool) ?? false
+        let returnHierarchy = boolValue(json["returnHierarchy"]) ?? false
+        let includeSystemUi = boolValue(json["includeSystemUi"]) ?? false
 
         let started = Date()
         let hadSoftwareKeyboard = executeAction(appId: appId, action: validatedAction)
@@ -440,8 +441,8 @@ final class XcuiActions {
         }
         let exactText = textMatchRaw == "exact"
 
-        let notVisible = (json["notVisible"] as? Bool) ?? false
-        let waitStable = (json["waitStable"] as? Bool) ?? false
+        let notVisible = boolValue(json["notVisible"]) ?? false
+        let waitStable = boolValue(json["waitStable"]) ?? false
         if identifier == nil && text == nil && !(waitStable && !notVisible) {
             return HttpResponse.jsonError(
                 status: 400,
@@ -451,8 +452,8 @@ final class XcuiActions {
 
         let stablePolls = max(2, min(10, intValue(json["stablePolls"]) ?? 2))
         let timeoutMs = max(0, min(60_000, intValue(json["timeoutMs"]) ?? 5_000))
-        let includeSystemUi = (json["includeSystemUi"] as? Bool) ?? false
-        let returnHierarchy = (json["returnHierarchy"] as? Bool) ?? false
+        let includeSystemUi = boolValue(json["includeSystemUi"]) ?? false
+        let returnHierarchy = boolValue(json["returnHierarchy"]) ?? false
 
         let started = Date()
         let deadline = started.addingTimeInterval(Double(timeoutMs) / 1000.0)
@@ -463,6 +464,9 @@ final class XcuiActions {
         var lastCapture: HierarchyCapture?
 
         while true {
+            if polls > 0 && Date() >= deadline {
+                break
+            }
             polls += 1
             if case .success(let capture) = captureHierarchy(appId: appId, includeSystemUi: includeSystemUi) {
                 lastCapture = capture
@@ -473,10 +477,8 @@ final class XcuiActions {
                     consecutiveSameHash = 1
                 }
 
-                let appRunning = capture.stateCode >= 2
                 let (conditionMet, matchedNode) = evaluateWaitPredicate(
                     capture: capture,
-                    appRunning: appRunning,
                     identifier: identifier,
                     text: text,
                     exactText: exactText,
@@ -508,6 +510,9 @@ final class XcuiActions {
             }
             let sleepSec = min(Double(delayMs) / 1000.0, remaining)
             RunLoop.current.run(until: Date().addingTimeInterval(sleepSec))
+            if Date() >= deadline {
+                break
+            }
             delayMs = min(150, delayMs * 2)
         }
 
@@ -535,15 +540,20 @@ final class XcuiActions {
             return HttpResponse.jsonError(status: 400, message: "missing or invalid appId")
         }
         let timeoutMs = max(0, min(30_000, intValue(json["timeoutMs"]) ?? 10_000))
-        let includeSystemUi = (json["includeSystemUi"] as? Bool) ?? false
-        let returnHierarchy = (json["returnHierarchy"] as? Bool) ?? false
+        let includeSystemUi = boolValue(json["includeSystemUi"]) ?? false
+        let returnHierarchy = boolValue(json["returnHierarchy"]) ?? false
 
         let started = Date()
         let deadline = started.addingTimeInterval(Double(timeoutMs) / 1000.0)
+        var attempts = 0
         var delayMs = 15
         var lastError = "app did not reach running_foreground state with readable hierarchy"
 
         while true {
+            if attempts > 0 && Date() >= deadline {
+                break
+            }
+            attempts += 1
             let app = XCUIApplication(bundleIdentifier: appId)
             if app.state == .runningForeground {
                 switch captureHierarchy(appId: appId, includeSystemUi: includeSystemUi) {
@@ -575,6 +585,9 @@ final class XcuiActions {
             }
             let sleepSec = min(Double(delayMs) / 1000.0, remaining)
             RunLoop.current.run(until: Date().addingTimeInterval(sleepSec))
+            if Date() >= deadline {
+                break
+            }
             delayMs = min(150, delayMs * 2)
         }
 
@@ -623,7 +636,7 @@ final class XcuiActions {
         if text.utf8.count > Self.maxTextLength {
             return .failure(ValidationError(message: "text exceeds maximum length"))
         }
-        let settleKeyboard = (json["settleKeyboard"] as? Bool) ?? true
+        let settleKeyboard = boolValue(json["settleKeyboard"]) ?? true
         return .success(.type(text: text, settleKeyboard: settleKeyboard))
     }
 
@@ -837,15 +850,16 @@ final class XcuiActions {
 
     private func evaluateWaitPredicate(
         capture: HierarchyCapture,
-        appRunning: Bool,
         identifier: String?,
         text: String?,
         exactText: Bool,
         notVisible: Bool
     ) -> (Bool, CapturedNode?) {
         if identifier == nil && text == nil {
-            // Pure waitStable mode requires a running app snapshot.
-            return (appRunning && !capture.nodes.isEmpty, nil)
+            // Pure waitStable mode requires a foreground capture containing target-app nodes.
+            let hasForegroundAppNodes = capture.stateCode == 4
+                && capture.nodes.contains(where: { $0.source == "app" })
+            return (hasForegroundAppNodes, nil)
         }
 
         let matchedNode = findMatchingNode(
@@ -856,6 +870,11 @@ final class XcuiActions {
         )
 
         if notVisible {
+            // Never treat a truncated hierarchy as proof of absence: the selector may live in
+            // the omitted portion of the tree.
+            if matchedNode == nil && capture.truncated {
+                return (false, nil)
+            }
             return (matchedNode == nil, nil)
         }
         return (matchedNode != nil, matchedNode)
@@ -868,6 +887,7 @@ final class XcuiActions {
         exactText: Bool
     ) -> CapturedNode? {
         func matches(_ node: CapturedNode) -> Bool {
+            guard node.isOnScreen else { return false }
             if let identifier, node.identifier != identifier {
                 return false
             }
@@ -894,7 +914,7 @@ final class XcuiActions {
         var result: [String] = []
         var seen = Set<String>()
         for node in nodes {
-            if node.inVolatileChrome { continue }
+            if node.inVolatileChrome || !node.isOnScreen { continue }
             let rawCandidates: [String] = [node.label, node.title, node.identifier, node.value ?? ""]
             for raw in rawCandidates {
                 let normalized = raw
@@ -951,17 +971,29 @@ final class XcuiActions {
         }
     }
 
+    private func equalsAsciiIgnoreCase(_ lhs: String, _ rhs: String) -> Bool {
+        let a = lhs.utf8
+        let b = rhs.utf8
+        guard a.count == b.count else { return false }
+        for (ba, bb) in zip(a, b) {
+            let fa = (ba >= 65 && ba <= 90) ? (ba + 32) : ba
+            let fb = (bb >= 65 && bb <= 90) ? (bb + 32) : bb
+            if fa != fb { return false }
+        }
+        return true
+    }
+
     private func isVolatileSystemChrome(source: String, elementType: String, identifier: String) -> Bool {
-        if elementType.caseInsensitiveCompare("StatusBar") == .orderedSame {
+        if equalsAsciiIgnoreCase(elementType, "StatusBar") {
             return true
         }
-        if source.caseInsensitiveCompare("systemui") == .orderedSame
-            || source.caseInsensitiveCompare("com.android.systemui") == .orderedSame {
+        if equalsAsciiIgnoreCase(source, "systemui")
+            || equalsAsciiIgnoreCase(source, "com.android.systemui") {
             return true
         }
         if identifier.hasPrefix("com.android.systemui:id/")
-            || identifier.caseInsensitiveCompare("statusBarBackground") == .orderedSame
-            || identifier.caseInsensitiveCompare("navigationBarBackground") == .orderedSame {
+            || equalsAsciiIgnoreCase(identifier, "statusBarBackground")
+            || equalsAsciiIgnoreCase(identifier, "navigationBarBackground") {
             return true
         }
         return false
@@ -989,10 +1021,10 @@ final class XcuiActions {
         let elementType = describeElementType(snapshot.elementType)
         let identifier = snapshot.identifier
         let rect = sanitizeRect(snapshot.frame)
-        let hittable = snapshot.isEnabled
-            && rect.width > 0
+        let isOnScreen = rect.width > 0
             && rect.height > 0
             && rect.intersects(rootBounds)
+        let hittable = snapshot.isEnabled && isOnScreen
 
         let inVolatileChrome = parentInVolatileChrome
             || isVolatileSystemChrome(source: source, elementType: elementType, identifier: identifier)
@@ -1019,6 +1051,7 @@ final class XcuiActions {
             selected: snapshot.isSelected,
             hasFocus: snapshot.hasFocus,
             hittable: hittable,
+            isOnScreen: isOnScreen,
             frame: rect,
             inVolatileChrome: inVolatileChrome
         )
@@ -1254,8 +1287,13 @@ final class XcuiActions {
         return lowered == "true" || lowered == "1" || lowered == "yes"
     }
 
+    private func boolValue(_ raw: Any?) -> Bool? {
+        guard let n = raw as? NSNumber else { return nil }
+        guard CFGetTypeID(n) == CFBooleanGetTypeID() else { return nil }
+        return n.boolValue
+    }
+
     private func numberValue(_ raw: Any?) -> Double? {
-        if raw is Bool { return nil }
         if let n = raw as? NSNumber {
             if CFGetTypeID(n) == CFBooleanGetTypeID() { return nil }
             return n.doubleValue
@@ -1266,10 +1304,13 @@ final class XcuiActions {
     }
 
     private func intValue(_ raw: Any?) -> Int? {
-        if raw is Bool { return nil }
         if let n = raw as? NSNumber {
             if CFGetTypeID(n) == CFBooleanGetTypeID() { return nil }
-            return n.intValue
+            let d = n.doubleValue
+            guard d.isFinite, d >= -9_007_199_254_740_992.0, d <= 9_007_199_254_740_992.0 else {
+                return nil
+            }
+            return Int(d)
         }
         if let i = raw as? Int { return i }
         return nil

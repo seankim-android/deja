@@ -1,11 +1,18 @@
 # CI checks and local platform gates
 
-## CI: Pure-Rust portable checks (Ubuntu & macOS, no devices, no model)
+## CI: Pure-Rust portable checks (Ubuntu always; macOS path-gated, no devices, no model)
 
 [`.github/workflows/rust-checks.yml`](../.github/workflows/rust-checks.yml) runs on `main` pushes,
-pull requests, and manual dispatch across `ubuntu-latest` and `macos-latest` with read-only
-repository permissions. Each job checks out the exact commit, installs the stable Rust toolchain
-(`rustfmt`, `clippy`), and runs:
+pull requests, and manual dispatch with read-only repository permissions:
+
+- **`ubuntu-latest` always runs** (~25 s cached) and gates **`macos-latest`**, which only runs after
+  `ubuntu-latest` passes and only on manual dispatch or when changes touch macOS/workspace files
+  (`crates/deja-driver-ios/`, `drivers/ios/`, `Cargo.toml`, `Cargo.lock`, `rustfmt.toml`, or
+  `.github/workflows/rust-checks.yml`). This keeps remote CI fast and avoids spending macOS runner
+  minutes on docs-only, Android/Web, or failing Linux runs.
+
+Each job checks out the exact commit, installs the stable Rust toolchain (`rustfmt`, `clippy`),
+and runs:
 
 ```sh
 cargo fmt --all -- --check

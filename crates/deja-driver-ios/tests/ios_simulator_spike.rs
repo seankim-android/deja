@@ -1347,7 +1347,69 @@ async fn benchmark_deja_fixture_optimized_and_session_reuse() {
         miss_wait.visible_sample
     );
 
-    // 5. Verify zero-fling drag-and-hold swipe (`holdDurationMs: 150`).
+    // 5. Verify zero-fling drag-and-hold swipe (`holdDurationMs: 150`), numeric 0/1 payload
+    //    parsing (`timeoutMs: 0`, `x: 0.0, y: 1.0`), and 409 busy rejection on overlap.
+    let zero_timeout_wait = client
+        .wait_for_selector(&WaitForSelectorRequest {
+            app_id: FIXTURE_BUNDLE_ID.to_string(),
+            identifier: Some("nonexistent_checkout_id_zero".to_string()),
+            text: None,
+            text_match: None,
+            not_visible: Some(false),
+            wait_stable: Some(false),
+            stable_polls: None,
+            timeout_ms: Some(0),
+            include_system_ui: Some(false),
+            return_hierarchy: Some(false),
+        })
+        .await
+        .expect("wait_for_selector with timeoutMs=0");
+    assert!(!zero_timeout_wait.matched);
+    assert_eq!(
+        zero_timeout_wait.polls, 1,
+        "timeoutMs=0 must run exactly 1 initial probe instead of falling back to default 5000ms"
+    );
+
+    let zero_one_tap = client
+        .tap(&TapRequest {
+            app_id: FIXTURE_BUNDLE_ID.to_string(),
+            x: 0.0,
+            y: 1.0,
+            count: Some(1),
+            duration_ms: Some(0),
+        })
+        .await
+        .expect("POST /tap with 0.0/1.0 coordinates must be accepted");
+    assert!(zero_one_tap.ok);
+
+    let busy_client = client.clone();
+    let long_wait_task = tokio::spawn(async move {
+        busy_client
+            .wait_for_selector(&WaitForSelectorRequest {
+                app_id: FIXTURE_BUNDLE_ID.to_string(),
+                identifier: Some("nonexistent_overlap_probe".to_string()),
+                text: None,
+                text_match: None,
+                not_visible: Some(false),
+                wait_stable: Some(false),
+                stable_polls: None,
+                timeout_ms: Some(600),
+                include_system_ui: Some(false),
+                return_hierarchy: Some(false),
+            })
+            .await
+    });
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    match client.app_state(FIXTURE_BUNDLE_ID).await {
+        Err(IosDriverError::AgentHttpStatus { status: 409, .. }) => {}
+        other => panic!("expected 409 Conflict for overlapping non-/health request, got {other:?}"),
+    }
+    let long_wait_res = long_wait_task
+        .await
+        .expect("join wait task")
+        .expect("long wait should finish cleanly");
+    assert!(!long_wait_res.matched);
+
     let hold_swipe = client
         .swipe(&SwipeRequest {
             app_id: FIXTURE_BUNDLE_ID.to_string(),
