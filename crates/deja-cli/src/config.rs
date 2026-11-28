@@ -185,14 +185,15 @@ pub fn load_config(opts: &LoadConfigOptions<'_>) -> Result<LoadedConfig, ConfigE
             }
         })?;
 
+    let root_val: Value = serde_json::from_str(&contents)
+        .map_err(|err| ConfigError(format!("invalid JSON in configuration file: {err}")))?;
+
     if let Some(dup) = find_duplicate_json_key(&contents) {
         return Err(ConfigError(format!(
             "configuration file contains duplicate JSON key {dup:?}"
         )));
     }
 
-    let root_val: Value = serde_json::from_str(&contents)
-        .map_err(|err| ConfigError(format!("invalid JSON in configuration file: {err}")))?;
     let Some(obj) = root_val.as_object() else {
         return Err(ConfigError(
             "configuration root must be a JSON object".to_string(),
@@ -854,25 +855,32 @@ fn find_duplicate_json_key(text: &str) -> Option<String> {
                     let mut seen = HashSet::new();
                     self.skip_ws();
                     while self.pos < self.bytes.len() && self.bytes[self.pos] != b'}' {
+                        let iter_start = self.pos;
                         self.skip_ws();
                         let key = self.scan_string()?;
                         if !seen.insert(key.clone()) {
                             return Some(key);
                         }
                         self.skip_ws();
-                        if self.pos < self.bytes.len() && self.bytes[self.pos] == b':' {
-                            self.pos += 1;
+                        if self.pos >= self.bytes.len() || self.bytes[self.pos] != b':' {
+                            return None;
                         }
+                        self.pos += 1;
                         if let Some(dup) = self.scan_value() {
                             return Some(dup);
                         }
                         self.skip_ws();
                         if self.pos < self.bytes.len() && self.bytes[self.pos] == b',' {
                             self.pos += 1;
+                        } else if self.pos < self.bytes.len() && self.bytes[self.pos] != b'}' {
+                            return None;
                         }
                         self.skip_ws();
+                        if self.pos <= iter_start {
+                            return None;
+                        }
                     }
-                    if self.pos < self.bytes.len() {
+                    if self.pos < self.bytes.len() && self.bytes[self.pos] == b'}' {
                         self.pos += 1;
                     }
                     None
@@ -881,31 +889,42 @@ fn find_duplicate_json_key(text: &str) -> Option<String> {
                     self.pos += 1;
                     self.skip_ws();
                     while self.pos < self.bytes.len() && self.bytes[self.pos] != b']' {
+                        let iter_start = self.pos;
                         if let Some(dup) = self.scan_value() {
                             return Some(dup);
                         }
                         self.skip_ws();
                         if self.pos < self.bytes.len() && self.bytes[self.pos] == b',' {
                             self.pos += 1;
+                        } else if self.pos < self.bytes.len() && self.bytes[self.pos] != b']' {
+                            return None;
                         }
                         self.skip_ws();
+                        if self.pos <= iter_start {
+                            return None;
+                        }
                     }
-                    if self.pos < self.bytes.len() {
+                    if self.pos < self.bytes.len() && self.bytes[self.pos] == b']' {
                         self.pos += 1;
                     }
                     None
                 }
                 b'"' => {
-                    let _ = self.scan_string();
+                    let _ = self.scan_string()?;
                     None
                 }
                 _ => {
+                    let start = self.pos;
                     while self.pos < self.bytes.len()
                         && !matches!(
                             self.bytes[self.pos],
                             b',' | b'}' | b']' | b' ' | b'\t' | b'\r' | b'\n'
                         )
                     {
+                        self.pos += 1;
+                    }
+                    if self.pos == start {
+                        // Unexpected closing delimiter in malformed JSON: advance fail-closed.
                         self.pos += 1;
                     }
                     None

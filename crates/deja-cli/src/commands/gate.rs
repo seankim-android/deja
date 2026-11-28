@@ -148,26 +148,15 @@ pub fn run(args: &GateArgs, explicit_config: Option<&Path>, json_mode: bool, dep
         &deps.env,
     );
 
-    // Load & strictly validate goals file.
+    // Resolve raw goals path and evidence paths FIRST, then precheck & unlink verified previous
+    // evidence BEFORE reading/validating the goals file so an invalid or missing goals file
+    // never leaves a stale passing evidence file behind!
     let goals_abs = if args.goals.is_absolute() {
         lexical_normalize(&args.goals)
     } else {
         lexical_normalize(&deps.cwd.join(&args.goals))
     };
-    let goals = match load_goals_file(&goals_abs) {
-        Ok(g) => g,
-        Err(msg) => {
-            emit_gate_error(
-                deps,
-                json_mode,
-                "INVALID_GOALS",
-                &redaction.redact_str(&msg),
-            );
-            return EXIT_USAGE_OR_CONFIG;
-        }
-    };
 
-    // Resolve evidence JSON and sibling `.txt` paths, and run tamper precheck BEFORE deleting anything.
     let evidence_json_path = match &args.evidence {
         Some(p) if p.is_absolute() => lexical_normalize(p),
         Some(p) => lexical_normalize(&deps.cwd.join(p)),
@@ -208,7 +197,8 @@ pub fn run(args: &GateArgs, explicit_config: Option<&Path>, json_mode: bool, dep
         }
     };
 
-    // Delete any previously verified evidence BEFORE evaluating so stale passes never survive errors.
+    // Delete any previously verified evidence BEFORE validating goals or evaluating so stale
+    // passes never survive invalid-goals or runtime errors.
     if let Err(err) = remove_verified_gate_evidence(&precheck) {
         let code = match err {
             GateEvidenceError::Refused(_) => EXIT_USAGE_OR_CONFIG,
@@ -222,6 +212,20 @@ pub fn run(args: &GateArgs, explicit_config: Option<&Path>, json_mode: bool, dep
         );
         return code;
     }
+
+    // Now load & strictly validate the goals file.
+    let goals = match load_goals_file(&goals_abs) {
+        Ok(g) => g,
+        Err(msg) => {
+            emit_gate_error(
+                deps,
+                json_mode,
+                "INVALID_GOALS",
+                &redaction.redact_str(&msg),
+            );
+            return EXIT_USAGE_OR_CONFIG;
+        }
+    };
 
     let evaluated_at = now_iso8601();
     let build_path = config
@@ -461,14 +465,18 @@ fn to_evidence_goal(
     build_fingerprint: &str,
     report_paths: &BTreeMap<(String, String, String), String>,
 ) -> GateEvidenceGoal {
-    let report_path = r.validated_at.as_ref().and_then(|at| {
-        report_paths
-            .get(&(
-                r.goal_key.clone(),
-                build_fingerprint.to_string(),
-                at.clone(),
-            ))
-            .cloned()
+    // Prefer the exact `report_path` persisted on the selected SQLite validation row so
+    // concurrent stores finishing at identical timestamps never misattribute reports.
+    let report_path = r.report_path.or_else(|| {
+        r.validated_at.as_ref().and_then(|at| {
+            report_paths
+                .get(&(
+                    r.goal_key.clone(),
+                    build_fingerprint.to_string(),
+                    at.clone(),
+                ))
+                .cloned()
+        })
     });
     GateEvidenceGoal {
         goal: r.goal,

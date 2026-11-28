@@ -511,20 +511,20 @@ pub async fn run(
         }
     };
 
-    let attach_res = async {
+    let attach_res: Result<(), (u8, String)> = async {
         driver
             .ensure_session(&deps.cancel)
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| (crate::exit_codes::EXIT_FAILURE, e.to_string()))?;
         deps.driver_factory
             .install_app(&driver_ctx, &deps.cancel)
             .await
-            .map_err(|e| e.to_string())?;
-        Ok::<(), String>(())
+            .map_err(|e| (e.exit_code(), e.to_string()))?;
+        Ok(())
     }
     .await;
 
-    if let Err(err) = attach_res {
+    if let Err((code, err)) = attach_res {
         let _ = driver.shutdown().await;
         store.close();
         return emit_early_exec_error(
@@ -537,7 +537,7 @@ pub async fn run(
             &redaction,
             "DRIVER_ATTACH_FAILED",
             &err,
-            crate::exit_codes::EXIT_FAILURE,
+            code,
         );
     }
     let driver_attach_ms = attach_t0.elapsed().as_millis() as u64;
@@ -562,7 +562,7 @@ pub async fn run(
     let first_attempt = execute_single_attempt(
         driver.as_ref(),
         &config,
-        &exec_plan.flow_abs_path,
+        &closure,
         timeout_ms,
         &redaction,
         &deps.cancel,
@@ -593,7 +593,7 @@ pub async fn run(
             let retry_attempt = execute_single_attempt(
                 driver.as_ref(),
                 &config,
-                &exec_plan.flow_abs_path,
+                &closure,
                 timeout_ms,
                 &redaction,
                 &deps.cancel,

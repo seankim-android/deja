@@ -381,12 +381,14 @@ pub struct ExecutedAttempt {
     pub artifacts: Vec<RunArtifact>,
 }
 
-/// Execute a single flow file on an already-attached `driver`, including post-executor `.ips`
-/// crash-report fallback classification (`DEJA-46`, `DEJA-52`).
+/// Execute a single flow closure on an already-attached `driver` exclusively from the
+/// preflight-validated in-memory `closure` bytes (never reopening flow/subflow files from disk),
+/// and run the post-executor `.ips` crash-report fallback ONLY when [`FlowExecutor`] did not
+/// already complete a full crash probe (`DEJA-46`, `DEJA-52`).
 pub async fn execute_single_attempt(
     driver: &dyn PlatformDriver,
     config: &LoadedConfig,
-    flow_path: &Path,
+    closure: &FlowClosure,
     timeout_ms: u64,
     redaction: &RedactionContext,
     cancel: &CancellationToken,
@@ -398,19 +400,29 @@ pub async fn execute_single_attempt(
         .unwrap_or(0);
     let t0 = Instant::now();
 
-    let mut exec_cfg = FlowExecutionConfig::new(config.workspace_root.clone());
+    let mut exec_cfg =
+        FlowExecutionConfig::new(config.workspace_root.clone()).with_closure_snapshot(closure);
     exec_cfg.app_id_override = Some(config.app_id.clone());
     exec_cfg.env = config.env.clone();
     exec_cfg.flow_timeout = Some(Duration::from_millis(timeout_ms));
     exec_cfg.redactor = redaction.redactor.clone();
     exec_cfg.provider_redactor = redaction.provider.clone();
 
-    let executor = FlowExecutor::new(exec_cfg);
-    let mut outcome: FlowExecutionOutcome = executor.execute_file(driver, flow_path, cancel).await;
+    let main_source = closure
+        .files
+        .iter()
+        .find(|f| f.path == closure.main)
+        .map(|f| f.source.as_str())
+        .unwrap_or(closure.main.as_str());
+    let main_path = config.workspace_root.join(main_source);
 
-    // Post-executor crash check fallback: if a failed attempt was classified as selector,
-    // navigation, or unknown without a crash signal, query the driver's native crash detector.
+    let executor = FlowExecutor::new(exec_cfg);
+    let mut outcome: FlowExecutionOutcome = executor.execute_file(driver, &main_path, cancel).await;
+
+    // Post-executor crash check fallback: ONLY run when `FlowExecutor` did not already finish
+    // a full `driver.check_app_crash` probe (e.g., if `flow_timeout` truncated the in-flow probe).
     if !outcome.passed
+        && !outcome.crash_probe_completed
         && !cancel.is_cancelled()
         && driver
             .capabilities()

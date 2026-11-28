@@ -252,6 +252,11 @@ pub struct FlowExecutionConfig {
     pub redactor: Redactor,
     pub provider_redactor: ProviderKeyRedactor,
     pub raw_artifact_path: Option<String>,
+    /// Optional immutable preflight closure snapshot keyed by workspace-relative `/` paths
+    /// (matching [`deja_core::ClosureFile::source`]). When set, [`FlowExecutor::execute_file`]
+    /// and nested `runFlow`/`retry` file steps read exclusively from this in-memory map and
+    /// never reopen flow files from disk.
+    pub closure_snapshot: Option<BTreeMap<String, Vec<u8>>>,
 }
 
 impl FlowExecutionConfig {
@@ -271,7 +276,21 @@ impl FlowExecutionConfig {
             redactor: create_redactor(&ws_str, None, &[]),
             provider_redactor: provider_key_redactor(std::iter::empty::<(&str, &str)>()),
             raw_artifact_path: None,
+            closure_snapshot: None,
         }
+    }
+
+    /// Populate an immutable in-memory flow snapshot from a preflight [`deja_core::FlowClosure`].
+    #[must_use]
+    pub fn with_closure_snapshot(mut self, closure: &deja_core::FlowClosure) -> Self {
+        let mut map = BTreeMap::new();
+        for file in &closure.files {
+            if file.kind == deja_core::FlowReferenceKind::Flow {
+                map.insert(file.source.clone(), file.bytes.clone());
+            }
+        }
+        self.closure_snapshot = Some(map);
+        self
     }
 }
 
@@ -293,6 +312,11 @@ pub struct FlowExecutionOutcome {
     pub hook_errors: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub screenshots: Vec<PathBuf>,
+    /// `true` when [`FlowExecutor`] already ran `driver.check_app_crash` to completion
+    /// (without timeout truncation or cancellation), so callers do not wait through a second
+    /// crash-report grace window.
+    #[serde(default)]
+    pub crash_probe_completed: bool,
 }
 
 /// Platform-neutral `maestro/v1` YAML flow executor.
@@ -447,35 +471,54 @@ impl FlowExecutor {
                 format!("flow file escapes workspace: {}", flow_path.display()),
             );
         }
-        let canonical_file = match confine_existing_file(
-            &canonical_workspace,
-            &lexical_file,
-            MAX_FILE_BYTES,
-            "flow",
-        ) {
-            Ok(p) => p,
-            Err(err) => {
+
+        let (root_file, bytes) = if let Some(ref snapshot) = self.config.closure_snapshot {
+            let rel_key = lexical_file
+                .strip_prefix(&canonical_workspace)
+                .map(|rel| rel.to_string_lossy().replace('\\', "/"))
+                .unwrap_or_default();
+            let Some(snap_bytes) = snapshot.get(&rel_key) else {
                 return self.early_error_outcome(
                     started,
                     "parseFlow",
                     "Load flow file",
                     StepFailureKind::ParseOrConfinement,
-                    err.to_string(),
+                    format!("flow file missing from preflight closure snapshot: {rel_key}"),
                 );
-            }
-        };
+            };
+            (lexical_file.clone(), snap_bytes.clone())
+        } else {
+            let canonical_file = match confine_existing_file(
+                &canonical_workspace,
+                &lexical_file,
+                MAX_FILE_BYTES,
+                "flow",
+            ) {
+                Ok(p) => p,
+                Err(err) => {
+                    return self.early_error_outcome(
+                        started,
+                        "parseFlow",
+                        "Load flow file",
+                        StepFailureKind::ParseOrConfinement,
+                        err.to_string(),
+                    );
+                }
+            };
 
-        let bytes = match read_bounded_file(&canonical_file, MAX_FILE_BYTES) {
-            Ok(b) => b,
-            Err(err) => {
-                return self.early_error_outcome(
-                    started,
-                    "parseFlow",
-                    "Read flow file",
-                    StepFailureKind::ParseOrConfinement,
-                    err.to_string(),
-                );
-            }
+            let bytes = match read_bounded_file(&canonical_file, MAX_FILE_BYTES) {
+                Ok(b) => b,
+                Err(err) => {
+                    return self.early_error_outcome(
+                        started,
+                        "parseFlow",
+                        "Read flow file",
+                        StepFailureKind::ParseOrConfinement,
+                        err.to_string(),
+                    );
+                }
+            };
+            (canonical_file, bytes)
         };
         let yaml = String::from_utf8_lossy(&bytes);
         let parsed = match parse_flow(&yaml) {
@@ -500,7 +543,7 @@ impl FlowExecutor {
             driver,
             canonical_workspace,
             flow_dir,
-            Some(canonical_file),
+            Some(root_file),
             parsed,
             cancel,
             started,
@@ -596,6 +639,7 @@ impl FlowExecutor {
                 failure: None,
                 hook_errors: state.hook_errors,
                 screenshots: state.screenshots,
+                crash_probe_completed: false,
             },
             Ok(()) => {
                 let failed_step = FailedStepContext {
@@ -625,6 +669,7 @@ impl FlowExecutor {
                     failure,
                     hook_errors: state.hook_errors,
                     screenshots: state.screenshots,
+                    crash_probe_completed: false,
                 }
             }
             Err(mut failed_step) => {
@@ -659,12 +704,13 @@ impl FlowExecutor {
                     && driver
                         .capabilities()
                         .supports(DriverCapability::AppCrashReports);
+                let mut crash_probe_completed = false;
                 if can_probe_crash && let Some(app_id) = crash_app_id {
                     let probe_cancel = child_cancel.child_token();
-                    let probe_result = match crash_budget {
+                    let (completed, probe_result) = match crash_budget {
                         Some(rem) => tokio::select! {
                             biased;
-                            _ = probe_cancel.cancelled() => None,
+                            _ = probe_cancel.cancelled() => (false, None),
                             timed = tokio::time::timeout(
                                 rem,
                                 driver.check_app_crash(
@@ -673,23 +719,27 @@ impl FlowExecutor {
                                     &probe_cancel,
                                 ),
                             ) => match timed {
-                                Ok(Ok(sig)) => sig,
+                                Ok(Ok(sig)) => (true, sig),
                                 Ok(Err(_)) | Err(_) => {
                                     probe_cancel.cancel();
-                                    None
+                                    (false, None)
                                 }
                             },
                         },
                         None => tokio::select! {
                             biased;
-                            _ = probe_cancel.cancelled() => None,
+                            _ = probe_cancel.cancelled() => (false, None),
                             res = driver.check_app_crash(
                                 app_id,
                                 state.run_started_epoch_ms,
                                 &probe_cancel,
-                            ) => res.ok().flatten(),
+                            ) => match res {
+                                Ok(sig) => (true, sig),
+                                Err(_) => (false, None),
+                            },
                         },
                     };
+                    crash_probe_completed = completed;
                     if let Some(sig) = probe_result {
                         failed_step.crash_signal = Some(sig);
                     }
@@ -716,6 +766,7 @@ impl FlowExecutor {
                     failure,
                     hook_errors: state.hook_errors,
                     screenshots: state.screenshots,
+                    crash_probe_completed,
                 }
             }
         }
@@ -764,6 +815,7 @@ impl FlowExecutor {
             failure,
             hook_errors: Vec::new(),
             screenshots: Vec::new(),
+            crash_probe_completed: false,
         }
     }
 
@@ -3154,6 +3206,99 @@ impl FlowExecutor {
                         visible_context: None,
                         crash_signal: None,
                     }))
+                } else if let Some(ref snapshot) = self.config.closure_snapshot {
+                    match validate_relative_path_syntax(raw_rel, "subflow").and_then(|()| {
+                        let lexical = lexical_normalize(&flow_dir.join(raw_rel));
+                        if lexical == state.canonical_workspace
+                            || !lexical.starts_with(&state.canonical_workspace)
+                        {
+                            return Err(FlowExecutionError::PathConfinement(format!(
+                                "subflow escapes workspace: {raw_rel}"
+                            )));
+                        }
+                        Ok(lexical)
+                    }) {
+                        Err(err) => Err(Box::new(FailedStepContext {
+                            step_index,
+                            command: command.to_string(),
+                            label: format!("{command} \"{raw_rel}\""),
+                            kind: StepFailureKind::ParseOrConfinement,
+                            message: self.scrub(&err.to_string()),
+                            failed_app_id: None,
+                            visible_context: None,
+                            crash_signal: None,
+                        })),
+                        Ok(lexical_subflow) => {
+                            if state.call_stack.contains(&lexical_subflow) {
+                                Err(Box::new(FailedStepContext {
+                                    step_index,
+                                    command: command.to_string(),
+                                    label: format!("{command} \"{raw_rel}\""),
+                                    kind: StepFailureKind::ParseOrConfinement,
+                                    message: format!("subflow cycle detected: {raw_rel}"),
+                                    failed_app_id: None,
+                                    visible_context: None,
+                                    crash_signal: None,
+                                }))
+                            } else if state.call_stack.len() >= MAX_FLOW_DEPTH {
+                                Err(Box::new(FailedStepContext {
+                                    step_index,
+                                    command: command.to_string(),
+                                    label: format!("{command} \"{raw_rel}\""),
+                                    kind: StepFailureKind::ParseOrConfinement,
+                                    message: format!(
+                                        "subflow nesting exceeds maximum depth of {MAX_FLOW_DEPTH}"
+                                    ),
+                                    failed_app_id: None,
+                                    visible_context: None,
+                                    crash_signal: None,
+                                }))
+                            } else {
+                                let rel_key = lexical_subflow
+                                    .strip_prefix(&state.canonical_workspace)
+                                    .map(|rel| rel.to_string_lossy().replace('\\', "/"))
+                                    .unwrap_or_default();
+                                match snapshot.get(&rel_key).ok_or_else(|| {
+                                    FlowExecutionError::PathConfinement(format!(
+                                        "subflow missing from preflight closure snapshot: {rel_key}"
+                                    ))
+                                }).and_then(|bytes| {
+                                    let text = String::from_utf8_lossy(bytes);
+                                    parse_flow(&text).map_err(FlowExecutionError::from)
+                                }) {
+                                    Err(err) => Err(Box::new(FailedStepContext {
+                                        step_index,
+                                        command: command.to_string(),
+                                        label: format!("{command} \"{raw_rel}\""),
+                                        kind: StepFailureKind::ParseOrConfinement,
+                                        message: self.scrub(&err.to_string()),
+                                        failed_app_id: None,
+                                        visible_context: None,
+                                        crash_signal: None,
+                                    })),
+                                    Ok(sub_parsed) => {
+                                        let sub_dir = lexical_subflow
+                                            .parent()
+                                            .unwrap_or(&state.canonical_workspace)
+                                            .to_path_buf();
+                                        state.call_stack.push(lexical_subflow);
+                                        let sub_res = self
+                                            .execute_parsed_flow(
+                                                driver,
+                                                &sub_parsed,
+                                                &sub_dir,
+                                                true,
+                                                state,
+                                                cancel,
+                                            )
+                                            .await;
+                                        state.call_stack.pop();
+                                        sub_res
+                                    }
+                                }
+                            }
+                        }
+                    }
                 } else {
                     match confine_relative_read_path(
                         &state.canonical_workspace,

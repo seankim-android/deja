@@ -516,19 +516,20 @@ pub fn format_summary_line(result: &RunResult, redaction: &RedactionContext) -> 
         "deja-summary v=1 outcome={outcome} cache={cache} fingerprint={fingerprint} engine={engine} model_calls={model_calls} failure={failure}"
     );
 
+    // Strictly preserve `deja-summary v=1` grammar (`attempts=2 attempt1=... attempt2=...`):
+    // summarize the initial attempt (`attempts[0]`) and final rerun attempt (`attempts.last()`)
+    // even when `--retries >= 2` produced > 2 attempts (all attempts stay in JSON & JUnit).
     if let Some(ref attempts) = result.attempts
         && attempts.len() >= 2
     {
-        line.push_str(&format!(" attempts={}", attempts.len()));
-        for (idx, attempt) in attempts.iter().enumerate() {
-            let num = idx + 1;
-            line.push_str(&format!(
-                " attempt{num}={}",
-                sanitize_attempt_label(attempt)
-            ));
-        }
-        for (idx, attempt) in attempts.iter().enumerate() {
-            let num = idx + 1;
+        let first = &attempts[0];
+        let last = &attempts[attempts.len() - 1];
+        line.push_str(&format!(
+            " attempts=2 attempt1={} attempt2={}",
+            sanitize_attempt_label(first),
+            sanitize_attempt_label(last),
+        ));
+        for (num, attempt) in [(1usize, first), (2usize, last)] {
             if let Some(ref fail) = attempt.failure {
                 if let Some(ref step) = fail.failing_step {
                     line.push_str(&format!(

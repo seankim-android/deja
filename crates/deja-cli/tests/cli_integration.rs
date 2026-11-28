@@ -6,11 +6,11 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use deja_cli::driver_factory::{
     DoctorCheck, DoctorCheckStatus, DoctorProbeRequest, DoctorProbes, DriverContext, DriverFactory,
-    DriverFactoryError, FactoryFuture,
+    DriverFactoryError, FactoryFuture, RealDriverFactory, verify_ios_app_bundle,
 };
 use deja_cli::output::OutputSink;
 use deja_cli::{CliDeps, EMBEDDED_AGENT_GUIDE_MD, run_cli_from_args};
@@ -90,6 +90,7 @@ fn deja_bin() -> Command {
 
 type HierarchyScript = Arc<Mutex<Vec<UiHierarchy>>>;
 type OnLaunchHook = Arc<dyn Fn(usize) + Send + Sync>;
+type OnEnsureSessionHook = Arc<dyn Fn() + Send + Sync>;
 
 #[derive(Clone)]
 struct MockDriver {
@@ -97,8 +98,12 @@ struct MockDriver {
     hierarchies: HierarchyScript,
     launch_count: Arc<AtomicUsize>,
     shutdown_count: Arc<AtomicUsize>,
+    killed_apps: Arc<Mutex<Vec<String>>>,
+    crash_probe_calls: Arc<AtomicUsize>,
+    crash_probe_delay_first: Option<Duration>,
     crash_signal: Arc<Mutex<Option<DriverCrashSignal>>>,
     on_launch: Option<OnLaunchHook>,
+    on_ensure_session: Option<OnEnsureSessionHook>,
 }
 
 impl MockDriver {
@@ -111,8 +116,12 @@ impl MockDriver {
             hierarchies: Arc::new(Mutex::new(hierarchies)),
             launch_count: Arc::new(AtomicUsize::new(0)),
             shutdown_count: Arc::new(AtomicUsize::new(0)),
+            killed_apps: Arc::new(Mutex::new(Vec::new())),
+            crash_probe_calls: Arc::new(AtomicUsize::new(0)),
+            crash_probe_delay_first: None,
             crash_signal: Arc::new(Mutex::new(None)),
             on_launch: None,
+            on_ensure_session: None,
         }
     }
 
@@ -121,8 +130,18 @@ impl MockDriver {
         self
     }
 
+    fn with_crash_probe_delay_first(mut self, delay: Duration) -> Self {
+        self.crash_probe_delay_first = Some(delay);
+        self
+    }
+
     fn with_on_launch(mut self, hook: OnLaunchHook) -> Self {
         self.on_launch = Some(hook);
+        self
+    }
+
+    fn with_on_ensure_session(mut self, hook: OnEnsureSessionHook) -> Self {
+        self.on_ensure_session = Some(hook);
         self
     }
 }
@@ -170,6 +189,9 @@ impl PlatformDriver for MockDriver {
 
     fn ensure_session<'a>(&'a self, cancel: &'a CancellationToken) -> DriverFuture<'a, ()> {
         Box::pin(async move {
+            if let Some(ref hook) = self.on_ensure_session {
+                hook();
+            }
             if cancel.is_cancelled() {
                 return Err(DriverError::Cancelled);
             }
@@ -205,10 +227,14 @@ impl PlatformDriver for MockDriver {
 
     fn kill_app<'a>(
         &'a self,
-        _app_id: &'a str,
+        app_id: &'a str,
         _cancel: &'a CancellationToken,
     ) -> DriverFuture<'a, ()> {
-        Box::pin(async { Ok(()) })
+        let app_id = app_id.to_string();
+        Box::pin(async move {
+            self.killed_apps.lock().unwrap().push(app_id);
+            Ok(())
+        })
     }
 
     fn clear_state<'a>(
@@ -355,9 +381,23 @@ impl PlatformDriver for MockDriver {
         &'a self,
         _app_id: &'a str,
         _since_epoch_ms: u64,
-        _cancel: &'a CancellationToken,
+        cancel: &'a CancellationToken,
     ) -> DriverFuture<'a, Option<DriverCrashSignal>> {
-        Box::pin(async move { Ok(self.crash_signal.lock().unwrap().clone()) })
+        Box::pin(async move {
+            let call_num = self.crash_probe_calls.fetch_add(1, Ordering::SeqCst) + 1;
+            if call_num == 1
+                && let Some(delay) = self.crash_probe_delay_first
+            {
+                tokio::select! {
+                    _ = cancel.cancelled() => return Err(DriverError::Cancelled),
+                    _ = tokio::time::sleep(delay) => {}
+                }
+            }
+            if cancel.is_cancelled() {
+                return Err(DriverError::Cancelled);
+            }
+            Ok(self.crash_signal.lock().unwrap().clone())
+        })
     }
 
     fn shutdown<'a>(&'a self) -> DriverFuture<'a, ()> {
@@ -1901,4 +1941,1049 @@ async fn manifest_verify_assertion_change_stale_build_and_retry_edge_cases() {
         5
     );
     held_writer.close();
+}
+
+// ===========================================================================
+// 3. Codex Round 1 regression tests (Findings 1 through 9)
+// ===========================================================================
+
+#[tokio::test]
+async fn regression_r1_f1_ios_bundle_validation_rejects_non_app_missing_plist_mismatch_and_accepts_match()
+ {
+    let ws = TempWs::new("r1-f1-ios-bundle");
+    let cancel = CancellationToken::new();
+    let factory = RealDriverFactory;
+
+    let make_ctx = |build_path: PathBuf| DriverContext {
+        platform: "ios".to_string(),
+        device: TEST_UDID.to_string(),
+        app_id: TEST_APP_ID.to_string(),
+        build_path,
+        workspace_root: ws.path.clone(),
+        disable_animations: true,
+        crash_report_grace_ms: 0,
+        crash_report_dir: None,
+        deja_home: None,
+        timeout_ms: 5_000,
+        env: BTreeMap::new(),
+    };
+
+    // 1. Plain regular file (`build/App.bin`) rejected with exit 2.
+    let plain_bin = ws.write_build("build/App.bin", b"not-a-bundle");
+    assert!(verify_ios_app_bundle(&plain_bin, TEST_APP_ID).is_err());
+    let err_create = factory
+        .create(&make_ctx(plain_bin.clone()), &cancel)
+        .await
+        .err()
+        .expect("create must reject non-.app file");
+    assert_eq!(err_create.exit_code(), 2);
+    let err_install = factory
+        .install_app(&make_ctx(plain_bin), &cancel)
+        .await
+        .expect_err("install_app must reject non-.app file");
+    assert_eq!(err_install.exit_code(), 2);
+
+    // 2. Plain file named `.app` rejected.
+    let fake_file_app = ws.write_build("build/Fake.app", b"not-a-dir");
+    assert!(verify_ios_app_bundle(&fake_file_app, TEST_APP_ID).is_err());
+
+    // 3. Directory NOT ending in `.app` rejected even with matching Info.plist.
+    let xml_matching = format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- <key>CFBundleIdentifier</key><string>com.comment.decoy</string> -->
+  <key>Nested</key>
+  <dict>
+    <key>CFBundleIdentifier</key>
+    <string>com.nested.decoy</string>
+  </dict>
+  <key>CFBundleIdentifier</key>
+  <string>{TEST_APP_ID}</string>
+</dict>
+</plist>
+"#
+    );
+    ws.write("build/NotABundle/Info.plist", &xml_matching);
+    let non_app_dir = ws.path.join("build/NotABundle");
+    assert!(verify_ios_app_bundle(&non_app_dir, TEST_APP_ID).is_err());
+
+    // 4. `.app` directory missing `Info.plist` rejected.
+    let missing_plist_app = ws.path.join("build/MissingPlist.app");
+    fs::create_dir_all(&missing_plist_app).unwrap();
+    assert!(verify_ios_app_bundle(&missing_plist_app, TEST_APP_ID).is_err());
+    let err_missing = factory
+        .install_app(&make_ctx(missing_plist_app), &cancel)
+        .await
+        .expect_err("install_app must reject missing Info.plist");
+    assert_eq!(err_missing.exit_code(), 2);
+
+    // 5. `.app` directory with mismatched `CFBundleIdentifier` rejected.
+    let xml_mismatch = r#"<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0">
+<dict>
+  <key>CFBundleIdentifier</key>
+  <string>dev.deja.other.app</string>
+</dict>
+</plist>
+"#;
+    ws.write("build/WrongId.app/Info.plist", xml_mismatch);
+    let wrong_app = ws.path.join("build/WrongId.app");
+    let mismatch_err = verify_ios_app_bundle(&wrong_app, TEST_APP_ID).unwrap_err();
+    assert!(mismatch_err.contains("dev.deja.other.app"));
+    let err_wrong = factory
+        .create(&make_ctx(wrong_app), &cancel)
+        .await
+        .err()
+        .expect("create must reject mismatched CFBundleIdentifier");
+    assert_eq!(err_wrong.exit_code(), 2);
+
+    // 6. Valid `.app` directory with matching XML `Info.plist` (including comment + nested dict decoy) accepted.
+    ws.write("build/Good.app/Info.plist", &xml_matching);
+    let good_app = ws.path.join("build/Good.app");
+    verify_ios_app_bundle(&good_app, TEST_APP_ID).expect("matching XML .app must pass");
+
+    // 7. Symlinked `.app` bundle and symlinked `Info.plist` rejected on Unix.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+        let sym_app = ws.path.join("build/Sym.app");
+        symlink(&good_app, &sym_app).unwrap();
+        assert!(verify_ios_app_bundle(&sym_app, TEST_APP_ID).is_err());
+
+        let sym_plist_app = ws.path.join("build/SymPlist.app");
+        fs::create_dir_all(&sym_plist_app).unwrap();
+        symlink(
+            good_app.join("Info.plist"),
+            sym_plist_app.join("Info.plist"),
+        )
+        .unwrap();
+        assert!(verify_ios_app_bundle(&sym_plist_app, TEST_APP_ID).is_err());
+    }
+
+    // 8. Binary `Info.plist` validated via `plutil` on macOS (both matching and mismatched).
+    #[cfg(target_os = "macos")]
+    {
+        let bin_good = ws.path.join("build/BinGood.app");
+        fs::create_dir_all(&bin_good).unwrap();
+        let bin_good_plist = bin_good.join("Info.plist");
+        fs::write(&bin_good_plist, &xml_matching).unwrap();
+        let st = Command::new("/usr/bin/plutil")
+            .args(["-convert", "binary1"])
+            .arg(&bin_good_plist)
+            .status()
+            .unwrap();
+        assert!(st.success(), "plutil -convert binary1 failed");
+        assert!(fs::read(&bin_good_plist).unwrap().starts_with(b"bplist"));
+        verify_ios_app_bundle(&bin_good, TEST_APP_ID)
+            .expect("matching binary Info.plist must pass");
+
+        let bin_bad = ws.path.join("build/BinBad.app");
+        fs::create_dir_all(&bin_bad).unwrap();
+        let bin_bad_plist = bin_bad.join("Info.plist");
+        fs::write(&bin_bad_plist, xml_mismatch).unwrap();
+        let st2 = Command::new("/usr/bin/plutil")
+            .args(["-convert", "binary1"])
+            .arg(&bin_bad_plist)
+            .status()
+            .unwrap();
+        assert!(st2.success());
+        assert!(verify_ios_app_bundle(&bin_bad, TEST_APP_ID).is_err());
+    }
+}
+
+#[tokio::test]
+async fn regression_r1_f2_executes_preflight_closure_bytes_even_when_disk_mutated_during_attach() {
+    let ws = TempWs::new("r1-f2-snapshot");
+    ws.write_build("build/App.bin", b"v1");
+    ws.write(
+        "deja.config.json",
+        &json!({
+            "workspaceRoot": ".",
+            "platform": "ios",
+            "appId": TEST_APP_ID,
+            "adapter": "maestro-ios/v1",
+            "buildPath": "build/App.bin",
+            "device": TEST_UDID,
+            "manifest": "deja.walks.json"
+        })
+        .to_string(),
+    );
+    let main_yaml =
+        "appId: dev.deja.test.app\n---\n- launchApp\n- runFlow: sub.yaml\n- assertVisible: Ready\n";
+    let sub_yaml = "appId: dev.deja.test.app\n---\n- tapOn:\n    id: go_btn\n";
+    let main_path = ws.write("flows/main.yaml", main_yaml);
+    let sub_path = ws.write("flows/sub.yaml", sub_yaml);
+
+    let ok_tree = hierarchy_with_nodes(
+        TEST_APP_ID,
+        vec![
+            node_with_label("go_btn", "Go"),
+            node_with_label("ready", "Ready"),
+        ],
+    );
+
+    // 1. During `remember`, mutate BOTH root and subflow on disk inside `ensure_session`
+    // (after preflight closure hashing/validation, right before FlowExecutor starts).
+    let mutated_main = main_path.clone();
+    let mutated_sub = sub_path.clone();
+    let driver =
+        MockDriver::new(vec![ok_tree.clone()]).with_on_ensure_session(Arc::new(move || {
+            fs::write(
+            &mutated_main,
+            "appId: dev.deja.test.app\n---\n- killApp: com.evil.main\n- assertVisible: NeverSeen\n",
+        )
+        .unwrap();
+            fs::write(
+                &mutated_sub,
+                "appId: dev.deja.test.app\n---\n- killApp: com.evil.sub\n",
+            )
+            .unwrap();
+        }));
+    let killed = Arc::clone(&driver.killed_apps);
+    let (deps, cap) = make_deps(
+        &ws.path,
+        Arc::new(MockFactory::new(Some("ios-27.2"), driver)),
+        default_probes(),
+        CancellationToken::new(),
+    );
+    let code = run_cli_from_args(
+        [
+            "deja",
+            "remember",
+            "snapshot goal",
+            "--flow",
+            "flows/main.yaml",
+            "--json",
+        ],
+        &deps,
+    )
+    .await;
+    // Executor MUST have run ONLY the preflight closure bytes (zero `killApp` calls),
+    // and post-run drift check MUST catch the on-disk mutation and refuse persistence (exit 6).
+    assert!(
+        killed.lock().unwrap().is_empty(),
+        "executor must never execute mutated disk bytes after preflight"
+    );
+    assert_eq!(
+        code, 6,
+        "post-run drift check must catch mutation during remember"
+    );
+    let rep: Value = serde_json::from_str(&cap.lock().unwrap().stdout).unwrap();
+    assert_eq!(rep["outcome"], "flow-changed");
+    assert!(
+        !ws.path.join("deja.walks.json").exists(),
+        "drifted remember must not persist manifest"
+    );
+
+    // 2. Restore original files, remember cleanly, then mutate on disk during `run` attach.
+    fs::write(&main_path, main_yaml).unwrap();
+    fs::write(&sub_path, sub_yaml).unwrap();
+    let (deps_ok, _) = make_deps(
+        &ws.path,
+        Arc::new(MockFactory::new(
+            Some("ios-27.2"),
+            MockDriver::new(vec![ok_tree.clone()]),
+        )),
+        default_probes(),
+        CancellationToken::new(),
+    );
+    assert_eq!(
+        run_cli_from_args(
+            [
+                "deja",
+                "remember",
+                "snapshot goal",
+                "--flow",
+                "flows/main.yaml",
+            ],
+            &deps_ok,
+        )
+        .await,
+        0
+    );
+
+    let mutated_main2 = main_path.clone();
+    let mutated_sub2 = sub_path.clone();
+    let driver2 = MockDriver::new(vec![ok_tree]).with_on_ensure_session(Arc::new(move || {
+        fs::write(
+            &mutated_main2,
+            "appId: dev.deja.test.app\n---\n- killApp: com.evil.run\n",
+        )
+        .unwrap();
+        fs::write(
+            &mutated_sub2,
+            "appId: dev.deja.test.app\n---\n- killApp: com.evil.subrun\n",
+        )
+        .unwrap();
+    }));
+    let killed2 = Arc::clone(&driver2.killed_apps);
+    let (deps_run, cap_run) = make_deps(
+        &ws.path,
+        Arc::new(MockFactory::new(Some("ios-27.2"), driver2)),
+        default_probes(),
+        CancellationToken::new(),
+    );
+    let run_code = run_cli_from_args(["deja", "run", "snapshot goal", "--json"], &deps_run).await;
+    assert!(
+        killed2.lock().unwrap().is_empty(),
+        "`deja run` must execute immutable preflight closure snapshot, never post-preflight disk edits"
+    );
+    assert_eq!(
+        run_code, 6,
+        "manifest-mode `deja run` post-run drift check must refuse persistence when disk changed mid-run"
+    );
+    let run_rep: Value = serde_json::from_str(&cap_run.lock().unwrap().stdout).unwrap();
+    assert_eq!(run_rep["outcome"], "flow-changed");
+}
+
+#[tokio::test]
+async fn regression_r1_f3_gate_clears_stale_evidence_on_invalid_goals_but_protects_unrelated_files()
+{
+    let ws = TempWs::new("r1-f3-gate-stale");
+    let build = ws.write_build("build/App.bin", b"v1");
+    let fp = fingerprint_file(&ws.path, &build).unwrap();
+    ws.write(
+        "deja.config.json",
+        &json!({
+            "workspaceRoot": ".",
+            "platform": "ios",
+            "appId": TEST_APP_ID,
+            "adapter": "maestro-ios/v1",
+            "buildPath": "build/App.bin"
+        })
+        .to_string(),
+    );
+    let flow = ws.write(
+        "flows/checkout.yaml",
+        "appId: dev.deja.test.app\n---\n- launchApp\n- assertVisible: Done\n",
+    );
+    ws.write("goals.txt", "checkout\n");
+    ws.write("empty-goals.txt", "# only comments\n   \n");
+
+    let store = SqliteWalkStore::open_writable(SqliteStoreOptions::new(&ws.path)).unwrap();
+    let id = WalkIdentity {
+        goal: "checkout".to_string(),
+        app_id: TEST_APP_ID.to_string(),
+        platform: "ios".to_string(),
+        flow_schema_version: DEFAULT_FLOW_SCHEMA_VERSION.to_string(),
+        build_fingerprint: fp,
+        adapter: Some("maestro-ios/v1".to_string()),
+        browser: None,
+    };
+    store
+        .persist_verified_candidate(
+            &id,
+            &deja_store::PersistVerifiedCandidateOptions {
+                candidate_path: flow,
+                validation: RecordValidationInput::new(true, now_iso8601())
+                    .with_origin(WalkOrigin::Remember)
+                    .with_runtime("ios-27.2"),
+                expected_flow_sha256: None,
+                expected_closure_sha256: None,
+                exploration: None,
+                repair_history: None,
+            },
+        )
+        .unwrap();
+    store.close();
+
+    let ev_json = ws.path.join(".deja/gate/evidence.json");
+    let ev_txt = ws.path.join(".deja/gate/evidence.txt");
+
+    // 1. Produce passing evidence first.
+    let (deps1, _) = make_deps(
+        &ws.path,
+        Arc::new(MockFactory::new(None, MockDriver::new(vec![]))),
+        default_probes(),
+        CancellationToken::new(),
+    );
+    assert_eq!(
+        run_cli_from_args(
+            [
+                "deja",
+                "gate",
+                "--goals",
+                "goals.txt",
+                "--evidence",
+                ".deja/gate/evidence.json",
+                "--json",
+            ],
+            &deps1,
+        )
+        .await,
+        0
+    );
+    assert!(ev_json.is_file());
+    assert!(ev_txt.is_file());
+
+    // 2. Missing goals file -> exits 2 AND removes stale passing evidence `.json` + `.txt`.
+    let (deps2, _) = make_deps(
+        &ws.path,
+        Arc::new(MockFactory::new(None, MockDriver::new(vec![]))),
+        default_probes(),
+        CancellationToken::new(),
+    );
+    assert_eq!(
+        run_cli_from_args(
+            [
+                "deja",
+                "gate",
+                "--goals",
+                "does-not-exist.txt",
+                "--evidence",
+                ".deja/gate/evidence.json",
+                "--json",
+            ],
+            &deps2,
+        )
+        .await,
+        2
+    );
+    assert!(
+        !ev_json.exists(),
+        "stale evidence.json must be removed on missing goals file"
+    );
+    assert!(
+        !ev_txt.exists(),
+        "stale evidence.txt must be removed on missing goals file"
+    );
+
+    // 3. Re-create passing evidence, then run with empty goals file -> exits 2 AND removes stale evidence.
+    let (deps3, _) = make_deps(
+        &ws.path,
+        Arc::new(MockFactory::new(None, MockDriver::new(vec![]))),
+        default_probes(),
+        CancellationToken::new(),
+    );
+    assert_eq!(
+        run_cli_from_args(
+            [
+                "deja",
+                "gate",
+                "--goals",
+                "goals.txt",
+                "--evidence",
+                ".deja/gate/evidence.json",
+                "--json",
+            ],
+            &deps3,
+        )
+        .await,
+        0
+    );
+    assert!(ev_json.is_file() && ev_txt.is_file());
+    let (deps4, _) = make_deps(
+        &ws.path,
+        Arc::new(MockFactory::new(None, MockDriver::new(vec![]))),
+        default_probes(),
+        CancellationToken::new(),
+    );
+    assert_eq!(
+        run_cli_from_args(
+            [
+                "deja",
+                "gate",
+                "--goals",
+                "empty-goals.txt",
+                "--evidence",
+                ".deja/gate/evidence.json",
+                "--json",
+            ],
+            &deps4,
+        )
+        .await,
+        2
+    );
+    assert!(!ev_json.exists() && !ev_txt.exists());
+
+    // 4. Unrelated non-evidence file is NEVER deleted even when goals file is missing.
+    let unrelated = ws.write("notes/important.json", r#"{"owner":"user","keep":true}"#);
+    let (deps5, _) = make_deps(
+        &ws.path,
+        Arc::new(MockFactory::new(None, MockDriver::new(vec![]))),
+        default_probes(),
+        CancellationToken::new(),
+    );
+    assert_eq!(
+        run_cli_from_args(
+            [
+                "deja",
+                "gate",
+                "--goals",
+                "does-not-exist.txt",
+                "--evidence",
+                "notes/important.json",
+                "--json",
+            ],
+            &deps5,
+        )
+        .await,
+        2
+    );
+    assert_eq!(
+        fs::read_to_string(&unrelated).unwrap(),
+        r#"{"owner":"user","keep":true}"#
+    );
+}
+
+#[test]
+fn regression_r1_f4_malformed_config_json_exits_promptly_without_hanging() {
+    let ws = TempWs::new("r1-f4-malformed-json");
+    for malformed in [
+        r#"{"platform": "ios", "arr": [1}"#,
+        r#"{"platform": "ios", "arr": [1, 2 3]}"#,
+        r#"{"platform": "ios", "nested": {"a": ["#,
+    ] {
+        ws.write("deja.config.json", malformed);
+        let out = deja_bin()
+            .args(["list", "--json"])
+            .current_dir(&ws.path)
+            .output()
+            .unwrap();
+        assert_eq!(
+            out.status.code(),
+            Some(2),
+            "malformed JSON must exit 2 promptly: {malformed}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn regression_r1_f5_multi_retry_preserves_v1_summary_grammar_while_keeping_all_attempts() {
+    let ws = TempWs::new("r1-f5-multi-retry");
+    let build = ws.write_build("build/App.bin", b"v1");
+    let fp = fingerprint_file(&ws.path, &build).unwrap();
+    ws.write(
+        "deja.config.json",
+        &json!({
+            "workspaceRoot": ".",
+            "platform": "ios",
+            "appId": TEST_APP_ID,
+            "adapter": "maestro-ios/v1",
+            "buildPath": "build/App.bin",
+            "device": TEST_UDID
+        })
+        .to_string(),
+    );
+    let flow = ws.write(
+        "flows/checkout.yaml",
+        "appId: dev.deja.test.app\n---\n- launchApp\n- tapOn:\n    id: buy_btn\n- assertVisible: Done\n",
+    );
+
+    let store = SqliteWalkStore::open_writable(SqliteStoreOptions::new(&ws.path)).unwrap();
+    let id = WalkIdentity {
+        goal: "checkout".to_string(),
+        app_id: TEST_APP_ID.to_string(),
+        platform: "ios".to_string(),
+        flow_schema_version: DEFAULT_FLOW_SCHEMA_VERSION.to_string(),
+        build_fingerprint: fp,
+        adapter: Some("maestro-ios/v1".to_string()),
+        browser: None,
+    };
+    store
+        .persist_verified_candidate(
+            &id,
+            &deja_store::PersistVerifiedCandidateOptions {
+                candidate_path: flow,
+                validation: RecordValidationInput::new(true, now_iso8601())
+                    .with_origin(WalkOrigin::Remember)
+                    .with_runtime("ios-27.2"),
+                expected_flow_sha256: None,
+                expected_closure_sha256: None,
+                exploration: None,
+                repair_history: None,
+            },
+        )
+        .unwrap();
+    store.close();
+
+    // 3 polls for attempt 1 (miss) + 3 polls for attempt 2 (miss) + 1 hit for attempt 3 (pass)!
+    let miss_tree = hierarchy_with_nodes(TEST_APP_ID, vec![node_with_label("other", "Other")]);
+    let hit_tree = hierarchy_with_nodes(
+        TEST_APP_ID,
+        vec![
+            node_with_label("buy_btn", "Buy"),
+            node_with_label("done", "Done"),
+        ],
+    );
+    let driver = MockDriver::new(vec![
+        miss_tree.clone(),
+        miss_tree.clone(),
+        miss_tree.clone(),
+        miss_tree.clone(),
+        miss_tree.clone(),
+        miss_tree,
+        hit_tree,
+    ]);
+    let (deps, cap) = make_deps(
+        &ws.path,
+        Arc::new(MockFactory::new(Some("ios-27.2"), driver)),
+        default_probes(),
+        CancellationToken::new(),
+    );
+    let code = run_cli_from_args(
+        [
+            "deja",
+            "run",
+            "checkout",
+            "--retries",
+            "2",
+            "--junit",
+            "out/multi.xml",
+            "--summary",
+            "--json",
+        ],
+        &deps,
+    )
+    .await;
+    assert_eq!(code, 7, "flaky multi-retry run must exit 7");
+
+    let out = cap.lock().unwrap().clone();
+    let rep: Value = serde_json::from_str(&out.stdout).unwrap();
+    let attempts = rep["attempts"].as_array().unwrap();
+    assert_eq!(attempts.len(), 3, "JSON report must keep all 3 attempts");
+    assert_eq!(attempts[0]["passed"], false);
+    assert_eq!(attempts[1]["passed"], false);
+    assert_eq!(attempts[2]["passed"], true);
+
+    // Summary line MUST obey strict `deja-summary v=1` grammar (`attempts=2`, never `attempts=3` / `attempt3=`).
+    assert!(
+        out.stderr
+            .contains("attempts=2 attempt1=selector attempt2=none"),
+        "expected strict v1 attempts=2 trailer, got: {}",
+        out.stderr
+    );
+    assert!(!out.stderr.contains("attempts=3"));
+    assert!(!out.stderr.contains("attempt3="));
+
+    // JUnit XML must contain all 3 attempts.
+    let junit = fs::read_to_string(ws.path.join("out/multi.xml")).unwrap();
+    assert!(junit.contains("tests=\"3\""));
+    assert!(junit.contains("failures=\"2\""));
+    assert_eq!(junit.matches("<testcase ").count(), 3);
+}
+
+#[tokio::test]
+async fn regression_r1_f6_crash_probe_runs_once_normally_and_falls_back_when_flow_timeout_truncates()
+ {
+    let ws = TempWs::new("r1-f6-crash-probe");
+    let build = ws.write_build("build/App.bin", b"v1");
+    let fp = fingerprint_file(&ws.path, &build).unwrap();
+    ws.write(
+        "deja.config.json",
+        &json!({
+            "workspaceRoot": ".",
+            "platform": "ios",
+            "appId": TEST_APP_ID,
+            "adapter": "maestro-ios/v1",
+            "buildPath": "build/App.bin",
+            "device": TEST_UDID,
+            "timeoutMs": 10000
+        })
+        .to_string(),
+    );
+    let flow = ws.write(
+        "flows/missing.yaml",
+        "appId: dev.deja.test.app\n---\n- launchApp\n- tapOn:\n    id: missing_btn\n",
+    );
+
+    let store = SqliteWalkStore::open_writable(SqliteStoreOptions::new(&ws.path)).unwrap();
+    for goal_name in ["crash probe normal", "crash probe fallback"] {
+        let id = WalkIdentity {
+            goal: goal_name.to_string(),
+            app_id: TEST_APP_ID.to_string(),
+            platform: "ios".to_string(),
+            flow_schema_version: DEFAULT_FLOW_SCHEMA_VERSION.to_string(),
+            build_fingerprint: fp.clone(),
+            adapter: Some("maestro-ios/v1".to_string()),
+            browser: None,
+        };
+        store
+            .persist_verified_candidate(
+                &id,
+                &deja_store::PersistVerifiedCandidateOptions {
+                    candidate_path: flow.clone(),
+                    validation: RecordValidationInput::new(true, now_iso8601())
+                        .with_origin(WalkOrigin::Remember)
+                        .with_runtime("ios-27.2"),
+                    expected_flow_sha256: None,
+                    expected_closure_sha256: None,
+                    exploration: None,
+                    repair_history: None,
+                },
+            )
+            .unwrap();
+    }
+    store.close();
+
+    // Case A: Normal non-crash failure -> `check_app_crash` runs ONCE (inside FlowExecutor), NOT twice.
+    let empty_tree = hierarchy_with_nodes(TEST_APP_ID, vec![]);
+    let driver_a = MockDriver::new(vec![empty_tree.clone()]);
+    let calls_a = Arc::clone(&driver_a.crash_probe_calls);
+    let (deps_a, cap_a) = make_deps(
+        &ws.path,
+        Arc::new(MockFactory::new(Some("ios-27.2"), driver_a)),
+        default_probes(),
+        CancellationToken::new(),
+    );
+    let code_a = run_cli_from_args(["deja", "run", "crash probe normal", "--json"], &deps_a).await;
+    assert_eq!(code_a, 1);
+    let rep_a: Value = serde_json::from_str(&cap_a.lock().unwrap().stdout).unwrap();
+    assert_eq!(rep_a["failure"]["category"], "selector");
+    assert_eq!(
+        calls_a.load(Ordering::SeqCst),
+        1,
+        "non-crash failure must wait through only ONE crash probe"
+    );
+
+    // Case B: In-flow crash probe truncated by `flow_timeout` -> post-executor fallback runs
+    // and classifies as `app_crash`.
+    ws.write(
+        "deja.config.json",
+        &json!({
+            "workspaceRoot": ".",
+            "platform": "ios",
+            "appId": TEST_APP_ID,
+            "adapter": "maestro-ios/v1",
+            "buildPath": "build/App.bin",
+            "device": TEST_UDID,
+            "timeoutMs": 1200
+        })
+        .to_string(),
+    );
+    let driver_b = MockDriver::new(vec![empty_tree])
+        .with_crash_probe_delay_first(Duration::from_secs(5))
+        .with_crash(DriverCrashSignal {
+            source: CrashSignalSource::CrashReport,
+            report_file: Some("DejaFixture-fallback.ips".to_string()),
+            process: Some("DejaFixture".to_string()),
+            detail: Some("SIGABRT".to_string()),
+        });
+    let calls_b = Arc::clone(&driver_b.crash_probe_calls);
+    let (deps_b, cap_b) = make_deps(
+        &ws.path,
+        Arc::new(MockFactory::new(Some("ios-27.2"), driver_b)),
+        default_probes(),
+        CancellationToken::new(),
+    );
+    let code_b =
+        run_cli_from_args(["deja", "run", "crash probe fallback", "--json"], &deps_b).await;
+    assert_eq!(code_b, 1);
+    let rep_b: Value = serde_json::from_str(&cap_b.lock().unwrap().stdout).unwrap();
+    assert_eq!(rep_b["failure"]["category"], "app_crash");
+    assert_eq!(
+        rep_b["failure"]["crash"]["reportFile"],
+        "DejaFixture-fallback.ips"
+    );
+    assert_eq!(
+        calls_b.load(Ordering::SeqCst),
+        2,
+        "fallback crash probe must run when flow_timeout truncates the in-flow probe"
+    );
+}
+
+#[tokio::test]
+async fn regression_r1_f7_gate_links_exact_store_report_path_even_on_identical_timestamps() {
+    let ws = TempWs::new("r1-f7-gate-report-path");
+    let build = ws.write_build("build/App.bin", b"v1");
+    let fp = fingerprint_file(&ws.path, &build).unwrap();
+    ws.write(
+        "deja.config.json",
+        &json!({
+            "workspaceRoot": ".",
+            "platform": "ios",
+            "appId": TEST_APP_ID,
+            "adapter": "maestro-ios/v1",
+            "buildPath": "build/App.bin"
+        })
+        .to_string(),
+    );
+    let flow = ws.write(
+        "flows/checkout.yaml",
+        "appId: dev.deja.test.app\n---\n- launchApp\n- assertVisible: Done\n",
+    );
+    ws.write("goals.txt", "checkout\n");
+
+    let shared_ts = "2026-06-01T12:00:00Z";
+    let id = WalkIdentity {
+        goal: "checkout".to_string(),
+        app_id: TEST_APP_ID.to_string(),
+        platform: "ios".to_string(),
+        flow_schema_version: DEFAULT_FLOW_SCHEMA_VERSION.to_string(),
+        build_fingerprint: fp,
+        adapter: Some("maestro-ios/v1".to_string()),
+        browser: None,
+    };
+
+    for (store_id, report_rel) in [
+        ("shard-a", ".deja/reports/run-a.json"),
+        ("shard-b", ".deja/reports/run-b.json"),
+    ] {
+        ws.write(
+            report_rel,
+            &json!({
+                "identity": { "goal": "checkout" },
+                "execution": { "startedAt": shared_ts, "endedAt": shared_ts }
+            })
+            .to_string(),
+        );
+        let store = SqliteWalkStore::open_writable(
+            SqliteStoreOptions::new(&ws.path).with_store_id(store_id),
+        )
+        .unwrap();
+        store
+            .persist_verified_candidate(
+                &id,
+                &deja_store::PersistVerifiedCandidateOptions {
+                    candidate_path: flow.clone(),
+                    validation: RecordValidationInput::new(true, shared_ts)
+                        .with_origin(WalkOrigin::Remember)
+                        .with_runtime("ios-27.2")
+                        .with_report_path(report_rel),
+                    expected_flow_sha256: None,
+                    expected_closure_sha256: None,
+                    exploration: None,
+                    repair_history: None,
+                },
+            )
+            .unwrap();
+        store.close();
+    }
+
+    for (store_id, expected_report) in [
+        ("shard-a", ".deja/reports/run-a.json"),
+        ("shard-b", ".deja/reports/run-b.json"),
+    ] {
+        let (deps, cap) = make_deps(
+            &ws.path,
+            Arc::new(MockFactory::new(None, MockDriver::new(vec![]))),
+            default_probes(),
+            CancellationToken::new(),
+        );
+        let code = run_cli_from_args(
+            [
+                "deja",
+                "gate",
+                "--goals",
+                "goals.txt",
+                "--store",
+                store_id,
+                "--json",
+            ],
+            &deps,
+        )
+        .await;
+        assert_eq!(code, 0);
+        let parsed: Value = serde_json::from_str(&cap.lock().unwrap().stdout).unwrap();
+        assert_eq!(
+            parsed["goals"][0]["reportPath"], expected_report,
+            "gate must link the exact reportPath stored on shard {store_id}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn regression_r1_f8_manifest_check_fix_flow_path_works_from_parent_cwd() {
+    let parent = TempWs::new("r1-f8-manifest-cwd");
+    let app_dir = parent.path.join("app");
+    fs::create_dir_all(&app_dir).unwrap();
+
+    parent.write(
+        "app/deja.config.json",
+        &json!({
+            "workspaceRoot": ".",
+            "platform": "ios",
+            "appId": TEST_APP_ID,
+            "adapter": "maestro-ios/v1",
+            "manifest": "deja.walks.json"
+        })
+        .to_string(),
+    );
+    let assert_only_flow = parent.write(
+        "app/flows/assert_only.yaml",
+        "appId: dev.deja.test.app\n---\n- launchApp\n- assertVisible: Original\n",
+    );
+    let ao_closure = collect_flow_closure(&app_dir, &assert_only_flow).unwrap();
+    let both_changed_flow = parent.write(
+        "app/flows/both_changed.yaml",
+        "appId: dev.deja.test.app\n---\n- launchApp\n- assertVisible: Original\n",
+    );
+    let bc_closure = collect_flow_closure(&app_dir, &both_changed_flow).unwrap();
+    let bc_assert = assertions_sha256(&bc_closure).unwrap();
+
+    parent.write(
+        "app/deja.walks.json",
+        &json!({
+            "manifestVersion": 1,
+            "hashVersion": 1,
+            "walks": [
+                {
+                    "goal": "checkout",
+                    "appId": TEST_APP_ID,
+                    "platform": "ios",
+                    "adapter": "maestro-ios/v1",
+                    "flow": "flows/assert_only.yaml",
+                    "closureSha256": ao_closure.sha256,
+                    "assertionsSha256": "0".repeat(64)
+                },
+                {
+                    "goal": "checkout edited",
+                    "appId": TEST_APP_ID,
+                    "platform": "ios",
+                    "adapter": "maestro-ios/v1",
+                    "flow": "flows/both_changed.yaml",
+                    "closureSha256": bc_closure.sha256,
+                    "assertionsSha256": bc_assert
+                }
+            ]
+        })
+        .to_string(),
+    );
+
+    // Edit `both_changed.yaml` assertion so `flow-changed` + `assertionsAlsoChanged: true` also triggers.
+    parent.write(
+        "app/flows/both_changed.yaml",
+        "appId: dev.deja.test.app\n---\n- launchApp\n- assertVisible: Updated\n",
+    );
+
+    // Run from `parent` (OUTSIDE `workspaceRoot = parent/app`) with `--config app/deja.config.json`.
+    let (deps_json, cap_json) = make_deps(
+        &parent.path,
+        Arc::new(MockFactory::new(None, MockDriver::new(vec![]))),
+        default_probes(),
+        CancellationToken::new(),
+    );
+    let code = run_cli_from_args(
+        [
+            "deja",
+            "manifest",
+            "check",
+            "--config",
+            "app/deja.config.json",
+            "--json",
+        ],
+        &deps_json,
+    )
+    .await;
+    assert_eq!(code, 8);
+    let parsed: Value = serde_json::from_str(&cap_json.lock().unwrap().stdout).unwrap();
+    let entries = parsed["entries"].as_array().unwrap();
+    assert_eq!(entries[0]["status"], "assertions-changed");
+    assert_eq!(entries[0]["flow"], "flows/assert_only.yaml");
+    let fix = entries[0]["fix"].as_str().unwrap();
+    assert!(
+        fix.contains("--flow app/flows/assert_only.yaml"),
+        "fix command must resolve relative to caller cwd, got: {fix}"
+    );
+    assert!(parent.path.join("app/flows/assert_only.yaml").is_file());
+    assert_eq!(entries[1]["status"], "flow-changed");
+    assert_eq!(entries[1]["assertionsAlsoChanged"], true);
+
+    // Human output must resolve BOTH the `assertions-changed` fix and `assertionsAlsoChanged` note to caller cwd.
+    let (deps_human, cap_human) = make_deps(
+        &parent.path,
+        Arc::new(MockFactory::new(None, MockDriver::new(vec![]))),
+        default_probes(),
+        CancellationToken::new(),
+    );
+    assert_eq!(
+        run_cli_from_args(
+            [
+                "deja",
+                "manifest",
+                "check",
+                "--config",
+                "app/deja.config.json",
+            ],
+            &deps_human,
+        )
+        .await,
+        8
+    );
+    let human_stdout = cap_human.lock().unwrap().stdout.clone();
+    assert!(
+        human_stdout.contains("--flow app/flows/assert_only.yaml"),
+        "human assertions-changed fix must use cwd-relative flow path: {human_stdout}"
+    );
+    assert!(
+        human_stdout.contains("--flow app/flows/both_changed.yaml"),
+        "human assertionsAlsoChanged note must use cwd-relative flow path: {human_stdout}"
+    );
+}
+
+#[tokio::test]
+async fn regression_r1_f9_manifest_check_redacts_identity_mismatch_secrets_in_human_and_json_output()
+ {
+    let ws = TempWs::new("r1-f9-manifest-redact");
+    let secret_val = ["top", "secret-adapter-tok-42"].concat();
+    ws.write(
+        "deja.config.json",
+        &json!({
+            "workspaceRoot": ".",
+            "platform": "ios",
+            "appId": TEST_APP_ID,
+            "adapter": format!("custom-{secret_val}"),
+            "manifest": "deja.walks.json",
+            "secrets": [secret_val]
+        })
+        .to_string(),
+    );
+    let flow = ws.write(
+        "flows/checkout.yaml",
+        "appId: dev.deja.test.app\n---\n- launchApp\n- assertVisible: Done\n",
+    );
+    let closure = collect_flow_closure(&ws.path, &flow).unwrap();
+    let assert_hash = assertions_sha256(&closure).unwrap();
+    ws.write(
+        "deja.walks.json",
+        &json!({
+            "manifestVersion": 1,
+            "hashVersion": 1,
+            "walks": [
+                {
+                    "goal": "checkout",
+                    "appId": TEST_APP_ID,
+                    "platform": "ios",
+                    "adapter": "maestro-ios/v1",
+                    "flow": "flows/checkout.yaml",
+                    "closureSha256": closure.sha256,
+                    "assertionsSha256": assert_hash
+                }
+            ]
+        })
+        .to_string(),
+    );
+
+    // 1. Human output must exit 8, omit raw secret everywhere, and show `<redacted-fixture-value>`.
+    let (deps_human, cap_human) = make_deps(
+        &ws.path,
+        Arc::new(MockFactory::new(None, MockDriver::new(vec![]))),
+        default_probes(),
+        CancellationToken::new(),
+    );
+    let code_human = run_cli_from_args(["deja", "manifest", "check"], &deps_human).await;
+    assert_eq!(code_human, 8);
+    let human_out = cap_human.lock().unwrap().clone();
+    assert!(!human_out.stdout.contains(&secret_val));
+    assert!(!human_out.stderr.contains(&secret_val));
+    assert!(
+        human_out.stdout.contains("<redacted-fixture-value>"),
+        "expected redacted placeholder in human mismatch output, got: {}",
+        human_out.stdout
+    );
+
+    // 2. JSON output must also exit 8 and omit raw secret everywhere.
+    let (deps_json, cap_json) = make_deps(
+        &ws.path,
+        Arc::new(MockFactory::new(None, MockDriver::new(vec![]))),
+        default_probes(),
+        CancellationToken::new(),
+    );
+    let code_json = run_cli_from_args(["deja", "manifest", "check", "--json"], &deps_json).await;
+    assert_eq!(code_json, 8);
+    let json_out = cap_json.lock().unwrap().clone();
+    assert!(!json_out.stdout.contains(&secret_val));
+    assert!(!json_out.stderr.contains(&secret_val));
 }

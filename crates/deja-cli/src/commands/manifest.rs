@@ -308,6 +308,7 @@ fn run_check(
 
         let checked = check_single_entry(
             entry,
+            &deps.cwd,
             &config.workspace_root,
             config_flag_arg,
             identity_mismatch,
@@ -362,9 +363,17 @@ fn run_check(
                 .writeln_stdout(&format!("  [{status_str}] {safe_goal} ({safe_flow})"));
 
             if let Some(ref mismatch) = e.identity {
+                let safe_manifest = mismatch
+                    .manifest
+                    .as_deref()
+                    .map(|v| escape_unsafe_chars(&redaction.redact_str(v)));
+                let safe_config = mismatch
+                    .config
+                    .as_deref()
+                    .map(|v| escape_unsafe_chars(&redaction.redact_str(v)));
                 deps.output.writeln_stdout(&format!(
                     "    identity mismatch on {}: manifest={:?}, config={:?}",
-                    mismatch.field, mismatch.manifest, mismatch.config
+                    mismatch.field, safe_manifest, safe_config
                 ));
             }
             if let Some(ref missing) = e.file {
@@ -391,7 +400,11 @@ fn run_check(
                 deps.output
                     .writeln_stdout(&format!("    fix: {}", redaction.redact_str(cmd)));
                 if e.assertions_also_changed == Some(true)
-                    && let Some(rem_cmd) = build_remember_fix(&e.goal, &e.flow, config_flag_arg)
+                    && let Some(rem_cmd) = build_remember_fix(
+                        &e.goal,
+                        &format_flow_path_for_cwd(&deps.cwd, &config.workspace_root, &e.flow),
+                        config_flag_arg,
+                    )
                 {
                     deps.output.writeln_stdout(&format!(
                         "    note: assertions also changed; if --verify refuses with assertions-changed, run: {}",
@@ -457,6 +470,7 @@ fn first_identity_mismatch(
 
 fn check_single_entry(
     entry: &ManifestWalk,
+    cwd: &Path,
     canonical_workspace: &Path,
     config_flag_arg: Option<&str>,
     identity_mismatch: Option<IdentityMismatchDetail>,
@@ -649,8 +663,8 @@ fn check_single_entry(
     }
 
     if current_assertions != entry.assertions_sha256 {
-        let (fix, fix_unsafe) = match build_remember_fix(&entry.goal, &entry.flow, config_flag_arg)
-        {
+        let fix_flow = format_flow_path_for_cwd(cwd, canonical_workspace, &entry.flow);
+        let (fix, fix_unsafe) = match build_remember_fix(&entry.goal, &fix_flow, config_flag_arg) {
             Some(cmd) => (FixField::Command(cmd), None),
             None => (FixField::Null, Some(true)),
         };
@@ -723,6 +737,49 @@ fn build_verify_fix(goal: &str, config_flag_arg: Option<&str>) -> Option<String>
     }
     parts.push(posix_single_quote(goal));
     Some(parts.join(" "))
+}
+
+/// Compute a path to `workspace_root.join(flow_rel)` relative to `cwd` so runnable
+/// `deja remember --flow <path>` fix hints work verbatim when invoked outside `workspace_root`.
+#[must_use]
+pub fn format_flow_path_for_cwd(cwd: &Path, canonical_workspace: &Path, flow_rel: &str) -> String {
+    let abs_flow = lexical_normalize(&canonical_workspace.join(flow_rel));
+    let canon_cwd = fs::canonicalize(cwd).unwrap_or_else(|_| lexical_normalize(cwd));
+    if let Ok(rel) = abs_flow.strip_prefix(&canon_cwd) {
+        return rel.to_string_lossy().replace('\\', "/");
+    }
+    if let Some(rel) = relative_path_between(&canon_cwd, &abs_flow) {
+        return rel.to_string_lossy().replace('\\', "/");
+    }
+    abs_flow.to_string_lossy().replace('\\', "/")
+}
+
+fn relative_path_between(from_dir: &Path, to_path: &Path) -> Option<std::path::PathBuf> {
+    use std::path::Component;
+    let from_comps: Vec<Component<'_>> = from_dir.components().collect();
+    let to_comps: Vec<Component<'_>> = to_path.components().collect();
+    // Require matching roots/prefixes so we never invent a broken cross-drive relative path.
+    if from_comps.first() != to_comps.first() {
+        return None;
+    }
+    let common = from_comps
+        .iter()
+        .zip(to_comps.iter())
+        .take_while(|(a, b)| a == b)
+        .count();
+    if common == 0 {
+        return None;
+    }
+    let mut out = std::path::PathBuf::new();
+    for comp in &from_comps[common..] {
+        if matches!(comp, Component::Normal(_)) {
+            out.push("..");
+        }
+    }
+    for comp in &to_comps[common..] {
+        out.push(comp.as_os_str());
+    }
+    Some(out)
 }
 
 fn build_remember_fix(goal: &str, flow: &str, config_flag_arg: Option<&str>) -> Option<String> {

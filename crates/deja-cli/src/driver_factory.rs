@@ -6,7 +6,9 @@
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
+use std::fs;
 use std::future::Future;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::Stdio;
@@ -19,10 +21,14 @@ use deja_driver_ios::{
     IosDriver, IosDriverConfig, Simctl, SimctlEnv, default_crash_report_dir, embed,
     find_device_runtime_version,
 };
-use deja_flow::PlatformDriver;
+use deja_flow::{PlatformDriver, decode_xml};
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 use tokio_util::sync::CancellationToken;
+
+use crate::fs_safe::open_read_nofollow;
+
+const MAX_INFO_PLIST_BYTES: u64 = 4 * 1024 * 1024;
 
 /// Future type returned by [`DriverFactory`] methods.
 pub type FactoryFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -153,6 +159,8 @@ impl DriverFactory for RealDriverFactory {
             }
             match ctx.platform.as_str() {
                 "ios" => {
+                    verify_ios_app_bundle(&ctx.build_path, &ctx.app_id)
+                        .map_err(DriverFactoryError::UnsupportedOrConfig)?;
                     let mut cfg = IosDriverConfig::new(&ctx.device)
                         .with_disable_animations(ctx.disable_animations);
                     cfg.env = simctl_env_from_map(&ctx.env);
@@ -199,10 +207,9 @@ impl DriverFactory for RealDriverFactory {
             if cancel.is_cancelled() {
                 return Err(DriverFactoryError::Cancelled);
             }
-            if ctx.platform == "ios"
-                && ctx.build_path.is_dir()
-                && ctx.build_path.extension().and_then(|s| s.to_str()) == Some("app")
-            {
+            if ctx.platform == "ios" {
+                verify_ios_app_bundle(&ctx.build_path, &ctx.app_id)
+                    .map_err(DriverFactoryError::UnsupportedOrConfig)?;
                 let simctl = Simctl::with_env(simctl_env_from_map(&ctx.env));
                 tokio::select! {
                     _ = cancel.cancelled() => return Err(DriverFactoryError::Cancelled),
@@ -219,6 +226,215 @@ impl DriverFactory for RealDriverFactory {
             Ok(())
         })
     }
+}
+
+/// Strictly validate that an iOS `buildPath` is a non-symlink `.app` bundle directory containing
+/// a regular, non-symlink `Info.plist` whose `CFBundleIdentifier` matches `expected_app_id`.
+///
+/// Supports both XML plists (pure Rust) and binary plists (via `/usr/bin/plutil` on macOS).
+pub fn verify_ios_app_bundle(build_path: &Path, expected_app_id: &str) -> Result<(), String> {
+    let lmeta = fs::symlink_metadata(build_path).map_err(|err| {
+        format!(
+            "iOS buildPath cannot be inspected ({}): {err}",
+            build_path.display()
+        )
+    })?;
+    if lmeta.file_type().is_symlink() {
+        return Err(format!(
+            "iOS buildPath must not be a symbolic link: {}",
+            build_path.display()
+        ));
+    }
+    if !lmeta.file_type().is_dir() || build_path.extension().and_then(|s| s.to_str()) != Some("app")
+    {
+        return Err(format!(
+            "iOS buildPath must be an existing `.app` bundle directory (got {})",
+            build_path.display()
+        ));
+    }
+
+    let info_plist = build_path.join("Info.plist");
+    let file = open_read_nofollow(&info_plist).map_err(|err| {
+        format!(
+            "iOS `.app` bundle is missing a readable non-symlink Info.plist ({}): {err}",
+            info_plist.display()
+        )
+    })?;
+    let meta = file
+        .metadata()
+        .map_err(|err| format!("cannot stat Info.plist ({}): {err}", info_plist.display()))?;
+    if meta.len() > MAX_INFO_PLIST_BYTES {
+        return Err(format!(
+            "Info.plist exceeds {MAX_INFO_PLIST_BYTES} byte limit: {}",
+            info_plist.display()
+        ));
+    }
+    let mut bytes =
+        Vec::with_capacity(usize::try_from(meta.len().min(MAX_INFO_PLIST_BYTES)).unwrap_or(0));
+    file.take(MAX_INFO_PLIST_BYTES.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|err| {
+            format!(
+                "failed to read Info.plist ({}): {err}",
+                info_plist.display()
+            )
+        })?;
+    if (bytes.len() as u64) > MAX_INFO_PLIST_BYTES {
+        return Err(format!(
+            "Info.plist exceeds {MAX_INFO_PLIST_BYTES} byte limit: {}",
+            info_plist.display()
+        ));
+    }
+
+    let bundle_id = if bytes.starts_with(b"bplist") {
+        extract_cf_bundle_id_from_binary_plist(&info_plist, &bytes)?
+    } else {
+        let xml = std::str::from_utf8(&bytes).map_err(|err| {
+            format!(
+                "XML Info.plist is not valid UTF-8 ({}): {err}",
+                info_plist.display()
+            )
+        })?;
+        extract_cf_bundle_id_from_xml_plist(xml)?
+    };
+
+    if bundle_id != expected_app_id {
+        return Err(format!(
+            "iOS `.app` bundle CFBundleIdentifier ({bundle_id:?}) does not match configured appId ({expected_app_id:?})"
+        ));
+    }
+    Ok(())
+}
+
+fn extract_cf_bundle_id_from_binary_plist(
+    info_plist: &Path,
+    bytes: &[u8],
+) -> Result<String, String> {
+    #[cfg(target_os = "macos")]
+    {
+        use std::io::Write;
+        let mut child = std::process::Command::new("/usr/bin/plutil")
+            .args(["-convert", "json", "-o", "-", "-"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|err| format!("failed to execute plutil for binary Info.plist: {err}"))?;
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin.write_all(bytes).map_err(|err| {
+                format!(
+                    "failed to stream binary Info.plist ({}) to plutil: {err}",
+                    info_plist.display()
+                )
+            })?;
+        }
+        let output = child
+            .wait_with_output()
+            .map_err(|err| format!("failed waiting for plutil: {err}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "plutil failed to decode binary Info.plist ({}): {}",
+                info_plist.display(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        let val: serde_json::Value = serde_json::from_slice(&output.stdout)
+            .map_err(|err| format!("failed to parse plutil JSON output: {err}"))?;
+        let bundle_id = val
+            .get("CFBundleIdentifier")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                format!(
+                    "Info.plist ({}) is missing string CFBundleIdentifier",
+                    info_plist.display()
+                )
+            })?;
+        Ok(bundle_id.to_string())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (info_plist, bytes);
+        Err("binary Info.plist decoding is only supported on macOS".to_string())
+    }
+}
+
+/// Extract top-level `CFBundleIdentifier` from an XML Apple property list without external XML crates.
+fn extract_cf_bundle_id_from_xml_plist(xml: &str) -> Result<String, String> {
+    let cleaned = strip_xml_comments(xml);
+    let mut rest = cleaned.as_str();
+    let mut dict_depth: usize = 0;
+
+    while let Some(lt) = rest.find('<') {
+        rest = &rest[lt..];
+        let Some(gt) = rest.find('>') else {
+            return Err("malformed XML Info.plist: unclosed tag".to_string());
+        };
+        let tag = rest[1..gt].trim();
+        rest = &rest[gt + 1..];
+
+        if tag.starts_with('?') || tag.starts_with('!') {
+            continue;
+        }
+        let self_closing = tag.ends_with('/');
+        let tag_name = tag
+            .trim_end_matches('/')
+            .split_whitespace()
+            .next()
+            .unwrap_or("");
+
+        match tag_name {
+            "dict" if !self_closing => dict_depth = dict_depth.saturating_add(1),
+            "/dict" => dict_depth = dict_depth.saturating_sub(1),
+            "key" if !self_closing && dict_depth == 1 => {
+                let Some(key_close) = rest.find("</key>") else {
+                    return Err("malformed XML Info.plist: unclosed <key> element".to_string());
+                };
+                let key_name = decode_xml(rest[..key_close].trim());
+                rest = &rest[key_close + 6..];
+                if key_name != "CFBundleIdentifier" {
+                    continue;
+                }
+                let trimmed = rest.trim_start();
+                if let Some(after_str_open) = trimmed.strip_prefix("<string>") {
+                    let Some(str_close) = after_str_open.find("</string>") else {
+                        return Err(
+                            "malformed XML Info.plist: unclosed <string> for CFBundleIdentifier"
+                                .to_string(),
+                        );
+                    };
+                    let value = decode_xml(&after_str_open[..str_close]);
+                    if value.trim().is_empty() {
+                        return Err("Info.plist CFBundleIdentifier is empty".to_string());
+                    }
+                    return Ok(value);
+                }
+                return Err(
+                    "Info.plist CFBundleIdentifier value must be a <string> element".to_string(),
+                );
+            }
+            _ => {}
+        }
+    }
+
+    Err("Info.plist is missing CFBundleIdentifier".to_string())
+}
+
+fn strip_xml_comments(xml: &str) -> String {
+    let mut out = String::with_capacity(xml.len());
+    let mut rest = xml;
+    while let Some(start) = rest.find("<!--") {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 4..];
+        if let Some(end) = after.find("-->") {
+            rest = &after[end + 3..];
+        } else {
+            return out;
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Status of an individual `deja doctor` probe.
