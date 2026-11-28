@@ -1,85 +1,53 @@
-# Portable checks and local platform gates
+# CI checks and local platform gates
 
-## CI: Linux, no devices, no model
+## CI: Pure-Rust portable checks (Ubuntu & macOS, no devices, no model)
 
-[`.github/workflows/portable-checks.yml`](../.github/workflows/portable-checks.yml) runs on `main`
-pushes, pull requests, and manual dispatch on `ubuntu-latest` with read-only repository permissions.
-The job checks out the exact commit, installs Bun 1.4.4, then runs:
+[`.github/workflows/rust-checks.yml`](../.github/workflows/rust-checks.yml) runs on `main` pushes,
+pull requests, and manual dispatch across `ubuntu-latest` and `macos-latest` with read-only
+repository permissions. Each job checks out the exact commit, installs the stable Rust toolchain
+(`rustfmt`, `clippy`), and runs:
 
 ```sh
-bun install --frozen-lockfile
-bun run lint
-bun test --timeout=10000
-bun run build
-bun scripts/validate-release-artifacts.ts
-git rev-parse HEAD
+cargo fmt --all -- --check
+cargo fetch --locked
+cargo clippy --locked --offline --workspace --all-targets --all-features -- -D warnings
+cargo test --locked --offline --workspace --all-features
+DEJA_BOUNDARIES_ALL_TARGETS=1 cargo test --locked --offline -p deja-cli --test workspace_boundaries --all-features
+cargo run --locked --offline --bin deja-repo-check -- --require-clean --check-chart
 ```
 
-A second job, `node-conformance`, installs Node 22.13.0 and Node 24 beside Bun, builds the packages, and
-runs the store conformance suites on Node with `node:test` (`bun run test:node`) against the built
-`dist/` output and a third-party in-memory store fixture.
-
-The 221 deterministic unit/component/contract tests (1,129 assertions) cover orchestration, exact/corrupt storage,
-runner behavior and platform adapters, OpenClaw exploration boundaries, bounded repair, failure
-classification, cold/warm metrics, CLI/report behavior, the local viewer, diagnostic-only route
-graphs, and explicit login-subflow composition/preservation. The 25 route-graph tests include
-schema/failure fixtures and byte-exact re-derivation from curated WALK-020 evidence. WALK-018 tests
-add closed contracts, segment-store failures, reference containment, observation-gated launch and
-screen boundaries, complete clean-state `runFlow` execution, stored exact replay, wrong-text and
-late-launch rejection, canonical output ancestor/symlink/non-directory attacks with external-file
-preservation, and runner/filesystem failure preservation. Tests use fake process fixtures where appropriate
-and do not assert a real device result; the WALK-017 graph and WALK-018 split are derived from prior
-curated evidence, not a CI device run. The independently runnable WALK-018 deriver/verifier commands
-are documented in [`SUBFLOW_COMPOSITION.md`](SUBFLOW_COMPOSITION.md).
-
-The artifact validator parses every strict tracked JSON file (compiler-owned JSONC `tsconfig` files are
-separately validated by `bun run build`), rejects generated cache/build/dependency/binary artifacts, scans text for private keys/token shapes and machine-specific home paths, and fails if the
-checkout changed during checks. Generated demo scene PNGs remain ignored; the final MP4, generator,
-source text, and evidence-linked rehearsal results are curated intentionally.
+`deja-repo-check` validates every strict tracked JSON file, rejects generated cache/build/dependency/binary
+artifacts (including tracked `target/` files), checks every local Markdown link, scans text for
+private keys/token shapes and machine-specific home paths, verifies `docs/results-chart.svg` matches
+`demo/live-evidence/` run reports, and fails if the checkout changed during checks.
 
 ## Reproduce a clean checkout
 
 ```sh
 git clone https://github.com/deja-run/deja.git
 cd deja
-bun install --frozen-lockfile
-bun run lint
-bun test --timeout=10000
-bun run build
-bun scripts/validate-release-artifacts.ts
-git status --short
-git rev-parse HEAD
+cargo fmt --all -- --check
+cargo fetch --locked
+cargo clippy --locked --offline --workspace --all-targets --all-features -- -D warnings
+cargo test --locked --offline --workspace --all-features
+DEJA_BOUNDARIES_ALL_TARGETS=1 cargo test --locked --offline -p deja-cli --test workspace_boundaries --all-features
+cargo run --locked --offline --bin deja-repo-check -- --require-clean --check-chart
 ```
 
-No ignored cache, emulator state, credentials, build output, or generated viewer assets are required
-for these checks. `scripts/validate-release-artifacts.ts` must run against the committed clean tree.
+No ignored cache, emulator state, credentials, or model keys are required for these checks.
 
-## Platform integration is intentionally not a portable CI claim
+## Platform integration is separately verified
 
-Android emulators, OpenClaw/Kimi provider credentials, and Maestro's experimental Chromium driver are
-not available to this portable job. CI does **not** relabel fake runner tests as real Android/Web runs.
-The actual local executions remain separately curated:
+CI does **not** relabel unit tests as real iOS/Android/Web device runs. Live device proofs live
+alongside their fixtures and spike evidence:
 
-- Android: [`WALK-010 compatibility replay`](../spikes/001-android-deja/evidence/walk010-android-warm.txt)
-  and [`README quick-start review`](../spikes/001-android-deja/evidence/walk012-readme-review.txt).
-- Chromium: [`warm replay`](../spikes/002-web-deja/evidence/walk010-warm.txt),
-  [`independent remember`](../spikes/002-web-deja/evidence/walk010-remember.txt), and
-  [`regression`](../spikes/002-web-deja/evidence/walk010-product-regression.txt).
-- iOS: [`WALK-011 warm replay`](../spikes/003-ios-deja/evidence/walk011-warm.txt) and
-  [`independent remember`](../spikes/003-ios-deja/evidence/walk011-remember.txt) are local
-  simulator evidence, not a portable CI/integration job or physical-device claim.
-
-To verify that stored Android YAML is standalone Maestro rather than Déjà-dependent syntax,
-start the deterministic Android fixture as described in the root README, then from its directory run:
-
-```sh
-. ./scripts/env.sh
-sh scripts/fixture-mode.sh stable
-maestro --no-ansi --device emulator-5554 test flows/repaired-checkout.yaml
-```
-
-For the Web standalone command and its fixture server, see
-[`spikes/002-web-deja/README.md`](../spikes/002-web-deja/README.md). Maestro 2.12.0 labels
-Web Beta/Experimental; `--device chromium` and a `url:` flow declaration are required. Cold Web
-exploration and Web repair are intentionally unsupported. No platform command needs a viewer, and
-`remember`/warm replay need no model access.
+- Native iOS Simulator (`DEJA-60`): [`SPIKE_EVIDENCE.md`](../drivers/ios/DejaXCTestRunner/SPIKE_EVIDENCE.md)
+  (and historical Maestro 2.12 baseline [`walk011-warm.txt`](../spikes/003-ios-deja/evidence/walk011-warm.txt)
+  / [`walk011-remember.txt`](../spikes/003-ios-deja/evidence/walk011-remember.txt)).
+- Android baseline: [`walk010-android-warm.txt`](../spikes/001-android-deja/evidence/walk010-android-warm.txt),
+  [`walk012-readme-review.txt`](../spikes/001-android-deja/evidence/walk012-readme-review.txt), and
+  [`SUBFLOW_COMPOSITION.md`](SUBFLOW_COMPOSITION.md).
+- Web baseline: [`walk010-warm.txt`](../spikes/002-web-deja/evidence/walk010-warm.txt),
+  [`walk010-remember.txt`](../spikes/002-web-deja/evidence/walk010-remember.txt),
+  [`walk010-product-regression.txt`](../spikes/002-web-deja/evidence/walk010-product-regression.txt),
+  and [`spikes/002-web-deja/README.md`](../spikes/002-web-deja/README.md).

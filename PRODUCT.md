@@ -4,7 +4,7 @@
 
 ## Platform
 
-web
+cli
 
 ## Users
 
@@ -12,32 +12,31 @@ Three audiences:
 
 - Mobile developers on small teams who skip end-to-end QA because writing and maintaining tests costs too much.
 - QA and test engineers who maintain Maestro suites that break when selectors change.
-- Developers whose AI coding agents need a cheap way to check app flows. The MCP server is planned (DEJA-9).
+- Developers whose AI coding agents need a cheap way to check app flows via CLI or MCP (`DEJA-67`).
 
-They work in a terminal, in CI and in a code editor, usually next to an Android emulator or iOS simulator.
+They work in a terminal, in CI and in a code editor, usually next to an iOS simulator, an Android emulator, or headless Chromium.
 
 ## Product Purpose
 
-Déjà is an open-source SDK and CLI. A test comes from an AI model exploring the app once, or from YAML you already have, which needs no model or OpenClaw. Déjà verifies that test by running it again on its own, and saves it only if every check passes. Later runs replay the saved test with zero model calls. A changed selector gets one small, scoped repair; a real product bug still fails.
+Déjà is an open-source verified app test memory and native `maestro/v1` runner built in Rust. A test comes from an AI model exploring the app once, or from YAML you already have, which needs no model. Déjà verifies that test by running it again on its own, and saves it only if every check passes. Later runs replay the saved test with zero model calls. A changed selector gets one small, scoped repair proposal; a real product bug still fails.
 
-Success means a team owns plain test files that keep working across builds, with no model cost after the first run.
+Success means a team owns plain test files that keep working across builds, with no model cost after the first run and no external JVM/Maestro runtime dependency.
 
 ## Positioning
 
-Déjà is a memory layer for app testing. It learns a flow once, then remembers and replays it, and teams use one tool for all of that. The test runner underneath (Maestro today) is an implementation detail. Product copy names neither it nor OpenClaw; only install steps and reference docs do. The host still installs Maestro until Déjà ships its own pinned copy (DEJA-24).
+Déjà is a memory layer and native runner for app testing. It learns a flow once, then remembers and replays it, and teams use one standalone Rust binary for all of that.
 
-Learn once with a model, then replay with no model. Verification gates every saved test. Déjà can verify and save test YAML a team already has (`remember --flow`), including the subflows it calls. Planned: read existing runner configuration and work alongside it, so teams adopt Déjà without rewriting anything.
+Learn once with a model, then replay with no model. Verification gates every saved test. Déjà can verify and save `maestro/v1` test YAML a team already has (`remember --flow`), including the subflows it calls.
 
 ## Operating Context
 
-- CLI (`deja`) and Bun workspace packages under the `@deja-run` scope (not yet published to npm).
-- Maestro 2.12. Exploration and repair work on the Android emulator only; iOS and Chromium support replay only. On a new iOS build, replaying the last verified test is opt-in and off by default.
-- Optional cold exploration runs through the OpenClaw harness. Remember, replay and repair work without OpenClaw or any model. The default model is Kimi K3.1 Pro on Cerebras, and any OpenAI-compatible model can be configured.
-- An optional local run viewer (`viewer/`).
+- Standalone pure-Rust Cargo workspace at repository root (`edition = "2024"`, MSRV `1.89`, `unsafe_code = "deny"`). The unpublished TypeScript/Bun prototype packages have been retired (`DEJA-75`).
+- Native platform drivers in priority order: iOS Simulator (`xcrun simctl` + embedded Swift `DejaXCTestRunner`), Android (`adb` + bundled UiAutomator2 APK, zero host JDK), and Web (direct Chromium CDP over WebSocket, zero Node/Playwright).
+- Optional cold exploration uses an OpenAI-compatible chooser (`DEJA-71`). Remember, replay, and gating work with zero model calls and no API key.
 
 ## Capabilities and Constraints
 
-- The packages are Apache-2.0. The maintainer may later offer paid features under other terms.
+- The repository is Apache-2.0. The maintainer may later offer paid features under other terms (`DEJA-28`).
 - Replay never needs a model or a provider key.
 
 ## Brand Commitments
@@ -48,12 +47,13 @@ Learn once with a model, then replay with no model. Verification gates every sav
 - Original work only. No imagery from *The Matrix* or other Warner Bros. properties: no green digital or code rain, no black cat, no katakana columns.
 - Formerly called WalkCache. That name and the "WC" placeholder favicon are retired and not brand assets.
 - The trademark policy is in TRADEMARKS.md (draft, DEJA-27).
-- npm scope `@deja-run`, domain deja-run.com.
+- GitHub org `deja-run`, domain `deja-run.com`.
 
 ## Evidence on Hand
 
-- Demo GIF and narrated 55-second demo: `demo/deja-preview.gif`, `demo/deja-demo.mp4`.
-- Measured results for Kimi K3.1 Pro on Cerebras only. No other model has been measured, and none should be claimed.
+- Demo GIF and narrated 55-second demo: `demo/deja-preview.gif`, `demo/deja-demo.mp4` (recorded on the retired prototype).
+- Live native iOS Simulator proof (`DEJA-60`): `drivers/ios/DejaXCTestRunner/SPIKE_EVIDENCE.md`.
+- Measured exploration results for Kimi K3.1 Pro on Cerebras only (`demo/live-evidence/`). No other model has been measured, and none should be claimed.
 - No customers, testimonials or pricing exist yet. Don't invent any.
 
 ## Product Principles

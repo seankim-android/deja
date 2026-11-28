@@ -14,67 +14,14 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  changes:
-    name: Detect Rust changes
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    outputs:
-      run: ${{ steps.detect.outputs.run }}
-    steps:
-      - name: Checkout commit metadata
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 2
-          filter: blob:none
-          sparse-checkout: |
-            .github
-      - name: Check changed paths
-        id: detect
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          BEFORE_SHA: ${{ github.event.before }}
-        run: |
-          run=false
-          readable=true
-          changed="$RUNNER_TEMP/rust-changed-files"
-          if [[ "$EVENT_NAME" == pull_request ]]; then
-            git diff --name-only --no-renames -z HEAD^1 HEAD > "$changed" || readable=false
-          elif [[ "$EVENT_NAME" == push ]]; then
-            if [[ "$BEFORE_SHA" =~ ^[0-9a-f]{40}$ && "$BEFORE_SHA" != 0000000000000000000000000000000000000000 ]]; then
-              git fetch --no-tags --depth=1 origin "$BEFORE_SHA" && git diff --name-only --no-renames -z "$BEFORE_SHA" HEAD > "$changed" || readable=false
-            else
-              readable=false
-            fi
-          else
-            readable=false
-          fi
-          if [[ "$readable" == false ]]; then
-            run=true
-          else
-            while IFS= read -r -d '' path; do
-              case "$path" in
-                rust/*|.cargo/*|.cargo|rust-toolchain|rust-toolchain.toml|clippy.toml|.clippy.toml|rustfmt.toml|.rustfmt.toml|.github/workflows/rust-checks.yml)
-                  run=true
-                  break
-                  ;;
-              esac
-            done < "$changed"
-          fi
-          echo "run=$run" >> "$GITHUB_OUTPUT"
-
   rust:
     name: ${{ matrix.os }} / Rust workspace
-    needs: changes
-    if: needs.changes.outputs.run == 'true'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
-    defaults:
-      run:
-        working-directory: rust
     steps:
       - name: Checkout exact commit
         uses: actions/checkout@v4
@@ -86,9 +33,6 @@ jobs:
           components: rustfmt, clippy
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: |
-            rust -> target
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Fetch locked dependencies for all targets
@@ -101,3 +45,5 @@ jobs:
         env:
           DEJA_BOUNDARIES_ALL_TARGETS: "1"
         run: cargo test --locked --offline -p deja-cli --test workspace_boundaries --all-features
+      - name: Validate tracked artifacts, links, leaks, and results chart
+        run: cargo run --locked --offline --bin deja-repo-check -- --require-clean --check-chart

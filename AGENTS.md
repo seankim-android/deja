@@ -1,10 +1,10 @@
 # Déjà — Agent Working Rules
 
-Déjà is an Apache-2.0 memory layer and native runner for `maestro/v1` app tests across iOS, Android, and Web. The Rust workspace lives under [`rust/`](rust/Cargo.toml) alongside frozen TypeScript packages during the migration.
+Déjà is an Apache-2.0 memory layer and native Rust runner for `maestro/v1` app tests across iOS, Android, and Web. The Cargo workspace lives at the [repository root](Cargo.toml).
 
 ## Architecture & Boundaries
 
-- Enforce the crate DAG via [`rust/crates/deja-cli/tests/workspace_boundaries.rs`](rust/crates/deja-cli/tests/workspace_boundaries.rs):
+- Enforce the crate DAG via [`crates/deja-cli/tests/workspace_boundaries.rs`](crates/deja-cli/tests/workspace_boundaries.rs):
   - `deja-core` stays pure (closed-world direct dependency allowlist; zero driver, SQLite, HTTP, async runtime, or subprocess dependencies).
   - `deja-store` owns SQLite (`rusqlite` `bundled`); `deja-driver-web` owns WebSockets (`tokio-tungstenite`); `deja-cli` is the sole composition root (`clap`, `tracing-subscriber`, concrete drivers, `deja-mcp`).
   - No cross-driver edges (`deja-driver-{ios,android,web}` depend only on `deja-core` and `deja-flow`).
@@ -16,9 +16,13 @@ Déjà is an Apache-2.0 memory layer and native runner for `maestro/v1` app test
 ## Plan -> Execute Workflow
 
 - Structure non-trivial work in two phases: **Phase 1 (Plan, core architecture & hard invariants)** on a stronger planning/reasoning tier, then **Phase 2 (Standard wiring, tests & polish)** on the default execution tier (follow your local agent model mapping). Offload large spec/doc reads and pre-PR checks to read-only `doc-reader` and `reviewer` subagents when configured.
-- Always verify locally before pushing:
-  - Rust (from `rust/`): `cargo fmt --all -- --check`, `cargo fetch --locked`, `cargo clippy --locked --offline --workspace --all-targets --all-features -- -D warnings`, `cargo test --locked --offline --workspace --all-features`, and `DEJA_BOUNDARIES_ALL_TARGETS=1 cargo test --locked --offline -p deja-cli --test workspace_boundaries --all-features`.
-  - Repo checks: `bun scripts/validate-release-artifacts.ts` (must pass on a clean committed tree; never leak local `/Users/...` home paths or secrets, and keep all local Markdown links valid).
+- Always verify locally before pushing (from repo root):
+  - `cargo fmt --all -- --check`
+  - `cargo fetch --locked`
+  - `cargo clippy --locked --offline --workspace --all-targets --all-features -- -D warnings`
+  - `cargo test --locked --offline --workspace --all-features`
+  - `DEJA_BOUNDARIES_ALL_TARGETS=1 cargo test --locked --offline -p deja-cli --test workspace_boundaries --all-features`
+  - `cargo run --locked --offline --bin deja-repo-check -- --require-clean --check-chart` (must pass on a clean committed tree; never leak local `/Users/...` home paths or secrets, and keep all local Markdown links valid).
 
 ## Required Worktree Workflow
 
