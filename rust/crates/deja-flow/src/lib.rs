@@ -1,5 +1,10 @@
 //! Platform-neutral `maestro/v1` YAML interpreter, `PlatformDriver` abstraction,
-//! selector matching, structured failure classification, and JUnit XML writer.
+//! selector matching, structured failure classification, adaptive polling/settle primitives,
+//! driver capability contracts, latency telemetry, and JUnit XML writer.
+
+pub mod backoff;
+pub mod capabilities;
+pub mod timing;
 
 /// Canonical crate identifier used by workspace smoke checks.
 pub const CRATE_NAME: &str = "deja-flow";
