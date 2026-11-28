@@ -4,6 +4,7 @@
 use std::fs;
 use std::io::{ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
@@ -182,9 +183,17 @@ pub enum InspectedConsumerEntry {
 pub struct SaveManifestWalkOptions {
     pub identity: WalkIdentity,
     pub flow_path: String,
+    /// Closure SHA-256 of the verified flow that actually ran; save fails closed if the files on
+    /// disk changed before persistence.
+    pub expected_closure_sha256: String,
+    /// Optional pre-run assertions SHA-256 to bind alongside `expected_closure_sha256`.
+    pub expected_assertions_sha256: Option<String>,
     pub validation: RecordValidationInput,
     pub accept_assertion_change: bool,
 }
+
+/// Optional test hook invoked right before re-reading and committing `deja.walks.json` under lock.
+pub type BeforeManifestCommitHook = Arc<dyn Fn(&Path) + Send + Sync>;
 
 /// Manages `deja.walks.json`, `.deja/manifest.lock`, disk closure/assertion verification,
 /// owner rules, forbidden fixture scanning, and the `DEJA-51` manifest replay state machine.
@@ -545,9 +554,9 @@ impl ConsumerFlows {
             match self.inspect_entry(&entry)? {
                 InspectedConsumerEntry::Missing { file } => {
                     return Ok(ConsumerRunPlan::Refuse {
-                        outcome: RunOutcome::Failed,
+                        outcome: RunOutcome::FlowChanged,
                         miss_reason: CacheMissReason::MissingFlow,
-                        exit_code: 1,
+                        exit_code: 6,
                         detail: format!("consumer flow file is missing: {file}"),
                         flow_change: None,
                         manifest_assertions_sha256: None,
@@ -759,13 +768,43 @@ impl ConsumerFlows {
     }
 
     /// Persist a verified consumer flow to SQLite and (when changed) update `deja.walks.json`
-    /// under `.deja/manifest.lock`, enforcing `ManifestOwnerRules`, assertion-change guards,
-    /// forbidden fixture scanning, and optimistic `ManifestChanged` detection.
+    /// under `.deja/manifest.lock`, enforcing passing validation, closure binding,
+    /// `ManifestOwnerRules`, assertion-change guards, forbidden fixture scanning, and
+    /// optimistic merge / `ManifestChanged` detection.
     pub fn save_verified_manifest_walk(
         &self,
         store: &SqliteWalkStore,
         options: &SaveManifestWalkOptions,
     ) -> Result<(StoredWalk, bool), StoreError> {
+        self.save_verified_manifest_walk_with_hook(store, options, None)
+    }
+
+    /// Variant of [`ConsumerFlows::save_verified_manifest_walk`] accepting a deterministic hook
+    /// invoked right before re-reading and committing `deja.walks.json` (for concurrency tests).
+    pub fn save_verified_manifest_walk_with_hook(
+        &self,
+        store: &SqliteWalkStore,
+        options: &SaveManifestWalkOptions,
+        before_commit_hook: Option<BeforeManifestCommitHook>,
+    ) -> Result<(StoredWalk, bool), StoreError> {
+        if !options.validation.passed {
+            return Err(StoreError::ConsumerFlow(
+                "cannot update walk manifest from a failed validation".to_string(),
+            ));
+        }
+        if !crate::schema::is_sha256_hex(&options.expected_closure_sha256) {
+            return Err(StoreError::InvalidIdentity(
+                "expected_closure_sha256 must be a lowercase 64-char hex SHA-256".to_string(),
+            ));
+        }
+        if let Some(ref exp_assert) = options.expected_assertions_sha256
+            && !crate::schema::is_sha256_hex(exp_assert)
+        {
+            return Err(StoreError::InvalidIdentity(
+                "expected_assertions_sha256 must be a lowercase 64-char hex SHA-256".to_string(),
+            ));
+        }
+
         let norm = normalize_walk_identity(&options.identity)?;
         let adapter = norm.adapter.clone().ok_or_else(|| {
             StoreError::InvalidIdentity("A manifest walk needs the adapter in its identity".into())
@@ -801,6 +840,21 @@ impl ConsumerFlows {
             })?;
         let assertions = closure_assertions(&closure)?;
         let assertions_hash = assertions_sha256(&closure)?;
+
+        if closure.sha256 != options.expected_closure_sha256 {
+            return Err(StoreError::ManifestChanged(format!(
+                "the flow or a file it runs changed after verification (expected closure {}, now {}); nothing was written",
+                options.expected_closure_sha256, closure.sha256
+            )));
+        }
+        if let Some(ref expected_assert) = options.expected_assertions_sha256
+            && &assertions_hash != expected_assert
+        {
+            return Err(StoreError::ManifestChanged(format!(
+                "the flow's assertions changed after verification (expected {}, now {}); nothing was written",
+                expected_assert, assertions_hash
+            )));
+        }
 
         self.with_manifest_lock(|| {
             let manifest = self.load()?;
@@ -887,20 +941,29 @@ impl ConsumerFlows {
             };
 
             let manifest_changed = existing.as_ref() != Some(&next_entry);
-            let mut next_walks: Vec<ManifestWalk> = manifest
-                .walks
-                .iter()
-                .filter(|e| manifest_walk_key(e).ok().as_deref() != Some(target_key.as_str()))
-                .cloned()
-                .collect();
-            next_walks.push(next_entry.clone());
-            let next_manifest = WalkManifest {
-                manifest_version: manifest.manifest_version,
-                hash_version: manifest.hash_version,
-                walks: next_walks,
-            };
             if manifest_changed {
-                let _ = self.check_manifest(&next_manifest)?;
+                let mut preview_walks: Vec<ManifestWalk> = manifest
+                    .walks
+                    .iter()
+                    .filter(|e| manifest_walk_key(e).ok().as_deref() != Some(target_key.as_str()))
+                    .cloned()
+                    .collect();
+                preview_walks.push(next_entry.clone());
+                let preview_manifest = WalkManifest {
+                    manifest_version: manifest.manifest_version,
+                    hash_version: manifest.hash_version,
+                    walks: preview_walks,
+                };
+                let _ = self.check_manifest(&preview_manifest)?;
+            }
+
+            // Re-verify disk closure right before persisting to narrow the post-verify TOCTOU window.
+            let live_closure = collect_flow_closure(&root, &canonical)?;
+            if live_closure.sha256 != options.expected_closure_sha256 {
+                return Err(StoreError::ManifestChanged(format!(
+                    "the flow or a file it runs changed after verification (expected closure {}, now {}); nothing was written",
+                    options.expected_closure_sha256, live_closure.sha256
+                )));
             }
 
             // Write memory first, then manifest last (atomic write under .deja/manifest.lock).
@@ -917,7 +980,12 @@ impl ConsumerFlows {
             })?;
 
             if manifest_changed {
-                // Re-read under lock to detect concurrent manifest edits.
+                if let Some(ref hook) = before_commit_hook {
+                    let (_, manifest_target) = self.manifest_file()?;
+                    hook(&manifest_target);
+                }
+                // Re-read under lock and merge onto the latest document so concurrent edits to
+                // unrelated goals are preserved while conflicting edits to this goal fail closed.
                 let current = self.load()?;
                 let current_entry = current
                     .walks
@@ -929,7 +997,18 @@ impl ConsumerFlows {
                             .to_string(),
                     ));
                 }
-                self.write_manifest(&next_manifest)?;
+                let mut merged_walks: Vec<ManifestWalk> = current
+                    .walks
+                    .into_iter()
+                    .filter(|e| manifest_walk_key(e).ok().as_deref() != Some(target_key.as_str()))
+                    .collect();
+                merged_walks.push(next_entry);
+                let merged_manifest = WalkManifest {
+                    manifest_version: current.manifest_version,
+                    hash_version: current.hash_version,
+                    walks: merged_walks,
+                };
+                self.write_manifest(&merged_manifest)?;
             }
 
             Ok((stored, manifest_changed))

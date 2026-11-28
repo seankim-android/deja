@@ -50,10 +50,10 @@ pub fn import_legacy_walks_json(
 ) -> Result<LegacyImportReport, StoreError> {
     let source_path = match json_path {
         Some(p) => p.to_path_buf(),
-        None => {
-            let rel = store_metadata_path(LEGACY_JSON_MEMORY_PATH, store.store_id())?;
-            store.workspace_root().join(rel)
-        }
+        None => PathBuf::from(store_metadata_path(
+            LEGACY_JSON_MEMORY_PATH,
+            store.store_id(),
+        )?),
     };
 
     let target = canonical_metadata_target(store.workspace_root(), &source_path)?;
@@ -204,6 +204,10 @@ pub fn import_legacy_walks_json(
                     flaky = excluded.flaky,
                     validated_at = excluded.validated_at,
                     origin = excluded.origin,
+                    failure_category = NULL,
+                    report_path = NULL,
+                    duration_ms = NULL,
+                    phase_timings_json = NULL,
                     integrity_sha256 = excluded.integrity_sha256",
                 params![
                     walk_id,

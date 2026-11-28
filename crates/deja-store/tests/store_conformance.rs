@@ -1066,16 +1066,19 @@ fn consumer_flows_deja51_replay_and_fail_closed_drift() {
 
     // 5g. Owner rule violation (disallowTextSelectors) rejected by save_verified_manifest_walk.
     ws.write_file("deja.walks.json", manifest_bytes.as_bytes());
-    ws.write_file(
+    let edited_abs = ws.write_file(
         flow_rel,
         b"appId: com.example.app\n---\n- tapOn: Pay Now\n- assertVisible:\n    id: order_done\n",
     );
+    let edited_closure = collect_flow_closure(ws.path(), &edited_abs).unwrap();
     let owner_err = consumer
         .save_verified_manifest_walk(
             &store,
             &SaveManifestWalkOptions {
                 identity: id_b1.clone(),
                 flow_path: flow_rel.to_string(),
+                expected_closure_sha256: edited_closure.sha256,
+                expected_assertions_sha256: None,
                 validation: RecordValidationInput::new(true, "2026-05-01T12:10:00Z")
                     .with_origin(WalkOrigin::Remember),
                 accept_assertion_change: true,
@@ -1805,6 +1808,8 @@ fn legacy_sqlite_v3_upgrades_transactionally_to_v5_and_manifest_lock_and_gate_fl
                 &SaveManifestWalkOptions {
                     identity: ios_identity("Use top-secret-token to sign in", "b1"),
                     flow_path: flow_rel.to_string(),
+                    expected_closure_sha256: closure.sha256.clone(),
+                    expected_assertions_sha256: Some(assert_sha.clone()),
                     validation: RecordValidationInput::new(true, "2026-05-01T10:00:00Z")
                         .with_origin(WalkOrigin::Remember),
                     accept_assertion_change: false,
@@ -1824,6 +1829,8 @@ fn legacy_sqlite_v3_upgrades_transactionally_to_v5_and_manifest_lock_and_gate_fl
                 &SaveManifestWalkOptions {
                     identity: ios_identity("Open home", "b1"),
                     flow_path: flow_rel.to_string(),
+                    expected_closure_sha256: closure.sha256.clone(),
+                    expected_assertions_sha256: Some(assert_sha.clone()),
                     validation: RecordValidationInput::new(true, "2026-05-01T10:00:00Z")
                         .with_origin(WalkOrigin::Remember),
                     accept_assertion_change: false,
@@ -1841,6 +1848,8 @@ fn legacy_sqlite_v3_upgrades_transactionally_to_v5_and_manifest_lock_and_gate_fl
                 &SaveManifestWalkOptions {
                     identity: ios_identity("Open home", "b1"),
                     flow_path: flow_rel.to_string(),
+                    expected_closure_sha256: closure.sha256.clone(),
+                    expected_assertions_sha256: Some(assert_sha.clone()),
                     validation: RecordValidationInput::new(true, "2026-05-01T10:00:00Z")
                         .with_origin(WalkOrigin::Remember),
                     accept_assertion_change: false,
@@ -1889,5 +1898,721 @@ fn legacy_sqlite_v3_upgrades_transactionally_to_v5_and_manifest_lock_and_gate_fl
         )
         .unwrap();
         assert_eq!(changed_gate[0].outcome, GateOutcome::FlowChanged);
+    }
+}
+
+// =============================================================================================
+// 9. Codex Round 1 Regression Tests (Findings 1 through 12)
+
+fn relative_path_from(base: &Path, target: &Path) -> PathBuf {
+    let base_parts: Vec<_> = base.components().collect();
+    let target_parts: Vec<_> = target.components().collect();
+    let common = base_parts
+        .iter()
+        .zip(target_parts.iter())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let mut rel = PathBuf::new();
+    for _ in common..base_parts.len() {
+        rel.push("..");
+    }
+    for comp in &target_parts[common..] {
+        rel.push(comp.as_os_str());
+    }
+    rel
+}
+
+#[test]
+fn regression_r1_f1_f4_f7_f12_manifest_closure_binding_failed_rejection_merge_and_missing_flow() {
+    let ws = TempWorkspace::new("r1-manifest-checks");
+    let main_rel = ".maestro/flows/pay.yaml";
+    let sub_rel = ".maestro/flows/pay_sub.yaml";
+    let main_abs = ws.write_file(
+        main_rel,
+        b"appId: com.example.app\n---\n- runFlow: pay_sub.yaml\n- assertVisible:\n    id: paid\n",
+    );
+    ws.write_file(
+        sub_rel,
+        b"appId: com.example.app\n---\n- tapOn:\n    id: confirm_btn\n",
+    );
+    let initial_closure = collect_flow_closure(ws.path(), &main_abs).unwrap();
+    let initial_assert = assertions_sha256(&initial_closure).unwrap();
+
+    let consumer =
+        ConsumerFlows::new(ConsumerFlowsOptions::new(ws.path(), "deja.walks.json")).unwrap();
+    let store = SqliteWalkStore::open_writable(SqliteStoreOptions::new(ws.path())).unwrap();
+    let id = ios_identity("Pay order", "build-pay-1");
+
+    // Finding 4: Failed validation MUST be rejected before touching SQLite or deja.walks.json.
+    let fail_err = consumer
+        .save_verified_manifest_walk(
+            &store,
+            &SaveManifestWalkOptions {
+                identity: id.clone(),
+                flow_path: main_rel.to_string(),
+                expected_closure_sha256: initial_closure.sha256.clone(),
+                expected_assertions_sha256: Some(initial_assert.clone()),
+                validation: RecordValidationInput::new(false, "2026-05-01T10:00:00Z")
+                    .with_origin(WalkOrigin::Remember),
+                accept_assertion_change: false,
+            },
+        )
+        .expect_err("failed validation must be rejected before manifest update");
+    assert!(matches!(fail_err, StoreError::ConsumerFlow(_)));
+    assert_eq!(fail_err.exit_code(), 2);
+    assert!(store.list_walks().unwrap().is_empty());
+    assert!(!ws.path().join("deja.walks.json").exists());
+
+    // Finding 1: Post-verify edit to subflow breaks expected_closure_sha256 -> ManifestChanged (exit 6), zero writes!
+    ws.write_file(
+        sub_rel,
+        b"appId: com.example.app\n---\n- tapOn:\n    id: confirm_btn_tampered\n",
+    );
+    let drift_err = consumer
+        .save_verified_manifest_walk(
+            &store,
+            &SaveManifestWalkOptions {
+                identity: id.clone(),
+                flow_path: main_rel.to_string(),
+                expected_closure_sha256: initial_closure.sha256.clone(),
+                expected_assertions_sha256: Some(initial_assert.clone()),
+                validation: RecordValidationInput::new(true, "2026-05-01T10:01:00Z")
+                    .with_origin(WalkOrigin::Verify),
+                accept_assertion_change: false,
+            },
+        )
+        .expect_err("edited flow after verify must fail closed with ManifestChanged");
+    assert!(matches!(drift_err, StoreError::ManifestChanged(_)));
+    assert_eq!(drift_err.exit_code(), 6);
+    assert!(store.list_walks().unwrap().is_empty());
+    assert!(!ws.path().join("deja.walks.json").exists());
+
+    // Restore subflow and save cleanly, while injecting a concurrent edit to an UNRELATED goal (Finding 7).
+    ws.write_file(
+        sub_rel,
+        b"appId: com.example.app\n---\n- tapOn:\n    id: confirm_btn\n",
+    );
+    let other_flow_abs = ws.write_file(
+        ".maestro/flows/other.yaml",
+        b"appId: com.example.app\n---\n- assertVisible:\n    id: other_ok\n",
+    );
+    let other_closure = collect_flow_closure(ws.path(), &other_flow_abs).unwrap();
+    let other_assert = assertions_sha256(&other_closure).unwrap();
+    let other_manifest_text = serialize_walk_manifest(&WalkManifest {
+        manifest_version: 1,
+        hash_version: 1,
+        walks: vec![ManifestWalk {
+            goal: "Unrelated Goal".to_string(),
+            app_id: "com.example.app".to_string(),
+            platform: "ios".to_string(),
+            adapter: "ios-native".to_string(),
+            browser: None,
+            flow: ".maestro/flows/other.yaml".to_string(),
+            closure_sha256: other_closure.sha256,
+            assertions_sha256: other_assert,
+            owner_rules: None,
+            profile: None,
+        }],
+    })
+    .unwrap();
+    let injected_text = other_manifest_text.clone();
+    let hook = Arc::new(move |manifest_path: &Path| {
+        fs::write(manifest_path, injected_text.as_bytes()).expect("inject concurrent goal");
+    });
+
+    consumer
+        .save_verified_manifest_walk_with_hook(
+            &store,
+            &SaveManifestWalkOptions {
+                identity: id.clone(),
+                flow_path: main_rel.to_string(),
+                expected_closure_sha256: initial_closure.sha256.clone(),
+                expected_assertions_sha256: Some(initial_assert.clone()),
+                validation: RecordValidationInput::new(true, "2026-05-01T10:02:00Z")
+                    .with_origin(WalkOrigin::Remember),
+                accept_assertion_change: false,
+            },
+            Some(hook),
+        )
+        .expect("concurrent edit to unrelated goal must merge cleanly");
+
+    let merged = consumer.load().unwrap();
+    assert_eq!(merged.walks.len(), 2);
+    assert!(merged.walks.iter().any(|w| w.goal == "Pay order"));
+    assert!(merged.walks.iter().any(|w| w.goal == "Unrelated Goal"));
+
+    // Finding 12: Missing subflow (and missing main flow) in plan_run -> FlowChanged + MissingFlow + exit 6!
+    fs::remove_file(ws.path().join(sub_rel)).unwrap();
+    let missing_sub_plan = consumer
+        .plan_run(
+            &store,
+            &ConsumerRunRequest {
+                identity: &id,
+                runtime: None,
+                stale_build: Some(StaleBuildPolicy::ReplayLastVerified),
+            },
+        )
+        .unwrap();
+    assert!(matches!(
+        missing_sub_plan,
+        ConsumerRunPlan::Refuse {
+            outcome: RunOutcome::FlowChanged,
+            miss_reason: CacheMissReason::MissingFlow,
+            exit_code: 6,
+            ..
+        }
+    ));
+
+    fs::remove_file(&main_abs).unwrap();
+    let missing_main_plan = consumer
+        .plan_run(
+            &store,
+            &ConsumerRunRequest {
+                identity: &id,
+                runtime: None,
+                stale_build: Some(StaleBuildPolicy::ReplayLastVerified),
+            },
+        )
+        .unwrap();
+    assert!(matches!(
+        missing_main_plan,
+        ConsumerRunPlan::Refuse {
+            outcome: RunOutcome::FlowChanged,
+            miss_reason: CacheMissReason::MissingFlow,
+            exit_code: 6,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn regression_r1_f2_gate_without_consumer_verifies_full_consumer_closure() {
+    let ws = TempWorkspace::new("r1-full-consumer-closure");
+    let main_rel = ".maestro/flows/checkout.yaml";
+    let sub_rel = ".maestro/flows/step.yaml";
+    let main_abs = ws.write_file(
+        main_rel,
+        b"appId: com.example.app\n---\n- runFlow: step.yaml\n- assertVisible:\n    id: done\n",
+    );
+    ws.write_file(
+        sub_rel,
+        b"appId: com.example.app\n---\n- tapOn:\n    id: next_btn\n",
+    );
+    let closure = collect_flow_closure(ws.path(), &main_abs).unwrap();
+    let main_sha = closure
+        .files
+        .iter()
+        .find(|f| f.path == closure.main)
+        .unwrap()
+        .sha256
+        .clone();
+
+    let id = ios_identity("Checkout Closure", "build-closure-1");
+    let store = SqliteWalkStore::open_writable(SqliteStoreOptions::new(ws.path())).unwrap();
+    store
+        .upsert_walk(&UpsertWalkInput {
+            identity: id.clone(),
+            flow_path: main_rel.to_string(),
+            flow_sha256: main_sha,
+            subflow_files: None,
+            legacy_closure: false,
+            closure_sha256: Some(closure.sha256),
+            validation: RecordValidationInput::new(true, "2026-05-01T10:00:00Z"),
+            exploration: None,
+            repair_history: None,
+        })
+        .unwrap();
+    store.close();
+
+    let gate_id = GateIdentity {
+        app_id: "com.example.app".to_string(),
+        platform: "ios".to_string(),
+        flow_schema_version: DEFAULT_FLOW_SCHEMA_VERSION.to_string(),
+        build_fingerprint: fake_sha("build-closure-1"),
+        adapter: Some("ios-native".to_string()),
+        browser: None,
+    };
+    let ro = SqliteWalkStore::open_readonly(SqliteStoreOptions::new(ws.path())).unwrap();
+
+    // Unchanged subflow -> Passed!
+    let pass = evaluate_gate(
+        &[&ro],
+        &["Checkout Closure".to_string()],
+        &gate_id,
+        &StoreGateOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(pass[0].outcome, GateOutcome::Passed);
+
+    // Edit ONLY subflow (main YAML unchanged!) -> gate without consumer MUST report FlowChanged!
+    ws.write_file(
+        sub_rel,
+        b"appId: com.example.app\n---\n- tapOn:\n    id: next_btn_changed\n",
+    );
+    let edited = evaluate_gate(
+        &[&ro],
+        &["Checkout Closure".to_string()],
+        &gate_id,
+        &StoreGateOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(edited[0].outcome, GateOutcome::FlowChanged);
+    assert!(matches!(
+        ro.lookup(&id).unwrap(),
+        LookupResult::Miss(m) if m.reason == CacheMissReason::FlowChanged
+    ));
+
+    // Delete ONLY subflow -> gate without consumer MUST report FlowChanged!
+    fs::remove_file(ws.path().join(sub_rel)).unwrap();
+    let deleted = evaluate_gate(
+        &[&ro],
+        &["Checkout Closure".to_string()],
+        &gate_id,
+        &StoreGateOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(deleted[0].outcome, GateOutcome::FlowChanged);
+}
+
+#[test]
+fn regression_r1_f3_relative_workspace_root_never_double_joins() {
+    let ws = TempWorkspace::new("r1-relative-ws");
+    let canonical_ws = fs::canonicalize(ws.path()).unwrap();
+    let cwd = fs::canonicalize(std::env::current_dir().unwrap()).unwrap();
+    let rel_ws = relative_path_from(&cwd, &canonical_ws);
+    assert!(rel_ws.is_relative());
+
+    let (flow_path, flow_sha) = write_classic_flow(
+        &ws,
+        ".deja/flows/rel-goal/ios-rel.yaml",
+        "appId: com.example.app\n---\n- assertVisible: Relative\n",
+    );
+    let expected_db = canonical_ws.join(".deja/memory/walks.sqlite");
+
+    let store = SqliteWalkStore::open_writable(SqliteStoreOptions::new(&rel_ws)).unwrap();
+    assert_eq!(store.memory_path(), expected_db);
+    assert!(expected_db.exists());
+    // Ensure NO nested duplicate directory was created!
+    let ws_name = canonical_ws.file_name().unwrap();
+    assert!(!canonical_ws.join(ws_name).exists());
+
+    let id = ios_identity("Rel Goal", "build-rel");
+    store
+        .upsert_walk(&UpsertWalkInput {
+            identity: id.clone(),
+            flow_path: flow_path.clone(),
+            flow_sha256: flow_sha.clone(),
+            subflow_files: Some(vec![]),
+            legacy_closure: false,
+            closure_sha256: None,
+            validation: RecordValidationInput::new(true, "2026-05-01T10:00:00Z"),
+            exploration: None,
+            repair_history: None,
+        })
+        .unwrap();
+
+    // Also test legacy walks.json import with relative workspace_root!
+    let legacy_json = serde_json::to_string(&serde_json::json!({
+        "schemaVersion": 3,
+        "walks": [{
+            "goal": "Rel Goal Two",
+            "goalKey": "rel goal two",
+            "appId": "com.example.app",
+            "platform": "ios",
+            "flowSchemaVersion": "maestro/v1",
+            "buildFingerprint": fake_sha("build-rel-2"),
+            "adapter": "ios-native",
+            "flowPath": flow_path,
+            "flowSha256": flow_sha,
+            "subflowFiles": [],
+            "lastValidation": { "passed": true, "at": "2026-05-01T10:05:00Z" },
+            "validationHistory": [{ "passed": true, "at": "2026-05-01T10:05:00Z", "flowSha256": flow_sha }],
+            "origin": "remember"
+        }]
+    }))
+    .unwrap();
+    ws.write_file(LEGACY_JSON_MEMORY_PATH, legacy_json.as_bytes());
+    let imported = import_legacy_walks_json(&store, None).expect("relative workspace import");
+    assert_eq!(imported.imported_walks, 1);
+    store.close();
+
+    // Read-only open via relative workspace root sees both walks!
+    let ro = SqliteWalkStore::open_readonly(SqliteStoreOptions::new(&rel_ws)).unwrap();
+    assert_eq!(ro.memory_path(), expected_db);
+    assert_eq!(ro.list_walks().unwrap().len(), 2);
+}
+
+#[test]
+fn regression_r1_f5_legacy_sqlite_upgrade_rejects_last_validation_history_mismatch() {
+    let ws = TempWorkspace::new("r1-legacy-mismatch");
+    let db_path = ws.path().join(".deja/memory/walks.sqlite");
+    fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+    let flow_sha = fake_sha("flow-sha");
+    {
+        let raw = Connection::open(&db_path).unwrap();
+        raw.execute_batch(
+            "CREATE TABLE walks (
+                id INTEGER PRIMARY KEY, goal TEXT NOT NULL, goal_key TEXT NOT NULL,
+                app_id TEXT NOT NULL, platform TEXT NOT NULL, flow_schema_version TEXT NOT NULL,
+                build_fingerprint TEXT NOT NULL, adapter TEXT, browser TEXT,
+                flow_path TEXT NOT NULL, flow_sha256 TEXT NOT NULL,
+                last_passed INTEGER NOT NULL, last_at TEXT NOT NULL,
+                origin TEXT, exploration_json TEXT,
+                has_files INTEGER NOT NULL DEFAULT 1, legacy_closure INTEGER NOT NULL DEFAULT 0,
+                closure_sha256 TEXT
+            );
+            CREATE TABLE validation_history (
+                walk_id INTEGER NOT NULL, position INTEGER NOT NULL,
+                passed INTEGER NOT NULL, at TEXT NOT NULL, flow_sha256 TEXT NOT NULL,
+                PRIMARY KEY (walk_id, position)
+            );
+            CREATE TABLE walk_files (
+                walk_id INTEGER NOT NULL, position INTEGER NOT NULL,
+                path TEXT NOT NULL, sha256 TEXT NOT NULL, PRIMARY KEY (walk_id, position)
+            );
+            CREATE TABLE repair_history (
+                walk_id INTEGER NOT NULL, position INTEGER NOT NULL,
+                attempt_id TEXT NOT NULL, patch_path TEXT NOT NULL,
+                previous_build_fingerprint TEXT NOT NULL, previous_flow_sha256 TEXT NOT NULL,
+                PRIMARY KEY (walk_id, position)
+            );
+            PRAGMA user_version = 3;",
+        )
+        .unwrap();
+        // Summary claims passed=1, but latest history row has passed=0!
+        raw.execute(
+            "INSERT INTO walks (
+                id, goal, goal_key, app_id, platform, flow_schema_version, build_fingerprint,
+                adapter, browser, flow_path, flow_sha256, last_passed, last_at, origin,
+                has_files, legacy_closure
+            ) VALUES (1, 'Bad Legacy', 'bad legacy', 'com.example.app', 'ios', 'maestro/v1',
+                      ?1, 'ios-native', NULL, '.deja/flows/x/ios.yaml', ?2, 1,
+                      '2026-04-10T09:00:00Z', 'remember', 1, 0)",
+            rusqlite::params![fake_sha("b-legacy"), flow_sha],
+        )
+        .unwrap();
+        raw.execute(
+            "INSERT INTO validation_history (walk_id, position, passed, at, flow_sha256)
+             VALUES (1, 0, 0, '2026-04-10T09:00:00Z', ?1)",
+            [&flow_sha],
+        )
+        .unwrap();
+    }
+
+    let err = SqliteWalkStore::open_writable(SqliteStoreOptions::new(ws.path()))
+        .expect_err("mismatched legacy summary vs history must be rejected");
+    assert!(matches!(err, StoreError::InvalidWalkMemory(_)));
+    assert_eq!(err.exit_code(), 4);
+
+    // Verify legacy DB was NOT altered (still user_version = 3).
+    let raw = Connection::open(&db_path).unwrap();
+    let uv: u32 = raw
+        .pragma_query_value(None, "user_version", |r| r.get(0))
+        .unwrap();
+    assert_eq!(uv, 3);
+}
+
+#[test]
+fn regression_r1_f6_readonly_open_creates_zero_wal_shm_sidecars_and_sees_subsequent_writes() {
+    let ws = TempWorkspace::new("r1-readonly-no-sidecars");
+    let (flow_path, flow_sha) = write_classic_flow(
+        &ws,
+        ".deja/flows/clean/ios-clean.yaml",
+        "appId: com.example.app\n---\n- assertVisible: Clean\n",
+    );
+    let id = ios_identity("Clean ReadOnly", "build-ro-1");
+    let db_path = {
+        let store = SqliteWalkStore::open_writable(SqliteStoreOptions::new(ws.path())).unwrap();
+        store
+            .upsert_walk(&UpsertWalkInput {
+                identity: id.clone(),
+                flow_path,
+                flow_sha256: flow_sha,
+                subflow_files: Some(vec![]),
+                legacy_closure: false,
+                closure_sha256: None,
+                validation: RecordValidationInput::new(true, "2026-05-01T10:00:00Z"),
+                exploration: None,
+                repair_history: None,
+            })
+            .unwrap();
+        let path = store.memory_path().to_path_buf();
+        store.close();
+        path
+    };
+
+    let wal_path = PathBuf::from(format!("{}-wal", db_path.display()));
+    let shm_path = PathBuf::from(format!("{}-shm", db_path.display()));
+    assert!(
+        !wal_path.exists(),
+        "cleanly closed store should not leave -wal"
+    );
+    assert!(
+        !shm_path.exists(),
+        "cleanly closed store should not leave -shm"
+    );
+
+    // Open read-only, perform lookup and evaluate_gate -> ZERO -wal or -shm created!
+    let ro = SqliteWalkStore::open_readonly(SqliteStoreOptions::new(ws.path())).unwrap();
+    assert!(matches!(ro.lookup(&id).unwrap(), LookupResult::Hit(_)));
+    let gate_id = GateIdentity {
+        app_id: "com.example.app".to_string(),
+        platform: "ios".to_string(),
+        flow_schema_version: DEFAULT_FLOW_SCHEMA_VERSION.to_string(),
+        build_fingerprint: fake_sha("build-ro-1"),
+        adapter: Some("ios-native".to_string()),
+        browser: None,
+    };
+    let gate_res = evaluate_gate(
+        &[&ro],
+        &["Clean ReadOnly".to_string()],
+        &gate_id,
+        &StoreGateOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(gate_res[0].outcome, GateOutcome::Passed);
+    assert!(!wal_path.exists(), "open_readonly must NOT create -wal");
+    assert!(!shm_path.exists(), "open_readonly must NOT create -shm");
+
+    // Subsequent live write (creating -wal) is immediately visible to the existing ro handle!
+    let writer = SqliteWalkStore::open_writable(SqliteStoreOptions::new(ws.path())).unwrap();
+    writer
+        .record_validation(
+            &id,
+            &RecordValidationInput::new(false, "2026-05-01T10:05:00Z"),
+        )
+        .unwrap();
+    assert!(matches!(
+        ro.lookup(&id).unwrap(),
+        LookupResult::Miss(m) if m.reason == CacheMissReason::FailedValidation
+    ));
+    writer.close();
+    // And after writer closes cleanly, ro still sees the failed validation.
+    assert!(matches!(
+        ro.lookup(&id).unwrap(),
+        LookupResult::Miss(m) if m.reason == CacheMissReason::FailedValidation
+    ));
+}
+
+#[test]
+fn regression_r1_f8_f9_revalidation_mode_switch_and_legacy_import_conflict_clears_telemetry() {
+    let ws = TempWorkspace::new("r1-reval-and-import-conflict");
+    let store = SqliteWalkStore::open_writable(SqliteStoreOptions::new(ws.path())).unwrap();
+
+    // Finding 8: Build 1 is manifest-backed, Build 2 of the SAME logical walk is classic.
+    let manifest_rel = ".maestro/flows/mixed.yaml";
+    let manifest_abs = ws.write_file(
+        manifest_rel,
+        b"appId: com.example.app\n---\n- assertVisible: MixedManifest\n",
+    );
+    let m_closure = collect_flow_closure(ws.path(), &manifest_abs).unwrap();
+    let m_main_sha = m_closure
+        .files
+        .iter()
+        .find(|f| f.path == m_closure.main)
+        .unwrap()
+        .sha256
+        .clone();
+
+    let (classic_rel, classic_sha) = write_classic_flow(
+        &ws,
+        ".deja/flows/mixed-goal/ios-classic.yaml",
+        "appId: com.example.app\n---\n- assertVisible: MixedClassic\n",
+    );
+
+    let id_b1 = ios_identity("Mixed Goal", "mixed-b1");
+    let id_b2 = ios_identity("Mixed Goal", "mixed-b2");
+
+    // Upsert build 1 (manifest-backed: has_files=0, closure_sha256=Some).
+    store
+        .upsert_walk(&UpsertWalkInput {
+            identity: id_b1.clone(),
+            flow_path: manifest_rel.to_string(),
+            flow_sha256: m_main_sha,
+            subflow_files: None,
+            legacy_closure: false,
+            closure_sha256: Some(m_closure.sha256.clone()),
+            validation: RecordValidationInput::new(true, "2026-05-01T10:00:00Z"),
+            exploration: None,
+            repair_history: None,
+        })
+        .unwrap();
+
+    // Upsert build 2 (classic: has_files=1, closure_sha256=None).
+    store
+        .upsert_walk(&UpsertWalkInput {
+            identity: id_b2.clone(),
+            flow_path: classic_rel.clone(),
+            flow_sha256: classic_sha.clone(),
+            subflow_files: Some(vec![]),
+            legacy_closure: false,
+            closure_sha256: None,
+            validation: RecordValidationInput::new(true, "2026-05-01T10:01:00Z")
+                .with_failure_category("selector")
+                .with_report_path(".deja/reports/r.json")
+                .with_duration_ms(777)
+                .with_phase_timings_json(r#"{"step":1}"#),
+            exploration: None,
+            repair_history: None,
+        })
+        .unwrap();
+
+    // Now revalidate older manifest-backed build 1 -> walks row MUST remain valid and consistent!
+    store
+        .record_validation(
+            &id_b1,
+            &RecordValidationInput::new(true, "2026-05-01T10:02:00Z"),
+        )
+        .expect(
+            "revalidating manifest-backed build after classic build must keep walks consistent",
+        );
+    let listed = store.list_walks().unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(
+        listed[0].closure_sha256.as_deref(),
+        Some(m_closure.sha256.as_str())
+    );
+    assert!(listed[0].subflow_files.is_none());
+
+    // Revalidate classic build 2 -> walks row cleanly switches back to classic!
+    store
+        .record_validation(
+            &id_b2,
+            &RecordValidationInput::new(true, "2026-05-01T10:03:00Z")
+                .with_failure_category("runner")
+                .with_report_path(".deja/reports/r2.json")
+                .with_duration_ms(888)
+                .with_phase_timings_json(r#"{"step":2}"#),
+        )
+        .expect("revalidating classic build after manifest build must keep walks consistent");
+    let listed2 = store.list_walks().unwrap();
+    assert!(listed2[0].closure_sha256.is_none());
+    assert!(listed2[0].subflow_files.is_some());
+
+    // Finding 9: Legacy walks.json import conflicting on build 2 clears non-null telemetry columns
+    // in sync with the recomputed integrity_sha256 (subsequent reads must succeed!).
+    let legacy_overwrite = serde_json::to_string(&serde_json::json!({
+        "schemaVersion": 3,
+        "walks": [{
+            "goal": "Mixed Goal",
+            "goalKey": "mixed goal",
+            "appId": "com.example.app",
+            "platform": "ios",
+            "flowSchemaVersion": "maestro/v1",
+            "buildFingerprint": fake_sha("mixed-b2"),
+            "adapter": "ios-native",
+            "flowPath": classic_rel,
+            "flowSha256": classic_sha,
+            "subflowFiles": [],
+            "lastValidation": { "passed": true, "at": "2026-05-01T10:04:00Z" },
+            "validationHistory": [{ "passed": true, "at": "2026-05-01T10:04:00Z", "flowSha256": classic_sha }],
+            "origin": "remember"
+        }]
+    }))
+    .unwrap();
+    let json_path = ws.write_file(".deja/memory/overwrite.json", legacy_overwrite.as_bytes());
+    import_legacy_walks_json(&store, Some(&json_path)).unwrap();
+
+    // Must NOT fail with InvalidWalkMemory!
+    assert!(matches!(
+        store.lookup(&id_b2).unwrap(),
+        LookupResult::Hit(_)
+    ));
+    let runs = store.list_validation_runs(&id_b2).unwrap();
+    let b2_run = runs
+        .iter()
+        .find(|r| r.build_fingerprint == fake_sha("mixed-b2"))
+        .unwrap();
+    assert!(b2_run.failure_category.is_none());
+    assert!(b2_run.report_path.is_none());
+    assert!(b2_run.duration_ms.is_none());
+    assert!(b2_run.phase_timings_json.is_none());
+}
+
+#[cfg(unix)]
+#[test]
+fn regression_r1_f10_f11_symlinked_build_path_and_symlinked_workspace_alias() {
+    use std::os::unix::fs::symlink;
+
+    // Finding 10: Symlinked build path hashes the exact canonical target snapshotted by the cache.
+    {
+        let ws = TempWorkspace::new("r1-symlink-build");
+        let v1 = ws.write_file("builds/app-v1.apk", b"apk-v1-bytes");
+        let v2 = ws.write_file("builds/app-v2.apk", b"apk-v2-different-bytes");
+        let link = ws.path().join("builds/latest.apk");
+        symlink(&v1, &link).unwrap();
+
+        let store = SqliteWalkStore::open_writable(SqliteStoreOptions::new(ws.path())).unwrap();
+        let fp1 = store
+            .fingerprint_with_cache(ws.path(), Path::new("builds/latest.apk"), "Android")
+            .unwrap();
+        assert!(!fp1.cache_hit);
+        assert_eq!(fp1.digest, fingerprint_file(ws.path(), &v1).unwrap());
+
+        let fp1_hit = store
+            .fingerprint_with_cache(ws.path(), Path::new("builds/latest.apk"), "Android")
+            .unwrap();
+        assert!(fp1_hit.cache_hit);
+        assert_eq!(fp1_hit.bytes_read, 0);
+        assert_eq!(fp1_hit.digest, fp1.digest);
+
+        // Retarget symlink to v2 -> misses v2 and does not poison v1's cache entry.
+        fs::remove_file(&link).unwrap();
+        symlink(&v2, &link).unwrap();
+        let fp2 = store
+            .fingerprint_with_cache(ws.path(), Path::new("builds/latest.apk"), "Android")
+            .unwrap();
+        assert!(!fp2.cache_hit);
+        assert_eq!(fp2.digest, fingerprint_file(ws.path(), &v2).unwrap());
+        assert_ne!(fp2.digest, fp1.digest);
+
+        // Original v1 still hits cleanly under its canonical path.
+        let v1_still_valid = store
+            .fingerprint_with_cache(ws.path(), &v1, "Android")
+            .unwrap();
+        assert!(v1_still_valid.cache_hit);
+        assert_eq!(v1_still_valid.digest, fp1.digest);
+    }
+
+    // Finding 11: Symlinked workspace root alias (like /tmp -> /private/tmp) preserves candidate closures.
+    {
+        let real_ws = TempWorkspace::new("r1-alias-real");
+        let alias_holder = TempWorkspace::new("r1-alias-holder");
+        let alias_ws = alias_holder.path().join("workspace-link");
+        symlink(real_ws.path(), &alias_ws).unwrap();
+
+        real_ws.write_file(
+            "flows/main.yaml",
+            b"appId: com.example.app\n---\n- runFlow: sub.yaml\n- assertVisible: Aliased\n",
+        );
+        real_ws.write_file(
+            "flows/sub.yaml",
+            b"appId: com.example.app\n---\n- tapOn: Go\n",
+        );
+
+        let store = SqliteWalkStore::open_writable(SqliteStoreOptions::new(&alias_ws)).unwrap();
+        let aliased_main = alias_ws.join("flows/main.yaml");
+
+        let snap = store
+            .snapshot_candidate(&aliased_main)
+            .expect("snapshot_candidate must accept aliased workspace path");
+        assert_eq!(snap.files.len(), 2);
+
+        let id = ios_identity("Aliased Flow", "build-alias");
+        store
+            .persist_verified_candidate(
+                &id,
+                &PersistVerifiedCandidateOptions {
+                    candidate_path: aliased_main,
+                    validation: RecordValidationInput::new(true, "2026-05-01T10:00:00Z"),
+                    expected_flow_sha256: Some(snap.flow_sha256),
+                    expected_closure_sha256: Some(snap.closure_sha256),
+                    exploration: None,
+                    repair_history: None,
+                },
+            )
+            .expect("persist_verified_candidate must accept aliased workspace path");
+
+        assert!(matches!(store.lookup(&id).unwrap(), LookupResult::Hit(_)));
     }
 }

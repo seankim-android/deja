@@ -17,8 +17,9 @@ pub const CRATE_NAME: &str = "deja-store";
 pub const UPSTREAM_CRATES: &[&str] = &[deja_core::CRATE_NAME];
 
 pub use consumer_flows::{
-    ConsumerFlows, ConsumerFlowsOptions, ConsumerRunPlan, ConsumerRunRequest,
-    InspectedConsumerEntry, SaveManifestWalkOptions, check_flows_dir, check_manifest_path,
+    BeforeManifestCommitHook, ConsumerFlows, ConsumerFlowsOptions, ConsumerRunPlan,
+    ConsumerRunRequest, InspectedConsumerEntry, SaveManifestWalkOptions, check_flows_dir,
+    check_manifest_path,
 };
 pub use error::{GATE_INVALID_EXIT_CODE, StoreError};
 pub use gate::{StoreGateGoalResult, StoreGateOptions, evaluate_gate, store_gate_passed};

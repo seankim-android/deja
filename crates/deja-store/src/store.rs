@@ -7,14 +7,15 @@ use std::fs::{self, Metadata};
 use std::io::{ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::UNIX_EPOCH;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use deja_core::{
-    CacheMissReason, DEFAULT_FLOW_SCHEMA_VERSION, ExplorationDetails, LookupHit, LookupMiss,
-    LookupResult, RepairProvenance, StoredClosureCheck, StoredFlowFile, StoredValidation,
-    StoredWalk, WalkIdentity, WalkOrigin, WalkValidation, check_manifest_flow_path,
-    check_stored_subflows, cmp_utf16, collect_flow_closure, fingerprint_file, fingerprint_tree,
-    normalize_goal, plan_stored_closure, read_stored_flow_files,
+    CacheMissReason, CoreError, DEFAULT_FLOW_SCHEMA_VERSION, ExplorationDetails, FlowChange,
+    LookupHit, LookupMiss, LookupResult, RepairProvenance, StoredClosureCheck, StoredFlowFile,
+    StoredValidation, StoredWalk, WalkIdentity, WalkOrigin, WalkValidation,
+    check_manifest_flow_path, check_stored_subflows, cmp_utf16, collect_flow_closure,
+    fingerprint_file, fingerprint_tree, normalize_goal, plan_stored_closure,
+    read_stored_flow_files,
 };
 use rusqlite::{
     Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params,
@@ -338,7 +339,30 @@ enum OpenMode {
 struct StoreInner {
     mode: OpenMode,
     conn: Option<Connection>,
+    conn_immutable: bool,
+    conn_stamp: Option<DbFileStamp>,
     lock: Option<WriterLock>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DbFileStamp {
+    len: u64,
+    modified: SystemTime,
+    change_counter: [u8; 4],
+}
+
+impl Drop for StoreInner {
+    fn drop(&mut self) {
+        if self.mode == OpenMode::Writable
+            && let Some(ref conn) = self.conn
+        {
+            let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
+        }
+        self.conn.take();
+        if let Some(mut lock) = self.lock.take() {
+            lock.release();
+        }
+    }
 }
 
 /// Validated `walks` table row verified against its `integrity_sha256`.
@@ -370,6 +394,11 @@ pub(crate) enum ClassicFlowCheck {
     Missing,
     Legacy,
     Invalid(String),
+    FlowChanged {
+        detail: String,
+        expected_closure_sha256: String,
+        current_closure_sha256: Option<String>,
+    },
 }
 
 /// Unified, thread-safe (`Send + Sync`) SQLite v5 walk store.
@@ -406,9 +435,9 @@ impl SqliteWalkStore {
     ) -> Result<Self, StoreError> {
         let relative_memory_path =
             store_metadata_path(SQLITE_MEMORY_PATH, options.store_id.as_deref())?;
-        let memory_path = options.workspace_root.join(&relative_memory_path);
 
-        let target = canonical_metadata_target(&options.workspace_root, &memory_path)?;
+        let target =
+            canonical_metadata_target(&options.workspace_root, Path::new(&relative_memory_path))?;
         let lock_path = append_suffix(&target.path, ".lock");
         let lock = WriterLock::acquire_with_hook(lock_path, hook)?;
 
@@ -416,7 +445,8 @@ impl SqliteWalkStore {
             fs::create_dir_all(parent)?;
         }
         // Re-verify confinement and sidecars right after directory creation.
-        let target = canonical_metadata_target(&options.workspace_root, &memory_path)?;
+        let target =
+            canonical_metadata_target(&options.workspace_root, Path::new(&relative_memory_path))?;
 
         let flags = OpenFlags::SQLITE_OPEN_READ_WRITE
             | OpenFlags::SQLITE_OPEN_CREATE
@@ -428,7 +458,8 @@ impl SqliteWalkStore {
         lock.verify_held()?;
         ensure_writable_schema(&mut conn)?;
 
-        debug!(path = %target.path.display(), "opened writable SQLite v5 store");
+        let memory_path = target.path;
+        debug!(path = %memory_path.display(), "opened writable SQLite v5 store");
         Ok(Self {
             workspace_root: options.workspace_root,
             store_id: options.store_id,
@@ -437,6 +468,8 @@ impl SqliteWalkStore {
             inner: Mutex::new(StoreInner {
                 mode: OpenMode::Writable,
                 conn: Some(conn),
+                conn_immutable: false,
+                conn_stamp: None,
                 lock: Some(lock),
             }),
         })
@@ -444,29 +477,32 @@ impl SqliteWalkStore {
 
     /// Open a strictly read-only handle to a SQLite v5 store.
     ///
-    /// Acquires **zero** writer locks and creates **zero** files or directories. If the database
-    /// does not exist yet, succeeds with an empty read-only handle.
+    /// Acquires **zero** writer locks and creates **zero** files or directories (including zero
+    /// `-wal` / `-shm` sidecars on cleanly closed databases). If the database does not exist yet,
+    /// succeeds with an empty read-only handle.
     pub fn open_readonly(options: SqliteStoreOptions) -> Result<Self, StoreError> {
         let relative_memory_path =
             store_metadata_path(SQLITE_MEMORY_PATH, options.store_id.as_deref())?;
-        let memory_path = options.workspace_root.join(&relative_memory_path);
-        let target = canonical_metadata_target(&options.workspace_root, &memory_path)?;
+        let target =
+            canonical_metadata_target(&options.workspace_root, Path::new(&relative_memory_path))?;
 
-        let conn = if target.exists {
-            let conn = open_readonly_connection(&target.path)?;
-            Some(conn)
+        let (conn, conn_immutable, conn_stamp) = if target.exists {
+            let (conn, immutable, stamp) = open_readonly_connection(&target.path)?;
+            (Some(conn), immutable, stamp)
         } else {
-            None
+            (None, false, None)
         };
 
         Ok(Self {
             workspace_root: options.workspace_root,
             store_id: options.store_id,
             relative_memory_path,
-            memory_path,
+            memory_path: target.path,
             inner: Mutex::new(StoreInner {
                 mode: OpenMode::ReadOnly,
                 conn,
+                conn_immutable,
+                conn_stamp,
                 lock: None,
             }),
         })
@@ -498,16 +534,23 @@ impl SqliteWalkStore {
         &self.relative_memory_path
     }
 
-    /// Resolved (possibly non-canonical until checked) SQLite metadata path.
+    /// Canonical SQLite metadata path inside the workspace.
     #[must_use]
     pub fn memory_path(&self) -> &Path {
         &self.memory_path
     }
 
-    /// Close the SQLite connection and release the writer lock (if held).
+    /// Checkpoint WAL (when writable), close the SQLite connection, and release the writer lock.
     pub fn close(&self) {
         if let Ok(mut guard) = self.inner.lock() {
+            if guard.mode == OpenMode::Writable
+                && let Some(ref conn) = guard.conn
+            {
+                let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
+            }
             guard.conn.take();
+            guard.conn_immutable = false;
+            guard.conn_stamp = None;
             if let Some(mut lock) = guard.lock.take() {
                 lock.release();
             }
@@ -524,14 +567,28 @@ impl SqliteWalkStore {
         &self,
         guard: &'a mut StoreInner,
     ) -> Result<Option<&'a Connection>, StoreError> {
-        let target = canonical_metadata_target(&self.workspace_root, &self.memory_path)?;
+        let target =
+            canonical_metadata_target(&self.workspace_root, Path::new(&self.relative_memory_path))?;
         if !target.exists {
             guard.conn.take();
+            guard.conn_immutable = false;
+            guard.conn_stamp = None;
             return Ok(None);
         }
+        if guard.mode == OpenMode::ReadOnly && guard.conn.is_some() && guard.conn_immutable {
+            let wal_exists = wal_sidecar_exists(&target.path);
+            let current_stamp = read_db_file_stamp(&target.path);
+            if wal_exists || current_stamp != guard.conn_stamp {
+                guard.conn.take();
+                guard.conn_immutable = false;
+                guard.conn_stamp = None;
+            }
+        }
         if guard.conn.is_none() {
-            let conn = open_readonly_connection(&target.path)?;
+            let (conn, immutable, stamp) = open_readonly_connection(&target.path)?;
             guard.conn = Some(conn);
+            guard.conn_immutable = immutable;
+            guard.conn_stamp = stamp;
         }
         Ok(guard.conn.as_ref())
     }
@@ -555,7 +612,8 @@ impl SqliteWalkStore {
                 "cannot write to a read-only SqliteWalkStore".to_string(),
             ));
         }
-        let _ = canonical_metadata_target(&self.workspace_root, &self.memory_path)?;
+        let _ =
+            canonical_metadata_target(&self.workspace_root, Path::new(&self.relative_memory_path))?;
         {
             let lock = guard.lock.as_ref().ok_or_else(|| StoreError::StoreLocked {
                 lock_path: append_suffix(&self.memory_path, ".lock")
@@ -632,6 +690,21 @@ impl SqliteWalkStore {
                 ClassicFlowCheck::Missing => return Ok(miss(CacheMissReason::MissingFlow)),
                 ClassicFlowCheck::Legacy => return Ok(miss(CacheMissReason::LegacyClosureUnknown)),
                 ClassicFlowCheck::Invalid(msg) => return Err(StoreError::InvalidWalkMemory(msg)),
+                ClassicFlowCheck::FlowChanged {
+                    expected_closure_sha256,
+                    current_closure_sha256,
+                    ..
+                } => {
+                    return Ok(LookupResult::Miss(LookupMiss {
+                        reason: CacheMissReason::FlowChanged,
+                        flow_change: current_closure_sha256.map(|current| FlowChange {
+                            manifest_closure_sha256: expected_closure_sha256.clone(),
+                            current_closure_sha256: current,
+                        }),
+                        closure_sha256: Some(expected_closure_sha256),
+                        flow_path: Some(run.flow_path.clone()),
+                    }));
+                }
             };
 
         let stored = hydrate_stored_walk(conn, &walk, &run)?;
@@ -676,6 +749,21 @@ impl SqliteWalkStore {
                 ClassicFlowCheck::Missing => return Ok(miss(CacheMissReason::MissingFlow)),
                 ClassicFlowCheck::Legacy => return Ok(miss(CacheMissReason::LegacyClosureUnknown)),
                 ClassicFlowCheck::Invalid(msg) => return Err(StoreError::InvalidWalkMemory(msg)),
+                ClassicFlowCheck::FlowChanged {
+                    expected_closure_sha256,
+                    current_closure_sha256,
+                    ..
+                } => {
+                    return Ok(LookupResult::Miss(LookupMiss {
+                        reason: CacheMissReason::FlowChanged,
+                        flow_change: current_closure_sha256.map(|current| FlowChange {
+                            manifest_closure_sha256: expected_closure_sha256.clone(),
+                            current_closure_sha256: current,
+                        }),
+                        closure_sha256: Some(expected_closure_sha256),
+                        flow_path: Some(run.flow_path.clone()),
+                    }));
+                }
             };
 
         let stored = hydrate_stored_walk(conn, &walk, &run)?;
@@ -1016,34 +1104,53 @@ impl SqliteWalkStore {
 
             // Use the matching (build, runtime) run's flow metadata when available, otherwise
             // inherit the walk's latest stored flow metadata (e.g. replaying on a new build/runtime).
+            // Keep `(flow_path, flow_sha256, has_files, legacy_closure, closure_sha256)` consistent
+            // as a unit even when switching between classic and manifest-backed builds.
             let rt_key = validation.runtime.as_deref().unwrap_or("");
             let existing_run = query_validation_run(tx, walk.id, &norm.build_fingerprint, rt_key)?;
-            let (flow_path, flow_sha256, closure_sha256, subflow_files_json) =
-                if let Some(ref prev) = existing_run {
-                    let sf_json = prev
-                        .subflow_files
-                        .as_ref()
-                        .map(|f| serde_json::to_string(f).expect("subflow_files serialize"));
-                    (
-                        prev.flow_path.clone(),
-                        prev.flow_sha256.clone(),
-                        prev.closure_sha256.clone(),
-                        sf_json,
-                    )
+            let (
+                flow_path,
+                flow_sha256,
+                closure_sha256,
+                subflow_files_json,
+                next_has_files,
+                next_legacy_closure,
+                next_subflow_files,
+            ) = if let Some(ref prev) = existing_run {
+                let has_files = prev.closure_sha256.is_none();
+                let legacy_closure = has_files && prev.subflow_files.is_none();
+                let sf_json = prev
+                    .subflow_files
+                    .as_ref()
+                    .map(|f| serde_json::to_string(f).expect("subflow_files serialize"));
+                (
+                    prev.flow_path.clone(),
+                    prev.flow_sha256.clone(),
+                    prev.closure_sha256.clone(),
+                    sf_json,
+                    has_files,
+                    legacy_closure,
+                    prev.subflow_files.clone(),
+                )
+            } else {
+                let files = if walk.has_files && !walk.legacy_closure {
+                    Some(query_walk_files(tx, walk.id)?)
                 } else {
-                    let sf_json = if walk.has_files {
-                        let files = query_walk_files(tx, walk.id)?;
-                        Some(serde_json::to_string(&files).expect("subflow_files serialize"))
-                    } else {
-                        None
-                    };
-                    (
-                        walk.flow_path.clone(),
-                        walk.flow_sha256.clone(),
-                        walk.closure_sha256.clone(),
-                        sf_json,
-                    )
+                    None
                 };
+                let sf_json = files
+                    .as_ref()
+                    .map(|f| serde_json::to_string(f).expect("subflow_files serialize"));
+                (
+                    walk.flow_path.clone(),
+                    walk.flow_sha256.clone(),
+                    walk.closure_sha256.clone(),
+                    sf_json,
+                    walk.has_files,
+                    walk.legacy_closure,
+                    files,
+                )
+            };
 
             let next_origin = origin_str.or_else(|| walk.origin.map(origin_to_str));
             let exp_json = walk
@@ -1066,8 +1173,8 @@ impl SqliteWalkStore {
                 last_at: &validation.at,
                 origin: next_origin,
                 exploration_json: exp_json.as_deref(),
-                has_files: walk.has_files,
-                legacy_closure: walk.legacy_closure,
+                has_files: next_has_files,
+                legacy_closure: next_legacy_closure,
                 closure_sha256: closure_sha256.as_deref(),
             });
 
@@ -1079,9 +1186,11 @@ impl SqliteWalkStore {
                     last_passed = ?4,
                     last_at = ?5,
                     origin = ?6,
-                    closure_sha256 = ?7,
-                    integrity_sha256 = ?8
-                 WHERE id = ?9",
+                    has_files = ?7,
+                    legacy_closure = ?8,
+                    closure_sha256 = ?9,
+                    integrity_sha256 = ?10
+                 WHERE id = ?11",
                 params![
                     norm.build_fingerprint,
                     flow_path,
@@ -1089,11 +1198,26 @@ impl SqliteWalkStore {
                     i64::from(validation.passed),
                     validation.at,
                     next_origin,
+                    i64::from(next_has_files),
+                    i64::from(next_legacy_closure),
                     closure_sha256,
                     walk_integrity,
                     walk.id,
                 ],
             )?;
+
+            tx.execute("DELETE FROM walk_files WHERE walk_id = ?1", [walk.id])?;
+            if next_has_files && let Some(ref files) = next_subflow_files {
+                for (pos, file) in files.iter().enumerate() {
+                    let wf_integrity =
+                        compute_walk_file_integrity(walk.id, pos as i64, &file.path, &file.sha256);
+                    tx.execute(
+                        "INSERT INTO walk_files (walk_id, position, path, sha256, integrity_sha256)
+                         VALUES (?1, ?2, ?3, ?4, ?5)",
+                        params![walk.id, pos as i64, file.path, file.sha256, wf_integrity],
+                    )?;
+                }
+            }
 
             let run_integrity = compute_validation_run_integrity(&ValidationRunIntegrityFields {
                 walk_id: walk.id,
@@ -1182,13 +1306,14 @@ impl SqliteWalkStore {
         candidate_path: &Path,
     ) -> Result<CandidateSnapshot, StoreError> {
         let canonical_root = fs::canonicalize(&self.workspace_root)?;
-        let closure = collect_flow_closure(&canonical_root, candidate_path).map_err(|err| {
-            if matches!(err, deja_core::CoreError::MissingFlowFile { .. }) {
-                StoreError::CandidateNotFound(candidate_path.display().to_string())
-            } else {
-                StoreError::Core(err)
-            }
-        })?;
+        let closure =
+            collect_flow_closure(&self.workspace_root, candidate_path).map_err(|err| {
+                if matches!(err, deja_core::CoreError::MissingFlowFile { .. }) {
+                    StoreError::CandidateNotFound(candidate_path.display().to_string())
+                } else {
+                    StoreError::Core(err)
+                }
+            })?;
 
         let main = closure
             .files
@@ -1255,7 +1380,7 @@ impl SqliteWalkStore {
         validate_validation_input(&options.validation)?;
         let canonical_root = fs::canonicalize(&self.workspace_root)?;
         let closure =
-            collect_flow_closure(&canonical_root, &options.candidate_path).map_err(|err| {
+            collect_flow_closure(&self.workspace_root, &options.candidate_path).map_err(|err| {
                 if matches!(err, deja_core::CoreError::MissingFlowFile { .. }) {
                     StoreError::CandidateNotFound(options.candidate_path.display().to_string())
                 } else {
@@ -1615,9 +1740,9 @@ impl SqliteWalkStore {
         }
 
         let digest = if is_dir {
-            fingerprint_tree(root, build_path, label)?
+            fingerprint_tree(root, &canonical, label)?
         } else {
-            fingerprint_file(root, build_path)?
+            fingerprint_file(root, &canonical)?
         };
         let bytes_read = pre_snapshot
             .as_ref()
@@ -1729,16 +1854,75 @@ fn append_suffix(path: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(os)
 }
 
-fn open_readonly_connection(path: &Path) -> Result<Connection, StoreError> {
-    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
-    let conn = Connection::open_with_flags(path, flags).map_err(|err| {
-        StoreError::InvalidWalkMemory(format!("walks.sqlite cannot be opened read-only: {err}"))
-    })?;
+fn wal_sidecar_exists(db_path: &Path) -> bool {
+    fs::symlink_metadata(append_suffix(db_path, "-wal")).is_ok()
+}
+
+fn read_db_file_stamp(path: &Path) -> Option<DbFileStamp> {
+    let mut file = open_read_nofollow(path).ok()?;
+    let meta = file.metadata().ok()?;
+    let modified = meta.modified().ok()?;
+    let mut header = [0u8; 28];
+    let change_counter = if file.read_exact(&mut header).is_ok() {
+        [header[24], header[25], header[26], header[27]]
+    } else {
+        [0u8; 4]
+    };
+    Some(DbFileStamp {
+        len: meta.len(),
+        modified,
+        change_counter,
+    })
+}
+
+fn encode_sqlite_uri_path(path: &Path) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let raw = path.to_string_lossy();
+    let mut out = String::with_capacity(raw.len() + 32);
+    out.push_str("file:");
+    for &b in raw.as_bytes() {
+        let keep =
+            b == b'/' || b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~' | b':');
+        if keep {
+            out.push(b as char);
+        } else {
+            out.push('%');
+            out.push(HEX[(b >> 4) as usize] as char);
+            out.push(HEX[(b & 0x0f) as usize] as char);
+        }
+    }
+    out.push_str("?mode=ro&immutable=1");
+    out
+}
+
+fn open_readonly_connection(
+    path: &Path,
+) -> Result<(Connection, bool, Option<DbFileStamp>), StoreError> {
+    let use_immutable = !wal_sidecar_exists(path);
+    let conn = if use_immutable {
+        let uri = encode_sqlite_uri_path(path);
+        let flags = OpenFlags::SQLITE_OPEN_READ_ONLY
+            | OpenFlags::SQLITE_OPEN_URI
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+        Connection::open_with_flags(&uri, flags).map_err(|err| {
+            StoreError::InvalidWalkMemory(format!("walks.sqlite cannot be opened read-only: {err}"))
+        })?
+    } else {
+        let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+        Connection::open_with_flags(path, flags).map_err(|err| {
+            StoreError::InvalidWalkMemory(format!("walks.sqlite cannot be opened read-only: {err}"))
+        })?
+    };
     apply_readonly_pragmas(&conn).map_err(|err| {
         StoreError::InvalidWalkMemory(format!("walks.sqlite cannot be read: {err}"))
     })?;
     verify_readonly_schema(&conn)?;
-    Ok(conn)
+    let stamp = if use_immutable {
+        read_db_file_stamp(path)
+    } else {
+        None
+    };
+    Ok((conn, use_immutable, stamp))
 }
 
 fn miss(reason: CacheMissReason) -> LookupResult {
@@ -2480,8 +2664,10 @@ fn verify_classic_stored_flow_inner(
     walk: &ValidatedWalkRow,
     run: &ValidationRunRecord,
 ) -> Result<ClassicFlowCheck, StoreError> {
-    if run.closure_sha256.is_some() {
-        // Consumer-owned flow verified against workspace confinement & main file SHA-256.
+    if let Some(ref expected_closure_sha) = run.closure_sha256 {
+        // Consumer-owned flow: verify workspace confinement, non-symlink regular entry file,
+        // and the FULL transitive closure checksum (`collect_flow_closure`) so modified or deleted
+        // subflows/scripts/media never pass a gate or lookup!
         let canonical_root = fs::canonicalize(workspace_root)?;
         let candidate = lexical_normalize(&canonical_root.join(&run.flow_path));
         if Path::new(&run.flow_path).is_absolute() || !path_inside(&canonical_root, &candidate) {
@@ -2512,12 +2698,42 @@ fn verify_classic_stored_flow_inner(
                 run.flow_path
             )));
         }
-        let actual_sha = stream_sha256_nofollow(&canonical)?;
-        if actual_sha != run.flow_sha256 {
-            return Ok(ClassicFlowCheck::Invalid(format!(
-                "stored flow checksum does not match {}",
-                run.flow_path
-            )));
+        let closure = match collect_flow_closure(&canonical_root, &canonical) {
+            Ok(c) => c,
+            Err(CoreError::MissingFlowFile { path }) => {
+                return Ok(ClassicFlowCheck::FlowChanged {
+                    detail: format!("a file referenced by {} is missing: {path}", run.flow_path),
+                    expected_closure_sha256: expected_closure_sha.clone(),
+                    current_closure_sha256: None,
+                });
+            }
+            Err(err) => {
+                return Ok(ClassicFlowCheck::Invalid(format!(
+                    "consumer flow closure cannot be verified: {err}"
+                )));
+            }
+        };
+        if &closure.sha256 != expected_closure_sha {
+            return Ok(ClassicFlowCheck::FlowChanged {
+                detail: format!(
+                    "the flow or a file it runs changed (expected {}, now {})",
+                    expected_closure_sha, closure.sha256
+                ),
+                expected_closure_sha256: expected_closure_sha.clone(),
+                current_closure_sha256: Some(closure.sha256),
+            });
+        }
+        let main_sha = closure
+            .files
+            .iter()
+            .find(|f| f.path == closure.main)
+            .map(|f| f.sha256.as_str());
+        if main_sha != Some(run.flow_sha256.as_str()) {
+            return Ok(ClassicFlowCheck::FlowChanged {
+                detail: format!("stored flow checksum does not match {}", run.flow_path),
+                expected_closure_sha256: expected_closure_sha.clone(),
+                current_closure_sha256: Some(closure.sha256),
+            });
         }
         return Ok(ClassicFlowCheck::Ok(canonical));
     }

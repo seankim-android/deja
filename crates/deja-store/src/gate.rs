@@ -371,6 +371,20 @@ pub fn evaluate_gate(
                                 detail: Some(msg),
                             });
                         }
+                        ClassicFlowCheck::FlowChanged {
+                            detail,
+                            current_closure_sha256,
+                            ..
+                        } => {
+                            evidence.push(ShardEvidence {
+                                store_label: store_label.clone(),
+                                outcome: GateOutcome::FlowChanged,
+                                validated_at: None,
+                                flow_sha256: None,
+                                closure_sha256: current_closure_sha256,
+                                detail: Some(detail),
+                            });
+                        }
                     }
                 }
             }

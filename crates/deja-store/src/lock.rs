@@ -240,7 +240,17 @@ pub fn canonical_metadata_target(
     };
 
     let candidate = if memory_path.is_relative() {
-        lexical_normalize(&canonical_root.join(memory_path))
+        let normalized_mem = lexical_normalize(memory_path);
+        if !workspace_root.is_absolute()
+            && let Ok(cwd) = std::env::current_dir()
+            && let Ok(rel) =
+                lexical_normalize(&cwd.join(&normalized_mem)).strip_prefix(&lexical_root)
+            && !rel.as_os_str().is_empty()
+        {
+            lexical_normalize(&canonical_root.join(rel))
+        } else {
+            lexical_normalize(&canonical_root.join(&normalized_mem))
+        }
     } else {
         let normalized_mem = lexical_normalize(memory_path);
         if let Ok(rel) = normalized_mem.strip_prefix(&canonical_root) {

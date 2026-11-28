@@ -924,6 +924,13 @@ fn upgrade_legacy_sqlite_to_v5(conn: &mut Connection, old_version: u32) -> Resul
                     "legacy walk validation history must not be empty".to_string(),
                 ));
             }
+            let latest = history.last().expect("non-empty history");
+            if latest.0 != (last_passed_i == 1) || latest.1 != last_at || latest.2 != flow_sha256 {
+                return Err(StoreError::InvalidWalkMemory(
+                    "legacy lastValidation must equal the latest validation_history entry for the stored flow"
+                        .to_string(),
+                ));
+            }
 
             let mut files = Vec::new();
             let (has_files, legacy_closure) = if let Some(ref csha) = closure_sha256 {
@@ -1126,6 +1133,10 @@ fn upgrade_legacy_sqlite_to_v5(conn: &mut Connection, old_version: u32) -> Resul
                 flaky = excluded.flaky,
                 validated_at = excluded.validated_at,
                 origin = excluded.origin,
+                failure_category = excluded.failure_category,
+                report_path = excluded.report_path,
+                duration_ms = excluded.duration_ms,
+                phase_timings_json = excluded.phase_timings_json,
                 integrity_sha256 = excluded.integrity_sha256",
             params![
                 walk_id,
