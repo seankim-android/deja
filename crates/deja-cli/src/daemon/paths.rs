@@ -1,5 +1,6 @@
 //! Zero-`unsafe` daemon path resolution, strict `0o700`/`0o600` permission checks, exclusive
-//! `daemon.lock` management, atomic socket binding, and peer-credential verification.
+//! `daemon.lock` management, atomic socket binding, process-identity verification, and
+//! peer-credential verification.
 
 use std::collections::BTreeMap;
 use std::io;
@@ -16,6 +17,8 @@ pub const DAEMON_SOCKET_NAME: &str = "deja.sock";
 pub const DAEMON_METADATA_NAME: &str = "daemon.json";
 /// Exclusive advisory lock file guarding single-daemon startup and shutdown lifecycle.
 pub const DAEMON_LOCK_NAME: &str = "daemon.lock";
+/// Stable private temporary directory owned by the daemon (`<daemon_dir>/tmp`, `0o700`).
+pub const DAEMON_TMP_DIR_NAME: &str = "tmp";
 /// Hard cap on Unix domain socket path bytes (`sockaddr_un.sun_path` is 104 bytes on macOS
 /// including the NUL terminator, so valid paths must be strictly `< 104` bytes).
 pub const MAX_UNIX_SOCKET_PATH_BYTES: usize = 103;
@@ -53,6 +56,7 @@ pub struct DaemonPaths {
     pub socket: PathBuf,
     pub metadata: PathBuf,
     pub lock: PathBuf,
+    pub tmp_dir: PathBuf,
 }
 
 impl DaemonPaths {
@@ -74,11 +78,13 @@ impl DaemonPaths {
         validate_socket_path_len(&socket)?;
         let metadata = dir.join(DAEMON_METADATA_NAME);
         let lock = dir.join(DAEMON_LOCK_NAME);
+        let tmp_dir = dir.join(DAEMON_TMP_DIR_NAME);
         Ok(Self {
             dir,
             socket,
             metadata,
             lock,
+            tmp_dir,
         })
     }
 
@@ -90,21 +96,43 @@ impl DaemonPaths {
     }
 }
 
+fn resolve_env_path(raw: &str) -> Result<PathBuf, DaemonPathError> {
+    let trimmed = raw.trim();
+    let candidate = PathBuf::from(trimmed);
+    if candidate.is_absolute() {
+        Ok(lexical_normalize(&candidate))
+    } else {
+        let cwd = std::env::current_dir().map_err(|err| {
+            DaemonPathError::InvalidConfig(format!(
+                "cannot resolve relative daemon path {trimmed:?}: failed to read current working directory: {err}"
+            ))
+        })?;
+        Ok(lexical_normalize(&cwd.join(candidate)))
+    }
+}
+
 /// Resolve the daemon directory path with strict precedence:
 /// `DEJA_DAEMON_DIR` -> `$DEJA_HOME/daemon` -> `$HOME/.deja/daemon`.
+///
+/// Relative `DEJA_DAEMON_DIR` / `DEJA_HOME` / `HOME` values are resolved against the current
+/// working directory before normalization.
 pub fn resolve_daemon_dir(env: &BTreeMap<String, String>) -> Result<PathBuf, DaemonPathError> {
     if let Some(explicit) = env.get("DEJA_DAEMON_DIR").filter(|v| !v.trim().is_empty()) {
-        return Ok(PathBuf::from(explicit));
+        return resolve_env_path(explicit);
     }
     if let Some(deja_home) = env.get("DEJA_HOME").filter(|v| !v.trim().is_empty()) {
-        return Ok(PathBuf::from(deja_home).join("daemon"));
+        return Ok(lexical_normalize(
+            &resolve_env_path(deja_home)?.join("daemon"),
+        ));
     }
     if let Some(home) = env
         .get("HOME")
         .or_else(|| env.get("USERPROFILE"))
         .filter(|v| !v.trim().is_empty())
     {
-        return Ok(PathBuf::from(home).join(".deja").join("daemon"));
+        return Ok(lexical_normalize(
+            &resolve_env_path(home)?.join(".deja").join("daemon"),
+        ));
     }
     Err(DaemonPathError::InvalidConfig(
         "unable to resolve daemon directory: set DEJA_DAEMON_DIR, DEJA_HOME, or HOME".to_string(),
@@ -133,6 +161,63 @@ pub struct DaemonMetadata {
     pub socket_path: String,
     pub started_at: String,
     pub idle_timeout_secs: u64,
+    /// OS process start timestamp (`ps -o lstart= -p <pid>` in `LC_ALL=C TZ=UTC0`) used to verify
+    /// process identity against PID reuse before any fallback `SIGTERM`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proc_start_time: Option<String>,
+}
+
+/// Pure validator verifying a candidate process's UID, command-line args, and OS `lstart`
+/// timestamp before sending a fallback `SIGTERM`.
+pub fn verify_ps_identity_fields(
+    uid_args_line: &str,
+    lstart_line: &str,
+    expected_uid: u32,
+    expected_start_time: Option<&str>,
+) -> Result<(), String> {
+    let expected_start = expected_start_time
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            "daemon metadata is missing `procStartTime`; refusing unverified fallback SIGTERM"
+                .to_string()
+        })?;
+
+    let actual_start = lstart_line.trim();
+    if actual_start.is_empty() {
+        return Err("process OS start time is empty or process exited".to_string());
+    }
+    if actual_start != expected_start {
+        return Err(format!(
+            "process start time mismatch (expected {expected_start:?}, got {actual_start:?}); PID may have been reused"
+        ));
+    }
+
+    let trimmed = uid_args_line.trim();
+    let mut parts = trimmed.split_whitespace();
+    let Some(uid_tok) = parts.next() else {
+        return Err("empty process UID/args output from ps".to_string());
+    };
+    let actual_uid: u32 = uid_tok
+        .parse()
+        .map_err(|err| format!("invalid UID token {uid_tok:?} from ps: {err}"))?;
+    if actual_uid != expected_uid {
+        return Err(format!(
+            "process UID mismatch (expected {expected_uid}, got {actual_uid})"
+        ));
+    }
+
+    let args_tokens: Vec<&str> = parts.collect();
+    let has_daemon = args_tokens.contains(&"daemon");
+    let has_foreground = args_tokens.contains(&"--foreground");
+    if !has_daemon || !has_foreground {
+        return Err(format!(
+            "process command line does not look like a Déjà foreground daemon: {:?}",
+            args_tokens.join(" ")
+        ));
+    }
+
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -142,15 +227,15 @@ mod unix_impl {
     use std::os::unix::fs::{
         DirBuilderExt, FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt,
     };
-    use std::path::Path;
-    use std::process::{Command, Stdio};
+    use std::path::{Path, PathBuf};
+    use std::process::{Command, Output, Stdio};
     use std::sync::OnceLock;
 
     use tokio::net::{UnixListener, UnixStream};
 
     use super::{
         DAEMON_METADATA_NAME, DAEMON_SOCKET_NAME, DaemonMetadata, DaemonPathError, DaemonPaths,
-        MAX_DAEMON_METADATA_BYTES, validate_socket_path_len,
+        MAX_DAEMON_METADATA_BYTES, validate_socket_path_len, verify_ps_identity_fields,
     };
     use crate::fs_safe::{open_read_nofollow, write_atomic_nofollow_excl_with_mode};
 
@@ -194,6 +279,84 @@ mod unix_impl {
                 format!("failed to parse `/usr/bin/id -u` output {text:?}: {err}"),
             )
         })
+    }
+
+    fn run_ps(args: &[&str]) -> Option<Output> {
+        for bin in ["/bin/ps", "/usr/bin/ps", "ps"] {
+            let res = Command::new(bin)
+                .args(args)
+                .env("LC_ALL", "C")
+                .env("TZ", "UTC0")
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .output();
+            match res {
+                Ok(out) => return Some(out),
+                Err(err) if err.kind() == ErrorKind::NotFound => continue,
+                Err(_) => return None,
+            }
+        }
+        None
+    }
+
+    /// Query the OS process start timestamp (`ps -o lstart= -p <pid>` in `LC_ALL=C TZ=UTC0`)
+    /// with zero `unsafe`.
+    #[must_use]
+    pub fn query_proc_start_time(pid: u32) -> Option<String> {
+        if pid == 0 {
+            return None;
+        }
+        let pid_str = pid.to_string();
+        let out = run_ps(&["-o", "lstart=", "-p", &pid_str])?;
+        if !out.status.success() {
+            return None;
+        }
+        let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        (!text.is_empty()).then_some(text)
+    }
+
+    /// Query the current process's OS start timestamp for embedding in `daemon.json`.
+    #[must_use]
+    pub fn current_proc_start_time() -> Option<String> {
+        query_proc_start_time(std::process::id())
+    }
+
+    /// Re-verify via `ps` that `pid` belongs to `expected_uid`, has exact matching `lstart`, and
+    /// is running a Déjà foreground daemon before sending any fallback `SIGTERM`.
+    pub fn verify_daemon_process_identity(
+        pid: u32,
+        expected_uid: u32,
+        expected_start_time: Option<&str>,
+    ) -> Result<(), String> {
+        if pid == 0 {
+            return Err("refusing to signal pid 0".to_string());
+        }
+        let pid_str = pid.to_string();
+        let lstart_out = run_ps(&["-o", "lstart=", "-p", &pid_str]).ok_or_else(|| {
+            "failed to execute `ps` to verify daemon process start time".to_string()
+        })?;
+        if !lstart_out.status.success() {
+            return Err(format!(
+                "process {pid} is not running or cannot be inspected"
+            ));
+        }
+        let lstart_line = String::from_utf8_lossy(&lstart_out.stdout);
+
+        let uid_args_out = run_ps(&["-o", "uid=,args=", "-p", &pid_str]).ok_or_else(|| {
+            "failed to execute `ps` to verify daemon process UID and command".to_string()
+        })?;
+        if !uid_args_out.status.success() {
+            return Err(format!("process {pid} exited during identity check"));
+        }
+        let uid_args_line = String::from_utf8_lossy(&uid_args_out.stdout);
+
+        verify_ps_identity_fields(
+            &uid_args_line,
+            &lstart_line,
+            expected_uid,
+            expected_start_time,
+        )
     }
 
     /// Validate that an existing daemon directory is a non-symlink directory owned by the current
@@ -260,6 +423,25 @@ mod unix_impl {
                 validate_daemon_dir_secure(dir)
             }
             Err(err) => Err(DaemonPathError::Io(err)),
+        }
+    }
+
+    /// Ensure `<daemon_dir>/tmp` exists with strict `0o700` permissions and current-user ownership
+    /// so the persistent daemon never relies on a caller's ephemeral `TMPDIR`.
+    pub fn ensure_daemon_tmp_dir_secure(paths: &DaemonPaths) -> Result<PathBuf, DaemonPathError> {
+        ensure_daemon_dir_secure(&paths.dir)?;
+        ensure_daemon_dir_secure(&paths.tmp_dir)?;
+        Ok(paths.tmp_dir.clone())
+    }
+
+    /// Remove `<daemon_dir>/tmp` cleanly on daemon shutdown / idle exit if it is a real directory
+    /// (never following symlinks).
+    pub fn cleanup_daemon_tmp_dir(paths: &DaemonPaths) {
+        if let Ok(lmeta) = fs::symlink_metadata(&paths.tmp_dir)
+            && !lmeta.file_type().is_symlink()
+            && lmeta.file_type().is_dir()
+        {
+            let _ = fs::remove_dir_all(&paths.tmp_dir);
         }
     }
 
@@ -379,11 +561,11 @@ mod unix_impl {
     }
 
     struct TempSocketGuard {
-        path: Option<std::path::PathBuf>,
+        path: Option<PathBuf>,
     }
 
     impl TempSocketGuard {
-        fn new(path: std::path::PathBuf) -> Self {
+        fn new(path: PathBuf) -> Self {
             Self { path: Some(path) }
         }
 
@@ -661,6 +843,58 @@ mod tests {
         assert_eq!(
             resolve_daemon_dir(&env).unwrap(),
             PathBuf::from("/tmp/custom-d")
+        );
+    }
+
+    #[test]
+    fn resolve_daemon_dir_supports_relative_deja_home_and_daemon_dir() {
+        let cwd = std::env::current_dir().unwrap();
+
+        let env_home = BTreeMap::from([("DEJA_HOME".to_string(), ".tmp-deja-home".to_string())]);
+        assert_eq!(
+            resolve_daemon_dir(&env_home).unwrap(),
+            lexical_normalize(&cwd.join(".tmp-deja-home").join("daemon"))
+        );
+
+        let env_dir = BTreeMap::from([("DEJA_DAEMON_DIR".to_string(), ".tmp-deja-d".to_string())]);
+        assert_eq!(
+            resolve_daemon_dir(&env_dir).unwrap(),
+            lexical_normalize(&cwd.join(".tmp-deja-d"))
+        );
+    }
+
+    #[test]
+    fn verify_ps_identity_fields_enforces_uid_lstart_and_daemon_args() {
+        let lstart = "Sat Nov 28 11:03:31 2026";
+        let valid_line = "  501 /usr/local/bin/deja daemon start --foreground --idle-timeout 300";
+
+        assert!(verify_ps_identity_fields(valid_line, lstart, 501, Some(lstart)).is_ok());
+
+        // Missing procStartTime -> refused.
+        assert!(verify_ps_identity_fields(valid_line, lstart, 501, None).is_err());
+        assert!(verify_ps_identity_fields(valid_line, lstart, 501, Some("   ")).is_err());
+
+        // Mismatched lstart (PID reuse) -> refused.
+        assert!(
+            verify_ps_identity_fields(valid_line, "Sat Nov 28 11:05:00 2026", 501, Some(lstart),)
+                .is_err()
+        );
+
+        // Mismatched UID -> refused.
+        assert!(verify_ps_identity_fields(valid_line, lstart, 502, Some(lstart)).is_err());
+
+        // Unrelated command line -> refused.
+        assert!(
+            verify_ps_identity_fields("501 /bin/sleep 999", lstart, 501, Some(lstart)).is_err()
+        );
+        assert!(
+            verify_ps_identity_fields(
+                "501 /usr/local/bin/deja run checkout",
+                lstart,
+                501,
+                Some(lstart)
+            )
+            .is_err()
         );
     }
 

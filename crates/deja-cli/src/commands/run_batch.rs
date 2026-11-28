@@ -838,6 +838,7 @@ async fn run_batch_inner(
                 .await
             {
                 Ok(runtime) => {
+                    base_ctx.resolved_runtime = runtime.clone();
                     opened_shards.push(OpenedShard {
                         orig_idx,
                         device: spec.device.clone(),

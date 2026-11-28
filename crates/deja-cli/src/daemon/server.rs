@@ -18,7 +18,8 @@ use tracing::{debug, warn};
 
 use crate::daemon::paths::{
     DaemonLock, DaemonMetadata, DaemonPathError, DaemonPaths, acquire_daemon_lock,
-    bind_daemon_socket, current_uid, remove_if_not_symlink, write_daemon_metadata,
+    bind_daemon_socket, cleanup_daemon_tmp_dir, current_proc_start_time, current_uid,
+    ensure_daemon_tmp_dir_secure, remove_if_not_symlink, write_daemon_metadata,
 };
 use crate::daemon::pool::{DriverPool, LeaseGuard};
 use crate::daemon::protocol::{
@@ -83,6 +84,7 @@ impl DaemonServer {
             return Err(DaemonStartError::AlreadyRunning);
         };
         let daemon_uid = current_uid().map_err(DaemonPathError::Io)?;
+        let _ = ensure_daemon_tmp_dir_secure(&paths)?;
 
         // Remove any stale `daemon.json` BEFORE publishing the new socket so connecting clients
         // never observe a stale PID from a previous crash.
@@ -96,6 +98,7 @@ impl DaemonServer {
             socket_path: paths.socket.to_string_lossy().into_owned(),
             started_at: now_iso8601(),
             idle_timeout_secs: idle_timeout.as_secs(),
+            proc_start_time: current_proc_start_time(),
         };
         if let Err(err) = write_daemon_metadata(&paths, &metadata) {
             let _ = remove_if_not_symlink(&paths.socket);
@@ -256,6 +259,9 @@ impl DaemonServer {
 
         // 4. Concurrently shut down ALL pooled drivers (bounded 10s each).
         let stopped_sessions = pool.shutdown_all_drivers().await;
+
+        // 4b. Clean up the daemon-owned temporary directory once all pooled drivers have exited.
+        cleanup_daemon_tmp_dir(&paths);
 
         // 5. Notify any `Shutdown` RPC clients so they receive `ShutdownAck { stoppedSessions }`.
         for waiter in shutdown_ack_waiters {

@@ -19,9 +19,13 @@ use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use deja_cli::daemon::client::{DaemonClient, DaemonDriverFactory};
+use deja_cli::commands::daemon::run_stop_with_timeouts;
+use deja_cli::daemon::client::{
+    DaemonClient, DaemonDriverFactory, ensure_background_daemon_started_with_exe,
+};
 use deja_cli::daemon::paths::{
-    DaemonMetadata, DaemonPaths, connect_verified, current_uid, probe_daemon_lock_held,
+    DaemonMetadata, DaemonPaths, acquire_daemon_lock, connect_verified, current_uid,
+    probe_daemon_lock_held, read_daemon_metadata, write_daemon_metadata,
 };
 use deja_cli::daemon::server::DaemonServer;
 use deja_cli::driver_factory::{
@@ -649,6 +653,7 @@ fn sample_ctx(platform: &str, device: &str, app_id: &str) -> DriverContext {
         timeout_ms: 30_000,
         env: BTreeMap::from([("PATH".to_string(), "/usr/bin:/bin".to_string())]),
         staged_build: None,
+        resolved_runtime: None,
     }
 }
 
@@ -790,6 +795,7 @@ fn cli_daemon_status_cleans_stale_socket_and_metadata_when_lock_unlocked() {
         socket_path: sock_path.to_string_lossy().into_owned(),
         started_at: "2026-01-01T00:00:00Z".to_string(),
         idle_timeout_secs: 300,
+        proc_start_time: None,
     };
     fs::write(
         dir.path().join("daemon.json"),
@@ -1878,4 +1884,485 @@ async fn dropped_hierarchy_future_sends_cancel_rpc_without_corrupting_framing_an
     srv_cancel.cancel();
     srv_handle.await.unwrap();
     assert_eq!(mock_ref.shutdown_count.load(Ordering::SeqCst), 1);
+}
+
+// ===========================================================================
+// 9. Codex Round 1 Regression Tests (Findings 1 through 10)
+// ===========================================================================
+
+#[tokio::test]
+async fn regression_r1_f1_mcp_releases_daemon_lease_after_tool_call_while_staying_idle() {
+    use deja_mcp::{McpBoxFuture, McpDriverContext, McpDriverFactory, McpServerConfig};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    struct TestMcpBridge {
+        inner: Arc<dyn DriverFactory>,
+        cancel: CancellationToken,
+    }
+
+    impl TestMcpBridge {
+        fn to_ctx(ctx: &McpDriverContext) -> DriverContext {
+            DriverContext {
+                platform: ctx.platform.clone(),
+                device: ctx.device.clone(),
+                app_id: ctx.app_id.clone(),
+                build_path: ctx.build_path.clone(),
+                expected_build_fingerprint: ctx.expected_build_fingerprint.clone(),
+                workspace_root: ctx.workspace_root.clone(),
+                disable_animations: ctx.disable_animations,
+                crash_report_grace_ms: ctx.crash_report_grace_ms,
+                crash_report_dir: ctx.crash_report_dir.clone(),
+                deja_home: None,
+                headless: ctx.headless,
+                screen_size: ctx.screen_size.clone(),
+                timeout_ms: ctx.timeout_ms,
+                env: ctx.env.clone(),
+                staged_build: None,
+                resolved_runtime: ctx.resolved_runtime.clone(),
+            }
+        }
+    }
+
+    impl McpDriverFactory for TestMcpBridge {
+        fn resolve_runtime<'a>(
+            &'a self,
+            ctx: &'a McpDriverContext,
+            cancel: &'a CancellationToken,
+        ) -> McpBoxFuture<'a, Result<Option<String>, DriverError>> {
+            let dc = Self::to_ctx(ctx);
+            let inner = Arc::clone(&self.inner);
+            Box::pin(async move {
+                inner
+                    .resolve_runtime(&dc, cancel)
+                    .await
+                    .map_err(|e| DriverError::InvalidArgument(e.to_string()))
+            })
+        }
+
+        fn install_app<'a>(
+            &'a self,
+            ctx: &'a McpDriverContext,
+            cancel: &'a CancellationToken,
+        ) -> McpBoxFuture<'a, Result<(), DriverError>> {
+            let dc = Self::to_ctx(ctx);
+            let inner = Arc::clone(&self.inner);
+            Box::pin(async move {
+                inner
+                    .install_app(&dc, cancel)
+                    .await
+                    .map_err(|e| DriverError::InvalidArgument(e.to_string()))
+            })
+        }
+
+        fn create_driver<'a>(
+            &'a self,
+            ctx: &'a McpDriverContext,
+        ) -> McpBoxFuture<'a, Result<Box<dyn PlatformDriver>, DriverError>> {
+            let dc = Self::to_ctx(ctx);
+            let inner = Arc::clone(&self.inner);
+            let cancel = self.cancel.child_token();
+            Box::pin(async move {
+                inner
+                    .create(&dc, &cancel)
+                    .await
+                    .map_err(|e| DriverError::InvalidArgument(e.to_string()))
+            })
+        }
+    }
+
+    let dir = ShortDaemonDir::new("r1-mcp");
+    let paths = DaemonPaths::from_dir(dir.path().to_path_buf()).unwrap();
+    let ws = ShortDaemonDir::new("r1-mcp-ws");
+    fs::create_dir_all(ws.path()).unwrap();
+    let build = ws.path().join("App.bin");
+    fs::write(&build, b"v1").unwrap();
+
+    let mock_factory = DaemonMockFactory::new(Arc::new(|_, _| DaemonMockDriver::new("ios")));
+    let server = DaemonServer::bind(
+        paths.clone(),
+        Arc::clone(&mock_factory) as Arc<dyn DriverFactory>,
+        Duration::from_secs(60),
+    )
+    .unwrap();
+    let srv_cancel = CancellationToken::new();
+    let srv_handle = tokio::spawn(server.run(srv_cancel.clone()));
+
+    let daemon_factory: Arc<dyn DriverFactory> = Arc::new(DaemonDriverFactory::with_daemon_dir(
+        Arc::clone(&mock_factory) as Arc<dyn DriverFactory>,
+        dir.path().to_path_buf(),
+        false,
+    ));
+
+    let mcp_cancel = CancellationToken::new();
+    let (mut client_to_srv, srv_stdin) = tokio::io::duplex(64 * 1024);
+    let (srv_stdout, client_from_srv) = tokio::io::duplex(64 * 1024);
+    let mut client_reader = BufReader::new(client_from_srv);
+
+    let mcp_cfg = McpServerConfig {
+        workspace_root: ws.path().to_path_buf(),
+        canonical_workspace_root: fs::canonicalize(ws.path()).unwrap(),
+        home_dir: None,
+        store_id: None,
+        platform: "ios".to_string(),
+        app_id: "dev.deja.app".to_string(),
+        adapter: Some("maestro-ios/v1".to_string()),
+        browser: None,
+        build_path: Some(build.clone()),
+        device: Some("11111111-2222-3333-4444-555555555555".to_string()),
+        manifest_path: None,
+        flows_dir: None,
+        timeout_ms: 30_000,
+        verification_timeout_ms: 30_000,
+        retries: 0,
+        crash_report_grace_ms: 0,
+        crash_report_dir: None,
+        disable_animations: true,
+        stale_build: None,
+        env: BTreeMap::new(),
+        process_env: BTreeMap::from([("PATH".to_string(), "/usr/bin:/bin".to_string())]),
+        forbidden_values: Vec::new(),
+        mcp_explore: false,
+        explore_backend_available: false,
+        headless: None,
+        screen_size: None,
+    };
+
+    let bridge: Arc<dyn McpDriverFactory> = Arc::new(TestMcpBridge {
+        inner: Arc::clone(&daemon_factory),
+        cancel: mcp_cancel.clone(),
+    });
+    let mcp_task = tokio::spawn(deja_mcp::serve(
+        srv_stdin,
+        srv_stdout,
+        mcp_cfg,
+        bridge,
+        mcp_cancel.clone(),
+    ));
+
+    // Initialize MCP and run `deja_exec_batch`.
+    client_to_srv
+        .write_all(
+            format!(
+                "{}\n{}\n{}\n",
+                json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}),
+                json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+                json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"deja_exec_batch","arguments":{"steps":[{"launchApp":"dev.deja.app"},{"assertVisible":"Continue"}]}}})
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+
+    let mut line = String::new();
+    client_reader.read_line(&mut line).await.unwrap(); // init response
+    line.clear();
+    client_reader.read_line(&mut line).await.unwrap(); // deja_exec_batch response
+    let batch_resp: Value = serde_json::from_str(line.trim()).unwrap();
+    assert_eq!(batch_resp["result"]["isError"], false);
+
+    // Keep MCP server OPEN & IDLE! Daemon MUST show `activeLeases == 0` and warm pooled driver!
+    let status_client = DaemonClient::connect(&paths).await.unwrap();
+    let status = status_client
+        .status(&CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(
+        status.active_leases, 0,
+        "idle MCP server must release daemon lease immediately after tool call"
+    );
+    assert_eq!(status.pooled_sessions, 1);
+    assert_eq!(status.sessions[0].attach_count, Some(1));
+    assert!(!status.sessions[0].leased);
+
+    // A separate CLI client (`deja run`) IMMEDIATELY acquires the SAME warm driver without blocking!
+    let cli_ctx = sample_ctx(
+        "ios",
+        "11111111-2222-3333-4444-555555555555",
+        "dev.deja.app",
+    );
+    let cli_driver = tokio::time::timeout(
+        Duration::from_secs(2),
+        daemon_factory.create(&cli_ctx, &CancellationToken::new()),
+    )
+    .await
+    .expect("parallel CLI client must not block behind idle MCP server")
+    .unwrap();
+    cli_driver
+        .ensure_session(&CancellationToken::new())
+        .await
+        .unwrap();
+    cli_driver.shutdown().await.unwrap();
+
+    let status2 = status_client
+        .status(&CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(status2.sessions[0].attach_count, Some(1));
+    assert_eq!(status2.sessions[0].lease_count, 2);
+    assert_eq!(mock_factory.create_count.load(Ordering::SeqCst), 1);
+
+    drop(client_to_srv);
+    mcp_cancel.cancel();
+    let _ = mcp_task.await;
+    srv_cancel.cancel();
+    srv_handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn regression_r1_f2_f3_uncooperative_lock_holder_refuses_unverified_sigterm_and_exits_failure()
+ {
+    let dir = ShortDaemonDir::new("r1-stop-fail");
+    let paths = DaemonPaths::from_dir(dir.path().to_path_buf()).unwrap();
+
+    // Hold `daemon.lock` in-process (the test binary itself is NOT `deja daemon --foreground`!)
+    // and write `daemon.json` with a forged/mismatched `procStartTime`.
+    let _held_lock = acquire_daemon_lock(&paths).unwrap().expect("acquire lock");
+    let forged_meta = DaemonMetadata {
+        version: "0.1.0".to_string(),
+        pid: std::process::id(),
+        uid: current_uid().unwrap(),
+        socket_path: paths.socket.to_string_lossy().into_owned(),
+        started_at: "2026-01-01T00:00:00Z".to_string(),
+        idle_timeout_secs: 300,
+        proc_start_time: Some("Mon Jan 01 00:00:00 1990".to_string()),
+    };
+    write_daemon_metadata(&paths, &forged_meta).unwrap();
+
+    let (sink, buf) = OutputSink::captured();
+    let deps = CliDeps {
+        cwd: std::env::current_dir().unwrap(),
+        env: BTreeMap::from([(
+            "DEJA_DAEMON_DIR".to_string(),
+            dir.path().to_string_lossy().into_owned(),
+        )]),
+        home_dir: None,
+        output: sink,
+        driver_factory: Arc::new(RealDriverFactory),
+        doctor_probes: Arc::new(NoopDoctorProbes),
+        cancel: CancellationToken::new(),
+        cancel_signal: Arc::new(AtomicU8::new(0)),
+    };
+
+    // Must NOT send SIGTERM to our own test process, and MUST exit 1 with `stopped: false`!
+    let code = run_stop_with_timeouts(
+        true,
+        &deps,
+        Duration::from_millis(80),
+        Duration::from_millis(80),
+        Duration::from_millis(80),
+    )
+    .await;
+    assert_eq!(code, 1, "unconfirmed daemon stop must exit non-zero");
+    let out: Value = serde_json::from_str(&buf.lock().unwrap().stdout).unwrap();
+    assert_eq!(out["stopped"], false);
+    assert_eq!(out["error"]["code"], "DAEMON_STOP_FAILED");
+    assert!(
+        out["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("refused"),
+        "expected process-identity verification refusal, got: {out}"
+    );
+}
+
+#[tokio::test]
+async fn regression_r1_f4_concurrent_starters_wait_for_lock_winner_to_publish_socket() {
+    let dir = ShortDaemonDir::new("r1-race");
+    let paths = DaemonPaths::from_dir(dir.path().to_path_buf()).unwrap();
+    let exe = PathBuf::from(env!("CARGO_BIN_EXE_deja"));
+    let env = BTreeMap::from([(
+        "DEJA_DAEMON_DIR".to_string(),
+        dir.path().to_string_lossy().into_owned(),
+    )]);
+
+    // Part A: Simulate a winner holding `daemon.lock` for 150ms BEFORE starting the real daemon
+    // while another caller runs `ensure_background_daemon_started_with_exe`: the caller's spawned
+    // child loses `daemon.lock` and exits immediately, yet the caller MUST keep polling while
+    // `daemon.lock` is held and connect cleanly once the winner publishes `deja.sock`!
+    let pre_lock = acquire_daemon_lock(&paths).unwrap().expect("pre-lock");
+    let paths_winner = paths.clone();
+    let srv_cancel = CancellationToken::new();
+    let srv_cancel_c = srv_cancel.clone();
+    let winner_task = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(180)).await;
+        drop(pre_lock);
+        let mock = DaemonMockFactory::new(Arc::new(|_, _| DaemonMockDriver::new("ios")));
+        let server = DaemonServer::bind(
+            paths_winner,
+            mock as Arc<dyn DriverFactory>,
+            Duration::from_secs(60),
+        )
+        .unwrap();
+        server.run(srv_cancel_c).await;
+    });
+
+    let info = ensure_background_daemon_started_with_exe(
+        &paths,
+        &env,
+        60,
+        &exe,
+        Duration::from_secs(5),
+        &CancellationToken::new(),
+    )
+    .await
+    .expect("starter must wait while another winner holds daemon.lock");
+    assert_eq!(info.pid, std::process::id());
+    assert!(info.already_running);
+
+    srv_cancel.cancel();
+    winner_task.await.unwrap();
+
+    // Part B: Two real concurrent callers racing against an empty `DEJA_DAEMON_DIR` both succeed!
+    let dir2 = ShortDaemonDir::new("r1-race2");
+    let paths2 = DaemonPaths::from_dir(dir2.path().to_path_buf()).unwrap();
+    let env2 = BTreeMap::from([(
+        "DEJA_DAEMON_DIR".to_string(),
+        dir2.path().to_string_lossy().into_owned(),
+    )]);
+    let c = CancellationToken::new();
+    let (r1, r2) = tokio::join!(
+        ensure_background_daemon_started_with_exe(
+            &paths2,
+            &env2,
+            60,
+            &exe,
+            Duration::from_secs(5),
+            &c
+        ),
+        ensure_background_daemon_started_with_exe(
+            &paths2,
+            &env2,
+            60,
+            &exe,
+            Duration::from_secs(5),
+            &c
+        ),
+    );
+    let i1 = r1.expect("concurrent starter 1 must succeed");
+    let i2 = r2.expect("concurrent starter 2 must succeed");
+    assert_eq!(i1.pid, i2.pid);
+
+    // Verify `daemon.json` carries `procStartTime`.
+    let meta = read_daemon_metadata(&paths2).unwrap();
+    assert!(
+        meta.proc_start_time
+            .as_deref()
+            .is_some_and(|s| !s.trim().is_empty()),
+        "daemon.json must record procStartTime"
+    );
+
+    let stop = deja_bin_with_daemon(dir2.path())
+        .args(["daemon", "stop", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(stop.status.code(), Some(0));
+}
+
+#[tokio::test]
+async fn regression_r1_f8_web_runtime_upgrade_invalidates_and_evicts_stale_warm_browser() {
+    let dir = ShortDaemonDir::new("r1-web-upg");
+    let paths = DaemonPaths::from_dir(dir.path().to_path_buf()).unwrap();
+    let factory = DaemonMockFactory::new(Arc::new(|_, _| DaemonMockDriver::new("web")));
+    let server = DaemonServer::bind(
+        paths.clone(),
+        Arc::clone(&factory) as Arc<dyn DriverFactory>,
+        Duration::from_secs(60),
+    )
+    .unwrap();
+    let srv_cancel = CancellationToken::new();
+    let srv_handle = tokio::spawn(server.run(srv_cancel.clone()));
+
+    let df = DaemonDriverFactory::with_daemon_dir(
+        Arc::clone(&factory) as Arc<dyn DriverFactory>,
+        dir.path().to_path_buf(),
+        false,
+    );
+    let cancel = CancellationToken::new();
+
+    // Run #1 with Chromium 158.
+    let mut ctx_v1 = sample_ctx("web", "chromium", "http://127.0.0.1:4174");
+    ctx_v1.resolved_runtime = Some("chromium-158.0.0.1@1280x720".to_string());
+    let d1 = df.create(&ctx_v1, &cancel).await.unwrap();
+    d1.ensure_session(&cancel).await.unwrap();
+    d1.shutdown().await.unwrap();
+    assert_eq!(factory.create_count.load(Ordering::SeqCst), 1);
+
+    // Run #2 with SAME Chromium 158 -> warm hit!
+    let d2 = df.create(&ctx_v1, &cancel).await.unwrap();
+    d2.ensure_session(&cancel).await.unwrap();
+    d2.shutdown().await.unwrap();
+    assert_eq!(factory.create_count.load(Ordering::SeqCst), 1);
+    assert_eq!(factory.total_shutdowns(), 0);
+
+    // Run #3 after in-place Chromium upgrade to 159 -> MUST evict v158 & spawn fresh v159!
+    let mut ctx_v2 = ctx_v1.clone();
+    ctx_v2.resolved_runtime = Some("chromium-159.0.0.2@1280x720".to_string());
+    let d3 = df.create(&ctx_v2, &cancel).await.unwrap();
+    d3.ensure_session(&cancel).await.unwrap();
+    d3.shutdown().await.unwrap();
+
+    assert_eq!(factory.create_count.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        factory.created_drivers.lock().unwrap()[0]
+            .shutdown_count
+            .load(Ordering::SeqCst),
+        1,
+        "stale Chromium v158 warm driver must be shut down on runtime upgrade"
+    );
+    let status = DaemonClient::connect(&paths)
+        .await
+        .unwrap()
+        .status(&cancel)
+        .await
+        .unwrap();
+    assert_eq!(
+        status.pooled_sessions, 1,
+        "upgraded browser must replace stale slot rather than leaking an extra pooled session"
+    );
+
+    srv_cancel.cancel();
+    srv_handle.await.unwrap();
+}
+
+#[test]
+fn regression_r1_f9_daemon_uses_stable_owned_tmpdir_and_survives_caller_tmpdir_deletion() {
+    let dir = ShortDaemonDir::new("r1-tmp");
+    let ephemeral_tmp = ShortDaemonDir::new("r1-ephem");
+    fs::create_dir_all(ephemeral_tmp.path()).unwrap();
+
+    // Client 1 starts daemon with a short-lived ephemeral `TMPDIR`.
+    let start = deja_bin_with_daemon(dir.path())
+        .env("TMPDIR", ephemeral_tmp.path())
+        .args(["daemon", "start", "--idle-timeout", "60", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(start.status.code(), Some(0));
+
+    // Daemon must have created its own `0o700` `<daemon_dir>/tmp` directory.
+    let daemon_tmp = dir.path().join("tmp");
+    let tmp_meta = fs::symlink_metadata(&daemon_tmp).expect("daemon tmp dir must exist");
+    assert!(tmp_meta.is_dir() && !tmp_meta.file_type().is_symlink());
+    assert_eq!(tmp_meta.permissions().mode() & 0o777, 0o700);
+
+    // Delete Client 1's ephemeral `TMPDIR` completely.
+    fs::remove_dir_all(ephemeral_tmp.path()).unwrap();
+    assert!(!ephemeral_tmp.path().exists());
+
+    // Client 2 queries daemon status cleanly and daemon-owned tmp dir remains intact until stop.
+    let status = deja_bin_with_daemon(dir.path())
+        .args(["daemon", "status", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(status.status.code(), Some(0));
+    let status_json: Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert_eq!(status_json["running"], true);
+    assert!(daemon_tmp.is_dir());
+
+    // `deja daemon stop` cleans up `<daemon_dir>/tmp` cleanly.
+    let stop = deja_bin_with_daemon(dir.path())
+        .args(["daemon", "stop", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(stop.status.code(), Some(0));
+    assert!(!daemon_tmp.exists());
 }

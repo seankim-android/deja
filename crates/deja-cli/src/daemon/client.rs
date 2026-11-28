@@ -21,6 +21,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::daemon::paths::{
     DaemonMetadata, DaemonPathError, DaemonPaths, connect_verified, ensure_daemon_dir_secure,
+    ensure_daemon_tmp_dir_secure, probe_daemon_lock_held,
 };
 use crate::daemon::pool::compute_session_key;
 use crate::daemon::protocol::{
@@ -49,16 +50,39 @@ pub struct StartedDaemonInfo {
     pub idle_timeout_secs: u64,
 }
 
+/// Shared connection dispatch state protected by a SINGLE mutex so `closed` checks and
+/// `oneshot::Sender` registration are strictly atomic — eliminating any wakeup race during
+/// reader EOF or writer failure.
+struct ClientDispatchState {
+    closed: bool,
+    pending_rpc: HashMap<u64, oneshot::Sender<WireDriverResult>>,
+    pending_control: Option<oneshot::Sender<ServerMessage>>,
+}
+
+impl ClientDispatchState {
+    fn new() -> Self {
+        Self {
+            closed: false,
+            pending_rpc: HashMap::new(),
+            pending_control: None,
+        }
+    }
+
+    fn close_and_wake_all(&mut self) {
+        self.closed = true;
+        self.pending_rpc.clear();
+        let _ = self.pending_control.take();
+    }
+}
+
 /// Cancel-safe multiplexed client speaking NDJSON over a verified Unix socket to `deja daemon`.
 pub struct DaemonClient {
     meta: DaemonMetadata,
     write_tx: mpsc::UnboundedSender<ClientMessage>,
-    pending_rpc: Arc<StdMutex<HashMap<u64, oneshot::Sender<WireDriverResult>>>>,
-    pending_control: Arc<StdMutex<Option<oneshot::Sender<ServerMessage>>>>,
+    dispatch: Arc<StdMutex<ClientDispatchState>>,
     prev_cancelled_rx: Arc<StdMutex<Option<oneshot::Receiver<WireDriverResult>>>>,
     rpc_lock: AsyncMutex<()>,
     next_rpc_id: AtomicU64,
-    closed: Arc<AtomicBool>,
     reader_task: JoinHandle<()>,
     writer_task: JoinHandle<()>,
 }
@@ -100,7 +124,10 @@ impl Drop for PendingRpcGuard<'_> {
 
 impl Drop for DaemonClient {
     fn drop(&mut self) {
-        self.closed.store(true, Ordering::SeqCst);
+        {
+            let mut state = self.dispatch.lock().unwrap_or_else(|p| p.into_inner());
+            state.close_and_wake_all();
+        }
         self.reader_task.abort();
         self.writer_task.abort();
     }
@@ -116,34 +143,30 @@ impl DaemonClient {
     fn from_stream(stream: UnixStream, meta: DaemonMetadata) -> Self {
         let (read_half, mut write_half) = stream.into_split();
         let (write_tx, mut write_rx) = mpsc::unbounded_channel::<ClientMessage>();
-        let pending_rpc: Arc<StdMutex<HashMap<u64, oneshot::Sender<WireDriverResult>>>> =
-            Arc::new(StdMutex::new(HashMap::new()));
-        let pending_control: Arc<StdMutex<Option<oneshot::Sender<ServerMessage>>>> =
-            Arc::new(StdMutex::new(None));
-        let closed = Arc::new(AtomicBool::new(false));
+        let dispatch = Arc::new(StdMutex::new(ClientDispatchState::new()));
 
-        let closed_w = Arc::clone(&closed);
+        let dispatch_w = Arc::clone(&dispatch);
         let writer_task = tokio::spawn(async move {
             while let Some(msg) = write_rx.recv().await {
                 if write_ndjson_frame(&mut write_half, &msg).await.is_err() {
-                    closed_w.store(true, Ordering::SeqCst);
-                    break;
+                    let mut state = dispatch_w.lock().unwrap_or_else(|p| p.into_inner());
+                    state.close_and_wake_all();
+                    return;
                 }
             }
-            closed_w.store(true, Ordering::SeqCst);
+            let mut state = dispatch_w.lock().unwrap_or_else(|p| p.into_inner());
+            state.close_and_wake_all();
         });
 
-        let pending_rpc_r = Arc::clone(&pending_rpc);
-        let pending_control_r = Arc::clone(&pending_control);
-        let closed_r = Arc::clone(&closed);
+        let dispatch_r = Arc::clone(&dispatch);
         let reader_task = tokio::spawn(async move {
             let mut reader = BoundedNdjsonReader::new(read_half);
             while let Ok(Some(msg)) = reader.next_frame::<ServerMessage>().await {
                 match msg {
                     ServerMessage::RpcResult { id, result } => {
                         let tx = {
-                            let mut map = pending_rpc_r.lock().unwrap_or_else(|p| p.into_inner());
-                            map.remove(&id)
+                            let mut state = dispatch_r.lock().unwrap_or_else(|p| p.into_inner());
+                            state.pending_rpc.remove(&id)
                         };
                         if let Some(tx) = tx {
                             let _ = tx.send(result);
@@ -151,9 +174,8 @@ impl DaemonClient {
                     }
                     other => {
                         let tx = {
-                            let mut slot =
-                                pending_control_r.lock().unwrap_or_else(|p| p.into_inner());
-                            slot.take()
+                            let mut state = dispatch_r.lock().unwrap_or_else(|p| p.into_inner());
+                            state.pending_control.take()
                         };
                         if let Some(tx) = tx {
                             let _ = tx.send(other);
@@ -161,23 +183,18 @@ impl DaemonClient {
                     }
                 }
             }
-            closed_r.store(true, Ordering::SeqCst);
-            // Wake every awaiting caller immediately on EOF or framing error.
-            let mut rpcs = pending_rpc_r.lock().unwrap_or_else(|p| p.into_inner());
-            rpcs.clear();
-            let mut ctrl = pending_control_r.lock().unwrap_or_else(|p| p.into_inner());
-            let _ = ctrl.take();
+            // Atomically mark closed and drop all pending senders so no caller can hang.
+            let mut state = dispatch_r.lock().unwrap_or_else(|p| p.into_inner());
+            state.close_and_wake_all();
         });
 
         Self {
             meta,
             write_tx,
-            pending_rpc,
-            pending_control,
+            dispatch,
             prev_cancelled_rx: Arc::new(StdMutex::new(None)),
             rpc_lock: AsyncMutex::new(()),
             next_rpc_id: AtomicU64::new(1),
-            closed,
             reader_task,
             writer_task,
         }
@@ -197,42 +214,37 @@ impl DaemonClient {
         if cancel.is_cancelled() {
             return Err(DriverError::Cancelled);
         }
-        if self.closed.load(Ordering::SeqCst) {
-            return Err(DriverError::SessionClosed(
-                "daemon connection is closed".to_string(),
-            ));
-        }
 
         let (tx, rx) = oneshot::channel();
         {
-            let mut slot = self
-                .pending_control
-                .lock()
-                .unwrap_or_else(|p| p.into_inner());
-            *slot = Some(tx);
-        }
-        if self.write_tx.send(msg).is_err() {
-            let mut slot = self
-                .pending_control
-                .lock()
-                .unwrap_or_else(|p| p.into_inner());
-            let _ = slot.take();
-            return Err(DriverError::SessionClosed(
-                "daemon writer channel closed".to_string(),
-            ));
+            let mut state = self.dispatch.lock().unwrap_or_else(|p| p.into_inner());
+            if state.closed {
+                return Err(DriverError::SessionClosed(
+                    "daemon connection is closed".to_string(),
+                ));
+            }
+            state.pending_control = Some(tx);
+            if self.write_tx.send(msg).is_err() {
+                state.close_and_wake_all();
+                return Err(DriverError::SessionClosed(
+                    "daemon writer channel closed".to_string(),
+                ));
+            }
         }
 
         let recv_res = match timeout {
             Some(dur) => tokio::select! {
                 biased;
                 _ = cancel.cancelled() => {
-                    let _ = self.pending_control.lock().unwrap_or_else(|p| p.into_inner()).take();
+                    let mut state = self.dispatch.lock().unwrap_or_else(|p| p.into_inner());
+                    let _ = state.pending_control.take();
                     return Err(DriverError::Cancelled);
                 }
                 timed = tokio::time::timeout(dur, rx) => match timed {
                     Ok(inner) => inner,
                     Err(_) => {
-                        let _ = self.pending_control.lock().unwrap_or_else(|p| p.into_inner()).take();
+                        let mut state = self.dispatch.lock().unwrap_or_else(|p| p.into_inner());
+                        let _ = state.pending_control.take();
                         return Err(DriverError::Timeout {
                             operation: "daemon_control".to_string(),
                             elapsed_ms: dur.as_millis() as u64,
@@ -244,7 +256,8 @@ impl DaemonClient {
             None => tokio::select! {
                 biased;
                 _ = cancel.cancelled() => {
-                    let _ = self.pending_control.lock().unwrap_or_else(|p| p.into_inner()).take();
+                    let mut state = self.dispatch.lock().unwrap_or_else(|p| p.into_inner());
+                    let _ = state.pending_control.take();
                     return Err(DriverError::Cancelled);
                 }
                 inner = rx => inner,
@@ -326,8 +339,8 @@ impl DaemonClient {
         ctx: &DriverContext,
         cancel: &CancellationToken,
     ) -> Result<(u64, String, DriverCapabilities, String, bool), DriverFactoryError> {
-        let session_key = compute_session_key(ctx);
         let wire_ctx = WireDriverContext::from_driver_context(ctx);
+        let session_key = compute_session_key(&wire_ctx.clone().into_driver_context());
         let reply = self
             .send_control(
                 ClientMessage::AcquireLease {
@@ -399,11 +412,6 @@ impl DaemonClient {
         if cancel.is_cancelled() {
             return Err(DriverError::Cancelled);
         }
-        if self.closed.load(Ordering::SeqCst) {
-            return Err(DriverError::SessionClosed(
-                "daemon connection is closed".to_string(),
-            ));
-        }
 
         let _rpc_guard = tokio::select! {
             biased;
@@ -415,16 +423,19 @@ impl DaemonClient {
         let id = self.next_rpc_id.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = oneshot::channel();
         {
-            let mut map = self.pending_rpc.lock().unwrap_or_else(|p| p.into_inner());
-            map.insert(id, tx);
-        }
-
-        if self.write_tx.send(ClientMessage::Rpc { id, op }).is_err() {
-            let mut map = self.pending_rpc.lock().unwrap_or_else(|p| p.into_inner());
-            map.remove(&id);
-            return Err(DriverError::SessionClosed(
-                "daemon writer channel closed".to_string(),
-            ));
+            let mut state = self.dispatch.lock().unwrap_or_else(|p| p.into_inner());
+            if state.closed {
+                return Err(DriverError::SessionClosed(
+                    "daemon connection is closed".to_string(),
+                ));
+            }
+            state.pending_rpc.insert(id, tx);
+            if self.write_tx.send(ClientMessage::Rpc { id, op }).is_err() {
+                state.close_and_wake_all();
+                return Err(DriverError::SessionClosed(
+                    "daemon writer channel closed".to_string(),
+                ));
+            }
         }
 
         let mut guard = PendingRpcGuard {
@@ -460,8 +471,11 @@ impl DaemonClient {
         let cancel = CancellationToken::new();
         let _rpc_guard = self.rpc_lock.lock().await;
         let _ = self.drain_previous_cancelled(&cancel).await;
-        if self.closed.load(Ordering::SeqCst) {
-            return Ok(());
+        {
+            let state = self.dispatch.lock().unwrap_or_else(|p| p.into_inner());
+            if state.closed {
+                return Ok(());
+            }
         }
         match self
             .send_control(
@@ -561,6 +575,10 @@ impl PlatformDriver for DaemonDriver {
 
     fn capabilities(&self) -> &DriverCapabilities {
         &self.capabilities
+    }
+
+    fn is_daemon_backed(&self) -> bool {
+        true
     }
 
     fn ensure_session<'a>(&'a self, cancel: &'a CancellationToken) -> DriverFuture<'a, ()> {
@@ -1008,8 +1026,32 @@ pub async fn ensure_background_daemon_started(
     idle_timeout_secs: u64,
     cancel: &CancellationToken,
 ) -> Result<StartedDaemonInfo, DaemonPathError> {
-    // Validate directory security before attempting anything (creating with `0o700` if absent).
+    let exe = std::env::current_exe().map_err(DaemonPathError::Io)?;
+    ensure_background_daemon_started_with_exe(
+        paths,
+        env,
+        idle_timeout_secs,
+        &exe,
+        AUTO_START_POLL_TIMEOUT,
+        cancel,
+    )
+    .await
+}
+
+/// Spawn a daemon process using an explicit executable path and poll deadline (shared by
+/// production auto-start and deterministic concurrency tests).
+pub async fn ensure_background_daemon_started_with_exe(
+    paths: &DaemonPaths,
+    env: &BTreeMap<String, String>,
+    idle_timeout_secs: u64,
+    exe: &std::path::Path,
+    poll_timeout: Duration,
+    cancel: &CancellationToken,
+) -> Result<StartedDaemonInfo, DaemonPathError> {
+    // Validate directory security and create stable `<daemon_dir>/tmp` (`0o700`) so the daemon
+    // never inherits a short-lived caller's ephemeral `TMPDIR`.
     ensure_daemon_dir_secure(&paths.dir)?;
+    let daemon_tmp_dir = ensure_daemon_tmp_dir_secure(paths)?;
 
     // Fast path: already running.
     match DaemonClient::connect(paths).await {
@@ -1030,7 +1072,6 @@ pub async fn ensure_background_daemon_started(
         Err(_) => {}
     }
 
-    let exe = std::env::current_exe().map_err(DaemonPathError::Io)?;
     let mut cmd = tokio::process::Command::new(exe);
     cmd.args([
         "daemon",
@@ -1052,10 +1093,12 @@ pub async fn ensure_background_daemon_started(
         }
     }
     cmd.env("DEJA_DAEMON_DIR", &paths.dir);
+    cmd.env("TMPDIR", &daemon_tmp_dir);
 
     let mut child = cmd.spawn().map_err(DaemonPathError::Io)?;
     let spawned_pid = child.id();
-    let deadline = Instant::now() + AUTO_START_POLL_TIMEOUT;
+    let deadline = Instant::now() + poll_timeout;
+    let mut child_exit_status: Option<std::process::ExitStatus> = None;
 
     while Instant::now() < deadline {
         if cancel.is_cancelled() {
@@ -1084,25 +1127,41 @@ pub async fn ensure_background_daemon_started(
             Err(_) => {}
         }
 
-        // Check if our spawned child exited early; still do one final Ping in case another
-        // concurrent starter won `daemon.lock`.
-        if let Ok(Some(status)) = child.try_wait() {
-            if let Ok(client) = DaemonClient::connect(paths).await
-                && let Ok((version, pid)) = client.ping(cancel).await
-            {
-                let meta = client.metadata().clone();
-                return Ok(StartedDaemonInfo {
-                    started: false,
-                    already_running: true,
-                    pid,
-                    version,
-                    socket_path: meta.socket_path,
-                    idle_timeout_secs: meta.idle_timeout_secs,
-                });
+        if child_exit_status.is_none()
+            && let Ok(Some(status)) = child.try_wait()
+        {
+            child_exit_status = Some(status);
+        }
+
+        // If our child exited early, ONLY abort early when `daemon.lock` is ALSO unlocked.
+        // If another concurrent starter won `daemon.lock` and is still publishing `deja.sock`,
+        // keep polling until it is ready or the startup deadline expires.
+        if let Some(status) = child_exit_status {
+            match probe_daemon_lock_held(paths) {
+                Ok(true) => {}
+                Ok(false) => {
+                    // One final connect check in case the winner already finished publishing &
+                    // something transient happened.
+                    if let Ok(client) = DaemonClient::connect(paths).await
+                        && let Ok((version, pid)) = client.ping(cancel).await
+                    {
+                        let meta = client.metadata().clone();
+                        return Ok(StartedDaemonInfo {
+                            started: false,
+                            already_running: true,
+                            pid,
+                            version,
+                            socket_path: meta.socket_path,
+                            idle_timeout_secs: meta.idle_timeout_secs,
+                        });
+                    }
+                    return Err(DaemonPathError::Io(std::io::Error::other(format!(
+                        "Déjà daemon exited prematurely during startup with status {status}"
+                    ))));
+                }
+                Err(err) if err.is_security_violation() => return Err(err),
+                Err(_) => {}
             }
-            return Err(DaemonPathError::Io(std::io::Error::other(format!(
-                "Déjà daemon exited prematurely during startup with status {status}"
-            ))));
         }
 
         tokio::select! {
@@ -1121,14 +1180,15 @@ pub async fn ensure_background_daemon_started(
         std::io::ErrorKind::TimedOut,
         format!(
             "timed out waiting {}ms for Déjà daemon socket {}",
-            AUTO_START_POLL_TIMEOUT.as_millis(),
+            poll_timeout.as_millis(),
             paths.socket.display()
         ),
     )))
 }
 
 /// [`DriverFactory`] wrapper that leases warm drivers from the persistent Unix-socket daemon while
-/// delegating read-only `resolve_runtime` and `install_app` directly to `inner`.
+/// delegating read-only `resolve_runtime`, `prepare_batch_build`, and `install_app` directly to
+/// `inner`.
 pub struct DaemonDriverFactory {
     inner: Arc<dyn DriverFactory>,
     default_env: BTreeMap<String, String>,
@@ -1261,10 +1321,18 @@ impl DriverFactory for DaemonDriverFactory {
             // without ever spawning a background daemon.
             self.inner.validate_warm_context(ctx)?;
 
-            let paths = self.resolve_paths(ctx)?;
+            // Ensure Web requests always carry the resolved Chromium runtime version so in-place
+            // browser upgrades invalidate stale pooled WebDriver instances.
+            let mut effective_ctx = ctx.clone();
+            if effective_ctx.platform == "web" && effective_ctx.resolved_runtime.is_none() {
+                effective_ctx.resolved_runtime =
+                    self.inner.resolve_runtime(&effective_ctx, cancel).await?;
+            }
+
+            let paths = self.resolve_paths(&effective_ctx)?;
             for attempt in 0..2 {
-                let client = self.connect_client(&paths, ctx, cancel).await?;
-                match client.acquire_lease(ctx, cancel).await {
+                let client = self.connect_client(&paths, &effective_ctx, cancel).await?;
+                match client.acquire_lease(&effective_ctx, cancel).await {
                     Ok((lease_id, platform, capabilities, session_key, warm_hit)) => {
                         return Ok(Box::new(DaemonDriver::new(
                             client,
@@ -1308,5 +1376,69 @@ impl DriverFactory for DaemonDriverFactory {
 
     fn unwrapped_without_daemon(&self) -> Option<Arc<dyn DriverFactory>> {
         Some(Arc::clone(&self.inner))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dummy_meta() -> DaemonMetadata {
+        DaemonMetadata {
+            version: "0.1.0".to_string(),
+            pid: std::process::id(),
+            uid: 0,
+            socket_path: "/tmp/dummy.sock".to_string(),
+            started_at: "2026-01-01T00:00:00Z".to_string(),
+            idle_timeout_secs: 60,
+            proc_start_time: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn closed_connection_and_writer_failure_immediately_wake_callers() {
+        // 1. Peer closes immediately -> `ping` and `call_rpc` wake immediately with SessionClosed,
+        //    even if registered right around EOF.
+        let (a, b) = UnixStream::pair().unwrap();
+        let client = DaemonClient::from_stream(a, dummy_meta());
+        drop(b);
+
+        let cancel = CancellationToken::new();
+        let ping_res = tokio::time::timeout(Duration::from_secs(2), client.ping(&cancel))
+            .await
+            .expect("ping must not hang on closed stream");
+        assert!(matches!(ping_res, Err(DriverError::SessionClosed(_))));
+
+        let rpc_res = tokio::time::timeout(
+            Duration::from_secs(2),
+            client.call_rpc(DriverOp::EnsureSession, &cancel),
+        )
+        .await
+        .expect("call_rpc must not hang after connection closed");
+        assert!(matches!(rpc_res, Err(DriverError::SessionClosed(_))));
+
+        // 2. Peer shuts down its read half while keeping its write half open -> writer fails with
+        //    EPIPE and MUST wake pending caller immediately without waiting for reader EOF!
+        let (c, d) = UnixStream::pair().unwrap();
+        let (d_read, _d_write_kept_open) = d.into_split();
+        drop(d_read);
+        let client2 = DaemonClient::from_stream(c, dummy_meta());
+
+        // Oversized payload or broken pipe forces write failure; send an oversized input_text
+        // (> 32 MiB) so writer immediately rejects FrameTooLarge and closes dispatch state!
+        let huge = "x".repeat(crate::daemon::protocol::MAX_FRAME_BYTES + 16);
+        let write_fail_res = tokio::time::timeout(
+            Duration::from_secs(2),
+            client2.call_rpc(
+                DriverOp::InputText {
+                    app_id: "app".to_string(),
+                    text: huge,
+                },
+                &cancel,
+            ),
+        )
+        .await
+        .expect("writer failure must immediately wake pending RPC caller");
+        assert!(matches!(write_fail_res, Err(DriverError::SessionClosed(_))));
     }
 }

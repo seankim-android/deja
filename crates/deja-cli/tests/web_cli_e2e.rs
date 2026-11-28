@@ -937,21 +937,31 @@ fn live_web_cli_warm_daemon_reuses_chromium_and_cleans_up_on_stop() {
     assert!(!daemon_dir.join("deja.sock").exists());
     assert!(!daemon_dir.join("daemon.json").exists());
 
-    // 5. Verify ZERO leftover `deja-web-profile-*` temp dirs and ZERO orphaned Chromium processes.
-    let leftover_profiles: Vec<String> = fs::read_dir(isolated_tmp.path())
-        .unwrap()
-        .flatten()
-        .filter_map(|e| {
-            let name = e.file_name().to_string_lossy().into_owned();
-            name.starts_with("deja-web-profile-").then_some(name)
-        })
-        .collect();
+    // 5. Verify ZERO leftover `deja-web-profile-*` temp dirs (in both daemon-owned `<daemon_dir>/tmp`
+    //    and test `TMPDIR`) and ZERO orphaned Chromium processes.
+    for check_dir in [daemon_dir.join("tmp"), isolated_tmp.path().to_path_buf()] {
+        if let Ok(entries) = fs::read_dir(&check_dir) {
+            let leftover_profiles: Vec<String> = entries
+                .flatten()
+                .filter_map(|e| {
+                    let name = e.file_name().to_string_lossy().into_owned();
+                    name.starts_with("deja-web-profile-").then_some(name)
+                })
+                .collect();
+            assert!(
+                leftover_profiles.is_empty(),
+                "leftover Chromium profile dirs in {} after `deja daemon stop`: {leftover_profiles:?}",
+                check_dir.display()
+            );
+        }
+    }
     assert!(
-        leftover_profiles.is_empty(),
-        "leftover Chromium profile dirs after `deja daemon stop`: {leftover_profiles:?}"
+        !daemon_dir.join("tmp").exists(),
+        "daemon-owned `<daemon_dir>/tmp` must be cleaned up on `deja daemon stop`"
     );
 
-    let marker = isolated_tmp.path().to_string_lossy().into_owned();
+    let tmp_marker = isolated_tmp.path().to_string_lossy().into_owned();
+    let daemon_marker = daemon_dir.to_string_lossy().into_owned();
     let ps = Command::new("/bin/ps")
         .args(["-eo", "pid,args"])
         .output()
@@ -959,11 +969,11 @@ fn live_web_cli_warm_daemon_reuses_chromium_and_cleans_up_on_stop() {
     let ps_out = String::from_utf8_lossy(&ps.stdout);
     let orphans: Vec<&str> = ps_out
         .lines()
-        .filter(|line| line.contains(&marker))
+        .filter(|line| line.contains(&tmp_marker) || line.contains(&daemon_marker))
         .collect();
     assert!(
         orphans.is_empty(),
-        "orphaned Chromium processes referencing test TMPDIR survived `deja daemon stop`:\n{}",
+        "orphaned Chromium or daemon processes survived `deja daemon stop`:\n{}",
         orphans.join("\n")
     );
 }

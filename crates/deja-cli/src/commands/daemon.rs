@@ -19,8 +19,9 @@ use crate::cli::{DaemonCommand, DaemonStartArgs};
 use crate::daemon::client::{DaemonClient, ensure_background_daemon_started};
 #[cfg(unix)]
 use crate::daemon::paths::{
-    DaemonPathError, DaemonPaths, acquire_daemon_lock, cleanup_stale_files, probe_daemon_lock_held,
-    read_daemon_metadata, validate_daemon_dir_secure,
+    DaemonPathError, DaemonPaths, acquire_daemon_lock, cleanup_stale_files, current_uid,
+    probe_daemon_lock_held, read_daemon_metadata, validate_daemon_dir_secure,
+    verify_daemon_process_identity,
 };
 #[cfg(unix)]
 use crate::daemon::server::{DaemonServer, DaemonStartError};
@@ -42,6 +43,36 @@ fn emit_daemon_error(deps: &CliDeps, json_mode: bool, code: &str, message: &str,
             .writeln_stderr(&format!("deja daemon error: {message}"));
     }
     exit
+}
+
+#[cfg(unix)]
+fn emit_stop_failed(
+    deps: &CliDeps,
+    json_mode: bool,
+    pid: Option<u32>,
+    stopped_sessions: usize,
+    forced_sigterm: bool,
+    message: &str,
+) -> u8 {
+    if json_mode {
+        let payload = json!({
+            "stopped": false,
+            "pid": pid,
+            "stoppedSessions": stopped_sessions,
+            "forcedSigterm": forced_sigterm,
+            "error": {
+                "code": "DAEMON_STOP_FAILED",
+                "message": message,
+            }
+        });
+        deps.output.writeln_stdout(
+            &serde_json::to_string_pretty(&payload).expect("daemon stop error JSON"),
+        );
+    } else {
+        deps.output
+            .writeln_stderr(&format!("deja daemon error: {message}"));
+    }
+    EXIT_FAILURE
 }
 
 pub async fn run(args: &DaemonArgs, json_mode: bool, deps: &CliDeps) -> u8 {
@@ -341,6 +372,26 @@ fn emit_not_running_status(
 
 #[cfg(unix)]
 async fn run_stop(json_mode: bool, deps: &CliDeps) -> u8 {
+    run_stop_with_timeouts(
+        json_mode,
+        deps,
+        Duration::from_secs(10),
+        Duration::from_secs(2),
+        Duration::from_secs(3),
+    )
+    .await
+}
+
+/// Implementation of `deja daemon stop` with explicit wait budgets (exposed for fast deterministic
+/// timeout/unresponsive-daemon regression testing).
+#[cfg(unix)]
+pub async fn run_stop_with_timeouts(
+    json_mode: bool,
+    deps: &CliDeps,
+    rpc_lock_wait: Duration,
+    unconnectable_lock_wait: Duration,
+    sigterm_lock_wait: Duration,
+) -> u8 {
     let paths = match DaemonPaths::resolve(&deps.env) {
         Ok(p) => p,
         Err(err) => {
@@ -354,8 +405,8 @@ async fn run_stop(json_mode: bool, deps: &CliDeps) -> u8 {
         }
     };
 
-    match validate_daemon_dir_secure(&paths.dir) {
-        Ok(_) => {}
+    let my_uid = match validate_daemon_dir_secure(&paths.dir) {
+        Ok(uid) => uid,
         Err(DaemonPathError::NotFound(_)) => {
             return emit_already_stopped(deps, json_mode, Vec::new());
         }
@@ -368,24 +419,70 @@ async fn run_stop(json_mode: bool, deps: &CliDeps) -> u8 {
                 EXIT_FAILURE,
             );
         }
-    }
+    };
 
     match DaemonClient::connect(&paths).await {
         Ok(client) => {
-            let target_pid = client.metadata().pid;
+            let meta = client.metadata().clone();
+            let target_pid = meta.pid;
             let stopped_sessions = client.shutdown_daemon(&deps.cancel).await.unwrap_or(0);
             drop(client);
 
-            let unlocked = wait_for_lock_release(&paths, Duration::from_secs(10)).await;
+            let mut unlocked = wait_for_lock_release(&paths, rpc_lock_wait).await;
             let mut forced_sigterm = false;
             if !unlocked {
+                // Re-verify process identity (UID + `lstart` + daemon foreground args) BEFORE
+                // ever sending a fallback SIGTERM so a recycled PID can never be signalled.
+                if let Err(reason) = verify_daemon_process_identity(
+                    target_pid,
+                    my_uid,
+                    meta.proc_start_time.as_deref(),
+                ) {
+                    return emit_stop_failed(
+                        deps,
+                        json_mode,
+                        Some(target_pid),
+                        stopped_sessions,
+                        false,
+                        &format!(
+                            "Déjà daemon (pid {target_pid}) did not release daemon.lock within {}ms and fallback SIGTERM was refused: {reason}",
+                            rpc_lock_wait.as_millis()
+                        ),
+                    );
+                }
                 forced_sigterm = true;
                 let _ = send_sigterm_via_bin_kill(target_pid);
-                let _ = wait_for_lock_release(&paths, Duration::from_secs(3)).await;
+                unlocked = wait_for_lock_release(&paths, sigterm_lock_wait).await;
+            }
+
+            if !unlocked {
+                return emit_stop_failed(
+                    deps,
+                    json_mode,
+                    Some(target_pid),
+                    stopped_sessions,
+                    forced_sigterm,
+                    &format!(
+                        "Déjà daemon (pid {target_pid}) failed to release daemon.lock after shutdown and SIGTERM"
+                    ),
+                );
             }
 
             if let Ok(Some(lock)) = acquire_daemon_lock(&paths) {
                 let _ = cleanup_stale_files(&paths, &lock);
+            }
+
+            if !confirm_daemon_stopped(&paths) {
+                return emit_stop_failed(
+                    deps,
+                    json_mode,
+                    Some(target_pid),
+                    stopped_sessions,
+                    forced_sigterm,
+                    &format!(
+                        "Déjà daemon (pid {target_pid}) stop could not be confirmed: daemon.lock or deja.sock is still active"
+                    ),
+                );
             }
 
             if json_mode {
@@ -432,49 +529,86 @@ async fn run_stop(json_mode: bool, deps: &CliDeps) -> u8 {
                 ),
             },
             Ok(None) => {
-                // Lock is held but socket isn't accepting: try waiting briefly, else SIGTERM PID
-                // from verified `daemon.json`.
-                let meta_pid = read_daemon_metadata(&paths).ok().map(|m| m.pid);
-                if wait_for_lock_release(&paths, Duration::from_secs(2)).await {
+                // Lock is held even though socket isn't accepting: wait briefly in case the daemon
+                // is already exiting, then strictly verify process identity before any SIGTERM.
+                let meta = read_daemon_metadata(&paths).ok();
+                if wait_for_lock_release(&paths, unconnectable_lock_wait).await {
                     let cleaned = acquire_daemon_lock(&paths)
                         .ok()
                         .flatten()
                         .and_then(|lock| cleanup_stale_files(&paths, &lock).ok())
                         .unwrap_or_default();
-                    return emit_already_stopped(deps, json_mode, cleaned);
-                }
-                if let Some(pid) = meta_pid {
-                    let _ = send_sigterm_via_bin_kill(pid);
-                    let released = wait_for_lock_release(&paths, Duration::from_secs(5)).await;
-                    if let Ok(Some(lock)) = acquire_daemon_lock(&paths) {
-                        let _ = cleanup_stale_files(&paths, &lock);
-                    }
-                    if released {
-                        if json_mode {
-                            let payload = json!({
-                                "stopped": true,
-                                "wasRunning": true,
-                                "pid": pid,
-                                "stoppedSessions": 0,
-                                "forcedSigterm": true,
-                            });
-                            deps.output.writeln_stdout(
-                                &serde_json::to_string_pretty(&payload).expect("daemon stop JSON"),
-                            );
-                        } else {
-                            deps.output.writeln_stdout(&format!(
-                                "Déjà daemon stopped via SIGTERM (pid {pid})."
-                            ));
-                        }
-                        return EXIT_OK;
+                    if confirm_daemon_stopped(&paths) {
+                        return emit_already_stopped(deps, json_mode, cleaned);
                     }
                 }
-                emit_daemon_error(
+
+                let Some(meta) = meta else {
+                    return emit_stop_failed(
+                        deps,
+                        json_mode,
+                        None,
+                        0,
+                        false,
+                        "Déjà daemon lock is held without readable daemon.json metadata; refusing unverified SIGTERM",
+                    );
+                };
+
+                let expected_uid = current_uid().unwrap_or(my_uid);
+                if let Err(reason) = verify_daemon_process_identity(
+                    meta.pid,
+                    expected_uid,
+                    meta.proc_start_time.as_deref(),
+                ) {
+                    return emit_stop_failed(
+                        deps,
+                        json_mode,
+                        Some(meta.pid),
+                        0,
+                        false,
+                        &format!(
+                            "Déjà daemon lock is held, but fallback SIGTERM for pid {} was refused: {reason}",
+                            meta.pid
+                        ),
+                    );
+                }
+
+                let _ = send_sigterm_via_bin_kill(meta.pid);
+                let released = wait_for_lock_release(&paths, sigterm_lock_wait).await;
+                if released && let Ok(Some(lock)) = acquire_daemon_lock(&paths) {
+                    let _ = cleanup_stale_files(&paths, &lock);
+                }
+                if released && confirm_daemon_stopped(&paths) {
+                    if json_mode {
+                        let payload = json!({
+                            "stopped": true,
+                            "wasRunning": true,
+                            "pid": meta.pid,
+                            "stoppedSessions": 0,
+                            "forcedSigterm": true,
+                        });
+                        deps.output.writeln_stdout(
+                            &serde_json::to_string_pretty(&payload).expect("daemon stop JSON"),
+                        );
+                    } else {
+                        deps.output.writeln_stdout(&format!(
+                            "Déjà daemon stopped via SIGTERM (pid {}).",
+                            meta.pid
+                        ));
+                    }
+                    return EXIT_OK;
+                }
+
+                emit_stop_failed(
                     deps,
                     json_mode,
-                    "DAEMON_STOP_FAILED",
-                    "Déjà daemon lock remained held after stop attempt",
-                    EXIT_FAILURE,
+                    Some(meta.pid),
+                    0,
+                    true,
+                    &format!(
+                        "Déjà daemon (pid {}) lock remained held after verified SIGTERM",
+                        meta.pid
+                    ),
                 )
             }
             Err(err) => emit_daemon_error(
@@ -486,6 +620,12 @@ async fn run_stop(json_mode: bool, deps: &CliDeps) -> u8 {
             ),
         },
     }
+}
+
+#[cfg(unix)]
+fn confirm_daemon_stopped(paths: &DaemonPaths) -> bool {
+    matches!(probe_daemon_lock_held(paths), Ok(false))
+        && std::fs::symlink_metadata(&paths.socket).is_err()
 }
 
 #[cfg(unix)]

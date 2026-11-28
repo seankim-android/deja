@@ -713,7 +713,7 @@ pub async fn run(
     }
 
     // Resolve runtime, create driver, attach session, and install app.
-    let driver_ctx = build_driver_context(
+    let mut driver_ctx = build_driver_context(
         &config,
         deps,
         config.verification_timeout_ms,
@@ -742,6 +742,7 @@ pub async fn run(
             );
         }
     };
+    driver_ctx.resolved_runtime = runtime.clone();
 
     let attach_t0 = Instant::now();
     let driver = match deps.driver_factory.create(&driver_ctx, &deps.cancel).await {

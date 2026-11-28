@@ -45,6 +45,8 @@ pub struct McpDriverContext {
     pub env: BTreeMap<String, String>,
     pub headless: Option<bool>,
     pub screen_size: Option<Value>,
+    /// Optional runtime string previously resolved via `McpDriverFactory::resolve_runtime`.
+    pub resolved_runtime: Option<String>,
 }
 
 /// Trait-abstracted driver lifecycle injected by `deja-cli` (or test mocks) into `deja-mcp`.
@@ -221,6 +223,7 @@ impl McpServerConfig {
             env: self.process_env.clone(),
             headless: self.headless,
             screen_size: self.screen_size.clone(),
+            resolved_runtime: None,
         }
     }
 }

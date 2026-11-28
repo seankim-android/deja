@@ -753,6 +753,13 @@ pub trait PlatformDriver: Send + Sync {
         None
     }
 
+    /// Returns `true` when this driver proxies a leased session from the persistent warm daemon,
+    /// allowing long-lived callers such as `deja-mcp` to release the exclusive lease immediately
+    /// after each tool call while the daemon keeps the underlying driver warm.
+    fn is_daemon_backed(&self) -> bool {
+        false
+    }
+
     /// Returns `true` when this driver benefits from asynchronous background reset between warm
     /// daemon leases (for example rotating a dirty Web `BrowserContext`).
     fn needs_idle_reuse_prep(&self) -> bool {

@@ -108,6 +108,18 @@ impl WarmSessionState {
         }
     }
 
+    /// Release any held daemon-backed driver lease (`driver.shutdown()` -> `LeaseRelease`) while
+    /// keeping `installed_build_fingerprint` and `installed_runtime` intact so subsequent tool
+    /// calls re-acquire the warm pooled driver immediately without blocking other clients or
+    /// preventing daemon idle TTL shutdown.
+    pub async fn release_daemon_lease_if_any(&mut self) {
+        if self.driver.as_ref().is_some_and(|d| d.is_daemon_backed())
+            && let Some(driver) = self.driver.take()
+        {
+            let _ = tokio::time::timeout(DRIVER_SHUTDOWN_TIMEOUT, driver.shutdown()).await;
+        }
+    }
+
     /// Compute or reuse a stat-verified streaming SHA-256 build fingerprint (`DEJA-53`).
     pub fn fingerprint_build(
         &mut self,
@@ -344,10 +356,32 @@ pub async fn dispatch_tool_call(
     match name {
         "deja_list" => handle_deja_list(&ctx, raw_arguments, &cancel),
         "deja_inspect" => handle_deja_inspect(&ctx, raw_arguments, &cancel),
-        "deja_run" => handle_deja_run(&ctx, raw_arguments, &cancel).await,
-        "deja_remember" => handle_deja_remember(&ctx, raw_arguments, &cancel).await,
+        "deja_run" => {
+            let res = handle_deja_run(&ctx, raw_arguments, &cancel).await;
+            ctx.exec_mutex
+                .lock()
+                .await
+                .release_daemon_lease_if_any()
+                .await;
+            res
+        }
+        "deja_remember" => {
+            let res = handle_deja_remember(&ctx, raw_arguments, &cancel).await;
+            ctx.exec_mutex
+                .lock()
+                .await
+                .release_daemon_lease_if_any()
+                .await;
+            res
+        }
         "deja_exec_batch" | "deja_run_steps" => {
-            handle_deja_exec_batch(&ctx, raw_arguments, &cancel).await
+            let res = handle_deja_exec_batch(&ctx, raw_arguments, &cancel).await;
+            ctx.exec_mutex
+                .lock()
+                .await
+                .release_daemon_lease_if_any()
+                .await;
+            res
         }
         "deja_explore" => handle_deja_explore(&ctx, raw_arguments),
         _ => ToolDispatchResult::Response(tool_error(
@@ -752,9 +786,15 @@ async fn ensure_warm_driver_and_install(
 
     let t0 = Instant::now();
 
-    // If the runtime changed since the warm driver was created, tear down and re-create.
-    if state.driver.is_some() && state.installed_runtime != *runtime {
+    // If the runtime changed since the warm driver was created (or since a daemon lease was
+    // released), clear cached install tracking and tear down any held driver before re-creating.
+    if state.installed_runtime != *runtime {
         state.teardown_driver().await;
+    }
+
+    let mut effective_ctx = driver_ctx.clone();
+    if effective_ctx.resolved_runtime.is_none() {
+        effective_ctx.resolved_runtime = runtime.clone();
     }
 
     // Reuse warm driver when available; if its session dropped, recreate cleanly.
@@ -778,7 +818,7 @@ async fn ensure_warm_driver_and_install(
                 state.teardown_driver().await;
                 return Err(WarmAcquireError::Cancelled);
             }
-            res = factory.create_driver(driver_ctx) => res,
+            res = factory.create_driver(&effective_ctx) => res,
         };
         let driver = match created {
             Ok(d) => d,

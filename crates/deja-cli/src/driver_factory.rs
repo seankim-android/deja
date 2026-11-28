@@ -125,6 +125,9 @@ pub struct DriverContext {
     pub env: BTreeMap<String, String>,
     /// Optional batch-shared staged build artifact verified once and reused across shard workers.
     pub staged_build: Option<SharedStagedBuild>,
+    /// Optional resolved runtime string (for example `"chromium-158.0.8127.38@1280x800"` or
+    /// `"ios-27.2"`) passed into daemon pooling so browser upgrades invalidate stale warm drivers.
+    pub resolved_runtime: Option<String>,
 }
 
 /// Abstract factory for constructing concrete [`PlatformDriver`] instances.
@@ -1428,6 +1431,7 @@ mod tests {
             screen_size: None,
             timeout_ms: 30_000,
             env: BTreeMap::new(),
+            resolved_runtime: None,
         };
         let pre_res = factory.prepare_batch_build(&ctx, &pre_cancel).await;
         assert!(

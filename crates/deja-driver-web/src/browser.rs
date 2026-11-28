@@ -482,6 +482,18 @@ impl ManagedBrowser {
         if let Some(path) = opts.env.get("PATH") {
             cmd.env("PATH", path);
         }
+        if !opts.headless {
+            for key in [
+                "DISPLAY",
+                "WAYLAND_DISPLAY",
+                "XAUTHORITY",
+                "XDG_RUNTIME_DIR",
+            ] {
+                if let Some(val) = opts.env.get(key) {
+                    cmd.env(key, val);
+                }
+            }
+        }
         cmd.stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())

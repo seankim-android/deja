@@ -13,8 +13,11 @@ use sha2::{Digest, Sha256};
 use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 use tokio_util::sync::CancellationToken;
 
+use crate::daemon::ALLOWED_WEB_HEADFUL_ENV_KEYS;
 use crate::daemon::paths::DaemonMetadata;
-use crate::daemon::protocol::{DaemonStatusReport, PooledSessionStatus};
+use crate::daemon::protocol::{
+    DaemonStatusReport, PooledSessionStatus, absolutize_chrome_env_paths,
+};
 use crate::driver_factory::{DriverContext, DriverFactory, DriverFactoryError};
 
 /// Bounded shutdown budget per pooled driver during graceful daemon shutdown or replacement.
@@ -33,7 +36,7 @@ pub struct GateKey {
 
 impl GateKey {
     #[must_use]
-    pub fn for_context(ctx: &DriverContext, session_key: &str) -> Self {
+    pub fn for_context(ctx: &DriverContext, _session_key: &str) -> Self {
         match ctx.platform.as_str() {
             "ios" => Self {
                 platform: "ios".to_string(),
@@ -48,7 +51,10 @@ impl GateKey {
             "web" => Self {
                 platform: "web".to_string(),
                 device: ctx.device.trim().to_string(),
-                web_session_key: Some(session_key.to_string()),
+                // Exclude `resolved_runtime` from the Web gate key so an in-place Chromium version
+                // upgrade hits the same gate, evicts the stale browser process, and replaces it,
+                // while distinct viewports / headless modes still run concurrently.
+                web_session_key: Some(compute_web_config_hash(ctx, false)),
             },
             other => Self {
                 platform: other.to_string(),
@@ -91,6 +97,72 @@ fn hash_opt_str_field(hasher: &mut Sha256, tag: &str, value: Option<&str>) {
     }
 }
 
+fn compute_web_config_hash(ctx: &DriverContext, include_resolved_runtime: bool) -> String {
+    let mut hasher = Sha256::new();
+    let mut normalized_env = ctx.env.clone();
+    absolutize_chrome_env_paths(&mut normalized_env);
+
+    hash_str_field(&mut hasher, "schema", "deja-daemon-session-v1");
+    hash_str_field(&mut hasher, "platform", "web");
+    hash_str_field(&mut hasher, "device", ctx.device.trim());
+    let is_headless = ctx.headless.unwrap_or(true);
+    hash_str_field(&mut hasher, "headless", if is_headless { "1" } else { "0" });
+    let normalized_screen = match ctx.screen_size.as_ref() {
+        Some(val) => match ScreenSize::parse(val) {
+            Ok(sz) => format!("{}x{}", sz.width, sz.height),
+            Err(_) => format!("invalid:{val}"),
+        },
+        None => {
+            let def = ScreenSize::default();
+            format!("{}x{}", def.width, def.height)
+        }
+    };
+    hash_str_field(&mut hasher, "screen_size", &normalized_screen);
+    hash_str_field(
+        &mut hasher,
+        "disable_animations",
+        if ctx.disable_animations { "1" } else { "0" },
+    );
+    let capped_timeout = ctx.timeout_ms.clamp(1_000, WEB_MAX_DRIVER_TIMEOUT_MS);
+    hash_str_field(
+        &mut hasher,
+        "capped_timeout_ms",
+        &capped_timeout.to_string(),
+    );
+    hash_opt_str_field(
+        &mut hasher,
+        "env.DEJA_CHROME",
+        normalized_env.get("DEJA_CHROME").map(String::as_str),
+    );
+    hash_opt_str_field(
+        &mut hasher,
+        "env.CHROME_PATH",
+        normalized_env.get("CHROME_PATH").map(String::as_str),
+    );
+    hash_opt_str_field(
+        &mut hasher,
+        "env.PATH",
+        normalized_env.get("PATH").map(String::as_str),
+    );
+    if !is_headless {
+        for key in ALLOWED_WEB_HEADFUL_ENV_KEYS {
+            hash_opt_str_field(
+                &mut hasher,
+                &format!("env.{key}"),
+                normalized_env.get(*key).map(String::as_str),
+            );
+        }
+    }
+    if include_resolved_runtime {
+        hash_opt_str_field(
+            &mut hasher,
+            "resolved_runtime",
+            ctx.resolved_runtime.as_deref(),
+        );
+    }
+    hex::encode(hasher.finalize())
+}
+
 /// Compute the canonical SHA-256 `session_key` hashing ONLY driver-affecting configuration fields.
 ///
 /// Unrelated per-run fields (`app_id`, `build_path`, `workspace_root`, `expected_build_fingerprint`)
@@ -98,6 +170,10 @@ fn hash_opt_str_field(hasher: &mut Sha256, tag: &str, value: Option<&str>) {
 /// driver while still validating build/appId on every warm lease acquisition.
 #[must_use]
 pub fn compute_session_key(ctx: &DriverContext) -> String {
+    if ctx.platform == "web" {
+        return compute_web_config_hash(ctx, true);
+    }
+
     let mut hasher = Sha256::new();
     hash_str_field(&mut hasher, "schema", "deja-daemon-session-v1");
     hash_str_field(&mut hasher, "platform", &ctx.platform);
@@ -136,55 +212,6 @@ pub fn compute_session_key(ctx: &DriverContext) -> String {
                 &mut hasher,
                 "env.DEVELOPER_DIR",
                 ctx.env.get("DEVELOPER_DIR").map(String::as_str),
-            );
-        }
-        "web" => {
-            hash_str_field(&mut hasher, "device", ctx.device.trim());
-            hash_str_field(
-                &mut hasher,
-                "headless",
-                if ctx.headless.unwrap_or(true) {
-                    "1"
-                } else {
-                    "0"
-                },
-            );
-            let normalized_screen = match ctx.screen_size.as_ref() {
-                Some(val) => match ScreenSize::parse(val) {
-                    Ok(sz) => format!("{}x{}", sz.width, sz.height),
-                    Err(_) => format!("invalid:{val}"),
-                },
-                None => {
-                    let def = ScreenSize::default();
-                    format!("{}x{}", def.width, def.height)
-                }
-            };
-            hash_str_field(&mut hasher, "screen_size", &normalized_screen);
-            hash_str_field(
-                &mut hasher,
-                "disable_animations",
-                if ctx.disable_animations { "1" } else { "0" },
-            );
-            let capped_timeout = ctx.timeout_ms.clamp(1_000, WEB_MAX_DRIVER_TIMEOUT_MS);
-            hash_str_field(
-                &mut hasher,
-                "capped_timeout_ms",
-                &capped_timeout.to_string(),
-            );
-            hash_opt_str_field(
-                &mut hasher,
-                "env.DEJA_CHROME",
-                ctx.env.get("DEJA_CHROME").map(String::as_str),
-            );
-            hash_opt_str_field(
-                &mut hasher,
-                "env.CHROME_PATH",
-                ctx.env.get("CHROME_PATH").map(String::as_str),
-            );
-            hash_opt_str_field(
-                &mut hasher,
-                "env.PATH",
-                ctx.env.get("PATH").map(String::as_str),
             );
         }
         _ => {
@@ -790,6 +817,7 @@ mod tests {
             timeout_ms: 60_000,
             env: BTreeMap::from([("PATH".to_string(), "/usr/bin:/bin".to_string())]),
             staged_build: None,
+            resolved_runtime: None,
         }
     }
 
@@ -821,5 +849,41 @@ mod tests {
 
         b.screen_size = Some(serde_json::json!("1440x900"));
         assert_ne!(compute_session_key(&a), compute_session_key(&b));
+    }
+
+    #[test]
+    fn web_session_key_includes_headful_display_and_runtime_version_while_sharing_gate_for_upgrade()
+    {
+        let mut headful_a = sample_ios_ctx("chromium", "http://127.0.0.1:4174");
+        headful_a.platform = "web".to_string();
+        headful_a.headless = Some(false);
+        headful_a
+            .env
+            .insert("DISPLAY".to_string(), ":0".to_string());
+        headful_a.resolved_runtime = Some("chromium-158.0.0.1@1280x720-headed".to_string());
+
+        let mut headful_b = headful_a.clone();
+        headful_b
+            .env
+            .insert("DISPLAY".to_string(), ":1".to_string());
+        assert_ne!(
+            compute_session_key(&headful_a),
+            compute_session_key(&headful_b),
+            "different headful DISPLAY must produce distinct Web session keys"
+        );
+
+        let mut upgraded = headful_a.clone();
+        upgraded.resolved_runtime = Some("chromium-159.0.0.2@1280x720-headed".to_string());
+        let key_old = compute_session_key(&headful_a);
+        let key_new = compute_session_key(&upgraded);
+        assert_ne!(
+            key_old, key_new,
+            "Chromium version upgrade must invalidate warm Web session key"
+        );
+        assert_eq!(
+            GateKey::for_context(&headful_a, &key_old),
+            GateKey::for_context(&upgraded, &key_new),
+            "Chromium upgrade on same config shares GateKey so stale browser is evicted"
+        );
     }
 }

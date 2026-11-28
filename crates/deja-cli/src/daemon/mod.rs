@@ -33,9 +33,19 @@ pub const ALLOWED_DRIVER_ENV_KEYS: &[&str] = &[
     "DEJA_ADB",
 ];
 
+/// Narrow display-session environment variables additionally forwarded ONLY for headful Web
+/// (`platform == "web"` and `headless == Some(false)`) sessions so headful Chromium launched by a
+/// persistent daemon can still reach the caller's X11/Wayland display without exposing secrets.
+pub const ALLOWED_WEB_HEADFUL_ENV_KEYS: &[&str] = &[
+    "DISPLAY",
+    "WAYLAND_DISPLAY",
+    "XAUTHORITY",
+    "XDG_RUNTIME_DIR",
+];
+
 /// Safe environment variable allowlist inherited when auto-starting or spawning the background
-/// daemon process (`deja daemon start --foreground`). Excludes `DEJA_NO_DAEMON`, model API keys,
-/// and fixture secrets.
+/// daemon process (`deja daemon start --foreground`). Deliberately excludes `TMPDIR` (the daemon
+/// uses its own stable `<daemon_dir>/tmp`), `DEJA_NO_DAEMON`, model API keys, and fixture secrets.
 #[cfg(unix)]
 pub const ALLOWED_DAEMON_SPAWN_ENV_KEYS: &[&str] = &[
     "PATH",
@@ -45,7 +55,6 @@ pub const ALLOWED_DAEMON_SPAWN_ENV_KEYS: &[&str] = &[
     "DEJA_LOG",
     "RUST_LOG",
     "HOME",
-    "TMPDIR",
     "DEJA_CHROME",
     "CHROME_PATH",
     "ANDROID_HOME",
@@ -75,10 +84,29 @@ pub fn is_no_daemon_env(env: &BTreeMap<String, String>) -> bool {
 /// Filter an environment map down to [`ALLOWED_DRIVER_ENV_KEYS`] for safe daemon IPC transport.
 #[must_use]
 pub fn filter_driver_env(env: &BTreeMap<String, String>) -> BTreeMap<String, String> {
+    filter_driver_env_for_context("", None, env)
+}
+
+/// Filter an environment map for safe daemon IPC transport, additionally preserving narrow display
+/// variables ([`ALLOWED_WEB_HEADFUL_ENV_KEYS`]) ONLY for headful Web sessions (`platform == "web"`
+/// and `headless == Some(false)`).
+#[must_use]
+pub fn filter_driver_env_for_context(
+    platform: &str,
+    headless: Option<bool>,
+    env: &BTreeMap<String, String>,
+) -> BTreeMap<String, String> {
     let mut filtered = BTreeMap::new();
     for key in ALLOWED_DRIVER_ENV_KEYS {
         if let Some(val) = env.get(*key) {
             filtered.insert((*key).to_string(), val.clone());
+        }
+    }
+    if platform == "web" && headless == Some(false) {
+        for key in ALLOWED_WEB_HEADFUL_ENV_KEYS {
+            if let Some(val) = env.get(*key) {
+                filtered.insert((*key).to_string(), val.clone());
+            }
         }
     }
     filtered
@@ -106,6 +134,7 @@ mod tests {
         let mut env = BTreeMap::new();
         env.insert("PATH".to_string(), "/usr/bin:/bin".to_string());
         env.insert("DEJA_CHROME".to_string(), "/usr/bin/chromium".to_string());
+        env.insert("DISPLAY".to_string(), ":99".to_string());
         env.insert(
             "OPENAI_API_KEY".to_string(),
             "redacted-test-key".to_string(),
@@ -115,6 +144,7 @@ mod tests {
             "redacted-anthropic".to_string(),
         );
         env.insert("FIXTURE_PASSWORD".to_string(), "super-secret".to_string());
+
         let filtered = filter_driver_env(&env);
         assert_eq!(filtered.len(), 2);
         assert_eq!(
@@ -125,8 +155,29 @@ mod tests {
             filtered.get("DEJA_CHROME").map(String::as_str),
             Some("/usr/bin/chromium")
         );
+        assert!(!filtered.contains_key("DISPLAY"));
         assert!(!filtered.contains_key("OPENAI_API_KEY"));
         assert!(!filtered.contains_key("ANTHROPIC_API_KEY"));
         assert!(!filtered.contains_key("FIXTURE_PASSWORD"));
+
+        // Headless web still omits display variables.
+        let headless_web = filter_driver_env_for_context("web", Some(true), &env);
+        assert!(!headless_web.contains_key("DISPLAY"));
+        assert!(!headless_web.contains_key("OPENAI_API_KEY"));
+
+        // Headful web preserves display variables while still stripping API keys & secrets.
+        let headful_web = filter_driver_env_for_context("web", Some(false), &env);
+        assert_eq!(headful_web.get("DISPLAY").map(String::as_str), Some(":99"));
+        assert!(!headful_web.contains_key("OPENAI_API_KEY"));
+        assert!(!headful_web.contains_key("FIXTURE_PASSWORD"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn daemon_spawn_env_allowlist_excludes_caller_tmpdir() {
+        assert!(
+            !ALLOWED_DAEMON_SPAWN_ENV_KEYS.contains(&"TMPDIR"),
+            "daemon spawn env must never inherit a caller's ephemeral TMPDIR"
+        );
     }
 }

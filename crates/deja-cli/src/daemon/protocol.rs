@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 use std::io::{self, ErrorKind};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use deja_flow::{
@@ -19,8 +19,9 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 
-use crate::daemon::filter_driver_env;
+use crate::daemon::filter_driver_env_for_context;
 use crate::driver_factory::{DriverContext, DriverFactoryError};
+use crate::fs_safe::lexical_normalize;
 
 /// Hard maximum size of a single NDJSON frame (32 MiB) to bound memory usage.
 pub const MAX_FRAME_BYTES: usize = 32 * 1024 * 1024;
@@ -113,9 +114,35 @@ where
     Ok(())
 }
 
+/// Resolve relative `DEJA_CHROME` / `CHROME_PATH` overrides against `cwd` so a persistent daemon
+/// launched from another directory always executes the exact binary validated by the client.
+pub fn absolutize_chrome_env_paths_with_cwd(env: &mut BTreeMap<String, String>, cwd: &Path) {
+    for key in ["DEJA_CHROME", "CHROME_PATH"] {
+        if let Some(val) = env.get_mut(key) {
+            let trimmed = val.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let p = Path::new(trimmed);
+            if !p.is_absolute() {
+                let resolved = lexical_normalize(&cwd.join(p));
+                *val = resolved.to_string_lossy().into_owned();
+            }
+        }
+    }
+}
+
+/// Resolve relative `DEJA_CHROME` / `CHROME_PATH` overrides against `std::env::current_dir()`.
+pub fn absolutize_chrome_env_paths(env: &mut BTreeMap<String, String>) {
+    if let Ok(cwd) = std::env::current_dir() {
+        absolutize_chrome_env_paths_with_cwd(env, &cwd);
+    }
+}
+
 /// Sanitized driver creation context sent over daemon IPC.
 ///
-/// Only allowlisted toolchain env vars ([`crate::daemon::ALLOWED_DRIVER_ENV_KEYS`]) are included;
+/// Only allowlisted toolchain env vars ([`crate::daemon::ALLOWED_DRIVER_ENV_KEYS`], plus
+/// [`crate::daemon::ALLOWED_WEB_HEADFUL_ENV_KEYS`] for headful Web runs) are included;
 /// API keys and fixture credentials are never placed on the wire.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -140,13 +167,17 @@ pub struct WireDriverContext {
     pub timeout_ms: u64,
     #[serde(default)]
     pub env: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_runtime: Option<String>,
 }
 
 impl WireDriverContext {
     /// Convert a local [`DriverContext`] into a sanitized wire payload stripping non-allowlisted
-    /// environment variables.
+    /// environment variables and absolutizing relative Chromium binary overrides.
     #[must_use]
     pub fn from_driver_context(ctx: &DriverContext) -> Self {
+        let mut env = filter_driver_env_for_context(&ctx.platform, ctx.headless, &ctx.env);
+        absolutize_chrome_env_paths(&mut env);
         Self {
             platform: ctx.platform.clone(),
             device: ctx.device.clone(),
@@ -161,7 +192,8 @@ impl WireDriverContext {
             headless: ctx.headless,
             screen_size: ctx.screen_size.clone(),
             timeout_ms: ctx.timeout_ms,
-            env: filter_driver_env(&ctx.env),
+            env,
+            resolved_runtime: ctx.resolved_runtime.clone(),
         }
     }
 
@@ -169,6 +201,7 @@ impl WireDriverContext {
     /// defense in depth.
     #[must_use]
     pub fn into_driver_context(self) -> DriverContext {
+        let env = filter_driver_env_for_context(&self.platform, self.headless, &self.env);
         DriverContext {
             platform: self.platform,
             device: self.device,
@@ -183,8 +216,9 @@ impl WireDriverContext {
             headless: self.headless,
             screen_size: self.screen_size,
             timeout_ms: self.timeout_ms,
-            env: filter_driver_env(&self.env),
+            env,
             staged_build: None,
+            resolved_runtime: self.resolved_runtime,
         }
     }
 }
@@ -786,5 +820,73 @@ mod tests {
             Some(ClientMessage::CancelRpc { id: 42 })
         );
         assert_eq!(reader.next_frame::<ClientMessage>().await.unwrap(), None);
+    }
+
+    #[test]
+    fn wire_driver_context_absolutizes_relative_chrome_paths_and_preserves_headful_display() {
+        let cwd = std::env::current_dir().unwrap();
+        let mut env = BTreeMap::new();
+        env.insert("DEJA_CHROME".to_string(), "./bin/my-chrome".to_string());
+        env.insert("CHROME_PATH".to_string(), "tools/chrome-bin".to_string());
+        env.insert("DISPLAY".to_string(), ":1".to_string());
+        env.insert("WAYLAND_DISPLAY".to_string(), "wayland-0".to_string());
+        env.insert("XAUTHORITY".to_string(), "/tmp/.Xauthority".to_string());
+        env.insert("XDG_RUNTIME_DIR".to_string(), "/run/user/1000".to_string());
+        env.insert("OPENAI_API_KEY".to_string(), "secret-val".to_string());
+
+        let ctx = DriverContext {
+            platform: "web".to_string(),
+            device: "chromium".to_string(),
+            app_id: "http://127.0.0.1:4174".to_string(),
+            build_path: PathBuf::from("/tmp/app"),
+            expected_build_fingerprint: None,
+            workspace_root: PathBuf::from("/tmp/ws"),
+            disable_animations: true,
+            crash_report_grace_ms: 0,
+            crash_report_dir: None,
+            deja_home: None,
+            headless: Some(false),
+            screen_size: None,
+            timeout_ms: 30_000,
+            env,
+            staged_build: None,
+            resolved_runtime: Some("chromium-158.0.0.1@1280x720-headed".to_string()),
+        };
+
+        let wire = WireDriverContext::from_driver_context(&ctx);
+        assert_eq!(
+            wire.env.get("DEJA_CHROME").map(String::as_str),
+            Some(
+                lexical_normalize(&cwd.join("bin/my-chrome"))
+                    .to_string_lossy()
+                    .as_ref()
+            )
+        );
+        assert_eq!(
+            wire.env.get("CHROME_PATH").map(String::as_str),
+            Some(
+                lexical_normalize(&cwd.join("tools/chrome-bin"))
+                    .to_string_lossy()
+                    .as_ref()
+            )
+        );
+        assert_eq!(wire.env.get("DISPLAY").map(String::as_str), Some(":1"));
+        assert_eq!(
+            wire.env.get("WAYLAND_DISPLAY").map(String::as_str),
+            Some("wayland-0")
+        );
+        assert_eq!(
+            wire.env.get("XAUTHORITY").map(String::as_str),
+            Some("/tmp/.Xauthority")
+        );
+        assert_eq!(
+            wire.env.get("XDG_RUNTIME_DIR").map(String::as_str),
+            Some("/run/user/1000")
+        );
+        assert!(!wire.env.contains_key("OPENAI_API_KEY"));
+        assert_eq!(
+            wire.resolved_runtime.as_deref(),
+            Some("chromium-158.0.0.1@1280x720-headed")
+        );
     }
 }
