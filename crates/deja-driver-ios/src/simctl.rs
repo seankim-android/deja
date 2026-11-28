@@ -5,7 +5,10 @@ use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::process::Command;
+use tokio_util::sync::CancellationToken;
 use tracing::debug;
 
 const PNG_MAGIC: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
@@ -286,7 +289,7 @@ pub fn validate_open_link_url(url: &str) -> Result<String> {
     Ok(trimmed.to_string())
 }
 
-fn validate_env_key(key: &str) -> Result<()> {
+pub fn validate_env_key(key: &str) -> Result<()> {
     let mut bytes = key.bytes();
     let Some(first) = bytes.next() else {
         return Err(IosDriverError::InvalidArgument(
@@ -301,8 +304,9 @@ fn validate_env_key(key: &str) -> Result<()> {
     Ok(())
 }
 
-fn validate_launch_arg_key(key: &str) -> Result<()> {
+pub fn validate_launch_arg_key(key: &str) -> Result<()> {
     if key.is_empty()
+        || key.trim_start_matches('-').is_empty()
         || !key
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-' || b == b'.')
@@ -310,6 +314,33 @@ fn validate_launch_arg_key(key: &str) -> Result<()> {
         return Err(IosDriverError::InvalidArgument(key.to_string()));
     }
     Ok(())
+}
+
+/// Validates all `simctl launch` inputs (bundle ID, launch argument keys/values, and environment
+/// variable keys/values) up front without mutating simulator state.
+pub fn validate_launch_inputs(
+    bundle_id: &str,
+    args: &BTreeMap<String, String>,
+    env: &BTreeMap<String, String>,
+) -> Result<String> {
+    let bundle = validate_bundle_id(bundle_id)?;
+    for (k, v) in env {
+        validate_env_key(k)?;
+        if v.contains('\0') {
+            return Err(IosDriverError::InvalidArgument(format!(
+                "environment variable `{k}` value must not contain NUL bytes"
+            )));
+        }
+    }
+    for (k, v) in args {
+        validate_launch_arg_key(k)?;
+        if v.contains('\0') {
+            return Err(IosDriverError::InvalidArgument(format!(
+                "launch argument `{k}` value must not contain NUL bytes"
+            )));
+        }
+    }
+    Ok(bundle)
 }
 
 impl Simctl {
@@ -513,16 +544,14 @@ impl Simctl {
         env: &BTreeMap<String, String>,
     ) -> Result<Option<u32>> {
         let canonical = validate_udid(udid)?;
-        let bundle = validate_bundle_id(bundle_id)?;
+        let bundle = validate_launch_inputs(bundle_id, args, env)?;
 
         let mut cmd = self.command();
         cmd.args(["launch", &canonical, &bundle]);
         for (k, v) in env {
-            validate_env_key(k)?;
             cmd.env(format!("SIMCTL_CHILD_{k}"), v);
         }
         for (k, v) in args {
-            validate_launch_arg_key(k)?;
             let flag = if k.starts_with('-') {
                 k.clone()
             } else {
@@ -586,13 +615,38 @@ impl Simctl {
     }
 
     pub async fn clear_state(&self, udid: &str, bundle_id: &str) -> Result<()> {
+        let cancel = CancellationToken::new();
+        self.clear_state_cancellable(udid, bundle_id, &cancel).await
+    }
+
+    /// Terminates `bundle_id` and wipes its confined CoreSimulator data container (`Documents/`,
+    /// `Library/`, `tmp/`), cooperatively cancelling any in-progress directory wipe and awaiting
+    /// the blocking worker to finish BEFORE returning `IosDriverError::Cancelled` so no background
+    /// deletion can race a subsequent app launch.
+    pub async fn clear_state_cancellable(
+        &self,
+        udid: &str,
+        bundle_id: &str,
+        cancel: &CancellationToken,
+    ) -> Result<()> {
         let canonical = validate_udid(udid)?;
         let bundle = validate_bundle_id(bundle_id)?;
-        self.terminate_app(&canonical, &bundle).await?;
+        if cancel.is_cancelled() {
+            return Err(IosDriverError::Cancelled);
+        }
 
-        let output = self
-            .run_simctl(&["get_app_container", &canonical, &bundle, "data"])
-            .await?;
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Err(IosDriverError::Cancelled),
+            res = self.terminate_app(&canonical, &bundle) => res?,
+        }
+
+        let container_args = ["get_app_container", &canonical, &bundle, "data"];
+        let output = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Err(IosDriverError::Cancelled),
+            res = self.run_simctl(&container_args) => res?,
+        };
         let container_raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
         if container_raw.is_empty() {
             return Err(IosDriverError::InvalidPath(
@@ -600,14 +654,32 @@ impl Simctl {
             ));
         }
 
+        if cancel.is_cancelled() {
+            return Err(IosDriverError::Cancelled);
+        }
+
         let container_path = PathBuf::from(container_raw);
         let udid_clone = canonical.clone();
-        tokio::task::spawn_blocking(move || clear_app_data_container(&container_path, &udid_clone))
-            .await
-            .map_err(|err| {
-                IosDriverError::InvalidPath(format!("clear_state task failed: {err}"))
-            })??;
-        Ok(())
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        let flag_for_worker = Arc::clone(&cancel_flag);
+        let mut handle = tokio::task::spawn_blocking(move || {
+            clear_app_data_container_cancellable(&container_path, &udid_clone, &flag_for_worker)
+        });
+
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => {
+                cancel_flag.store(true, Ordering::SeqCst);
+                let _ = handle.await;
+                Err(IosDriverError::Cancelled)
+            }
+            res = &mut handle => {
+                res.map_err(|err| {
+                    IosDriverError::InvalidPath(format!("clear_state task failed: {err}"))
+                })??;
+                Ok(())
+            }
+        }
     }
 }
 
@@ -674,7 +746,20 @@ pub fn verify_png_header(bytes: &[u8]) -> Result<()> {
 /// wipes ONLY children inside `Documents/`, `Library/`, and `tmp/`, and preserves
 /// `.com.apple.mobile_container_manager.metadata.plist` and the top-level directories.
 pub fn clear_app_data_container(container_path: &Path, udid: &str) -> Result<()> {
+    clear_app_data_container_cancellable(container_path, udid, &AtomicBool::new(false))
+}
+
+/// Cooperative cancellation variant of [`clear_app_data_container`] that checks `cancelled`
+/// before each directory and child entry removal and returns `IosDriverError::Cancelled` promptly.
+pub fn clear_app_data_container_cancellable(
+    container_path: &Path,
+    udid: &str,
+    cancelled: &AtomicBool,
+) -> Result<()> {
     let canonical_udid = validate_udid(udid)?;
+    if cancelled.load(Ordering::SeqCst) {
+        return Err(IosDriverError::Cancelled);
+    }
 
     let meta = std::fs::symlink_metadata(container_path).map_err(|source| IosDriverError::Io {
         context: format!("stat app container {}", container_path.display()),
@@ -702,6 +787,9 @@ pub fn clear_app_data_container(container_path: &Path, udid: &str) -> Result<()>
     verify_container_confinement(&canonical_container, &canonical_udid)?;
 
     for subdir_name in ["Documents", "Library", "tmp"] {
+        if cancelled.load(Ordering::SeqCst) {
+            return Err(IosDriverError::Cancelled);
+        }
         let subdir = canonical_container.join(subdir_name);
         let sub_meta = match std::fs::symlink_metadata(&subdir) {
             Ok(meta) => meta,
@@ -745,31 +833,65 @@ pub fn clear_app_data_container(container_path: &Path, udid: &str) -> Result<()>
         })?;
 
         for entry_res in entries {
+            if cancelled.load(Ordering::SeqCst) {
+                return Err(IosDriverError::Cancelled);
+            }
             let entry = entry_res.map_err(|source| IosDriverError::Io {
                 context: format!("iterate container subdir {}", canonical_sub.display()),
                 source,
             })?;
-            let child_path = entry.path();
-            let child_meta =
-                std::fs::symlink_metadata(&child_path).map_err(|source| IosDriverError::Io {
-                    context: format!("stat container entry {}", child_path.display()),
-                    source,
-                })?;
-
-            if child_meta.file_type().is_symlink() || !child_meta.is_dir() {
-                std::fs::remove_file(&child_path).map_err(|source| IosDriverError::Io {
-                    context: format!("remove container file {}", child_path.display()),
-                    source,
-                })?;
-            } else {
-                std::fs::remove_dir_all(&child_path).map_err(|source| IosDriverError::Io {
-                    context: format!("remove container directory {}", child_path.display()),
-                    source,
-                })?;
-            }
+            remove_entry_cancellable(&entry.path(), cancelled)?;
         }
     }
 
+    Ok(())
+}
+
+fn remove_entry_cancellable(path: &Path, cancelled: &AtomicBool) -> Result<()> {
+    if cancelled.load(Ordering::SeqCst) {
+        return Err(IosDriverError::Cancelled);
+    }
+    let meta = match std::fs::symlink_metadata(path) {
+        Ok(m) => m,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(source) => {
+            return Err(IosDriverError::Io {
+                context: format!("stat container entry {}", path.display()),
+                source,
+            });
+        }
+    };
+
+    if meta.file_type().is_symlink() || !meta.is_dir() {
+        std::fs::remove_file(path).map_err(|source| IosDriverError::Io {
+            context: format!("remove container file {}", path.display()),
+            source,
+        })?;
+        return Ok(());
+    }
+
+    let entries = std::fs::read_dir(path).map_err(|source| IosDriverError::Io {
+        context: format!("read container directory {}", path.display()),
+        source,
+    })?;
+    for entry_res in entries {
+        if cancelled.load(Ordering::SeqCst) {
+            return Err(IosDriverError::Cancelled);
+        }
+        let entry = entry_res.map_err(|source| IosDriverError::Io {
+            context: format!("iterate container directory {}", path.display()),
+            source,
+        })?;
+        remove_entry_cancellable(&entry.path(), cancelled)?;
+    }
+
+    if cancelled.load(Ordering::SeqCst) {
+        return Err(IosDriverError::Cancelled);
+    }
+    std::fs::remove_dir(path).map_err(|source| IosDriverError::Io {
+        context: format!("remove container directory {}", path.display()),
+        source,
+    })?;
     Ok(())
 }
 
@@ -1114,6 +1236,78 @@ mod tests {
 
         assert!(clear_app_data_container(&container, TEST_UDID).is_err());
         assert!(outside.join("secret.txt").exists());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn validate_launch_inputs_rejects_bad_keys_and_nul_values() {
+        use super::validate_launch_inputs;
+        use std::collections::BTreeMap;
+
+        let mut ok_args = BTreeMap::new();
+        ok_args.insert("DEJA_FIXTURE_ORDER".to_string(), "WC-2027".to_string());
+        ok_args.insert("-flag.name".to_string(), "1".to_string());
+        let mut ok_env = BTreeMap::new();
+        ok_env.insert("VALID_ENV_1".to_string(), "value".to_string());
+        assert!(validate_launch_inputs("dev.deja.ios.checkout", &ok_args, &ok_env).is_ok());
+
+        for bad_arg_key in ["", "-", "--", "bad key", "k=v"] {
+            let mut args = BTreeMap::new();
+            args.insert(bad_arg_key.to_string(), "val".to_string());
+            assert!(
+                validate_launch_inputs("dev.deja.ios.checkout", &args, &BTreeMap::new()).is_err(),
+                "expected invalid arg key `{bad_arg_key}`"
+            );
+        }
+
+        let mut nul_arg = BTreeMap::new();
+        nul_arg.insert("KEY".to_string(), "bad\0val".to_string());
+        assert!(
+            validate_launch_inputs("dev.deja.ios.checkout", &nul_arg, &BTreeMap::new()).is_err()
+        );
+
+        for bad_env_key in ["", "1BAD", "BAD-KEY", "BAD KEY"] {
+            let mut env = BTreeMap::new();
+            env.insert(bad_env_key.to_string(), "val".to_string());
+            assert!(
+                validate_launch_inputs("dev.deja.ios.checkout", &BTreeMap::new(), &env).is_err(),
+                "expected invalid env key `{bad_env_key}`"
+            );
+        }
+
+        let mut nul_env = BTreeMap::new();
+        nul_env.insert("GOOD_KEY".to_string(), "bad\0val".to_string());
+        assert!(
+            validate_launch_inputs("dev.deja.ios.checkout", &BTreeMap::new(), &nul_env).is_err()
+        );
+    }
+
+    #[test]
+    fn clear_app_data_container_cancellable_stops_immediately_when_cancelled() {
+        use super::clear_app_data_container_cancellable;
+        use crate::error::IosDriverError;
+        use std::sync::atomic::AtomicBool;
+
+        let root = unique_temp_dir("cancel-wipe");
+        let container = root
+            .join("CoreSimulator")
+            .join("Devices")
+            .join(TEST_UDID)
+            .join("data")
+            .join("Containers")
+            .join("Data")
+            .join("Application")
+            .join("33333333-2222-3333-4444-555555555555");
+        std::fs::create_dir_all(container.join("Documents")).unwrap();
+        let keep = container.join("Documents/keep.txt");
+        std::fs::write(&keep, b"untouched").unwrap();
+
+        let cancelled = AtomicBool::new(true);
+        let err = clear_app_data_container_cancellable(&container, TEST_UDID, &cancelled)
+            .expect_err("cancelled wipe must return Cancelled");
+        assert!(matches!(err, IosDriverError::Cancelled));
+        assert!(keep.exists(), "cancelled wipe must not delete entries");
 
         let _ = std::fs::remove_dir_all(&root);
     }

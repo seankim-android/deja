@@ -1561,6 +1561,7 @@ async fn flow_executor_drives_deja_fixture_end_to_end_and_reuses_warm_session() 
       DEJA_FIXTURE_ORDER: WC-2027
 - assertVisible:
     id: screen_login
+- assertVisible: Fixture email
 - tapOn:
     id: username_input
 - inputText: qa@example.comXX

@@ -929,7 +929,12 @@ final class XcuiActions {
                 return false
             }
             if let text {
-                let candidates = [node.label, node.title, node.value ?? ""]
+                let candidates = [
+                    node.label,
+                    node.title,
+                    node.value ?? "",
+                    node.placeholderValue ?? "",
+                ]
                 let textHit = candidates.contains { candidate in
                     guard !candidate.isEmpty else { return false }
                     return exactText ? (candidate == text) : candidate.contains(text)
@@ -952,7 +957,13 @@ final class XcuiActions {
         var seen = Set<String>()
         for node in nodes {
             if node.inVolatileChrome || !node.isOnScreen { continue }
-            let rawCandidates: [String] = [node.label, node.title, node.identifier, node.value ?? ""]
+            let rawCandidates: [String] = [
+                node.label,
+                node.title,
+                node.identifier,
+                node.value ?? "",
+                node.placeholderValue ?? "",
+            ]
             for raw in rawCandidates {
                 let normalized = raw
                     .components(separatedBy: .whitespacesAndNewlines)

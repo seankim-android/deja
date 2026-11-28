@@ -7,7 +7,12 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::future::Future;
 use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::sync::Arc;
+#[cfg(test)]
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::{Mutex as StdMutex, MutexGuard as StdMutexGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use deja_core::{LaunchArgumentValue, provider_key_redactor};
@@ -18,7 +23,7 @@ use deja_flow::{
     UnsupportedCapability, VisibleContext, WaitSelectorOutcome, WaitSelectorRequest,
     build_visible_context, wait_local,
 };
-use tokio::sync::Mutex;
+use tokio::sync::Mutex as AsyncMutex;
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
 
@@ -33,7 +38,7 @@ use crate::error::{IosDriverError, Result};
 use crate::process::validate_udid;
 use crate::runner::{IosRunnerConfig, IosRunnerSession};
 use crate::simctl::{
-    Simctl, SimctlEnv, map_privacy_action, map_privacy_service, validate_bundle_id,
+    Simctl, SimctlEnv, map_privacy_action, map_privacy_service, validate_launch_inputs,
     validate_open_link_url,
 };
 
@@ -41,6 +46,7 @@ const MAX_KEY_BATCH: u32 = 100;
 const WARMUP_CHUNK_MS: u64 = 1_800;
 const DEFAULT_LONG_PRESS_MS: u64 = 1_000;
 const MAX_SERVER_WAIT_TIMEOUT: Duration = Duration::from_secs(60);
+const MAX_SERVER_POST_ACTION_DELAY_MS: u64 = 5_000;
 
 static SCREENSHOT_NONCE: AtomicU64 = AtomicU64::new(0);
 
@@ -77,18 +83,63 @@ impl IosDriverConfig {
 #[derive(Debug)]
 enum SessionState {
     Detached,
+    Stopping,
     Runner(Box<IosRunnerSession>),
     #[cfg(test)]
-    Mock(AgentClient),
+    Mock {
+        client: AgentClient,
+        teardown_delay: Duration,
+        teardown_done: Option<Arc<AtomicBool>>,
+    },
 }
 
 impl SessionState {
     fn client(&self) -> Option<AgentClient> {
         match self {
-            Self::Detached => None,
+            Self::Detached | Self::Stopping => None,
             Self::Runner(s) => Some(s.client().clone()),
             #[cfg(test)]
-            Self::Mock(c) => Some(c.clone()),
+            Self::Mock { client, .. } => Some(client.clone()),
+        }
+    }
+}
+
+/// Ensures `SessionState::Stopping` transitions to `SessionState::Detached` only AFTER the taken
+/// session finishes shutting down (or is synchronously dropped on cancellation), while still under
+/// the `lifecycle` lock.
+struct ResetStoppingGuard<'a> {
+    session: &'a StdMutex<SessionState>,
+}
+
+impl Drop for ResetStoppingGuard<'_> {
+    fn drop(&mut self) {
+        let mut guard = self
+            .session
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if matches!(*guard, SessionState::Stopping) {
+            *guard = SessionState::Detached;
+        }
+    }
+}
+
+async fn teardown_session(taken: SessionState) -> Result<()> {
+    match taken {
+        SessionState::Runner(sess) => sess.shutdown().await,
+        SessionState::Detached | SessionState::Stopping => Ok(()),
+        #[cfg(test)]
+        SessionState::Mock {
+            teardown_delay,
+            teardown_done,
+            ..
+        } => {
+            if !teardown_delay.is_zero() {
+                tokio::time::sleep(teardown_delay).await;
+            }
+            if let Some(flag) = teardown_done {
+                flag.store(true, Ordering::SeqCst);
+            }
+            Ok(())
         }
     }
 }
@@ -129,10 +180,15 @@ pub struct IosDriver {
     config: IosDriverConfig,
     simctl: Simctl,
     capabilities: DriverCapabilities,
-    session: Mutex<SessionState>,
-    start_lock: Mutex<()>,
+    /// Short-held synchronous slot for fast-path `AgentClient` cloning (never held across `.await`).
+    session: StdMutex<SessionState>,
+    /// Serializes runner startup, dead-session invalidation teardown, and explicit `shutdown` so
+    /// a replacement runner never races an in-progress teardown / simulator lock release.
+    lifecycle: AsyncMutex<()>,
     attach_count: AtomicU64,
     runner_pid: AtomicU32,
+    #[cfg(test)]
+    max_server_post_action_delay_ms: u64,
 }
 
 impl IosDriver {
@@ -148,10 +204,12 @@ impl IosDriver {
             config,
             simctl,
             capabilities: ios_capabilities(),
-            session: Mutex::new(SessionState::Detached),
-            start_lock: Mutex::new(()),
+            session: StdMutex::new(SessionState::Detached),
+            lifecycle: AsyncMutex::new(()),
             attach_count: AtomicU64::new(0),
             runner_pid: AtomicU32::new(0),
+            #[cfg(test)]
+            max_server_post_action_delay_ms: MAX_SERVER_POST_ACTION_DELAY_MS,
         })
     }
 
@@ -160,20 +218,56 @@ impl IosDriver {
         config: IosDriverConfig,
         client: AgentClient,
     ) -> Result<Self> {
+        Self::with_mock_client_and_teardown_for_tests(config, client, Duration::ZERO, None)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_mock_client_and_teardown_for_tests(
+        config: IosDriverConfig,
+        client: AgentClient,
+        teardown_delay: Duration,
+        teardown_done: Option<Arc<AtomicBool>>,
+    ) -> Result<Self> {
         let driver = Self::new(config)?;
         driver.attach_count.store(1, Ordering::SeqCst);
-        let mut guard = driver
-            .session
-            .try_lock()
-            .expect("fresh driver mutex must be unlocked");
-        *guard = SessionState::Mock(client);
+        let mut guard = driver.lock_session();
+        *guard = SessionState::Mock {
+            client,
+            teardown_delay,
+            teardown_done,
+        };
         drop(guard);
         Ok(driver)
     }
 
+    fn lock_session(&self) -> StdMutexGuard<'_, SessionState> {
+        self.session
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn max_server_post_action_delay_ms(&self) -> u64 {
+        #[cfg(test)]
+        {
+            self.max_server_post_action_delay_ms
+        }
+        #[cfg(not(test))]
+        {
+            MAX_SERVER_POST_ACTION_DELAY_MS
+        }
+    }
+
     #[cfg(test)]
-    pub(crate) async fn has_active_session(&self) -> bool {
-        !matches!(*self.session.lock().await, SessionState::Detached)
+    pub(crate) fn has_active_session(&self) -> bool {
+        matches!(
+            *self.lock_session(),
+            SessionState::Runner(_) | SessionState::Mock { .. }
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_detached(&self) -> bool {
+        matches!(*self.lock_session(), SessionState::Detached)
     }
 
     /// Canonical uppercase simulator UDID.
@@ -211,13 +305,10 @@ impl IosDriver {
             return Err(DriverError::Cancelled);
         }
 
-        // Fast path: clone existing client under a short Mutex lock and probe `/health` outside the lock.
-        let existing_client = {
-            let guard = self.session.lock().await;
-            guard.client()
-        };
-
-        if let Some(client) = existing_client {
+        // Fast path: clone existing client under the short synchronous lock and probe `/health`
+        // without blocking on `lifecycle`.
+        let existing_client = self.lock_session().client();
+        if let Some(ref client) = existing_client {
             let health_res = tokio::select! {
                 biased;
                 _ = cancel.cancelled() => return Err(DriverError::Cancelled),
@@ -226,7 +317,7 @@ impl IosDriver {
             match health_res {
                 Ok(h) if h.status == "ok" => {
                     self.runner_pid.store(h.pid, Ordering::SeqCst);
-                    return Ok(client);
+                    return Ok(client.clone());
                 }
                 Ok(h) => {
                     debug!(
@@ -234,7 +325,6 @@ impl IosDriver {
                         status = %h.status,
                         "warm DejaXCTestRunner reported non-ok health; recycling session"
                     );
-                    self.invalidate_session_if_matching(client.base_url()).await;
                 }
                 Err(err) => {
                     debug!(
@@ -242,35 +332,42 @@ impl IosDriver {
                         error = %err,
                         "warm DejaXCTestRunner health probe failed; recycling session"
                     );
-                    self.invalidate_session_if_matching(client.base_url()).await;
                 }
             }
         }
 
-        // Serialize cold/recovery session starts so concurrent callers never race the simulator lock.
-        let _start_guard = self.start_lock.lock().await;
+        // Slow path: serialize teardown and startup behind `lifecycle` so concurrent callers wait
+        // for any in-progress runner shutdown and simulator-lock release before starting a replacement.
+        let _lifecycle = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Err(DriverError::Cancelled),
+            guard = self.lifecycle.lock() => guard,
+        };
         if cancel.is_cancelled() {
             return Err(DriverError::Cancelled);
         }
 
-        // Re-check after acquiring `start_lock` in case a sibling task just started a healthy session.
-        let raced_client = {
-            let guard = self.session.lock().await;
-            guard.client()
-        };
-        if let Some(client) = raced_client {
-            let health_res = tokio::select! {
-                biased;
-                _ = cancel.cancelled() => return Err(DriverError::Cancelled),
-                res = client.health() => res,
-            };
-            if let Ok(h) = health_res
-                && h.status == "ok"
-            {
-                self.runner_pid.store(h.pid, Ordering::SeqCst);
-                return Ok(client);
+        // Re-check under `lifecycle` in case a sibling caller already started a healthy session
+        // or recycled the unhealthy one.
+        let current_client = self.lock_session().client();
+        if let Some(client) = current_client {
+            let same_unhealthy = existing_client
+                .as_ref()
+                .is_some_and(|prev| prev.base_url() == client.base_url());
+            if !same_unhealthy {
+                let health_res = tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => return Err(DriverError::Cancelled),
+                    res = client.health() => res,
+                };
+                if let Ok(h) = health_res
+                    && h.status == "ok"
+                {
+                    self.runner_pid.store(h.pid, Ordering::SeqCst);
+                    return Ok(client);
+                }
             }
-            self.invalidate_session_if_matching(client.base_url()).await;
+            self.invalidate_session_locked(client.base_url()).await;
         }
 
         if self.config.auto_boot_simulator {
@@ -300,12 +397,10 @@ impl IosDriver {
         self.attach_count.fetch_add(1, Ordering::SeqCst);
 
         let previous = {
-            let mut guard = self.session.lock().await;
+            let mut guard = self.lock_session();
             std::mem::replace(&mut *guard, SessionState::Runner(Box::new(session)))
         };
-        if let SessionState::Runner(old) = previous {
-            let _ = old.shutdown().await;
-        }
+        let _ = teardown_session(previous).await;
 
         Ok(client)
     }
@@ -317,31 +412,35 @@ impl IosDriver {
         if cancel.is_cancelled() {
             return Err(DriverError::Cancelled);
         }
-        let existing = {
-            let guard = self.session.lock().await;
-            guard.client()
-        };
-        if let Some(client) = existing {
+        if let Some(client) = self.lock_session().client() {
             return Ok(client);
         }
         self.ensure_session_client(cancel).await
     }
 
     async fn invalidate_session_if_matching(&self, base_url: &str) {
+        let _lifecycle = self.lifecycle.lock().await;
+        self.invalidate_session_locked(base_url).await;
+    }
+
+    async fn invalidate_session_locked(&self, base_url: &str) {
         let taken = {
-            let mut guard = self.session.lock().await;
+            let mut guard = self.lock_session();
             let matches = guard
                 .client()
                 .is_some_and(|client| client.base_url() == base_url);
             if matches {
                 self.runner_pid.store(0, Ordering::SeqCst);
-                Some(std::mem::replace(&mut *guard, SessionState::Detached))
+                Some(std::mem::replace(&mut *guard, SessionState::Stopping))
             } else {
                 None
             }
         };
-        if let Some(SessionState::Runner(old)) = taken {
-            let _ = old.shutdown().await;
+        if let Some(old) = taken {
+            let _reset_guard = ResetStoppingGuard {
+                session: &self.session,
+            };
+            let _ = teardown_session(old).await;
         }
     }
 
@@ -555,6 +654,16 @@ impl IosDriver {
 
         let obtained_fresh =
             resp.matched || !resp.hierarchy_hash.is_empty() || ui_hierarchy.is_some();
+        if !resp.matched && !obtained_fresh {
+            return Err(DriverError::Transport {
+                operation: "wait_for_selector".to_string(),
+                detail: format!(
+                    "server-side waitForSelector completed {} poll(s) without capturing a readable UI hierarchy snapshot",
+                    resp.polls
+                ),
+                transient: false,
+            });
+        }
         let settled_early = !req.timeout.is_zero()
             && resp.matched
             && Duration::from_millis(resp.elapsed_ms) < req.timeout;
@@ -603,10 +712,9 @@ impl PlatformDriver for IosDriver {
             if cancel.is_cancelled() {
                 return Err(DriverError::Cancelled);
             }
-            let bundle_id = validate_bundle_id(app_id)
-                .map_err(|err| DriverError::InvalidArgument(err.to_string()))?;
 
-            // Pre-validate launch permissions and argument scalars before mutating simulator state.
+            // Validate the entire launch specification (permissions, bundle ID, argument keys/values,
+            // and env keys/values) BEFORE touching runner/simulator state.
             for (service, action) in &opts.permissions {
                 map_privacy_service(service)
                     .map_err(|err| DriverError::InvalidArgument(err.to_string()))?;
@@ -619,17 +727,19 @@ impl PlatformDriver for IosDriver {
                     .map_err(|err| DriverError::InvalidArgument(err.to_string()))?;
                 formatted_args.insert(key.clone(), formatted);
             }
+            let bundle_id = validate_launch_inputs(app_id, &formatted_args, &opts.env)
+                .map_err(|err| DriverError::InvalidArgument(err.to_string()))?;
 
             let client = self.ensure_session_client(cancel).await?;
 
             if opts.clear_state {
-                tokio::select! {
-                    biased;
-                    _ = cancel.cancelled() => return Err(DriverError::Cancelled),
-                    res = self.simctl.clear_state(&self.udid, &bundle_id) => {
-                        res.map_err(|err| map_ios_err("clear_state", err))?;
-                    }
-                }
+                // Call `clear_state_cancellable` directly without wrapping in an outer `select!`
+                // so cancellation cooperatively stops AND awaits the blocking directory wipe
+                // before returning `DriverError::Cancelled`.
+                self.simctl
+                    .clear_state_cancellable(&self.udid, &bundle_id, cancel)
+                    .await
+                    .map_err(|err| map_ios_err("clear_state", err))?;
             } else if opts.stop_app {
                 tokio::select! {
                     biased;
@@ -680,12 +790,17 @@ impl PlatformDriver for IosDriver {
             }
 
             let deadline = Instant::now() + self.config.app_launch_timeout;
-            let last_detail = loop {
+            let mut last_detail = "app did not reach running_foreground".to_string();
+
+            loop {
                 if cancel.is_cancelled() {
                     return Err(DriverError::Cancelled);
                 }
 
                 let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    break;
+                }
                 let chunk_ms = (remaining.as_millis() as u64).min(WARMUP_CHUNK_MS);
                 let warmup_req = WarmupRequest {
                     app_id: bundle_id.clone(),
@@ -694,13 +809,24 @@ impl PlatformDriver for IosDriver {
                     return_hierarchy: Some(false),
                 };
 
-                let res = tokio::select! {
+                let timed_res = tokio::select! {
                     biased;
                     _ = cancel.cancelled() => return Err(DriverError::Cancelled),
-                    res = client.warmup(&warmup_req) => res,
+                    timed = tokio::time::timeout(remaining, client.warmup(&warmup_req)) => timed,
                 };
 
-                let detail = match res {
+                let res = match timed_res {
+                    Ok(res) => res,
+                    Err(_) => {
+                        last_detail = format!(
+                            "warmup HTTP request exceeded remaining launch budget ({}ms)",
+                            remaining.as_millis()
+                        );
+                        break;
+                    }
+                };
+
+                match res {
                     Ok(resp) if resp.ok && resp.state == "running_foreground" => return Ok(()),
                     Ok(resp) if resp.state == "not_running" => {
                         if let Some(sig) = self
@@ -723,14 +849,20 @@ impl PlatformDriver for IosDriver {
                             ),
                         });
                     }
-                    Ok(resp) => format!("app state was `{}` (ok={})", resp.state, resp.ok),
+                    Ok(resp) => {
+                        last_detail = format!("app state was `{}` (ok={})", resp.state, resp.ok);
+                    }
                     Err(IosDriverError::AgentHttpStatus { status: 409, .. }) => {
-                        tokio::select! {
-                            biased;
-                            _ = cancel.cancelled() => return Err(DriverError::Cancelled),
-                            _ = tokio::time::sleep(Duration::from_millis(50)) => {}
+                        let sleep_for = Duration::from_millis(50)
+                            .min(deadline.saturating_duration_since(Instant::now()));
+                        if !sleep_for.is_zero() {
+                            tokio::select! {
+                                biased;
+                                _ = cancel.cancelled() => return Err(DriverError::Cancelled),
+                                _ = tokio::time::sleep(sleep_for) => {}
+                            }
                         }
-                        "companion runner busy (HTTP 409) during warmup".to_string()
+                        last_detail = "companion runner busy (HTTP 409) during warmup".to_string();
                     }
                     Err(IosDriverError::AgentHttpStatus {
                         status: 500, body, ..
@@ -746,7 +878,7 @@ impl PlatformDriver for IosDriver {
                         {
                             return Err(DriverError::AppCrashed(sig));
                         }
-                        body
+                        last_detail = body;
                     }
                     Err(err) => {
                         if is_dead_session_error(&err) {
@@ -762,12 +894,8 @@ impl PlatformDriver for IosDriver {
                             detail: err.to_string(),
                         });
                     }
-                };
-
-                if Instant::now() >= deadline {
-                    break detail;
                 }
-            };
+            }
 
             if let Some(sig) = self
                 .scan_crash_with_grace(
@@ -839,13 +967,12 @@ impl PlatformDriver for IosDriver {
             if cancel.is_cancelled() {
                 return Err(DriverError::Cancelled);
             }
-            tokio::select! {
-                biased;
-                _ = cancel.cancelled() => Err(DriverError::Cancelled),
-                res = self.simctl.clear_state(&self.udid, app_id) => {
-                    res.map_err(|err| map_ios_err("clear_state", err))
-                }
-            }
+            // Call `clear_state_cancellable` directly so cancellation cooperatively stops AND
+            // awaits any in-progress container wipe before returning.
+            self.simctl
+                .clear_state_cancellable(&self.udid, app_id, cancel)
+                .await
+                .map_err(|err| map_ios_err("clear_state", err))
         })
     }
 
@@ -1211,10 +1338,7 @@ impl PlatformDriver for IosDriver {
 
             // 2. If a runner session is live, probe `/appState`: when the app is still alive,
             //    skip the grace window completely (0 ms penalty on normal assertion failures).
-            let existing_client = {
-                let guard = self.session.lock().await;
-                guard.client()
-            };
+            let existing_client = self.lock_session().client();
             if let Some(client) = existing_client {
                 let probe_timeout = Duration::from_secs(2).min(self.config.request_timeout);
                 let state_res = tokio::select! {
@@ -1230,11 +1354,13 @@ impl PlatformDriver for IosDriver {
             }
 
             // 3. App is `not_running`/`unknown` (or `/appState` could not confirm liveness):
-            //    poll `.ips` reports through `crash_report_grace` so ReportCrash has time to flush.
+            //    capture a fresh timestamp AFTER the `/appState` probe so reports written
+            //    throughout the full `crash_report_grace` period are included.
+            let grace_start_ms = now_epoch_ms();
             self.scan_crash_with_grace(
                 app_id,
                 since_epoch_ms,
-                now_ms,
+                grace_start_ms,
                 self.config.crash_report_grace,
                 cancel,
             )
@@ -1244,20 +1370,22 @@ impl PlatformDriver for IosDriver {
 
     fn shutdown<'a>(&'a self) -> DriverFuture<'a, ()> {
         Box::pin(async move {
+            let _lifecycle = self.lifecycle.lock().await;
             let taken = {
-                let mut guard = self.session.lock().await;
+                let mut guard = self.lock_session();
                 self.runner_pid.store(0, Ordering::SeqCst);
-                std::mem::replace(&mut *guard, SessionState::Detached)
+                if matches!(*guard, SessionState::Detached) {
+                    SessionState::Detached
+                } else {
+                    std::mem::replace(&mut *guard, SessionState::Stopping)
+                }
             };
-            match taken {
-                SessionState::Runner(sess) => sess
-                    .shutdown()
-                    .await
-                    .map_err(|err| map_ios_err("shutdown", err)),
-                SessionState::Detached => Ok(()),
-                #[cfg(test)]
-                SessionState::Mock(_) => Ok(()),
-            }
+            let _reset_guard = ResetStoppingGuard {
+                session: &self.session,
+            };
+            teardown_session(taken)
+                .await
+                .map_err(|err| map_ios_err("shutdown", err))
         })
     }
 
@@ -1271,6 +1399,72 @@ impl PlatformDriver for IosDriver {
                 return Err(DriverError::Cancelled);
             }
             let started = Instant::now();
+
+            // `DejaXCTestRunner`'s `/act` clamps `postActionDelayMs` at 5,000 ms. For longer
+            // delays, run the primitive action, wait the full duration locally (racing `cancel`),
+            // and then capture the post-action hierarchy so long delays are never silently truncated.
+            if req
+                .post_action_delay_ms
+                .is_some_and(|ms| ms > self.max_server_post_action_delay_ms())
+            {
+                match &req.action {
+                    ActAction::Tap { x, y } => {
+                        self.tap_point(&req.app_id, UiPoint::new(*x, *y), cancel)
+                            .await?;
+                    }
+                    ActAction::LongPress { x, y, duration_ms } => {
+                        self.long_press_point(
+                            &req.app_id,
+                            UiPoint::new(*x, *y),
+                            *duration_ms,
+                            cancel,
+                        )
+                        .await?;
+                    }
+                    ActAction::DoubleTap { x, y } => {
+                        self.double_tap_point(&req.app_id, UiPoint::new(*x, *y), cancel)
+                            .await?;
+                    }
+                    ActAction::Swipe {
+                        start,
+                        end,
+                        duration_ms,
+                        hold_duration_ms,
+                    } => {
+                        let params = SwipeParams {
+                            app_id: req.app_id.clone(),
+                            start: *start,
+                            end: *end,
+                            duration_ms: *duration_ms,
+                            hold_duration_ms: *hold_duration_ms,
+                        };
+                        self.swipe(&params, cancel).await?;
+                    }
+                    ActAction::InputText { text } => {
+                        self.input_text(&req.app_id, text, cancel).await?;
+                    }
+                    ActAction::EraseText { count } => {
+                        self.erase_text(&req.app_id, *count, cancel).await?;
+                    }
+                    ActAction::PressKey {
+                        key,
+                        modifiers,
+                        count,
+                    } => {
+                        let kp = KeyPress {
+                            key: key.clone(),
+                            modifiers: modifiers.clone(),
+                            count: *count,
+                        };
+                        self.press_key(&req.app_id, &kp, cancel).await?;
+                    }
+                    ActAction::HideKeyboard => {
+                        self.hide_keyboard(&req.app_id, cancel).await?;
+                    }
+                    ActAction::Back => return Err(unsupported_system_back()),
+                }
+                return self.observe_post_action(req, started, cancel).await;
+            }
 
             let act_kind = match &req.action {
                 ActAction::Back => return Err(unsupported_system_back()),
@@ -1430,6 +1624,32 @@ fn ios_capabilities() -> DriverCapabilities {
     ])
 }
 
+/// Derives platform-neutral `checked` state for XCTest checkable controls (`Switch`, `CheckBox`,
+/// `Toggle`, `RadioButton`, and their `XCUIElementType*` forms) from `node.value`.
+fn derive_checked_state(element_type: &str, value: Option<&str>) -> bool {
+    let checkable = matches!(
+        element_type.trim().to_ascii_lowercase().as_str(),
+        "switch"
+            | "checkbox"
+            | "toggle"
+            | "radiobutton"
+            | "xcuielementtypeswitch"
+            | "xcuielementtypecheckbox"
+            | "xcuielementtypetoggle"
+            | "xcuielementtyperadiobutton"
+    );
+    if !checkable {
+        return false;
+    }
+    let Some(raw) = value else {
+        return false;
+    };
+    matches!(
+        raw.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "on"
+    )
+}
+
 /// Converts a `DejaXCTestRunner` [`HierarchyNode`] into a platform-neutral [`UiNode`].
 #[must_use]
 pub fn hierarchy_node_to_ui_node(node: &HierarchyNode) -> UiNode {
@@ -1446,7 +1666,7 @@ pub fn hierarchy_node_to_ui_node(node: &HierarchyNode) -> UiNode {
         value: node.value.clone(),
         placeholder_value: node.placeholder_value.clone(),
         enabled: node.enabled,
-        checked: false,
+        checked: derive_checked_state(&node.element_type, node.value.as_deref()),
         selected: node.selected,
         has_focus: node.has_focus,
         hittable: node.hittable,
@@ -1779,6 +1999,14 @@ mod tests {
     }
 
     type Responder = Arc<dyn Fn(&RecordedRequest) -> (u16, String) + Send + Sync>;
+    type AsyncResponder = Arc<
+        dyn Fn(
+                RecordedRequest,
+            )
+                -> std::pin::Pin<Box<dyn std::future::Future<Output = (u16, String)> + Send>>
+            + Send
+            + Sync,
+    >;
 
     struct MockAgent {
         port: u16,
@@ -1788,6 +2016,14 @@ mod tests {
 
     impl MockAgent {
         async fn start(responder: Responder) -> Self {
+            Self::start_async(Arc::new(move |req| {
+                let res = responder(&req);
+                Box::pin(async move { res })
+            }))
+            .await
+        }
+
+        async fn start_async(responder: AsyncResponder) -> Self {
             let listener = TcpListener::bind("127.0.0.1:0")
                 .await
                 .expect("bind mock agent");
@@ -1807,8 +2043,8 @@ mod tests {
                             return;
                         };
                         let recorded = parse_http_request(&raw);
-                        let (status, body) = resp_fn(&recorded);
-                        reqs.lock().unwrap().push(recorded);
+                        reqs.lock().unwrap().push(recorded.clone());
+                        let (status, body) = resp_fn(recorded).await;
                         let status_text = match status {
                             200 => "OK",
                             400 => "Bad Request",
@@ -1834,8 +2070,11 @@ mod tests {
         }
 
         fn client(&self) -> AgentClient {
-            AgentClient::new(self.port, TEST_TOKEN.to_string(), Duration::from_secs(5))
-                .expect("mock client")
+            self.client_with_timeout(Duration::from_secs(5))
+        }
+
+        fn client_with_timeout(&self, timeout: Duration) -> AgentClient {
+            AgentClient::new(self.port, TEST_TOKEN.to_string(), timeout).expect("mock client")
         }
 
         fn recorded(&self) -> Vec<RecordedRequest> {
@@ -2515,7 +2754,7 @@ mod tests {
             other => panic!("expected transient Transport for 409, got {other:?}"),
         }
         assert!(
-            driver.has_active_session().await,
+            driver.has_active_session(),
             "409 busy must NOT invalidate active session"
         );
 
@@ -2529,7 +2768,7 @@ mod tests {
         let dead_driver =
             IosDriver::with_mock_client_for_tests(IosDriverConfig::new(TEST_UDID), dead_client)
                 .unwrap();
-        assert!(dead_driver.has_active_session().await);
+        assert!(dead_driver.has_active_session());
 
         match dead_driver
             .swipe(
@@ -2550,7 +2789,7 @@ mod tests {
             other => panic!("expected non-transient Transport for dead session, got {other:?}"),
         }
         assert!(
-            !dead_driver.has_active_session().await,
+            !dead_driver.has_active_session(),
             "dead HTTP connection must clear active session"
         );
     }
@@ -2861,8 +3100,619 @@ exit 0
         assert_eq!(driver.attach_count(), 1);
 
         driver.shutdown().await.expect("shutdown");
-        assert!(!driver.has_active_session().await);
+        assert!(!driver.has_active_session());
+        assert!(driver.is_detached());
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn hierarchy_node_derives_checked_state_for_checkable_controls_only() {
+        use super::hierarchy_node_to_ui_node;
+
+        for element_type in [
+            "Switch",
+            "CheckBox",
+            "Toggle",
+            "RadioButton",
+            "XCUIElementTypeSwitch",
+            "XCUIElementTypeCheckBox",
+            "XCUIElementTypeToggle",
+            "XCUIElementTypeRadioButton",
+        ] {
+            for truthy in ["1", "true", "TRUE", "on", "ON"] {
+                let mut node = sample_hierarchy_node(1, element_type, "ctrl", "Ctrl");
+                node.value = Some(truthy.to_string());
+                assert!(
+                    hierarchy_node_to_ui_node(&node).checked,
+                    "expected checked=true for {element_type} value={truthy:?}"
+                );
+            }
+            for falsy in [Some("0"), Some("false"), Some("off"), Some(""), None] {
+                let mut node = sample_hierarchy_node(1, element_type, "ctrl", "Ctrl");
+                node.value = falsy.map(str::to_string);
+                assert!(
+                    !hierarchy_node_to_ui_node(&node).checked,
+                    "expected checked=false for {element_type} value={falsy:?}"
+                );
+            }
+        }
+
+        for non_checkable in ["TextField", "StaticText", "Button", "Application"] {
+            let mut node = sample_hierarchy_node(1, non_checkable, "x", "X");
+            node.value = Some("1".to_string());
+            assert!(
+                !hierarchy_node_to_ui_node(&node).checked,
+                "non-checkable {non_checkable} must stay checked=false"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn server_wait_without_any_hierarchy_capture_returns_transport_and_classifies_runner() {
+        use deja_core::FailureCategory;
+        use deja_flow::{FlowExecutionConfig, FlowExecutor};
+
+        let mock = MockAgent::start(Arc::new(|req| {
+            if req.target == "/health" {
+                (
+                    200,
+                    json!({
+                        "status": "ok",
+                        "agent": "DejaXCTestRunner",
+                        "version": "1",
+                        "pid": 1234
+                    })
+                    .to_string(),
+                )
+            } else if req.target == "/waitForSelector" {
+                (
+                    200,
+                    json!({
+                        "matched": false,
+                        "elapsedMs": 150,
+                        "polls": 4,
+                        "hierarchyHash": "",
+                        "visibleSample": []
+                    })
+                    .to_string(),
+                )
+            } else {
+                (500, r#"{"error":"AX snapshot failure"}"#.to_string())
+            }
+        }))
+        .await;
+
+        let driver =
+            IosDriver::with_mock_client_for_tests(IosDriverConfig::new(TEST_UDID), mock.client())
+                .expect("driver");
+        let cancel = CancellationToken::new();
+
+        let req = WaitSelectorRequest::visible(
+            "dev.deja.ios.checkout",
+            Selector::by_text("Order confirmed"),
+            Duration::from_millis(200),
+        );
+        assert!(matches!(
+            driver.wait_for_selector(&req, &cancel).await,
+            Err(DriverError::Transport {
+                transient: false,
+                ..
+            })
+        ));
+
+        let ws = unique_temp_dir("wait-capture-err");
+        let mut flow_cfg = FlowExecutionConfig::new(ws.clone());
+        flow_cfg.default_step_timeout = Duration::from_millis(200);
+        let outcome = FlowExecutor::new(flow_cfg)
+            .execute_yaml(
+                &driver,
+                "appId: dev.deja.ios.checkout\n---\n- assertVisible: Order confirmed\n",
+                &cancel,
+            )
+            .await;
+        assert!(!outcome.passed);
+        assert_eq!(
+            outcome.failure.as_ref().map(|f| f.category),
+            Some(FailureCategory::Runner),
+            "empty-capture server wait must classify as Runner, not ProductAssertion"
+        );
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn launch_app_validates_all_inputs_before_mutating_simulator_state() {
+        use deja_flow::LaunchOptions;
+        use std::collections::BTreeMap;
+        use std::ffi::OsString;
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = unique_temp_dir("launch-prevalidate");
+        let bin_dir = root.join("bin");
+        let log_file = root.join("xcrun.log");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let xcrun_path = bin_dir.join("xcrun");
+        std::fs::write(
+            &xcrun_path,
+            format!(
+                "#!/bin/sh\necho \"$@\" >> \"{}\"\nexit 0\n",
+                log_file.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&xcrun_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let mock = MockAgent::start(Arc::new(|_| (200, r#"{"ok":true}"#.to_string()))).await;
+        let mut cfg = IosDriverConfig::new(TEST_UDID);
+        cfg.env.env_path = Some(OsString::from(bin_dir.as_os_str()));
+        let driver = IosDriver::with_mock_client_for_tests(cfg, mock.client()).expect("driver");
+        let cancel = CancellationToken::new();
+
+        let base_opts = LaunchOptions {
+            clear_state: true,
+            clear_keychain: true,
+            stop_app: true,
+            permissions: BTreeMap::new(),
+            arguments: BTreeMap::new(),
+            env: BTreeMap::new(),
+        };
+
+        // 1. Invalid env key.
+        let mut bad_env_key = base_opts.clone();
+        bad_env_key
+            .env
+            .insert("BAD-KEY".to_string(), "val".to_string());
+        assert!(matches!(
+            driver
+                .launch_app("dev.deja.ios.checkout", &bad_env_key, &cancel)
+                .await,
+            Err(DriverError::InvalidArgument(_))
+        ));
+
+        // 2. NUL in env value.
+        let mut bad_env_val = base_opts.clone();
+        bad_env_val
+            .env
+            .insert("GOOD_KEY".to_string(), "bad\0val".to_string());
+        assert!(matches!(
+            driver
+                .launch_app("dev.deja.ios.checkout", &bad_env_val, &cancel)
+                .await,
+            Err(DriverError::InvalidArgument(_))
+        ));
+
+        // 3. Bare `--` launch arg key.
+        let mut bad_arg_key = base_opts.clone();
+        bad_arg_key
+            .arguments
+            .insert("--".to_string(), LaunchArgumentValue::String("x".into()));
+        assert!(matches!(
+            driver
+                .launch_app("dev.deja.ios.checkout", &bad_arg_key, &cancel)
+                .await,
+            Err(DriverError::InvalidArgument(_))
+        ));
+
+        // 4. NUL in launch arg value.
+        let mut bad_arg_val = base_opts.clone();
+        bad_arg_val.arguments.insert(
+            "DEJA_ARG".to_string(),
+            LaunchArgumentValue::String("a\0b".into()),
+        );
+        assert!(matches!(
+            driver
+                .launch_app("dev.deja.ios.checkout", &bad_arg_val, &cancel)
+                .await,
+            Err(DriverError::InvalidArgument(_))
+        ));
+
+        // 5. Invalid bundle ID.
+        assert!(matches!(
+            driver.launch_app("notabundle", &base_opts, &cancel).await,
+            Err(DriverError::InvalidArgument(_))
+        ));
+
+        assert!(
+            !log_file.exists(),
+            "no simctl terminate/clear_state/keychain/privacy commands may run on invalid launch inputs"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn clear_state_cancellation_awaits_blocking_wipe_before_returning() {
+        use std::ffi::OsString;
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = unique_temp_dir("clear-state-cancel");
+        let bin_dir = root.join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+
+        let container = root
+            .join("CoreSimulator")
+            .join("Devices")
+            .join(TEST_UDID)
+            .join("data")
+            .join("Containers")
+            .join("Data")
+            .join("Application")
+            .join("44444444-2222-3333-4444-555555555555");
+        let docs = container.join("Documents");
+        for d in 0..20 {
+            let sub = docs.join(format!("dir-{d:02}"));
+            std::fs::create_dir_all(&sub).unwrap();
+            for f in 0..25 {
+                std::fs::write(sub.join(format!("f-{f:02}.txt")), b"payload").unwrap();
+            }
+        }
+
+        let xcrun_path = bin_dir.join("xcrun");
+        std::fs::write(
+            &xcrun_path,
+            format!(
+                "#!/bin/sh\nif [ \"$2\" = \"get_app_container\" ]; then\n  echo \"{}\"\nfi\nexit 0\n",
+                container.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&xcrun_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let mut cfg = IosDriverConfig::new(TEST_UDID);
+        cfg.env.env_path = Some(OsString::from(bin_dir.as_os_str()));
+        let driver = IosDriver::new(cfg).expect("driver");
+
+        let cancel = CancellationToken::new();
+        let cancel_trigger = cancel.clone();
+        let canceller = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(2)).await;
+            cancel_trigger.cancel();
+        });
+
+        let res = driver.clear_state("dev.deja.ios.checkout", &cancel).await;
+        canceller.await.unwrap();
+        assert!(
+            matches!(res, Err(DriverError::Cancelled) | Ok(())),
+            "unexpected clear_state result: {res:?}"
+        );
+
+        // Immediately after `clear_state` returns, no background wipe task may keep deleting files.
+        let count_entries = |dir: &std::path::Path| -> usize {
+            let mut total = 0usize;
+            if let Ok(rd) = std::fs::read_dir(dir) {
+                for entry in rd.flatten() {
+                    total += 1;
+                    if let Ok(sub) = std::fs::read_dir(entry.path()) {
+                        total += sub.count();
+                    }
+                }
+            }
+            total
+        };
+        let count_at_return = count_entries(&docs);
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        let count_later = count_entries(&docs);
+        assert_eq!(
+            count_at_return, count_later,
+            "blocking wipe continued deleting files after clear_state returned"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn launch_app_enforces_launch_deadline_on_stalled_warmup_and_checks_crashes() {
+        use deja_flow::LaunchOptions;
+        use std::ffi::OsString;
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = unique_temp_dir("stalled-warmup");
+        let bin_dir = root.join("bin");
+        let crash_dir = root.join("crashes");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        std::fs::create_dir_all(&crash_dir).unwrap();
+
+        let xcrun_path = bin_dir.join("xcrun");
+        std::fs::write(
+            &xcrun_path,
+            "#!/bin/sh\nif [ \"$2\" = \"launch\" ]; then echo \"dev.deja.ios.checkout: 999\"; fi\nexit 0\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&xcrun_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let mock = MockAgent::start_async(Arc::new(|req| {
+            Box::pin(async move {
+                if req.target == "/health" {
+                    (
+                        200,
+                        json!({"status": "ok", "agent": "DejaXCTestRunner", "version": "1", "pid": 88}).to_string(),
+                    )
+                } else if req.target == "/warmup" {
+                    // Simulate a stalled HTTP response much longer than `app_launch_timeout`.
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    (200, r#"{"ok":false}"#.to_string())
+                } else {
+                    (200, r#"{"ok":true}"#.to_string())
+                }
+            })
+        }))
+        .await;
+
+        let mut cfg = IosDriverConfig::new(TEST_UDID);
+        cfg.env.env_path = Some(OsString::from(bin_dir.as_os_str()));
+        cfg.crash_report_dir = Some(crash_dir.clone());
+        cfg.app_launch_timeout = Duration::from_millis(180);
+        cfg.crash_report_grace = Duration::from_millis(30);
+        cfg.request_timeout = Duration::from_secs(30);
+        let driver = IosDriver::with_mock_client_for_tests(
+            cfg,
+            mock.client_with_timeout(Duration::from_secs(30)),
+        )
+        .expect("driver");
+        let cancel = CancellationToken::new();
+
+        // Subcase A: No .ips report -> LaunchFailed promptly within launch budget (not 30s).
+        let t0 = Instant::now();
+        let err = driver
+            .launch_app("dev.deja.ios.checkout", &LaunchOptions::default(), &cancel)
+            .await
+            .expect_err("stalled warmup must fail");
+        assert!(
+            matches!(err, DriverError::LaunchFailed { .. }),
+            "got {err:?}"
+        );
+        assert!(
+            t0.elapsed() < Duration::from_millis(1_000),
+            "stalled warmup overshot app_launch_timeout: {:?}",
+            t0.elapsed()
+        );
+
+        // Subcase B: .ips written while warmup is stalled -> routes through crash check -> AppCrashed.
+        let dir_for_writer = crash_dir.clone();
+        let writer = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let content = format!(
+                "{{\"app_name\":\"DejaFixture\",\"bundleID\":\"dev.deja.ios.checkout\"}}\n{{\"procName\":\"DejaFixture\",\"procPath\":\"/sim/Library/Developer/CoreSimulator/Devices/{TEST_UDID}/data/Containers/Bundle/Application/11111111-2222-3333-4444-555555555555/DejaFixture.app/DejaFixture\"}}\n"
+            );
+            std::fs::write(dir_for_writer.join("stalled-crash.ips"), content).unwrap();
+        });
+        let t1 = Instant::now();
+        match driver
+            .launch_app("dev.deja.ios.checkout", &LaunchOptions::default(), &cancel)
+            .await
+        {
+            Err(DriverError::AppCrashed(sig)) => {
+                assert_eq!(sig.report_file.as_deref(), Some("stalled-crash.ips"));
+            }
+            other => panic!("expected AppCrashed after stalled warmup, got {other:?}"),
+        }
+        writer.await.unwrap();
+        assert!(
+            t1.elapsed() < Duration::from_millis(1_000),
+            "crash attribution after stalled warmup took {:?}",
+            t1.elapsed()
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn check_app_crash_includes_reports_written_after_slow_app_state_probe() {
+        let mock = MockAgent::start_async(Arc::new(|req| {
+            Box::pin(async move {
+                if req.target.starts_with("/appState") {
+                    tokio::time::sleep(Duration::from_millis(300)).await;
+                    (
+                        200,
+                        json!({
+                            "appId": "dev.deja.ios.checkout",
+                            "state": "not_running",
+                            "stateCode": 1
+                        })
+                        .to_string(),
+                    )
+                } else {
+                    (404, "{}".to_string())
+                }
+            })
+        }))
+        .await;
+
+        let crash_dir = unique_temp_dir("crash-post-probe-grace");
+        let mut cfg = IosDriverConfig::new(TEST_UDID);
+        cfg.crash_report_dir = Some(crash_dir.clone());
+        cfg.crash_report_grace = Duration::from_millis(350);
+        let driver = IosDriver::with_mock_client_for_tests(cfg, mock.client()).expect("driver");
+        let cancel = CancellationToken::new();
+        let since = super::now_epoch_ms().saturating_sub(500);
+
+        // Write the .ips file at t=450ms (AFTER initial `now + 350ms`, but well INSIDE
+        // `grace_start + 350ms` after the 300ms `/appState` probe completes).
+        let dir_for_writer = crash_dir.clone();
+        let writer = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(450)).await;
+            let content = format!(
+                "{{\"app_name\":\"DejaFixture\",\"bundleID\":\"dev.deja.ios.checkout\"}}\n{{\"procName\":\"DejaFixture\",\"procPath\":\"/sim/Library/Developer/CoreSimulator/Devices/{TEST_UDID}/data/Containers/Bundle/Application/11111111-2222-3333-4444-555555555555/DejaFixture.app/DejaFixture\"}}\n"
+            );
+            std::fs::write(dir_for_writer.join("late-grace.ips"), content).unwrap();
+        });
+
+        let found = driver
+            .check_app_crash("dev.deja.ios.checkout", since, &cancel)
+            .await
+            .expect("check_app_crash")
+            .expect("report written during post-probe grace period must be discovered");
+        writer.await.unwrap();
+        assert_eq!(found.report_file.as_deref(), Some("late-grace.ips"));
+
+        let _ = std::fs::remove_dir_all(&crash_dir);
+    }
+
+    #[tokio::test]
+    async fn shutdown_serializes_teardown_before_publishing_detached_and_replacement_start() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let mock = MockAgent::start(Arc::new(|_| (200, r#"{"ok":true}"#.to_string()))).await;
+        let mut cfg = IosDriverConfig::new(TEST_UDID);
+        cfg.auto_boot_simulator = false;
+        // Point PATH to an empty directory so replacement startup cannot spawn real xcodebuild.
+        let empty_bin = unique_temp_dir("empty-bin-serialize");
+        cfg.env.env_path = Some(empty_bin.as_os_str().to_os_string());
+
+        let teardown_done = Arc::new(AtomicBool::new(false));
+        let driver = Arc::new(
+            IosDriver::with_mock_client_and_teardown_for_tests(
+                cfg,
+                mock.client(),
+                Duration::from_millis(180),
+                Some(Arc::clone(&teardown_done)),
+            )
+            .expect("driver"),
+        );
+
+        let driver_a = Arc::clone(&driver);
+        let shutdown_task = tokio::spawn(async move { driver_a.shutdown().await });
+
+        // Wait until shutdown has taken the session and entered the 180ms teardown.
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        assert!(
+            !teardown_done.load(Ordering::SeqCst),
+            "teardown should still be in progress"
+        );
+        assert!(
+            !driver.has_active_session(),
+            "dying session must not be served during teardown"
+        );
+        assert!(
+            !driver.is_detached(),
+            "Detached must NOT be published before teardown completes"
+        );
+
+        // Concurrent replacement attempt must block on `lifecycle` until teardown completes.
+        let driver_b = Arc::clone(&driver);
+        let done_for_b = Arc::clone(&teardown_done);
+        let replacement_task = tokio::spawn(async move {
+            let cancel = CancellationToken::new();
+            let res = driver_b.ensure_session(&cancel).await;
+            let saw_teardown_done = done_for_b.load(Ordering::SeqCst);
+            (res, saw_teardown_done)
+        });
+
+        shutdown_task.await.unwrap().expect("shutdown ok");
+        assert!(teardown_done.load(Ordering::SeqCst));
+        assert!(driver.is_detached());
+
+        let (replace_res, saw_teardown_done) = replacement_task.await.unwrap();
+        assert!(
+            saw_teardown_done,
+            "replacement ensure_session must wait until prior runner teardown finishes"
+        );
+        assert!(
+            replace_res.is_err(),
+            "replacement startup with empty PATH should fail cleanly after waiting for teardown"
+        );
+
+        let _ = std::fs::remove_dir_all(&empty_bin);
+    }
+
+    #[tokio::test]
+    async fn act_and_observe_honors_post_action_delays_longer_than_5s_clamp() {
+        let mock = MockAgent::start(Arc::new(|req| {
+            if req.target.starts_with("/hierarchy") {
+                (
+                    200,
+                    json!({
+                        "appId": "dev.deja.ios.checkout",
+                        "state": "running_foreground",
+                        "stateCode": 4,
+                        "truncated": false,
+                        "hierarchyHash": "0123456789abcdef",
+                        "unchanged": false,
+                        "nodeCount": 1,
+                        "nodes": [sample_hierarchy_node(0, "Application", "", "App")]
+                    })
+                    .to_string(),
+                )
+            } else {
+                (200, r#"{"ok":true}"#.to_string())
+            }
+        }))
+        .await;
+
+        let mut driver =
+            IosDriver::with_mock_client_for_tests(IosDriverConfig::new(TEST_UDID), mock.client())
+                .expect("driver");
+
+        // Subcase A: Real > 5,000 ms threshold bypasses `/act`, executes primitive `/tap`,
+        // waits locally (cancellable), and does not call `/hierarchy` if cancelled during delay.
+        let cancel_a = CancellationToken::new();
+        let cancel_trigger = cancel_a.clone();
+        let canceller = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(120)).await;
+            cancel_trigger.cancel();
+        });
+        let t0 = Instant::now();
+        let err = driver
+            .act_and_observe(
+                &ActPayload {
+                    app_id: "dev.deja.ios.checkout".to_string(),
+                    action: ActAction::Tap { x: 10.0, y: 20.0 },
+                    post_action_delay_ms: Some(6_000),
+                    return_hierarchy: true,
+                    include_system_ui: false,
+                    known_hash: None,
+                },
+                &cancel_a,
+            )
+            .await
+            .expect_err("long local delay must honor cancellation");
+        canceller.await.unwrap();
+        assert!(matches!(err, DriverError::Cancelled));
+        assert!(t0.elapsed() >= Duration::from_millis(100));
+        let recorded_a = mock.recorded();
+        assert!(recorded_a.iter().any(|r| r.target == "/tap"));
+        assert!(
+            !recorded_a.iter().any(|r| r.target == "/act"),
+            "delay > 5,000 ms must bypass clamped /act endpoint"
+        );
+        assert!(
+            !recorded_a
+                .iter()
+                .any(|r| r.target.starts_with("/hierarchy")),
+            "cancelled delay must not fetch hierarchy"
+        );
+
+        // Subcase B: Full local delay completion + post-delay hierarchy fetch.
+        driver.max_server_post_action_delay_ms = 50;
+        let cancel_b = CancellationToken::new();
+        let t1 = Instant::now();
+        let outcome = driver
+            .act_and_observe(
+                &ActPayload {
+                    app_id: "dev.deja.ios.checkout".to_string(),
+                    action: ActAction::Tap { x: 15.0, y: 25.0 },
+                    post_action_delay_ms: Some(120),
+                    return_hierarchy: true,
+                    include_system_ui: false,
+                    known_hash: None,
+                },
+                &cancel_b,
+            )
+            .await
+            .expect("full local delay + hierarchy capture");
+        assert!(outcome.action_ok);
+        assert!(outcome.hierarchy.is_some());
+        assert!(outcome.hierarchy_error.is_none());
+        assert!(
+            t1.elapsed() >= Duration::from_millis(110),
+            "expected full >=120ms delay, elapsed={:?}",
+            t1.elapsed()
+        );
+        assert!(
+            !mock.recorded().iter().any(|r| r.target == "/act"),
+            "delay above server clamp must route through primitive action + local delay + /hierarchy"
+        );
     }
 }
