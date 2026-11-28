@@ -22,7 +22,8 @@ use crate::commands::exec_common::{
     allocate_report_rel_path, build_base_report, build_consumer_flows, build_driver_context,
     check_closure_forbidden_values, emit_early_exec_error, execute_single_attempt,
     failure_run_outcome, finalize_run_report, make_walk_identity, parse_goal_tokens,
-    to_execution_result, validate_closure_app_id_confinement,
+    to_execution_result, validate_closure_app_id_confinement, validate_early_output_path,
+    validate_explicit_output_path,
 };
 use crate::config::{CommandCapability, LoadConfigOptions, load_config};
 use crate::exit_codes::{EXIT_USAGE_OR_CONFIG, exit_code_for_store_error};
@@ -41,7 +42,7 @@ pub async fn run(
     let early_redaction =
         RedactionContext::new(&deps.cwd, deps.home_dir.as_deref(), &[], &deps.env);
 
-    // Prepare explicit `--junit` as early as possible so a stale file is never left behind.
+    // Resolve & protect explicit `--junit` and `--report` destinations BEFORE touching disk.
     let cli_junit: Option<PathBuf> = args.junit.as_ref().map(|p| {
         if p.is_absolute() {
             lexical_normalize(p)
@@ -49,19 +50,68 @@ pub async fn run(
             lexical_normalize(&deps.cwd.join(p))
         }
     });
-    if let Some(ref jpath) = cli_junit
-        && let Err(err) = prepare_safe_junit(jpath)
+    let explicit_report: Option<PathBuf> = args.report.as_ref().map(|p| {
+        if p.is_absolute() {
+            lexical_normalize(p)
+        } else {
+            lexical_normalize(&deps.cwd.join(p))
+        }
+    });
+    if let Some(ref jpath) = cli_junit {
+        if let Err(msg) = validate_early_output_path(
+            jpath,
+            "--junit",
+            &deps.cwd,
+            explicit_config,
+            args.flow.as_deref(),
+        ) {
+            return emit_early_exec_error(
+                deps,
+                "remember",
+                &raw_goal_fallback,
+                None,
+                json_mode,
+                args.summary,
+                &early_redaction,
+                "JUNIT_ERROR",
+                &msg,
+                EXIT_USAGE_OR_CONFIG,
+            );
+        }
+        if let Err(err) = prepare_safe_junit(jpath) {
+            return emit_early_exec_error(
+                deps,
+                "remember",
+                &raw_goal_fallback,
+                None,
+                json_mode,
+                args.summary,
+                &early_redaction,
+                "JUNIT_ERROR",
+                &format!("cannot prepare JUnit path {}: {err}", jpath.display()),
+                EXIT_USAGE_OR_CONFIG,
+            );
+        }
+    }
+    if let Some(ref rpath) = explicit_report
+        && let Err(msg) = validate_early_output_path(
+            rpath,
+            "--report",
+            &deps.cwd,
+            explicit_config,
+            args.flow.as_deref(),
+        )
     {
         return emit_early_exec_error(
             deps,
             "remember",
             &raw_goal_fallback,
-            None,
+            cli_junit.as_deref(),
             json_mode,
             args.summary,
             &early_redaction,
-            "JUNIT_ERROR",
-            &format!("cannot prepare JUnit path {}: {err}", jpath.display()),
+            "REPORT_PATH_REFUSED",
+            &msg,
             EXIT_USAGE_OR_CONFIG,
         );
     }
@@ -169,20 +219,51 @@ pub async fn run(
     );
 
     let effective_junit: Option<PathBuf> = cli_junit.clone().or_else(|| config.junit.clone());
-    if cli_junit.is_none()
-        && let Some(ref jpath) = effective_junit
-        && let Err(err) = prepare_safe_junit(jpath)
+    if let Some(ref jpath) = effective_junit {
+        if let Err(msg) = validate_explicit_output_path(jpath, "--junit", &config, None) {
+            return emit_early_exec_error(
+                deps,
+                "remember",
+                &raw_goal,
+                None,
+                json_mode,
+                args.summary,
+                &redaction,
+                "JUNIT_ERROR",
+                &msg,
+                EXIT_USAGE_OR_CONFIG,
+            );
+        }
+        if cli_junit.is_none()
+            && let Err(err) = prepare_safe_junit(jpath)
+        {
+            return emit_early_exec_error(
+                deps,
+                "remember",
+                &raw_goal,
+                None,
+                json_mode,
+                args.summary,
+                &redaction,
+                "JUNIT_ERROR",
+                &format!("cannot prepare JUnit path {}: {err}", jpath.display()),
+                EXIT_USAGE_OR_CONFIG,
+            );
+        }
+    }
+    if let Some(ref rpath) = explicit_report
+        && let Err(msg) = validate_explicit_output_path(rpath, "--report", &config, None)
     {
         return emit_early_exec_error(
             deps,
             "remember",
             &raw_goal,
-            None,
+            effective_junit.as_deref(),
             json_mode,
             args.summary,
             &redaction,
-            "JUNIT_ERROR",
-            &format!("cannot prepare JUnit path {}: {err}", jpath.display()),
+            "REPORT_PATH_REFUSED",
+            &msg,
             EXIT_USAGE_OR_CONFIG,
         );
     }
@@ -201,14 +282,6 @@ pub async fn run(
             EXIT_USAGE_OR_CONFIG,
         );
     }
-
-    let explicit_report: Option<PathBuf> = args.report.as_ref().map(|p| {
-        if p.is_absolute() {
-            lexical_normalize(p)
-        } else {
-            lexical_normalize(&deps.cwd.join(p))
-        }
-    });
 
     let cmd_started_at = now_iso8601();
     let cmd_t0 = Instant::now();
@@ -299,7 +372,8 @@ pub async fn run(
         );
     }
 
-    // Collect full flow closure, validate static appId confinement, and check forbidden secrets.
+    // Collect full flow closure, protect closure files from output clobber, validate static
+    // appId confinement, and check forbidden secrets.
     let closure = match collect_flow_closure(&config.workspace_root, &canonical_candidate) {
         Ok(c) => c,
         Err(err) => {
@@ -317,6 +391,39 @@ pub async fn run(
             );
         }
     };
+
+    if let Some(ref jpath) = effective_junit
+        && let Err(msg) = validate_explicit_output_path(jpath, "--junit", &config, Some(&closure))
+    {
+        return emit_early_exec_error(
+            deps,
+            "remember",
+            &raw_goal,
+            None,
+            json_mode,
+            args.summary,
+            &redaction,
+            "JUNIT_ERROR",
+            &msg,
+            EXIT_USAGE_OR_CONFIG,
+        );
+    }
+    if let Some(ref rpath) = explicit_report
+        && let Err(msg) = validate_explicit_output_path(rpath, "--report", &config, Some(&closure))
+    {
+        return emit_early_exec_error(
+            deps,
+            "remember",
+            &raw_goal,
+            effective_junit.as_deref(),
+            json_mode,
+            args.summary,
+            &redaction,
+            "REPORT_PATH_REFUSED",
+            &msg,
+            EXIT_USAGE_OR_CONFIG,
+        );
+    }
 
     if let Err(msg) = validate_closure_app_id_confinement(&closure, &config.app_id, &config.env) {
         return emit_early_exec_error(

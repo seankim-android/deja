@@ -44,13 +44,21 @@ pub fn run(
         );
     }
 
-    let candidate_path = resolve_target_path(&deps.cwd, &args.target);
-    let looks_like_report_file = candidate_path.symlink_metadata().is_ok()
-        || args.target.ends_with(".json")
-        || args.target.contains('/')
-        || args.target.contains('\\');
+    if args.goal {
+        return inspect_store_goal(args, explicit_config, json_mode, deps);
+    }
 
-    if looks_like_report_file {
+    let candidate_path = resolve_target_path(&deps.cwd, &args.target);
+    // Treat TARGET as a report file ONLY when it exists on disk as a regular file or symlink
+    // (symlinks still fail closed inside `inspect_report_file`). Directories and missing paths —
+    // even if they contain `/` or end in `.json` — fall back to the read-only SQLite store so
+    // stored goals that look like paths remain inspectable.
+    let existing_file_or_symlink = candidate_path
+        .symlink_metadata()
+        .map(|m| m.file_type().is_file() || m.file_type().is_symlink())
+        .unwrap_or(false);
+
+    if existing_file_or_symlink {
         inspect_report_file(args, &candidate_path, explicit_config, json_mode, deps)
     } else {
         inspect_store_goal(args, explicit_config, json_mode, deps)
@@ -345,9 +353,11 @@ fn inspect_store_goal(
     };
 
     if json_mode {
+        let mut exported_walk = walk.clone();
+        exported_walk.goal_key = redaction.redact_goal_key(&walk.goal);
         let payload = json!({
             "store": store.store_label(),
-            "walk": walk,
+            "walk": exported_walk,
             "validationRuns": validation_runs,
         });
         let redacted = redaction.redact_json(&payload);

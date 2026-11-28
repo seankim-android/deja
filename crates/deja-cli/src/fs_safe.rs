@@ -299,6 +299,95 @@ pub fn write_atomic_nofollow_excl(target: &Path, bytes: &[u8]) -> io::Result<()>
     Ok(())
 }
 
+struct TempFileGuard {
+    path: Option<PathBuf>,
+}
+
+impl TempFileGuard {
+    fn new(path: PathBuf) -> Self {
+        Self { path: Some(path) }
+    }
+
+    fn disarm(&mut self) {
+        self.path = None;
+    }
+}
+
+impl Drop for TempFileGuard {
+    fn drop(&mut self) {
+        if let Some(p) = self.path.take() {
+            let _ = fs::remove_file(p);
+        }
+    }
+}
+
+fn check_target_not_symlink_or_dir(target: &Path) -> io::Result<()> {
+    if let Ok(lmeta) = fs::symlink_metadata(target) {
+        if lmeta.file_type().is_symlink() {
+            return Err(io::Error::new(
+                ErrorKind::InvalidInput,
+                format!("refusing to overwrite symbolic link: {}", target.display()),
+            ));
+        }
+        if !lmeta.file_type().is_file() {
+            return Err(io::Error::new(
+                ErrorKind::InvalidInput,
+                format!(
+                    "refusing to overwrite non-regular file: {}",
+                    target.display()
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn stage_temp_file(target: &Path, bytes: &[u8]) -> io::Result<(PathBuf, TempFileGuard)> {
+    if let Some(parent) = target.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent)?;
+    }
+    check_target_not_symlink_or_dir(target)?;
+
+    let file_name = target
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "deja.out".to_string());
+    let temp_path = target.with_file_name(format!(".{file_name}.{}.tmp", temp_nonce()));
+    let mut file = create_new_nofollow(&temp_path)?;
+    let guard = TempFileGuard::new(temp_path.clone());
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    Ok((temp_path, guard))
+}
+
+/// Atomically stage BOTH files via `O_EXCL | O_NOFOLLOW` sibling temporaries first, then publish
+/// `first_target` before `second_target`. If staging either file or publishing `first_target` fails,
+/// all temporaries are removed and `second_target` is never published.
+pub fn write_atomic_pair_nofollow_excl(
+    first_target: &Path,
+    first_bytes: &[u8],
+    second_target: &Path,
+    second_bytes: &[u8],
+) -> io::Result<()> {
+    let (first_tmp, mut first_guard) = stage_temp_file(first_target, first_bytes)?;
+    let (second_tmp, mut second_guard) = stage_temp_file(second_target, second_bytes)?;
+
+    check_target_not_symlink_or_dir(first_target)?;
+    check_target_not_symlink_or_dir(second_target)?;
+
+    fs::rename(&first_tmp, first_target)?;
+    first_guard.disarm();
+
+    if let Err(err) = fs::rename(&second_tmp, second_target) {
+        let _ = fs::remove_file(first_target);
+        return Err(err);
+    }
+    second_guard.disarm();
+    Ok(())
+}
+
 /// Atomically write `bytes` to `target` strictly inside `canonical_root` with full ancestor
 /// symlink confinement and `O_EXCL | O_NOFOLLOW` staging.
 pub fn write_atomic_confined(canonical_root: &Path, target: &Path, bytes: &[u8]) -> io::Result<()> {
@@ -575,7 +664,7 @@ pub fn remove_verified_gate_evidence(
     Ok(())
 }
 
-fn resolve_with_nearest_ancestor(target: &Path) -> io::Result<PathBuf> {
+pub fn resolve_with_nearest_ancestor(target: &Path) -> io::Result<PathBuf> {
     let mut cur = target.to_path_buf();
     let mut tail = Vec::new();
     loop {

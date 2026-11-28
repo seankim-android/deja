@@ -312,6 +312,7 @@ fn run_check(
             &config.workspace_root,
             config_flag_arg,
             identity_mismatch,
+            &redaction,
             &mut referenced_files,
         );
         entries_out.push(checked);
@@ -394,7 +395,7 @@ fn run_check(
                     _ => "deja run --verify",
                 };
                 deps.output.writeln_stdout(&format!(
-                    "    fix: entry contains unsafe control/bidi characters; run `{manual_cmd}` for this goal by hand"
+                    "    fix: entry contains unsafe or redacted characters; run `{manual_cmd}` for this goal by hand"
                 ));
             } else if let FixField::Command(ref cmd) = e.fix {
                 deps.output
@@ -404,6 +405,7 @@ fn run_check(
                         &e.goal,
                         &format_flow_path_for_cwd(&deps.cwd, &config.workspace_root, &e.flow),
                         config_flag_arg,
+                        &redaction,
                     )
                 {
                     deps.output.writeln_stdout(&format!(
@@ -474,6 +476,7 @@ fn check_single_entry(
     canonical_workspace: &Path,
     config_flag_arg: Option<&str>,
     identity_mismatch: Option<IdentityMismatchDetail>,
+    redaction: &RedactionContext,
     referenced_files: &mut BTreeSet<String>,
 ) -> ManifestCheckEntry {
     if let Err(err) = check_manifest_flow_path(&entry.flow, "flow") {
@@ -641,7 +644,7 @@ fn check_single_entry(
 
     if closure.sha256 != entry.closure_sha256 {
         let assertions_changed = current_assertions != entry.assertions_sha256;
-        let (fix, fix_unsafe) = match build_verify_fix(&entry.goal, config_flag_arg) {
+        let (fix, fix_unsafe) = match build_verify_fix(&entry.goal, config_flag_arg, redaction) {
             Some(cmd) => (FixField::Command(cmd), None),
             None => (FixField::Null, Some(true)),
         };
@@ -664,10 +667,11 @@ fn check_single_entry(
 
     if current_assertions != entry.assertions_sha256 {
         let fix_flow = format_flow_path_for_cwd(cwd, canonical_workspace, &entry.flow);
-        let (fix, fix_unsafe) = match build_remember_fix(&entry.goal, &fix_flow, config_flag_arg) {
-            Some(cmd) => (FixField::Command(cmd), None),
-            None => (FixField::Null, Some(true)),
-        };
+        let (fix, fix_unsafe) =
+            match build_remember_fix(&entry.goal, &fix_flow, config_flag_arg, redaction) {
+                Some(cmd) => (FixField::Command(cmd), None),
+                None => (FixField::Null, Some(true)),
+            };
         return ManifestCheckEntry {
             goal: entry.goal.clone(),
             flow: entry.flow.clone(),
@@ -720,9 +724,17 @@ fn check_single_entry(
     }
 }
 
-fn build_verify_fix(goal: &str, config_flag_arg: Option<&str>) -> Option<String> {
-    if has_unsafe_control_or_bidi_char(goal)
-        || config_flag_arg.is_some_and(has_unsafe_control_or_bidi_char)
+fn arg_is_safe_for_fix(arg: &str, redaction: &RedactionContext) -> bool {
+    !has_unsafe_control_or_bidi_char(arg) && redaction.redact_str(arg) == arg
+}
+
+fn build_verify_fix(
+    goal: &str,
+    config_flag_arg: Option<&str>,
+    redaction: &RedactionContext,
+) -> Option<String> {
+    if !arg_is_safe_for_fix(goal, redaction)
+        || config_flag_arg.is_some_and(|cfg| !arg_is_safe_for_fix(cfg, redaction))
     {
         return None;
     }
@@ -782,10 +794,15 @@ fn relative_path_between(from_dir: &Path, to_path: &Path) -> Option<std::path::P
     Some(out)
 }
 
-fn build_remember_fix(goal: &str, flow: &str, config_flag_arg: Option<&str>) -> Option<String> {
-    if has_unsafe_control_or_bidi_char(goal)
-        || has_unsafe_control_or_bidi_char(flow)
-        || config_flag_arg.is_some_and(has_unsafe_control_or_bidi_char)
+fn build_remember_fix(
+    goal: &str,
+    flow: &str,
+    config_flag_arg: Option<&str>,
+    redaction: &RedactionContext,
+) -> Option<String> {
+    if !arg_is_safe_for_fix(goal, redaction)
+        || !arg_is_safe_for_fix(flow, redaction)
+        || config_flag_arg.is_some_and(|cfg| !arg_is_safe_for_fix(cfg, redaction))
     {
         return None;
     }
@@ -909,13 +926,19 @@ mod tests {
         assert!(has_unsafe_control_or_bidi_char("safe\x1b[31m"));
         assert!(!has_unsafe_control_or_bidi_char("Complete checkout (iOS)"));
         assert_eq!(escape_unsafe_chars("a\x1bb\u{202e}c"), "a\\x1bb\\u202ec");
-        assert!(build_verify_fix("bad\u{202e}goal", None).is_none());
+        let redaction = RedactionContext::new(
+            Path::new("/tmp/ws"),
+            None,
+            &[],
+            &std::collections::BTreeMap::new(),
+        );
+        assert!(build_verify_fix("bad\u{202e}goal", None, &redaction).is_none());
         assert_eq!(
-            build_verify_fix("-dash-goal", None).as_deref(),
+            build_verify_fix("-dash-goal", None, &redaction).as_deref(),
             Some("deja run --verify -- -dash-goal")
         );
         assert_eq!(
-            build_verify_fix("it's ok", Some("my config.json")).as_deref(),
+            build_verify_fix("it's ok", Some("my config.json"), &redaction).as_deref(),
             Some("deja run --config 'my config.json' --verify 'it'\\''s ok'")
         );
     }

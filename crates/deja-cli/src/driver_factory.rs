@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;
 use std::future::Future;
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::Stdio;
@@ -531,6 +531,7 @@ fn extract_cf_bundle_id_from_binary_plist(
 ) -> Result<String, String> {
     #[cfg(target_os = "macos")]
     {
+        use std::io::Write;
         let mut child = std::process::Command::new("/usr/bin/plutil")
             .args(["-convert", "xml1", "-o", "-", "-"])
             .stdin(Stdio::piped())

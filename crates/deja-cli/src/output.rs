@@ -140,7 +140,19 @@ impl RedactionContext {
     ) -> Self {
         let ws = workspace_root.to_string_lossy().into_owned();
         let home_owned = home_dir.map(|p| p.to_string_lossy().into_owned());
-        let redactor = create_redactor(&ws, home_owned.as_deref(), forbidden_values);
+        let mut expanded_forbidden: Vec<String> = Vec::with_capacity(forbidden_values.len() * 2);
+        for v in forbidden_values {
+            expanded_forbidden.push(v.clone());
+            let lower = v.to_lowercase();
+            if lower != *v && lower.chars().count() >= 4 {
+                expanded_forbidden.push(lower.clone());
+            }
+            let slug = slugify_for_redaction(&lower);
+            if slug != lower && slug != *v && slug.chars().count() >= 4 {
+                expanded_forbidden.push(slug);
+            }
+        }
+        let redactor = create_redactor(&ws, home_owned.as_deref(), &expanded_forbidden);
         let provider =
             provider_key_redactor(env_vars.iter().map(|(k, v)| (k.as_str(), v.as_str())));
         Self { redactor, provider }
@@ -150,6 +162,16 @@ impl RedactionContext {
     #[must_use]
     pub fn redact_str(&self, text: &str) -> String {
         self.provider.redact(&self.redactor.redact(text))
+    }
+
+    /// Derive a safe display/export `goalKey` by redacting `raw_goal` BEFORE normalizing/lowercasing,
+    /// so mixed-case configured secrets never leak in lowercased form through exported `goalKey` fields.
+    #[must_use]
+    pub fn redact_goal_key(&self, raw_goal: &str) -> String {
+        let redacted = self.redact_str(raw_goal);
+        normalize_goal(&redacted)
+            .map(|g| g.key)
+            .unwrap_or_else(|_| redacted.trim().to_ascii_lowercase())
     }
 
     /// Redact a [`VisibleContext`] while preserving deduplication and truncation markers.
@@ -167,9 +189,28 @@ impl RedactionContext {
 
     /// Serialize and redact a [`CliRunReport`] to a JSON value.
     pub fn redact_report(&self, report: &CliRunReport) -> Result<Value, serde_json::Error> {
-        let raw = serde_json::to_value(report)?;
+        let mut raw = serde_json::to_value(report)?;
+        if let Some(obj) = raw.as_object_mut() {
+            let safe_key = self.redact_goal_key(&report.core.identity.goal);
+            obj.insert("goalKey".to_string(), Value::String(safe_key));
+        }
         Ok(self.redact_json(&raw))
     }
+}
+
+fn slugify_for_redaction(lower: &str) -> String {
+    let mut slug = String::with_capacity(lower.len());
+    for ch in lower.chars() {
+        if ch.is_ascii_alphanumeric() {
+            slug.push(ch);
+        } else if !slug.ends_with('-') && !slug.is_empty() {
+            slug.push('-');
+        }
+    }
+    while slug.ends_with('-') {
+        slug.pop();
+    }
+    slug
 }
 
 fn redact_json_provider_pass(value: &Value, provider: &ProviderKeyRedactor) -> Value {
@@ -547,7 +588,11 @@ pub fn format_summary_line(result: &RunResult, redaction: &RedactionContext) -> 
         }
     }
 
-    let goal_redacted = redaction.redact_str(&result.goal_key);
+    let goal_redacted = if !result.identity.goal.trim().is_empty() {
+        redaction.redact_goal_key(&result.identity.goal)
+    } else {
+        redaction.redact_str(&result.goal_key)
+    };
     let goal_encoded = percent_encode_summary(&goal_redacted);
     line.push_str(&format!(" goal={goal_encoded}"));
     line

@@ -157,6 +157,10 @@ pub struct InspectArgs {
     #[arg(value_name = "TARGET")]
     pub target: String,
 
+    /// Always resolve TARGET as a goal name stored in SQLite (even if it looks like a path or exists on disk).
+    #[arg(long)]
+    pub goal: bool,
+
     /// Isolated store identifier under `.deja/memory/stores/<id>/`.
     #[arg(long, value_name = "ID")]
     pub store: Option<String>,

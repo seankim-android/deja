@@ -24,7 +24,7 @@ use crate::exit_codes::{EXIT_GATE_CLOSED, EXIT_GATE_ERROR, EXIT_OK, EXIT_USAGE_O
 use crate::fs_safe::{
     GateEvidenceError, lexical_normalize, precheck_gate_evidence_paths,
     read_to_string_nofollow_bounded, remove_verified_gate_evidence, sibling_evidence_txt_path,
-    write_atomic_nofollow_excl,
+    write_atomic_pair_nofollow_excl,
 };
 use crate::output::{CliRunReport, RedactionContext, workspace_relative_display};
 
@@ -370,7 +370,7 @@ pub fn run(args: &GateArgs, explicit_config: Option<&Path>, json_mode: bool, dep
                         };
                         let entries = results
                             .into_iter()
-                            .map(|r| to_evidence_goal(r, &fp, &scanned.report_paths))
+                            .map(|r| to_evidence_goal(r, &fp, &scanned.report_paths, &redaction))
                             .collect();
                         (verdict, code, Some(fp), entries, None)
                     }
@@ -444,9 +444,14 @@ fn finalize_and_write_evidence(
         }
     };
 
-    if let Err(err) = write_atomic_nofollow_excl(json_path, json_text.as_bytes())
-        .and_then(|()| write_atomic_nofollow_excl(txt_path, table_text.as_bytes()))
-    {
+    // Stage BOTH `.txt` and `.json` temporaries first, publish `.txt` BEFORE `.json`, and clean up
+    // on any failure so a passing `.json` is NEVER published without its matching `.txt` table.
+    if let Err(err) = write_atomic_pair_nofollow_excl(
+        txt_path,
+        table_text.as_bytes(),
+        json_path,
+        json_text.as_bytes(),
+    ) {
         emit_gate_error(
             deps,
             json_mode,
@@ -468,6 +473,7 @@ fn to_evidence_goal(
     r: StoreGateGoalResult,
     build_fingerprint: &str,
     report_paths: &BTreeMap<(String, String, String), String>,
+    redaction: &RedactionContext,
 ) -> GateEvidenceGoal {
     // Prefer the exact `report_path` persisted on the selected SQLite validation row so
     // concurrent stores finishing at identical timestamps never misattribute reports.
@@ -482,9 +488,12 @@ fn to_evidence_goal(
                 .cloned()
         })
     });
+    // Derive exported `goalKey` by redacting `r.goal` BEFORE lowercasing/normalizing so
+    // mixed-case secrets never leak in lowercased form through `goalKey`.
+    let safe_goal_key = redaction.redact_goal_key(&r.goal);
     GateEvidenceGoal {
         goal: r.goal,
-        goal_key: r.goal_key,
+        goal_key: safe_goal_key,
         outcome: r.outcome,
         validated_at: r.validated_at,
         flow_sha256: r.flow_sha256,

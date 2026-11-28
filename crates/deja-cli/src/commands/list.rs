@@ -85,10 +85,18 @@ pub fn run(args: &ListArgs, explicit_config: Option<&Path>, json_mode: bool, dep
     };
 
     if json_mode {
+        let exported_walks: Vec<_> = walks
+            .iter()
+            .map(|w| {
+                let mut cloned = w.clone();
+                cloned.goal_key = redaction.redact_goal_key(&w.goal);
+                cloned
+            })
+            .collect();
         let payload = json!({
             "store": store.store_label(),
             "manifest": config.manifest,
-            "walks": walks,
+            "walks": exported_walks,
         });
         let redacted = redaction.redact_json(&payload);
         deps.output

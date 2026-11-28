@@ -3766,3 +3766,854 @@ async fn regression_r2_f6_debug_logs_never_emit_simctl_args_or_open_link_secrets
     assert!(!stderr_str.contains(&url_secret));
     assert!(!stderr_str.contains(&cfg_secret));
 }
+
+// ===========================================================================
+// 5. Codex Round 3 regression tests (Findings 1 through 8)
+// ===========================================================================
+
+#[tokio::test]
+async fn regression_r3_f1_gate_does_not_publish_passing_json_when_txt_write_fails() {
+    let ws = TempWs::new("r3-f1-gate-pair");
+    let build = ws.write_build("build/App.bin", b"v1");
+    let fp = fingerprint_file(&ws.path, &build).unwrap();
+    ws.write(
+        "deja.config.json",
+        &json!({
+            "workspaceRoot": ".",
+            "platform": "ios",
+            "appId": TEST_APP_ID,
+            "adapter": "maestro-ios/v1",
+            "buildPath": "build/App.bin"
+        })
+        .to_string(),
+    );
+    let flow = ws.write(
+        "flows/checkout.yaml",
+        "appId: dev.deja.test.app\n---\n- launchApp\n- assertVisible: Done\n",
+    );
+    ws.write("goals.txt", "checkout\n");
+
+    let store = SqliteWalkStore::open_writable(SqliteStoreOptions::new(&ws.path)).unwrap();
+    let id = WalkIdentity {
+        goal: "checkout".to_string(),
+        app_id: TEST_APP_ID.to_string(),
+        platform: "ios".to_string(),
+        flow_schema_version: DEFAULT_FLOW_SCHEMA_VERSION.to_string(),
+        build_fingerprint: fp,
+        adapter: Some("maestro-ios/v1".to_string()),
+        browser: None,
+    };
+    store
+        .persist_verified_candidate(
+            &id,
+            &deja_store::PersistVerifiedCandidateOptions {
+                candidate_path: flow,
+                validation: RecordValidationInput::new(true, now_iso8601())
+                    .with_origin(WalkOrigin::Remember)
+                    .with_runtime("ios-27.2"),
+                expected_flow_sha256: None,
+                expected_closure_sha256: None,
+                exploration: None,
+                repair_history: None,
+            },
+        )
+        .unwrap();
+    store.close();
+
+    // 1. Direct atomic-pair invariant: when the `.txt` target cannot be written (parent is a
+    // regular file), `write_atomic_pair_nofollow_excl` fails BEFORE publishing `.json` and leaves
+    // zero `.json` and zero `.tmp` files in the writable `.json` directory.
+    let blocker = ws.write("blocker", "not a dir");
+    let ok_dir = ws.path.join("ok-out");
+    fs::create_dir_all(&ok_dir).unwrap();
+    let bad_txt = blocker.join("ev.txt");
+    let good_json = ok_dir.join("ev.json");
+    assert!(
+        deja_cli::fs_safe::write_atomic_pair_nofollow_excl(
+            &bad_txt,
+            b"table\n",
+            &good_json,
+            b"{\"verdict\":\"passed\"}\n",
+        )
+        .is_err()
+    );
+    assert!(
+        !good_json.exists(),
+        ".json must never be published when .txt fails"
+    );
+    assert_eq!(
+        fs::read_dir(&ok_dir).unwrap().count(),
+        0,
+        "no leftover temp files in .json directory"
+    );
+
+    // 2. End-to-end `deja gate`: an overly long evidence basename triggers ENAMETOOLONG when
+    // staging sibling temporaries -> gate exits 11 and leaves NO `.json` or `.txt` on disk.
+    let long_name = format!("{}.json", "e".repeat(240));
+    let long_rel = format!("out/{long_name}");
+    let (deps, _) = make_deps(
+        &ws.path,
+        Arc::new(MockFactory::new(None, MockDriver::new(vec![]))),
+        default_probes(),
+        CancellationToken::new(),
+    );
+    let code = run_cli_from_args(
+        [
+            "deja",
+            "gate",
+            "--goals",
+            "goals.txt",
+            "--evidence",
+            &long_rel,
+            "--json",
+        ],
+        &deps,
+    )
+    .await;
+    assert_eq!(code, 11, "gate must exit 11 when evidence write fails");
+    assert!(!ws.path.join(&long_rel).exists());
+    let out_dir = ws.path.join("out");
+    if out_dir.exists() {
+        assert_eq!(
+            fs::read_dir(&out_dir).unwrap().count(),
+            0,
+            "failed gate evidence write must leave zero partial or temp files"
+        );
+    }
+}
+
+#[tokio::test]
+async fn regression_r3_f2_file_backed_subflow_with_url_header_rejected_at_preflight() {
+    let ws = TempWs::new("r3-f2-subflow-url");
+    ws.write_build("build/App.bin", b"v1");
+    ws.write(
+        "deja.config.json",
+        &json!({
+            "workspaceRoot": ".",
+            "platform": "ios",
+            "appId": TEST_APP_ID,
+            "adapter": "maestro-ios/v1",
+            "buildPath": "build/App.bin",
+            "device": TEST_UDID
+        })
+        .to_string(),
+    );
+    ws.write(
+        "flows/main.yaml",
+        "appId: dev.deja.test.app\n---\n- launchApp\n- runFlow: sub.yaml\n",
+    );
+    ws.write(
+        "flows/sub.yaml",
+        "url: https://evil.example/phish\n---\n- assertVisible: Welcome\n",
+    );
+
+    let factory = Arc::new(MockFactory::new(Some("ios-27.2"), MockDriver::new(vec![])));
+    let create_calls = Arc::clone(&factory.create_calls);
+    let (deps, cap) = make_deps(
+        &ws.path,
+        factory,
+        default_probes(),
+        CancellationToken::new(),
+    );
+    let code = run_cli_from_args(
+        [
+            "deja",
+            "remember",
+            "subflow url escape",
+            "--flow",
+            "flows/main.yaml",
+            "--json",
+        ],
+        &deps,
+    )
+    .await;
+    assert_eq!(
+        code, 2,
+        "subflow with url: header must fail preflight exit 2"
+    );
+    assert_eq!(
+        create_calls.load(Ordering::SeqCst),
+        0,
+        "driver must never be created when subflow url header fails confinement"
+    );
+    let out = cap.lock().unwrap().stdout.clone();
+    assert!(out.contains("APP_ID_CONFINEMENT"));
+}
+
+#[tokio::test]
+async fn regression_r3_f3_manifest_check_suppresses_fix_when_goal_contains_apostrophe_secret() {
+    let ws = TempWs::new("r3-f3-manifest-apostrophe");
+    let apo_secret = ["sec", "'ret-val-99"].concat();
+    let goal_with_secret = format!("buy {apo_secret} item");
+
+    ws.write(
+        "deja.config.json",
+        &json!({
+            "workspaceRoot": ".",
+            "platform": "ios",
+            "appId": TEST_APP_ID,
+            "adapter": "maestro-ios/v1",
+            "manifest": "deja.walks.json",
+            "secrets": [apo_secret]
+        })
+        .to_string(),
+    );
+    let f1 = ws.write(
+        "flows/changed.yaml",
+        "appId: dev.deja.test.app\n---\n- launchApp\n- assertVisible: Before\n",
+    );
+    let cl1 = collect_flow_closure(&ws.path, &f1).unwrap();
+    let as1 = assertions_sha256(&cl1).unwrap();
+
+    let f2 = ws.write(
+        "flows/assert_drift.yaml",
+        "appId: dev.deja.test.app\n---\n- launchApp\n- assertVisible: Stay\n",
+    );
+    let cl2 = collect_flow_closure(&ws.path, &f2).unwrap();
+
+    ws.write(
+        "deja.walks.json",
+        &json!({
+            "manifestVersion": 1,
+            "hashVersion": 1,
+            "walks": [
+                {
+                    "goal": goal_with_secret,
+                    "appId": TEST_APP_ID,
+                    "platform": "ios",
+                    "adapter": "maestro-ios/v1",
+                    "flow": "flows/changed.yaml",
+                    "closureSha256": cl1.sha256,
+                    "assertionsSha256": as1
+                },
+                {
+                    "goal": format!("assert {apo_secret} goal"),
+                    "appId": TEST_APP_ID,
+                    "platform": "ios",
+                    "adapter": "maestro-ios/v1",
+                    "flow": "flows/assert_drift.yaml",
+                    "closureSha256": cl2.sha256,
+                    "assertionsSha256": "0".repeat(64)
+                }
+            ]
+        })
+        .to_string(),
+    );
+    // Edit flow 1 so `flow-changed` triggers.
+    ws.write(
+        "flows/changed.yaml",
+        "appId: dev.deja.test.app\n---\n- launchApp\n- assertVisible: After\n",
+    );
+
+    let (deps_json, cap_json) = make_deps(
+        &ws.path,
+        Arc::new(MockFactory::new(None, MockDriver::new(vec![]))),
+        default_probes(),
+        CancellationToken::new(),
+    );
+    let code_json = run_cli_from_args(["deja", "manifest", "check", "--json"], &deps_json).await;
+    assert_eq!(code_json, 8);
+    let out_json = cap_json.lock().unwrap().clone();
+    assert!(!out_json.stdout.contains(&apo_secret));
+    assert!(!out_json.stdout.contains("ret-val-99"));
+    assert!(!out_json.stderr.contains(&apo_secret));
+    assert!(!out_json.stderr.contains("ret-val-99"));
+
+    let parsed: Value = serde_json::from_str(&out_json.stdout).unwrap();
+    for entry in parsed["entries"].as_array().unwrap() {
+        assert!(
+            entry["goal"]
+                .as_str()
+                .unwrap()
+                .contains("<redacted-fixture-value>")
+        );
+        assert!(
+            entry["fix"].is_null(),
+            "fix command must be suppressed (null) when goal contains a redacted secret"
+        );
+        assert_eq!(entry["fixUnsafe"], true);
+    }
+
+    let (deps_human, cap_human) = make_deps(
+        &ws.path,
+        Arc::new(MockFactory::new(None, MockDriver::new(vec![]))),
+        default_probes(),
+        CancellationToken::new(),
+    );
+    assert_eq!(
+        run_cli_from_args(["deja", "manifest", "check"], &deps_human).await,
+        8
+    );
+    let out_human = cap_human.lock().unwrap().clone();
+    assert!(!out_human.stdout.contains(&apo_secret));
+    assert!(!out_human.stdout.contains("ret-val-99"));
+    assert!(!out_human.stderr.contains("ret-val-99"));
+}
+
+#[tokio::test]
+async fn regression_r3_f4_mixed_case_secret_never_leaks_via_goal_key_across_commands() {
+    let ws = TempWs::new("r3-f4-goal-key-redact");
+    let mixed_secret = ["MyMixed", "CaseSecret77"].concat();
+    let lower_secret = mixed_secret.to_ascii_lowercase();
+    let raw_goal = format!("Checkout {mixed_secret}");
+
+    ws.write_build("build/App.bin", b"v1");
+    ws.write(
+        "deja.config.json",
+        &json!({
+            "workspaceRoot": ".",
+            "platform": "ios",
+            "appId": TEST_APP_ID,
+            "adapter": "maestro-ios/v1",
+            "buildPath": "build/App.bin",
+            "device": TEST_UDID,
+            "secrets": [mixed_secret]
+        })
+        .to_string(),
+    );
+    ws.write(
+        "flows/checkout.yaml",
+        "appId: dev.deja.test.app\n---\n- launchApp\n- assertVisible: Done\n",
+    );
+    ws.write("goals.txt", &format!("{raw_goal}\n"));
+
+    let ok_tree = hierarchy_with_nodes(TEST_APP_ID, vec![node_with_label("done", "Done")]);
+    let factory = Arc::new(MockFactory::new(
+        Some("ios-27.2"),
+        MockDriver::new(vec![ok_tree]),
+    ));
+
+    // 1. `deja remember --report out/rem.json --json`
+    let (deps_rem, cap_rem) = make_deps(
+        &ws.path,
+        factory.clone(),
+        default_probes(),
+        CancellationToken::new(),
+    );
+    assert_eq!(
+        run_cli_from_args(
+            [
+                "deja",
+                "remember",
+                &raw_goal,
+                "--flow",
+                "flows/checkout.yaml",
+                "--report",
+                "out/rem.json",
+                "--json",
+            ],
+            &deps_rem,
+        )
+        .await,
+        0
+    );
+    let rem_out = cap_rem.lock().unwrap().clone();
+    assert!(!rem_out.stdout.contains(&mixed_secret));
+    assert!(!rem_out.stdout.contains(&lower_secret));
+    let rem_json: Value = serde_json::from_str(&rem_out.stdout).unwrap();
+    assert_eq!(rem_json["goalKey"], "checkout <redacted-fixture-value>");
+
+    // 2. `deja run --json`
+    let (deps_run, cap_run) = make_deps(
+        &ws.path,
+        factory.clone(),
+        default_probes(),
+        CancellationToken::new(),
+    );
+    assert_eq!(
+        run_cli_from_args(["deja", "run", &raw_goal, "--json"], &deps_run).await,
+        0
+    );
+    let run_out = cap_run.lock().unwrap().stdout.clone();
+    assert!(!run_out.contains(&mixed_secret));
+    assert!(!run_out.contains(&lower_secret));
+    let run_json: Value = serde_json::from_str(&run_out).unwrap();
+    assert_eq!(run_json["goalKey"], "checkout <redacted-fixture-value>");
+
+    // 3. `deja list --json`
+    let (deps_list, cap_list) = make_deps(
+        &ws.path,
+        factory.clone(),
+        default_probes(),
+        CancellationToken::new(),
+    );
+    assert_eq!(
+        run_cli_from_args(["deja", "list", "--json"], &deps_list).await,
+        0
+    );
+    let list_out = cap_list.lock().unwrap().stdout.clone();
+    assert!(!list_out.contains(&mixed_secret));
+    assert!(!list_out.contains(&lower_secret));
+    let list_json: Value = serde_json::from_str(&list_out).unwrap();
+    assert_eq!(
+        list_json["walks"][0]["goalKey"],
+        "checkout <redacted-fixture-value>"
+    );
+
+    // 4. `deja inspect --goal <raw_goal> --json` AND `deja inspect out/rem.json --json`
+    let (deps_ig, cap_ig) = make_deps(
+        &ws.path,
+        factory.clone(),
+        default_probes(),
+        CancellationToken::new(),
+    );
+    assert_eq!(
+        run_cli_from_args(["deja", "inspect", "--goal", &raw_goal, "--json"], &deps_ig).await,
+        0
+    );
+    let ig_out = cap_ig.lock().unwrap().stdout.clone();
+    assert!(!ig_out.contains(&mixed_secret));
+    assert!(!ig_out.contains(&lower_secret));
+    let ig_json: Value = serde_json::from_str(&ig_out).unwrap();
+    assert_eq!(
+        ig_json["walk"]["goalKey"],
+        "checkout <redacted-fixture-value>"
+    );
+
+    let (deps_ir, cap_ir) = make_deps(
+        &ws.path,
+        factory.clone(),
+        default_probes(),
+        CancellationToken::new(),
+    );
+    assert_eq!(
+        run_cli_from_args(["deja", "inspect", "out/rem.json", "--json"], &deps_ir).await,
+        0
+    );
+    let ir_out = cap_ir.lock().unwrap().stdout.clone();
+    assert!(!ir_out.contains(&mixed_secret));
+    assert!(!ir_out.contains(&lower_secret));
+
+    // 5. `deja gate --goals goals.txt --evidence .deja/gate/ev.json --json`
+    let (deps_gate, cap_gate) = make_deps(
+        &ws.path,
+        factory,
+        default_probes(),
+        CancellationToken::new(),
+    );
+    assert_eq!(
+        run_cli_from_args(
+            [
+                "deja",
+                "gate",
+                "--goals",
+                "goals.txt",
+                "--evidence",
+                ".deja/gate/ev.json",
+                "--json",
+            ],
+            &deps_gate,
+        )
+        .await,
+        0
+    );
+    let gate_out = cap_gate.lock().unwrap().stdout.clone();
+    assert!(!gate_out.contains(&mixed_secret));
+    assert!(!gate_out.contains(&lower_secret));
+    let gate_json: Value = serde_json::from_str(&gate_out).unwrap();
+    assert_eq!(
+        gate_json["goals"][0]["goalKey"],
+        "checkout <redacted-fixture-value>"
+    );
+
+    let ev_json_disk = fs::read_to_string(ws.path.join(".deja/gate/ev.json")).unwrap();
+    let ev_txt_disk = fs::read_to_string(ws.path.join(".deja/gate/ev.txt")).unwrap();
+    assert!(!ev_json_disk.contains(&mixed_secret) && !ev_json_disk.contains(&lower_secret));
+    assert!(!ev_txt_disk.contains(&mixed_secret) && !ev_txt_disk.contains(&lower_secret));
+}
+
+#[tokio::test]
+async fn regression_r3_f5_explicit_report_and_junit_protect_config_manifest_closure_and_memory() {
+    let ws = TempWs::new("r3-f5-protect-state");
+    ws.write_build("build/App.bin", b"v1");
+    let cfg_text = json!({
+        "workspaceRoot": ".",
+        "platform": "ios",
+        "appId": TEST_APP_ID,
+        "adapter": "maestro-ios/v1",
+        "buildPath": "build/App.bin",
+        "device": TEST_UDID,
+        "manifest": "deja.walks.json"
+    })
+    .to_string();
+    let cfg_path = ws.write("deja.config.json", &cfg_text);
+    let main_text =
+        "appId: dev.deja.test.app\n---\n- launchApp\n- runFlow: sub.yaml\n- assertVisible: Done\n";
+    let sub_text = "appId: dev.deja.test.app\n---\n- assertVisible: Done\n";
+    let main_path = ws.write("flows/main.yaml", main_text);
+    let sub_path = ws.write("flows/sub.yaml", sub_text);
+
+    // Seed a valid walk so `deja.walks.json` and `.deja/memory/walks.sqlite` both exist!
+    let ok_tree = hierarchy_with_nodes(TEST_APP_ID, vec![node_with_label("done", "Done")]);
+    let seed_factory = Arc::new(MockFactory::new(
+        Some("ios-27.2"),
+        MockDriver::new(vec![ok_tree.clone()]),
+    ));
+    let (deps_seed, _) = make_deps(
+        &ws.path,
+        seed_factory,
+        default_probes(),
+        CancellationToken::new(),
+    );
+    assert_eq!(
+        run_cli_from_args(
+            ["deja", "remember", "checkout", "--flow", "flows/main.yaml"],
+            &deps_seed,
+        )
+        .await,
+        0
+    );
+
+    let manifest_path = ws.path.join("deja.walks.json");
+    let sqlite_path = ws.path.join(".deja/memory/walks.sqlite");
+    let manifest_before = fs::read(&manifest_path).unwrap();
+    let sqlite_before = fs::read(&sqlite_path).unwrap();
+
+    for protected in [
+        "deja.walks.json",
+        "deja.config.json",
+        ".deja/memory/walks.sqlite",
+        "flows/main.yaml",
+        "flows/sub.yaml",
+    ] {
+        for flag in ["--report", "--junit"] {
+            let f_rem = Arc::new(MockFactory::new(
+                Some("ios-27.2"),
+                MockDriver::new(vec![ok_tree.clone()]),
+            ));
+            let calls_rem = Arc::clone(&f_rem.create_calls);
+            let (deps_r, _) =
+                make_deps(&ws.path, f_rem, default_probes(), CancellationToken::new());
+            let code_r = run_cli_from_args(
+                [
+                    "deja",
+                    "remember",
+                    "checkout",
+                    "--flow",
+                    "flows/main.yaml",
+                    flag,
+                    protected,
+                    "--json",
+                ],
+                &deps_r,
+            )
+            .await;
+            assert_eq!(
+                code_r, 2,
+                "remember {flag} {protected} must be refused with exit 2"
+            );
+            assert_eq!(
+                calls_rem.load(Ordering::SeqCst),
+                0,
+                "driver must not run when {flag} targets {protected}"
+            );
+
+            let f_run = Arc::new(MockFactory::new(
+                Some("ios-27.2"),
+                MockDriver::new(vec![ok_tree.clone()]),
+            ));
+            let calls_run = Arc::clone(&f_run.create_calls);
+            let (deps_run, _) =
+                make_deps(&ws.path, f_run, default_probes(), CancellationToken::new());
+            let code_run = run_cli_from_args(
+                ["deja", "run", "checkout", flag, protected, "--json"],
+                &deps_run,
+            )
+            .await;
+            assert_eq!(
+                code_run, 2,
+                "run {flag} {protected} must be refused with exit 2"
+            );
+            assert_eq!(
+                calls_run.load(Ordering::SeqCst),
+                0,
+                "driver must not run when `run {flag}` targets {protected}"
+            );
+        }
+    }
+
+    // Confirm EVERY protected file remained completely untouched!
+    assert_eq!(fs::read_to_string(&cfg_path).unwrap(), cfg_text);
+    assert_eq!(fs::read_to_string(&main_path).unwrap(), main_text);
+    assert_eq!(fs::read_to_string(&sub_path).unwrap(), sub_text);
+    assert_eq!(fs::read(&manifest_path).unwrap(), manifest_before);
+    assert_eq!(fs::read(&sqlite_path).unwrap(), sqlite_before);
+}
+
+#[tokio::test]
+async fn regression_r3_f6_unwritable_explicit_report_or_junit_returns_exit_2_even_when_run_passes()
+{
+    let ws = TempWs::new("r3-f6-unwritable-out");
+    ws.write_build("build/App.bin", b"v1");
+    ws.write(
+        "deja.config.json",
+        &json!({
+            "workspaceRoot": ".",
+            "platform": "ios",
+            "appId": TEST_APP_ID,
+            "adapter": "maestro-ios/v1",
+            "buildPath": "build/App.bin",
+            "device": TEST_UDID
+        })
+        .to_string(),
+    );
+    ws.write(
+        "flows/ok.yaml",
+        "appId: dev.deja.test.app\n---\n- launchApp\n- assertVisible: Done\n",
+    );
+    let ok_tree = hierarchy_with_nodes(TEST_APP_ID, vec![node_with_label("done", "Done")]);
+
+    // Remember cleanly first.
+    let (deps_seed, _) = make_deps(
+        &ws.path,
+        Arc::new(MockFactory::new(
+            Some("ios-27.2"),
+            MockDriver::new(vec![ok_tree.clone()]),
+        )),
+        default_probes(),
+        CancellationToken::new(),
+    );
+    assert_eq!(
+        run_cli_from_args(
+            ["deja", "remember", "ok goal", "--flow", "flows/ok.yaml"],
+            &deps_seed,
+        )
+        .await,
+        0
+    );
+
+    // 1. `--report` under a regular file (parent is NOT a directory) on a PASSING run -> exit 2!
+    ws.write("not_a_dir", "file contents");
+    let (deps_rep, cap_rep) = make_deps(
+        &ws.path,
+        Arc::new(MockFactory::new(
+            Some("ios-27.2"),
+            MockDriver::new(vec![ok_tree.clone()]),
+        )),
+        default_probes(),
+        CancellationToken::new(),
+    );
+    let code_rep = run_cli_from_args(
+        [
+            "deja",
+            "run",
+            "ok goal",
+            "--report",
+            "not_a_dir/report.json",
+            "--json",
+        ],
+        &deps_rep,
+    )
+    .await;
+    assert_eq!(
+        code_rep, 2,
+        "unwritable explicit --report must return exit 2 even when the flow passed"
+    );
+    let rep_out = cap_rep.lock().unwrap().clone();
+    let rep_json: Value = serde_json::from_str(&rep_out.stdout).unwrap();
+    assert_eq!(rep_json["outcome"], "passed");
+    assert!(
+        rep_out.stderr.contains("failed to write explicit --report"),
+        "expected stderr diagnostic, got: {}",
+        rep_out.stderr
+    );
+
+    // 2. `--junit` whose parent directory becomes unwritable/replaced during run -> exit 2!
+    let jdir = ws.path.join("junit_parent");
+    let jdir_for_hook = jdir.clone();
+    let driver_j = MockDriver::new(vec![ok_tree]).with_on_ensure_session(Arc::new(move || {
+        // Replace prepared empty directory with a regular file so final JUnit write fails.
+        let _ = fs::remove_dir_all(&jdir_for_hook);
+        fs::write(&jdir_for_hook, "blocked").unwrap();
+    }));
+    let (deps_j, cap_j) = make_deps(
+        &ws.path,
+        Arc::new(MockFactory::new(Some("ios-27.2"), driver_j)),
+        default_probes(),
+        CancellationToken::new(),
+    );
+    let code_j = run_cli_from_args(
+        [
+            "deja",
+            "run",
+            "ok goal",
+            "--junit",
+            "junit_parent/out.xml",
+            "--json",
+        ],
+        &deps_j,
+    )
+    .await;
+    assert_eq!(
+        code_j, 2,
+        "unwritable explicit --junit must return exit 2 even when the flow passed"
+    );
+    assert!(
+        cap_j
+            .lock()
+            .unwrap()
+            .stderr
+            .contains("failed to write JUnit report")
+    );
+}
+
+#[test]
+fn regression_r3_f7_diamond_dag_preflight_confinement_memoizes_and_bounds_work() {
+    // 1. 14-layer diamond DAG (2^14 = 16,384 paths without memoization, 15 unique states with
+    // memoization): must complete almost instantaneously.
+    let ws = TempWs::new("r3-f7-diamond");
+    let layers = 14usize;
+    for i in 0..layers {
+        let next = format!("layer_{:02}.yaml", i + 1);
+        ws.write(
+            &format!("flows/layer_{i:02}.yaml"),
+            &format!("appId: {TEST_APP_ID}\n---\n- runFlow: {next}\n- runFlow: {next}\n"),
+        );
+    }
+    ws.write(
+        &format!("flows/layer_{layers:02}.yaml"),
+        &format!("appId: {TEST_APP_ID}\n---\n- assertVisible: Leaf\n"),
+    );
+
+    let root = ws.path.join("flows/layer_00.yaml");
+    let closure = collect_flow_closure(&ws.path, &root).unwrap();
+    let t0 = std::time::Instant::now();
+    deja_cli::commands::exec_common::validate_closure_app_id_confinement(
+        &closure,
+        TEST_APP_ID,
+        &BTreeMap::new(),
+    )
+    .expect("diamond DAG with identical env must memoize and pass");
+    assert!(
+        t0.elapsed() < Duration::from_secs(1),
+        "diamond DAG preflight took too long: {:?}",
+        t0.elapsed()
+    );
+
+    // 2. Adversarial DAG with exponentially varying envs (2^13 = 8,192 distinct states > 4,096
+    // cap) must fail closed promptly on the visit budget instead of hanging.
+    let ws_adv = TempWs::new("r3-f7-adv-dag");
+    let adv_layers = 13usize;
+    for i in 0..adv_layers {
+        let next = format!("adv_{:02}.yaml", i + 1);
+        ws_adv.write(
+            &format!("flows/adv_{i:02}.yaml"),
+            &format!(
+                "appId: {TEST_APP_ID}\n---\n- runFlow:\n    file: {next}\n    env:\n      BIT_{i}: \"0\"\n- runFlow:\n    file: {next}\n    env:\n      BIT_{i}: \"1\"\n"
+            ),
+        );
+    }
+    ws_adv.write(
+        &format!("flows/adv_{adv_layers:02}.yaml"),
+        &format!("appId: {TEST_APP_ID}\n---\n- assertVisible: Leaf\n"),
+    );
+
+    let adv_root = ws_adv.path.join("flows/adv_00.yaml");
+    let adv_closure = collect_flow_closure(&ws_adv.path, &adv_root).unwrap();
+    let err = deja_cli::commands::exec_common::validate_closure_app_id_confinement(
+        &adv_closure,
+        TEST_APP_ID,
+        &BTreeMap::new(),
+    )
+    .expect_err("exponentially varying env fan-out must hit visit budget");
+    assert!(
+        err.contains("maximum visit budget"),
+        "expected visit budget error, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn regression_r3_f8_inspect_resolves_path_like_goals_and_explicit_goal_flag() {
+    let ws = TempWs::new("r3-f8-inspect-goal");
+    ws.write_build("build/App.bin", b"v1");
+    ws.write(
+        "deja.config.json",
+        &json!({
+            "workspaceRoot": ".",
+            "platform": "ios",
+            "appId": TEST_APP_ID,
+            "adapter": "maestro-ios/v1",
+            "buildPath": "build/App.bin",
+            "device": TEST_UDID
+        })
+        .to_string(),
+    );
+    ws.write(
+        "flows/export.yaml",
+        "appId: dev.deja.test.app\n---\n- launchApp\n- assertVisible: Exported\n",
+    );
+    let ok_tree = hierarchy_with_nodes(TEST_APP_ID, vec![node_with_label("exp", "Exported")]);
+    let factory = Arc::new(MockFactory::new(
+        Some("ios-27.2"),
+        MockDriver::new(vec![ok_tree]),
+    ));
+
+    // Remember two goals: one looking like a JSON file path (`flows/export.json`), and one
+    // colliding with an existing directory on disk (`reports`).
+    for goal_name in ["flows/export.json", "reports"] {
+        let (deps, _) = make_deps(
+            &ws.path,
+            factory.clone(),
+            default_probes(),
+            CancellationToken::new(),
+        );
+        assert_eq!(
+            run_cli_from_args(
+                ["deja", "remember", goal_name, "--flow", "flows/export.yaml"],
+                &deps,
+            )
+            .await,
+            0
+        );
+    }
+
+    // Create a directory named `reports/` on disk!
+    fs::create_dir_all(ws.path.join("reports")).unwrap();
+
+    // 1. Without `--goal`: missing path `flows/export.json` falls back to SQLite and succeeds!
+    let (deps1, cap1) = make_deps(
+        &ws.path,
+        factory.clone(),
+        default_probes(),
+        CancellationToken::new(),
+    );
+    assert_eq!(
+        run_cli_from_args(["deja", "inspect", "flows/export.json", "--json"], &deps1).await,
+        0
+    );
+    let j1: Value = serde_json::from_str(&cap1.lock().unwrap().stdout).unwrap();
+    assert_eq!(j1["walk"]["goal"], "flows/export.json");
+
+    // 2. Without `--goal`: existing directory `reports/` falls back to SQLite and succeeds!
+    let (deps2, cap2) = make_deps(
+        &ws.path,
+        factory.clone(),
+        default_probes(),
+        CancellationToken::new(),
+    );
+    assert_eq!(
+        run_cli_from_args(["deja", "inspect", "reports", "--json"], &deps2).await,
+        0
+    );
+    let j2: Value = serde_json::from_str(&cap2.lock().unwrap().stdout).unwrap();
+    assert_eq!(j2["walk"]["goal"], "reports");
+
+    // 3. Even when an actual file `flows/export.json` exists on disk, `--goal` forces SQLite lookup!
+    ws.write("flows/export.json", r#"{"not":"a report"}"#);
+    let (deps3, cap3) = make_deps(
+        &ws.path,
+        factory,
+        default_probes(),
+        CancellationToken::new(),
+    );
+    assert_eq!(
+        run_cli_from_args(
+            ["deja", "inspect", "--goal", "flows/export.json", "--json"],
+            &deps3,
+        )
+        .await,
+        0
+    );
+    let j3: Value = serde_json::from_str(&cap3.lock().unwrap().stdout).unwrap();
+    assert_eq!(j3["walk"]["goal"], "flows/export.json");
+}

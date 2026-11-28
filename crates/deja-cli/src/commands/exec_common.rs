@@ -2,6 +2,7 @@
 //! used by `deja remember` and `deja run`.
 
 use std::collections::{BTreeMap, HashSet};
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -19,14 +20,17 @@ use deja_flow::{
     validate_flow_app_id_confinement,
 };
 use deja_store::{ConsumerFlows, ConsumerFlowsOptions, now_iso8601};
-use serde_json::json;
+use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
 use crate::CliDeps;
-use crate::config::LoadedConfig;
+use crate::config::{DEFAULT_CONFIG_PATH, LoadedConfig};
 use crate::driver_factory::DriverContext;
 use crate::exit_codes::{EXIT_USAGE_OR_CONFIG, exit_code_for_outcome};
-use crate::fs_safe::{lexical_normalize, write_atomic_confined, write_atomic_nofollow_excl};
+use crate::fs_safe::{
+    lexical_normalize, path_inside, read_to_string_nofollow_bounded, resolve_with_nearest_ancestor,
+    write_atomic_confined, write_atomic_nofollow_excl,
+};
 use crate::output::{
     CliRunReport, RedactionContext, emit_summary, format_error_summary_line, format_summary_line,
     native_engine_report, print_human_run_report, workspace_relative_display,
@@ -52,14 +56,12 @@ pub fn allocate_report_rel_path(command: RunCommand) -> String {
     format!(".deja/reports/{cmd}-{ms}-{}-{seq}.json", std::process::id())
 }
 
-/// Write redacted report to the pre-allocated immutable path, per-store latest path (`DEJA-35`),
-/// and optional explicit `--report <path>`.
-pub fn write_allocated_reports(
+/// Write redacted report to internal workspace paths (pre-allocated immutable path + per-store latest).
+pub fn write_internal_reports(
     canonical_workspace: &Path,
     store_id: Option<&str>,
     immutable_rel_path: &str,
     redacted_json: &serde_json::Value,
-    explicit_report: Option<&Path>,
 ) -> std::io::Result<()> {
     let mut text = serde_json::to_string_pretty(redacted_json)
         .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err.to_string()))?;
@@ -75,10 +77,199 @@ pub fn write_allocated_reports(
     };
     let latest_abs = canonical_workspace.join(latest_rel);
     write_atomic_confined(canonical_workspace, &latest_abs, bytes)?;
+    Ok(())
+}
 
-    if let Some(path) = explicit_report {
-        write_atomic_nofollow_excl(path, bytes)?;
+/// Early safety check for explicit `--report` / `--junit` paths BEFORE `load_config` or
+/// `prepare_safe_junit` touches disk, preventing accidental clobbering/deletion of config,
+/// manifest, flow closure files, symlinks, directories, or `.deja/memory/` walk state.
+pub fn validate_early_output_path(
+    target: &Path,
+    flag_label: &str,
+    cwd: &Path,
+    explicit_config: Option<&Path>,
+    extra_flow: Option<&Path>,
+) -> Result<(), String> {
+    check_output_target_not_symlink_or_dir(target, flag_label)?;
+
+    let config_abs = match explicit_config {
+        Some(p) if p.is_absolute() => lexical_normalize(p),
+        Some(p) => lexical_normalize(&cwd.join(p)),
+        None => lexical_normalize(&cwd.join(DEFAULT_CONFIG_PATH)),
+    };
+    let config_dir = config_abs
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| cwd.to_path_buf());
+
+    let mut protected_files = vec![config_abs.clone()];
+    let mut candidate_ws = fs::canonicalize(&config_dir)
+        .or_else(|_| fs::canonicalize(cwd))
+        .unwrap_or_else(|_| lexical_normalize(cwd));
+
+    if let Ok(raw_cfg) = read_to_string_nofollow_bounded(&config_abs, 1024 * 1024)
+        && let Ok(val) = serde_json::from_str::<Value>(&raw_cfg)
+        && let Some(obj) = val.as_object()
+    {
+        if let Some(ws_str) = obj.get("workspaceRoot").and_then(Value::as_str)
+            && !ws_str.trim().is_empty()
+        {
+            let ws_joined = if Path::new(ws_str).is_absolute() {
+                PathBuf::from(ws_str)
+            } else {
+                config_dir.join(ws_str)
+            };
+            if let Ok(canon_ws) = fs::canonicalize(&ws_joined)
+                && canon_ws.is_dir()
+            {
+                candidate_ws = canon_ws;
+            }
+        }
+        if let Some(manifest_str) = obj.get("manifest").and_then(Value::as_str)
+            && !manifest_str.trim().is_empty()
+        {
+            let manifest_abs = lexical_normalize(&candidate_ws.join(manifest_str));
+            protected_files.push(manifest_abs.clone());
+            // Also protect all flow files (and their referenced closures) tracked in the manifest
+            // BEFORE `prepare_safe_junit` runs so `--junit flows/main.yaml` never unlinks a flow!
+            if let Ok(raw_manifest) =
+                read_to_string_nofollow_bounded(&manifest_abs, 16 * 1024 * 1024)
+                && let Ok(manifest) = deja_core::parse_walk_manifest(&raw_manifest)
+            {
+                for entry in &manifest.walks {
+                    let flow_abs = lexical_normalize(&candidate_ws.join(&entry.flow));
+                    protected_files.push(flow_abs.clone());
+                    if let Ok(canon_flow) = fs::canonicalize(&flow_abs)
+                        && let Ok(closure) =
+                            deja_core::collect_flow_closure(&candidate_ws, &canon_flow)
+                    {
+                        for file in &closure.files {
+                            protected_files
+                                .push(lexical_normalize(&candidate_ws.join(&file.source)));
+                        }
+                    }
+                }
+            }
+        }
     }
+
+    if let Some(flow_arg) = extra_flow {
+        let flow_abs = if flow_arg.is_absolute() {
+            lexical_normalize(flow_arg)
+        } else {
+            lexical_normalize(&cwd.join(flow_arg))
+        };
+        protected_files.push(flow_abs.clone());
+        if let Ok(canon_flow) = fs::canonicalize(&flow_abs)
+            && let Ok(closure) = deja_core::collect_flow_closure(&candidate_ws, &canon_flow)
+        {
+            for file in &closure.files {
+                protected_files.push(lexical_normalize(&candidate_ws.join(&file.source)));
+            }
+        }
+    }
+
+    check_output_target_against_protected(target, flag_label, &candidate_ws, &protected_files)
+}
+
+/// Full walk-state protection check for explicit `--report` / `--junit` destinations once
+/// config (and optionally the active [`FlowClosure`]) have been resolved.
+pub fn validate_explicit_output_path(
+    target: &Path,
+    flag_label: &str,
+    config: &LoadedConfig,
+    closure: Option<&FlowClosure>,
+) -> Result<(), String> {
+    check_output_target_not_symlink_or_dir(target, flag_label)?;
+
+    let mut protected_files = vec![config.config_path.clone()];
+    if let Some(ref manifest_rel) = config.manifest {
+        protected_files.push(lexical_normalize(&config.workspace_root.join(manifest_rel)));
+    }
+    if let Some(c) = closure {
+        for file in &c.files {
+            protected_files.push(lexical_normalize(&config.workspace_root.join(&file.source)));
+        }
+    }
+
+    check_output_target_against_protected(
+        target,
+        flag_label,
+        &config.workspace_root,
+        &protected_files,
+    )
+}
+
+fn check_output_target_not_symlink_or_dir(target: &Path, flag_label: &str) -> Result<(), String> {
+    if let Ok(meta) = fs::symlink_metadata(target) {
+        if meta.file_type().is_symlink() {
+            return Err(format!(
+                "refusing to write {flag_label} to symbolic link: {}",
+                target.display()
+            ));
+        }
+        if !meta.file_type().is_file() {
+            return Err(format!(
+                "refusing to write {flag_label} to non-regular file or directory: {}",
+                target.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn check_output_target_against_protected(
+    target: &Path,
+    flag_label: &str,
+    canonical_workspace: &Path,
+    protected_files: &[PathBuf],
+) -> Result<(), String> {
+    let norm_target = lexical_normalize(target);
+    let resolved_target =
+        resolve_with_nearest_ancestor(&norm_target).unwrap_or_else(|_| norm_target.clone());
+
+    let memory_dir = lexical_normalize(&canonical_workspace.join(".deja/memory"));
+    let flows_dir = lexical_normalize(&canonical_workspace.join(".deja/flows"));
+    let manifest_lock = lexical_normalize(&canonical_workspace.join(".deja/manifest.lock"));
+    let legacy_walks = lexical_normalize(&canonical_workspace.join("walks.json"));
+
+    for candidate in [&norm_target, &resolved_target] {
+        if candidate == &memory_dir || path_inside(&memory_dir, candidate) {
+            return Err(format!(
+                "refusing to write {flag_label} inside Déjà walk memory (.deja/memory/): {}",
+                target.display()
+            ));
+        }
+        if candidate == &flows_dir || path_inside(&flows_dir, candidate) {
+            return Err(format!(
+                "refusing to write {flag_label} inside Déjà stored flows (.deja/flows/): {}",
+                target.display()
+            ));
+        }
+        if candidate == &manifest_lock || candidate == &legacy_walks {
+            return Err(format!(
+                "refusing to overwrite protected Déjà walk state with {flag_label}: {}",
+                target.display()
+            ));
+        }
+    }
+
+    for protected in protected_files {
+        let norm_prot = lexical_normalize(protected);
+        let resolved_prot =
+            resolve_with_nearest_ancestor(&norm_prot).unwrap_or_else(|_| norm_prot.clone());
+        if norm_target == norm_prot
+            || resolved_target == norm_prot
+            || norm_target == resolved_prot
+            || resolved_target == resolved_prot
+        {
+            return Err(format!(
+                "refusing to overwrite protected workspace file with {flag_label}: {}",
+                target.display()
+            ));
+        }
+    }
+
     Ok(())
 }
 
@@ -124,10 +315,14 @@ pub fn build_driver_context(
     }
 }
 
+const MAX_PREFLIGHT_VISITS: usize = 4_096;
+
 /// Validate static `appId` confinement across every flow and subflow in a collected [`FlowClosure`].
 ///
 /// Walks `runFlow`/`retry` file calls starting from `closure.main` so statically-passed subflow
-/// `env` frames propagate accurately, AND checks every remaining `Flow` file in `closure.files`.
+/// `env` frames propagate accurately, memoizing `(flow_path, effective_env)` states and capping
+/// total visits at [`MAX_PREFLIGHT_VISITS`] so diamond DAGs stay linear and adversarial dynamic
+/// fan-outs fail closed. Also checks every remaining `Flow` file in `closure.files`.
 pub fn validate_closure_app_id_confinement(
     closure: &FlowClosure,
     expected_app_id: &str,
@@ -146,6 +341,8 @@ pub fn validate_closure_app_id_confinement(
     }
 
     let mut validated: HashSet<String> = HashSet::new();
+    let mut visited_states: HashSet<(String, BTreeMap<String, String>)> = HashSet::new();
+    let mut visits: usize = 0;
     let mut call_stack: Vec<String> = Vec::new();
 
     if parsed_by_path.contains_key(closure.main.as_str()) {
@@ -155,6 +352,8 @@ pub fn validate_closure_app_id_confinement(
             expected_app_id,
             base_env,
             &mut validated,
+            &mut visited_states,
+            &mut visits,
             &mut call_stack,
         )?;
     }
@@ -169,16 +368,29 @@ pub fn validate_closure_app_id_confinement(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn validate_flow_tree(
     rel_path: &str,
     parsed_by_path: &BTreeMap<&str, ParsedFlow>,
     expected_app_id: &str,
     env: &BTreeMap<String, String>,
     validated: &mut HashSet<String>,
+    visited_states: &mut HashSet<(String, BTreeMap<String, String>)>,
+    visits: &mut usize,
     call_stack: &mut Vec<String>,
 ) -> Result<(), String> {
     if call_stack.iter().any(|p| p == rel_path) {
         return Ok(());
+    }
+    let state_key = (rel_path.to_string(), env.clone());
+    if !visited_states.insert(state_key) {
+        return Ok(());
+    }
+    *visits = visits.saturating_add(1);
+    if *visits > MAX_PREFLIGHT_VISITS {
+        return Err(format!(
+            "flow preflight confinement exceeded maximum visit budget ({MAX_PREFLIGHT_VISITS}); simplify subflow fan-out"
+        ));
     }
     let Some(parsed) = parsed_by_path.get(rel_path) else {
         return Ok(());
@@ -215,6 +427,8 @@ fn validate_flow_tree(
             expected_app_id,
             &mut stack,
             validated,
+            visited_states,
+            visits,
             call_stack,
         )?;
     }
@@ -222,6 +436,7 @@ fn validate_flow_tree(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn validate_referenced_subflows(
     current_dir: &Path,
     steps: &[FlowStep],
@@ -229,6 +444,8 @@ fn validate_referenced_subflows(
     expected_app_id: &str,
     stack: &mut EnvStack,
     validated: &mut HashSet<String>,
+    visited_states: &mut HashSet<(String, BTreeMap<String, String>)>,
+    visits: &mut usize,
     call_stack: &mut Vec<String>,
 ) -> Result<(), String> {
     for step in steps {
@@ -255,6 +472,8 @@ fn validate_referenced_subflows(
                             expected_app_id,
                             &merged,
                             validated,
+                            visited_states,
+                            visits,
                             call_stack,
                         )
                     }
@@ -265,6 +484,8 @@ fn validate_referenced_subflows(
                         expected_app_id,
                         stack,
                         validated,
+                        visited_states,
+                        visits,
                         call_stack,
                     ),
                 };
@@ -295,6 +516,8 @@ fn validate_referenced_subflows(
                             expected_app_id,
                             &merged,
                             validated,
+                            visited_states,
+                            visits,
                             call_stack,
                         )
                     }
@@ -305,6 +528,8 @@ fn validate_referenced_subflows(
                         expected_app_id,
                         stack,
                         validated,
+                        visited_states,
+                        visits,
                         call_stack,
                     ),
                 };
@@ -321,6 +546,8 @@ fn validate_referenced_subflows(
                     expected_app_id,
                     stack,
                     validated,
+                    visited_states,
+                    visits,
                     call_stack,
                 )?;
             }
@@ -597,13 +824,15 @@ pub fn finalize_run_report(
     redaction: &RedactionContext,
     report: &mut CliRunReport,
 ) -> u8 {
+    let mut explicit_artifact_failed = false;
+
     if let Some(jpath) = junit_path
         && let Err(err) = write_report_junit(jpath, workspace_root, report, redaction)
     {
-        report
-            .core
-            .errors
-            .push(redaction.redact_str(&format!("failed to write JUnit report: {err}")));
+        let msg = redaction.redact_str(&format!("failed to write JUnit report: {err}"));
+        report.core.errors.push(msg.clone());
+        deps.output.writeln_stderr(&format!("deja error: {msg}"));
+        explicit_artifact_failed = true;
     }
 
     let redacted_json = match redaction.redact_report(report) {
@@ -616,16 +845,26 @@ pub fn finalize_run_report(
         }
     };
 
-    if let Err(err) = write_allocated_reports(
-        workspace_root,
-        store_id,
-        immutable_rel_path,
-        &redacted_json,
-        explicit_report,
-    ) {
+    if let Err(err) =
+        write_internal_reports(workspace_root, store_id, immutable_rel_path, &redacted_json)
+    {
         deps.output.writeln_stderr(&redaction.redact_str(&format!(
             "deja warning: failed to write run report artifact: {err}"
         )));
+    }
+
+    if let Some(path) = explicit_report {
+        let mut text =
+            serde_json::to_string_pretty(&redacted_json).expect("redacted JSON serializes");
+        text.push('\n');
+        if let Err(err) = write_atomic_nofollow_excl(path, text.as_bytes()) {
+            let msg = redaction.redact_str(&format!(
+                "failed to write explicit --report {}: {err}",
+                path.display()
+            ));
+            deps.output.writeln_stderr(&format!("deja error: {msg}"));
+            explicit_artifact_failed = true;
+        }
     }
 
     if json_mode {
@@ -641,7 +880,11 @@ pub fn finalize_run_report(
         emit_summary(&deps.output, json_mode, &line);
     }
 
-    exit_code_for_outcome(report.core.outcome)
+    if explicit_artifact_failed {
+        EXIT_USAGE_OR_CONFIG
+    } else {
+        exit_code_for_outcome(report.core.outcome)
+    }
 }
 
 /// Emit an early error (before a full [`CliRunReport`] exists), writing errored redacted JUnit

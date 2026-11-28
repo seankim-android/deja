@@ -1894,6 +1894,9 @@ pub fn validate_flow_app_id_confinement(
         if let Some(ref raw_app_id) = flow.header.app_id {
             check_confined_app_id(raw_app_id, expected_app_id, &env_stack, "header appId")?;
         }
+        if let Some(ref raw_url) = flow.header.url {
+            check_confined_app_id(raw_url, expected_app_id, &env_stack, "header url")?;
+        }
         check_steps_app_id_confinement(
             &flow.header.on_flow_start,
             expected_app_id,
@@ -2219,5 +2222,30 @@ onFlowComplete:
         let err = validate_flow_app_id_confinement(&unresolved, "dev.deja.shop", &empty)
             .expect_err("unresolved dynamic appId must fail");
         assert!(err.contains("unresolvable dynamic appId"));
+    }
+
+    #[test]
+    fn app_id_confinement_validates_header_url_targets() {
+        let empty = BTreeMap::new();
+
+        // A native flow or file-backed subflow with `url:` (and no `appId:`) must fail closed.
+        let url_only = parse_flow("url: https://evil.example\n---\n- assertVisible: Hi\n").unwrap();
+        let err = validate_flow_app_id_confinement(&url_only, "dev.deja.shop", &empty)
+            .expect_err("url header must be rejected on native bundle appId");
+        assert!(err.contains("header url"));
+
+        // Dynamic unresolved `url:` must fail closed.
+        let dyn_url = parse_flow("url: ${TARGET_URL}\n---\n- assertVisible: Hi\n").unwrap();
+        assert!(
+            validate_flow_app_id_confinement(&dyn_url, "http://127.0.0.1:3000", &empty).is_err()
+        );
+
+        // Confined web flow whose `url:` matches `expected_app_id` passes; mismatched URL fails.
+        let ok_web = parse_flow("url: http://127.0.0.1:3000\n---\n- assertVisible: Hi\n").unwrap();
+        validate_flow_app_id_confinement(&ok_web, "http://127.0.0.1:3000", &empty)
+            .expect("matching web url header should pass");
+        assert!(
+            validate_flow_app_id_confinement(&ok_web, "http://127.0.0.1:4000", &empty).is_err()
+        );
     }
 }
