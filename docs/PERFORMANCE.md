@@ -18,17 +18,18 @@ All baseline figures below come directly from recorded run reports and spike evi
 
 In the legacy architecture, Déjà's own orchestration overhead was ~3–19 ms; >99% of wall-clock time lived in JVM/Maestro startup, driver attach, polling sleeps, and unbatched model/MCP loops.
 
-### Native Rust + `DejaXCTestRunner` iOS Spike (`DEJA-60`)
+### Native Rust + `DejaXCTestRunner` iOS Benchmarks (`DEJA-60` & `DEJA-77`)
 
 Measured on Apple Silicon (`iPhone 17`, iOS `27.2`, Xcode `27.2` `27B52`) in [SPIKE_EVIDENCE.md](../drivers/ios/DejaXCTestRunner/SPIKE_EVIDENCE.md):
 
-| Phase | Observed (`DEJA-60`) | Share of warm E2E | Primary bottleneck |
+| Phase | `DEJA-60` baseline | `DEJA-77` optimized | Primary gain / bottleneck |
 | --- | ---: | ---: | --- |
-| Cold runner build (`xcodebuild build-for-testing`) | `14.8–40.6 s` | Amortized (cached) | One-time Xcode compile per `<xcode>-<sdk>-<arch>-<sha256>` |
-| Warm runner attach (`test-without-building` → `/health`) | `8.2–9.4 s` | **~46%** | Spawning `xcodebuild` + XCTest host boot per CLI invocation |
-| Attached `DejaFixture` checkout flow | `9.6–10.3 s` | **~54%** | First-snapshot AX warmup (`~3.6–3.9 s`), per-step HTTP round-trips, fixed poll sleeps |
-| Steady-state `/hierarchy` snapshot | `11.1–19.5 ms` median | — | Fast once AX daemon warms up; `3.6–3.9 s` p95 spike on first post-launch read |
-| **Warm attach + full checkout E2E** | **`17.9–19.7 s`** | **100%** | Already ~35–40% faster than Maestro 2.12 (`29.1–31.3 s`) |
+| Cold runner build (`xcodebuild build-for-testing`) | `14.8–40.6 s` | `13.6 s` (cached) | One-time Xcode compile per `<xcode>-<sdk>-<arch>-<sha256>` |
+| Warm runner attach (`test-without-building` → `/health`) | `8.2–9.4 s` | `7.4 s` (Flow #1) / **`0 ms`** (Flow #2 reuse) | `verify_healthy()` takes `0.6–0.7 ms`; session reuse drops attach to `0 ms` for subsequent flows |
+| Attached `DejaFixture` checkout flow | `10.2 s` (`14` HTTP calls) | **`8.96 s`** (`8` HTTP calls) | Compound `/act`, `/warmup`, server-side `/waitForSelector`, single-snapshot `/type` (**-42.9% HTTP calls**, **-12.4% flow time**; observed `8.96–9.09 s` vs `10.22–14.14 s`) |
+| Steady-state `/hierarchy` snapshot | `11.1–19.5 ms` median | `14.8 ms` full / `15.0 ms` `knownHash` short-circuit | Exact Rust↔Swift chrome-stripped FNV-1a `hierarchyHash`; `unchanged: true` skips JSON node serialization & transfer |
+| **Warm attach + Flow #1 E2E** | **`17.9–19.7 s`** | **`16.4 s`** | **1.77×–1.91× faster** than Maestro 2.12 (`29.1–31.3 s`) |
+| **2-flow suite total (warm attach + 2 checkouts)** | `35.3 s` (2× attach + 2× baseline) | **`25.5 s`** (1× attach + 2× optimized) | **-27.9% end-to-end on 2 flows**; scales as attach cost amortizes across the suite |
 
 ## Optimization Roadmap (Ordered by Wall-Clock Impact)
 

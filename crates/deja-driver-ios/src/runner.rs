@@ -274,6 +274,19 @@ impl IosRunnerSession {
         self.attach_duration
     }
 
+    /// Probes `/health` to confirm a warm session is still responsive before reusing it
+    /// across sequential flows without paying another `xcodebuild test-without-building` attach.
+    pub async fn verify_healthy(&self) -> Result<crate::client::HealthResponse> {
+        let health = self.client.health().await?;
+        if health.status != "ok" {
+            return Err(IosDriverError::InvalidArgument(format!(
+                "DejaXCTestRunner reported non-ok health status: {}",
+                health.status
+            )));
+        }
+        Ok(health)
+    }
+
     /// Gracefully shuts down the `xcodebuild` runner process group, sweeps any stray processes
     /// for this UDID, terminates the simulator runner, and deletes per-run temp artifacts.
     pub async fn shutdown(mut self) -> Result<()> {

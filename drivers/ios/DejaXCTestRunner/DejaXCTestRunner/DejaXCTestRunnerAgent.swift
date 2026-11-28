@@ -5,6 +5,12 @@ final class DejaXCTestRunnerAgent: XCTestCase {
     private let issueLock = NSLock()
     private var capturedIssues: [String]?
 
+    // Guards overlapping non-/health requests on the HTTP server thread BEFORE dispatching
+    // onto DispatchQueue.main so a concurrent request never queues behind a long wait in GCD
+    // and executes late after a client timeout.
+    private let busyLock = NSLock()
+    private var isExecutingRequest = false
+
     override func setUp() {
         super.setUp()
         continueAfterFailure = true
@@ -43,6 +49,62 @@ final class DejaXCTestRunnerAgent: XCTestCase {
         return (result, issues)
     }
 
+    private func tryAcquireExecutionSlot() -> Bool {
+        busyLock.lock()
+        defer { busyLock.unlock() }
+        if isExecutingRequest {
+            return false
+        }
+        isExecutingRequest = true
+        return true
+    }
+
+    private func releaseExecutionSlot() {
+        busyLock.lock()
+        isExecutingRequest = false
+        busyLock.unlock()
+    }
+
+    private func executeMainRequest(
+        _ request: HttpRequest,
+        actions: XcuiActions,
+        respond: @escaping (HttpResponse) -> Void
+    ) {
+        var slotReleased = false
+        defer {
+            if !slotReleased {
+                releaseExecutionSlot()
+            }
+        }
+
+        let (result, issues) = runCapturingIssues {
+            actions.handle(request)
+        }
+        let finalResponse: HttpResponse
+        switch result {
+        case .success(let response):
+            if !issues.isEmpty && response.status < 400 {
+                finalResponse = HttpResponse.jsonError(
+                    status: 500,
+                    message: "XCTest recorded issue(s): \(issues.joined(separator: "; "))"
+                )
+            } else {
+                finalResponse = response
+            }
+        case .failure(let error):
+            let detail = issues.isEmpty
+                ? error.localizedDescription
+                : "\(error.localizedDescription) (issues: \(issues.joined(separator: "; ")))"
+            finalResponse = HttpResponse.jsonError(status: 500, message: detail)
+        }
+
+        // Release BEFORE writing the HTTP response so a client that immediately sends the next
+        // sequential request upon receiving this response can never race and receive 409.
+        releaseExecutionSlot()
+        slotReleased = true
+        respond(finalResponse)
+    }
+
     func testRunAgent() {
         let env = ProcessInfo.processInfo.environment
         guard let token = env["DEJA_IOS_AGENT_TOKEN"], !token.isEmpty else {
@@ -62,32 +124,27 @@ final class DejaXCTestRunnerAgent: XCTestCase {
                 return
             }
 
-            DispatchQueue.main.async {
+            guard let self else {
+                respond(HttpResponse.jsonError(status: 503, message: "agent shutting down"))
+                return
+            }
+
+            guard self.tryAcquireExecutionSlot() else {
+                respond(
+                    HttpResponse.jsonError(
+                        status: 409,
+                        message: "runner busy executing another request"
+                    )
+                )
+                return
+            }
+
+            DispatchQueue.main.async { [weak self] in
                 guard let self else {
                     respond(HttpResponse.jsonError(status: 503, message: "agent shutting down"))
                     return
                 }
-                let (result, issues) = self.runCapturingIssues {
-                    actions.handle(request)
-                }
-                switch result {
-                case .success(let response):
-                    if !issues.isEmpty && response.status < 400 {
-                        respond(
-                            HttpResponse.jsonError(
-                                status: 500,
-                                message: "XCTest recorded issue(s): \(issues.joined(separator: "; "))"
-                            )
-                        )
-                    } else {
-                        respond(response)
-                    }
-                case .failure(let error):
-                    let detail = issues.isEmpty
-                        ? error.localizedDescription
-                        : "\(error.localizedDescription) (issues: \(issues.joined(separator: "; ")))"
-                    respond(HttpResponse.jsonError(status: 500, message: detail))
-                }
+                self.executeMainRequest(request, actions: actions, respond: respond)
             }
         }
 
