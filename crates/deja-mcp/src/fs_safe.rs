@@ -560,47 +560,109 @@ fn ensure_confined_parent_dir(canonical_root: &Path, target: &Path) -> io::Resul
     Ok(canonical_parent)
 }
 
-/// Verify that the confined reports directory for `immutable_rel_path` (and its sibling
-/// `latest.json`) is writable without creating any report file or modifying `latest.json`.
-pub fn probe_confined_report_targets(
-    canonical_workspace: &Path,
-    store_id: Option<&str>,
-    immutable_rel_path: &str,
-) -> io::Result<()> {
-    let immutable_abs = canonical_workspace.join(immutable_rel_path);
-    let canonical_parent = ensure_confined_parent_dir(canonical_workspace, &immutable_abs)?;
+/// Atomically create a private (`0o700` on Unix) directory strictly inside `canonical_root`,
+/// creating any missing intermediate directories step-by-step while refusing symbolic links at
+/// every component and failing with `AlreadyExists` if `dir` already exists or is a symlink.
+pub fn create_confined_private_dir(canonical_root: &Path, dir: &Path) -> io::Result<PathBuf> {
+    let normalized = lexical_normalize(dir);
+    if !path_inside(canonical_root, &normalized) {
+        return Err(io::Error::new(
+            ErrorKind::PermissionDenied,
+            format!("directory escapes workspace: {}", dir.display()),
+        ));
+    }
+    let rel = normalized.strip_prefix(canonical_root).map_err(|_| {
+        io::Error::new(
+            ErrorKind::PermissionDenied,
+            format!("directory escapes workspace: {}", dir.display()),
+        )
+    })?;
+    let comps: Vec<String> =
+        rel.components()
+            .map(|c| match c {
+                Component::Normal(s) => s.to_str().map(ToString::to_string).ok_or_else(|| {
+                    io::Error::new(ErrorKind::InvalidInput, "non-UTF-8 path segment")
+                }),
+                _ => Err(io::Error::new(
+                    ErrorKind::PermissionDenied,
+                    "invalid path component in confined directory",
+                )),
+            })
+            .collect::<io::Result<Vec<_>>>()?;
+    if comps.is_empty() {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "confined private directory must be a subdirectory of workspace",
+        ));
+    }
 
-    let latest_rel = match store_id {
-        Some(id) => format!(".deja/reports/stores/{id}/latest.json"),
-        None => ".deja/reports/latest.json".to_string(),
-    };
-    let latest_abs = canonical_workspace.join(latest_rel);
-    if let Ok(lmeta) = fs::symlink_metadata(&latest_abs) {
-        if lmeta.file_type().is_symlink() {
-            return Err(io::Error::new(
-                ErrorKind::PermissionDenied,
-                format!(
-                    "refusing to overwrite symbolic link: {}",
-                    latest_abs.display()
-                ),
-            ));
-        }
-        if !lmeta.file_type().is_file() {
-            return Err(io::Error::new(
-                ErrorKind::InvalidInput,
-                format!(
-                    "refusing to overwrite non-regular file: {}",
-                    latest_abs.display()
-                ),
-            ));
+    let mut cursor = canonical_root.to_path_buf();
+    for seg in &comps[..comps.len() - 1] {
+        cursor.push(seg);
+        match fs::symlink_metadata(&cursor) {
+            Ok(meta) => {
+                if meta.file_type().is_symlink() {
+                    return Err(io::Error::new(
+                        ErrorKind::PermissionDenied,
+                        format!("refusing to traverse symbolic link: {}", cursor.display()),
+                    ));
+                }
+                if !meta.file_type().is_dir() {
+                    return Err(io::Error::new(
+                        ErrorKind::InvalidInput,
+                        format!("ancestor is not a directory: {}", cursor.display()),
+                    ));
+                }
+            }
+            Err(err) if err.kind() == ErrorKind::NotFound => {
+                match fs::DirBuilder::new().create(&cursor) {
+                    Ok(()) => {}
+                    Err(create_err) if create_err.kind() == ErrorKind::AlreadyExists => {
+                        let meta = fs::symlink_metadata(&cursor)?;
+                        if meta.file_type().is_symlink() || !meta.file_type().is_dir() {
+                            return Err(io::Error::new(
+                                ErrorKind::PermissionDenied,
+                                format!("ancestor is not a safe directory: {}", cursor.display()),
+                            ));
+                        }
+                    }
+                    Err(create_err) => return Err(create_err),
+                }
+            }
+            Err(err) => return Err(err),
         }
     }
 
-    let probe_path = canonical_parent.join(format!(".deja-report-probe-{}.tmp", temp_nonce()));
-    let file = create_new_nofollow(&probe_path)?;
-    drop(file);
-    let _ = fs::remove_file(&probe_path);
-    Ok(())
+    cursor.push(&comps[comps.len() - 1]);
+    let mut builder = fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(&cursor)?;
+
+    let leaf_meta = fs::symlink_metadata(&cursor)?;
+    if leaf_meta.file_type().is_symlink() || !leaf_meta.file_type().is_dir() {
+        return Err(io::Error::new(
+            ErrorKind::PermissionDenied,
+            format!(
+                "created target is not a private directory: {}",
+                cursor.display()
+            ),
+        ));
+    }
+    let canonical = fs::canonicalize(&cursor)?;
+    if !path_inside(canonical_root, &canonical) {
+        return Err(io::Error::new(
+            ErrorKind::PermissionDenied,
+            format!(
+                "created private directory escapes workspace: {}",
+                cursor.display()
+            ),
+        ));
+    }
+    Ok(canonical)
 }
 
 /// Atomically write `bytes` to `target` strictly inside `canonical_root` with ancestor symlink

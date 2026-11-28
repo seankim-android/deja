@@ -13,7 +13,10 @@ pub use backend::{
     McpBoxFuture, McpDriverContext, McpDriverFactory, McpServerConfig, McpServerError,
 };
 pub use protocol::{FramingMode, MAX_FRAME_BYTES};
-pub use server::serve;
+pub use server::{
+    DEFAULT_WRITE_BACKPRESSURE_TIMEOUT, MAX_IN_FLIGHT_TOOL_CALLS, McpServerLimits, serve,
+    serve_with_limits,
+};
 
 /// Canonical crate identifier used by workspace smoke checks.
 pub const CRATE_NAME: &str = "deja-mcp";

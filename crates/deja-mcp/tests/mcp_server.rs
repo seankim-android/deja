@@ -23,7 +23,7 @@ use deja_flow::{
 };
 use deja_mcp::{
     FramingMode, MAX_FRAME_BYTES, McpBoxFuture, McpDriverContext, McpDriverFactory,
-    McpServerConfig, serve,
+    McpServerConfig, McpServerLimits, serve, serve_with_limits,
 };
 use deja_store::{SqliteStoreOptions, SqliteWalkStore};
 use serde_json::{Value, json};
@@ -1711,7 +1711,11 @@ async fn group3_deja_run_flaky_retry_and_pruned_failure_visible_elements() {
             json!({"goal": "Flaky Goal", "rerunFailed": true}),
         )
         .await;
-    assert_eq!(run["result"]["isError"], true);
+    assert_eq!(
+        run["result"]["isError"], false,
+        "valid flaky RunResult should return isError: false: {run}"
+    );
+    assert_eq!(run["result"]["structuredContent"]["passed"], false);
     assert_eq!(run["result"]["structuredContent"]["outcome"], "flaky");
     assert_eq!(
         run["result"]["structuredContent"]["attempts"]
@@ -2884,12 +2888,15 @@ async fn regression_r2_f6_run_and_remember_return_schema1_run_result() {
     assert!(pass_sc["reportPath"].is_string());
     assert!(pass_sc.get("remembered").is_none());
 
-    // 3. Failing `deja_run` structuredContent ALSO deserializes into `deja_core::RunResult` AND
-    //    carries `visibleElements` + `visibleElementsTruncated` + `timing`!
+    // 3. Failing `deja_run` structuredContent returns `isError: false`, deserializes into
+    //    `deja_core::RunResult`, AND carries `visibleElements` + `visibleElementsTruncated` + `timing`!
     let run_fail = client
         .call_tool(json!(3), "deja_run", json!({"goal": "Open Dashboard"}))
         .await;
-    assert_eq!(run_fail["result"]["isError"], true);
+    assert_eq!(
+        run_fail["result"]["isError"], false,
+        "valid failed RunResult must return isError: false: {run_fail}"
+    );
     let fail_sc = &run_fail["result"]["structuredContent"];
     let fail_core: deja_core::RunResult = serde_json::from_value(fail_sc.clone()).expect(
         "failing deja_run structuredContent must deserialize cleanly into deja_core::RunResult",
@@ -2909,4 +2916,728 @@ async fn regression_r2_f6_run_and_remember_return_schema1_run_result() {
     assert!(fail_sc["timing"].is_object());
 
     client.close_and_join().await;
+}
+
+// ===========================================================================
+// Round 3 Codex cross-review regression tests (Findings #1, #2, #3, #4, #5, #6)
+// ===========================================================================
+
+#[tokio::test]
+async fn regression_r3_f1_stdout_backpressure_overload_shuts_down_without_deadlock() {
+    let ws = TempWs::new("r3-f1-overload");
+    let build_file = ws.write_bytes("build/App.bin", b"v1");
+
+    let launch_done = Arc::new(Notify::new());
+    let launch_done_hook = launch_done.clone();
+    let driver = MockDriver::new(vec![make_hierarchy(
+        TEST_APP_ID,
+        vec![make_node(0, "ok", "OK")],
+    )])
+    .with_on_launch(Arc::new(move |_| {
+        launch_done_hook.notify_waiters();
+    }));
+    let shutdowns = driver.shutdown_count.clone();
+    let factory = Arc::new(MockFactory::new(Some("ios-27.2"), driver));
+
+    let (mut client_w, server_r) = tokio::io::duplex(256 * 1024);
+    let (server_w, _stalled_reader) = tokio::io::duplex(64);
+    let cancel = CancellationToken::new();
+    let cfg = default_config(&ws, Some(build_file));
+    let limits = McpServerLimits {
+        max_in_flight_tool_calls: 32,
+        write_backpressure_timeout: Duration::from_millis(100),
+    };
+    let handle = tokio::spawn(async move {
+        serve_with_limits(server_r, server_w, cfg, factory, cancel, limits).await
+    });
+
+    // 1. Trigger a warm driver creation first while stdout is stalled on the 64-byte duplex.
+    let batch_req = format!(
+        "{}\n",
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": "deja_exec_batch", "arguments": {"steps": ["launchApp"]}}
+        })
+    );
+    client_w.write_all(batch_req.as_bytes()).await.unwrap();
+    client_w.flush().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(3), launch_done.notified())
+        .await
+        .expect("warm driver launch should complete");
+
+    // 2. Flood 250 ping requests (> WRITER_QUEUE_CAPACITY 128 + reader queue 64) while keeping
+    //    BOTH stdin AND stdout open and never draining stdout!
+    let mut flood = String::new();
+    for i in 2..=251 {
+        flood.push_str(&format!(
+            "{}\n",
+            json!({"jsonrpc": "2.0", "id": i, "method": "ping", "params": {}})
+        ));
+    }
+    let _ = client_w.write_all(flood.as_bytes()).await;
+    let _ = client_w.flush().await;
+
+    // 3. Overload deadline MUST cancel & shut down cleanly without hanging AND tear down driver!
+    tokio::time::timeout(Duration::from_secs(3), handle)
+        .await
+        .expect("server must shut down cleanly on stdout backpressure overload without deadlocking")
+        .expect("server task should not panic")
+        .expect("server should return Ok(())");
+    assert_eq!(
+        shutdowns.load(Ordering::SeqCst),
+        1,
+        "warm driver must be shut down during overload teardown"
+    );
+}
+
+#[tokio::test]
+async fn regression_r3_f2_screenshot_private_0700_dir_flat_filename_and_symlink_refusal() {
+    let ws = TempWs::new("r3-f2-shot-flat");
+    let outside = TempWs::new("r3-f2-outside");
+    let build_file = ws.write_bytes("build/App.bin", b"v1");
+
+    let driver = MockDriver::new(vec![make_hierarchy(
+        TEST_APP_ID,
+        vec![make_node(0, "ok", "OK")],
+    )]);
+    let factory = Arc::new(MockFactory::new(Some("ios-27.2"), driver));
+
+    let mut client = McpTestClient::spawn(
+        default_config(&ws, Some(build_file.clone())),
+        factory.clone(),
+        FramingMode::NewlineDelimited,
+        CancellationToken::new(),
+    );
+
+    // 1. Nested relative subpath flattens to a single flat filename directly inside a private
+    //    0o700 attempt directory (ZERO intermediate subdirectories beneath `attempt-.../`!).
+    let nested_ok = client
+        .call_tool(
+            json!(1),
+            "deja_exec_batch",
+            json!({"steps": ["launchApp", {"takeScreenshot": "nested/dir/checkout.png"}]}),
+        )
+        .await;
+    assert_eq!(
+        nested_ok["result"]["isError"], false,
+        "nested relative screenshot should succeed as flattened file: {nested_ok}"
+    );
+    let shot_rel = nested_ok["result"]["structuredContent"]["screenshots"][0]
+        .as_str()
+        .expect("screenshot path");
+    assert!(
+        shot_rel.starts_with(".deja/reports/mcp-screenshots/attempt-"),
+        "expected attempt dir prefix, got: {shot_rel}"
+    );
+    assert!(
+        shot_rel.ends_with("/nested__dir__checkout.png"),
+        "nested subpath must flatten to a single flat filename with zero intermediate dirs, got: {shot_rel}"
+    );
+    let shot_abs = ws.path.join(shot_rel);
+    assert!(shot_abs.is_file());
+    let attempt_dir = shot_abs.parent().unwrap();
+    assert!(
+        !attempt_dir.join("nested").exists(),
+        "no intermediate subdirectory should exist beneath attempt_dir"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::symlink_metadata(attempt_dir)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            mode, 0o700,
+            "attempt screenshot dir must have private 0700 mode, got {mode:o}"
+        );
+    }
+
+    // 2. Duplicate flattened filename within the SAME attempt fails closed without clobbering!
+    let flat_dup = client
+        .call_tool(
+            json!(2),
+            "deja_exec_batch",
+            json!({"steps": ["launchApp", {"takeScreenshot": "sub/shot.png"}, {"takeScreenshot": "sub__shot.png"}]}),
+        )
+        .await;
+    assert_eq!(flat_dup["result"]["isError"], true);
+    assert_eq!(flat_dup["result"]["structuredContent"]["passed"], false);
+
+    // 3. Symlinked `.deja/reports/mcp-screenshots` pointing outside workspace is refused!
+    client.close_and_join().await;
+
+    #[cfg(unix)]
+    {
+        let ws_sym = TempWs::new("r3-f2-sym");
+        let build_sym = ws_sym.write_bytes("build/App.bin", b"v1");
+        fs::create_dir_all(ws_sym.path.join(".deja/reports")).unwrap();
+        std::os::unix::fs::symlink(
+            &outside.path,
+            ws_sym.path.join(".deja/reports/mcp-screenshots"),
+        )
+        .unwrap();
+
+        let mut sym_client = McpTestClient::spawn(
+            default_config(&ws_sym, Some(build_sym)),
+            factory,
+            FramingMode::NewlineDelimited,
+            CancellationToken::new(),
+        );
+        let sym_res = sym_client
+            .call_tool(
+                json!(1),
+                "deja_exec_batch",
+                json!({"steps": ["launchApp", {"takeScreenshot": "pwn.png"}]}),
+            )
+            .await;
+        assert_eq!(sym_res["result"]["isError"], true);
+        assert_eq!(
+            sym_res["result"]["structuredContent"]["code"],
+            "PATH_CONFINEMENT"
+        );
+        assert!(
+            !outside.path.join("pwn.png").exists(),
+            "symlinked screenshot dir must never write outside workspace"
+        );
+        sym_client.close_and_join().await;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (&outside, &build_file, &factory);
+    }
+}
+
+#[tokio::test]
+async fn regression_r3_f3_deja_run_failed_and_flaky_return_is_error_false() {
+    let ws = TempWs::new("r3-f3-replay-res");
+    let build_file = ws.write_bytes("build/App.bin", b"v1");
+    let secret = "ReplaySecret55!";
+    ws.write(
+        "flows/check.yaml",
+        "appId: dev.deja.mcp.test\n---\n- launchApp\n- assertVisible:\n    text: Ready\n    timeout: 40\n",
+    );
+
+    let ok_tree = make_hierarchy(TEST_APP_ID, vec![make_node(0, "ready", "Ready")]);
+    let bad_tree = make_hierarchy(
+        TEST_APP_ID,
+        vec![make_node(0, "err", &format!("ErrorBanner {secret}"))],
+    );
+    let shared_trees = Arc::new(Mutex::new(vec![ok_tree.clone()]));
+    let trees_hook = shared_trees.clone();
+    let ok_clone = ok_tree.clone();
+    let bad_clone = bad_tree.clone();
+    let mut driver = MockDriver::new(vec![]);
+    driver.hierarchies = shared_trees;
+    // Launch 1 (remember "Check Fail"): ok; Launch 2 (remember "Check Flaky"): ok;
+    // Launch 3 (deterministic fail run on "Check Fail"): bad;
+    // Launch 4 (flaky attempt 1 on "Check Flaky"): bad; Launch 5 (flaky attempt 2): ok.
+    driver = driver.with_on_launch(Arc::new(move |n| {
+        let mut g = trees_hook.lock().unwrap();
+        g.clear();
+        if n == 3 || n == 4 {
+            g.push(bad_clone.clone());
+        } else {
+            g.push(ok_clone.clone());
+        }
+    }));
+    let factory = Arc::new(MockFactory::new(Some("ios-27.2"), driver));
+
+    let mut cfg = default_config(&ws, Some(build_file));
+    cfg.forbidden_values = vec![secret.to_string()];
+    let mut client = McpTestClient::spawn(
+        cfg,
+        factory,
+        FramingMode::NewlineDelimited,
+        CancellationToken::new(),
+    );
+
+    let rem1 = client
+        .call_tool(
+            json!(1),
+            "deja_remember",
+            json!({"goal": "Check Fail", "flow": "flows/check.yaml"}),
+        )
+        .await;
+    assert_eq!(rem1["result"]["isError"], false);
+
+    let rem2 = client
+        .call_tool(
+            json!(2),
+            "deja_remember",
+            json!({"goal": "Check Flaky", "flow": "flows/check.yaml"}),
+        )
+        .await;
+    assert_eq!(rem2["result"]["isError"], false);
+
+    // 1. Failing assertion replay -> isError: false with RunResult (passed: false, redacted visibleElements)!
+    let failed_run = client
+        .call_tool(json!(3), "deja_run", json!({"goal": "Check Fail"}))
+        .await;
+    assert_eq!(
+        failed_run["result"]["isError"], false,
+        "failed assertion replay must return isError: false: {failed_run}"
+    );
+    let fail_sc = &failed_run["result"]["structuredContent"];
+    assert_eq!(fail_sc["passed"], false);
+    assert!(
+        matches!(
+            fail_sc["outcome"].as_str(),
+            Some("failed" | "product-regression")
+        ),
+        "unexpected outcome: {fail_sc}"
+    );
+    let fail_json = serde_json::to_string(fail_sc).unwrap();
+    assert!(!fail_json.contains(secret), "secret leaked: {fail_json}");
+    assert!(
+        fail_sc["visibleElements"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v.as_str().unwrap_or("").contains("ErrorBanner"))
+    );
+
+    // 2. Flaky replay -> isError: false with RunResult (passed: false, outcome: "flaky", redacted visibleElements)!
+    let flaky_run = client
+        .call_tool(
+            json!(4),
+            "deja_run",
+            json!({"goal": "Check Flaky", "rerunFailed": true}),
+        )
+        .await;
+    assert_eq!(
+        flaky_run["result"]["isError"], false,
+        "flaky replay must return isError: false: {flaky_run}"
+    );
+    let flaky_sc = &flaky_run["result"]["structuredContent"];
+    assert_eq!(flaky_sc["passed"], false);
+    assert_eq!(flaky_sc["outcome"], "flaky");
+    let flaky_json = serde_json::to_string(flaky_sc).unwrap();
+    assert!(!flaky_json.contains(secret), "secret leaked: {flaky_json}");
+    assert!(
+        flaky_sc["visibleElements"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v.as_str().unwrap_or("").contains("ErrorBanner"))
+    );
+
+    // 3. Tool-level error (invalid arguments) STILL returns isError: true!
+    let bad_arg = client
+        .call_tool(
+            json!(5),
+            "deja_run",
+            json!({"goal": "Check Fail", "retries": 99}),
+        )
+        .await;
+    assert_eq!(bad_arg["result"]["isError"], true);
+    assert_eq!(
+        bad_arg["result"]["structuredContent"]["code"],
+        "INVALID_INPUT"
+    );
+
+    client.close_and_join().await;
+}
+
+#[tokio::test]
+async fn regression_r3_f4_in_flight_tool_cap_returns_server_busy_and_allows_cancel() {
+    let ws = TempWs::new("r3-f4-busy");
+    let build_file = ws.write_bytes("build/App.bin", b"v1");
+
+    let launch_started = Arc::new(Notify::new());
+    let unblock_launch = Arc::new(Notify::new());
+    let driver = MockDriver::new(vec![make_hierarchy(
+        TEST_APP_ID,
+        vec![make_node(0, "ok", "OK")],
+    )])
+    .with_blocking_launch(launch_started.clone(), unblock_launch.clone());
+    let factory = Arc::new(MockFactory::new(Some("ios-27.2"), driver));
+
+    let (mut client_w, server_r) = tokio::io::duplex(256 * 1024);
+    let (server_w, server_to_client_r) = tokio::io::duplex(256 * 1024);
+    let mut reader = BufReader::new(server_to_client_r);
+    let cancel = CancellationToken::new();
+    let cfg = default_config(&ws, Some(build_file));
+    let limits = McpServerLimits {
+        max_in_flight_tool_calls: 2,
+        write_backpressure_timeout: Duration::from_secs(2),
+    };
+    let handle = tokio::spawn(async move {
+        serve_with_limits(server_r, server_w, cfg, factory, cancel, limits).await
+    });
+
+    async fn send_msg(w: &mut DuplexStream, v: Value) {
+        let line = format!("{}\n", serde_json::to_string(&v).unwrap());
+        w.write_all(line.as_bytes()).await.unwrap();
+        w.flush().await.unwrap();
+    }
+    async fn read_msg(r: &mut BufReader<DuplexStream>) -> Value {
+        let mut line = String::new();
+        let n = tokio::time::timeout(Duration::from_secs(5), r.read_line(&mut line))
+            .await
+            .expect("read response timeout")
+            .unwrap();
+        assert!(n > 0);
+        serde_json::from_str::<Value>(line.trim()).unwrap()
+    }
+
+    // 1. Occupy slot 1 with a blocking batch holding `exec_mutex`.
+    send_msg(
+        &mut client_w,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": "deja_exec_batch", "arguments": {"steps": ["launchApp"]}}
+        }),
+    )
+    .await;
+    tokio::time::timeout(Duration::from_secs(5), launch_started.notified())
+        .await
+        .expect("slot 1 launch started");
+
+    // 2. Occupy slot 2 with a second batch queued waiting on `exec_mutex`.
+    send_msg(
+        &mut client_w,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {"name": "deja_exec_batch", "arguments": {"steps": ["launchApp"]}}
+        }),
+    )
+    .await;
+
+    // 3. Slot 3 exceeds max_in_flight_tool_calls=2 -> immediately rejected with SERVER_BUSY!
+    send_msg(
+        &mut client_w,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {"name": "deja_list", "arguments": {}}
+        }),
+    )
+    .await;
+    let busy = read_msg(&mut reader).await;
+    assert_eq!(busy["id"], 3);
+    assert_eq!(busy["result"]["isError"], true);
+    assert_eq!(busy["result"]["structuredContent"]["code"], "SERVER_BUSY");
+
+    // 4. $/cancelRequest on active slot 1 (and queued slot 2) STILL works immediately!
+    send_msg(
+        &mut client_w,
+        json!({"jsonrpc": "2.0", "method": "$/cancelRequest", "params": {"id": 2}}),
+    )
+    .await;
+    send_msg(
+        &mut client_w,
+        json!({"jsonrpc": "2.0", "method": "$/cancelRequest", "params": {"id": 1}}),
+    )
+    .await;
+    let c_a = read_msg(&mut reader).await;
+    let c_b = read_msg(&mut reader).await;
+    assert_eq!(c_a["error"]["code"], -32800);
+    assert_eq!(c_b["error"]["code"], -32800);
+
+    drop(client_w);
+    tokio::time::timeout(Duration::from_secs(5), handle)
+        .await
+        .expect("server exits cleanly")
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
+async fn regression_r3_f5_immutable_report_written_before_sqlite_and_cleaned_on_persist_fail() {
+    // Case A: Existing `.deja/reports` directory is unwritable (or blocked) -> immutable report
+    // write fails -> SQLite `validation_runs.report_path` is None AND response omits `reportPath`!
+    {
+        let ws = TempWs::new("r3-f5-ro-reports");
+        let build_file = ws.write_bytes("build/App.bin", b"v1");
+        ws.write(
+            "flows/ok.yaml",
+            "appId: dev.deja.mcp.test\n---\n- launchApp\n- assertVisible: OK\n",
+        );
+        let reports_dir = ws.path.join(".deja/reports");
+        fs::create_dir_all(&reports_dir).unwrap();
+
+        #[cfg(unix)]
+        let restored_perm = {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&reports_dir, fs::Permissions::from_mode(0o555)).unwrap();
+            // Detect whether effective uid bypasses 0555 (e.g. root container); if so, replace
+            // with a regular file so the write still fails deterministically.
+            let probe = reports_dir.join(".perm_check");
+            if fs::write(&probe, b"x").is_ok() {
+                let _ = fs::remove_file(&probe);
+                fs::set_permissions(&reports_dir, fs::Permissions::from_mode(0o755)).unwrap();
+                fs::remove_dir_all(&reports_dir).unwrap();
+                fs::write(&reports_dir, "blocked").unwrap();
+                false
+            } else {
+                true
+            }
+        };
+        #[cfg(not(unix))]
+        let restored_perm = {
+            fs::remove_dir_all(&reports_dir).unwrap();
+            fs::write(&reports_dir, "blocked").unwrap();
+            false
+        };
+
+        let driver = MockDriver::new(vec![make_hierarchy(
+            TEST_APP_ID,
+            vec![make_node(0, "ok", "OK")],
+        )]);
+        let factory = Arc::new(MockFactory::new(Some("ios-27.2"), driver));
+        let mut client = McpTestClient::spawn(
+            default_config(&ws, Some(build_file)),
+            factory,
+            FramingMode::NewlineDelimited,
+            CancellationToken::new(),
+        );
+
+        let rem = client
+            .call_tool(
+                json!(1),
+                "deja_remember",
+                json!({"goal": "RO Reports Goal", "flow": "flows/ok.yaml"}),
+            )
+            .await;
+        assert_eq!(rem["result"]["isError"], false, "remember: {rem}");
+        assert!(
+            rem["result"]["structuredContent"]
+                .get("reportPath")
+                .is_none(),
+            "reportPath must be omitted when immutable report write fails: {rem}"
+        );
+        assert!(
+            !rem["result"]["structuredContent"]["warnings"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+
+        let insp = client
+            .call_tool(json!(2), "deja_inspect", json!({"goal": "RO Reports Goal"}))
+            .await;
+        let runs = insp["result"]["structuredContent"]["validationRuns"]
+            .as_array()
+            .unwrap();
+        assert_eq!(runs.len(), 1);
+        assert!(
+            runs[0].get("reportPath").is_none() || runs[0]["reportPath"].is_null(),
+            "SQLite must not record reportPath when immutable report write failed: {runs:?}"
+        );
+
+        client.close_and_join().await;
+        #[cfg(unix)]
+        if restored_perm {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&reports_dir, fs::Permissions::from_mode(0o755));
+        }
+        #[cfg(not(unix))]
+        let _ = restored_perm;
+    }
+
+    // Case B: Persistence fails AFTER immutable report was written -> freshly-written immutable
+    // report is deleted AND `latest.json` remains untouched!
+    {
+        let ws = TempWs::new("r3-f5-cleanup");
+        let build_file = ws.write_bytes("build/App.bin", b"v1");
+        ws.write(
+            "flows/ok.yaml",
+            "appId: dev.deja.mcp.test\n---\n- launchApp\n- assertVisible: OK\n",
+        );
+        let sentinel = r#"{"sentinel":"unchanged-latest"}"#;
+        ws.write(".deja/reports/latest.json", sentinel);
+        ws.write(".deja/flows", "not-a-directory");
+
+        let driver = MockDriver::new(vec![make_hierarchy(
+            TEST_APP_ID,
+            vec![make_node(0, "ok", "OK")],
+        )]);
+        let factory = Arc::new(MockFactory::new(Some("ios-27.2"), driver));
+        let mut client = McpTestClient::spawn(
+            default_config(&ws, Some(build_file)),
+            factory,
+            FramingMode::NewlineDelimited,
+            CancellationToken::new(),
+        );
+
+        let rem = client
+            .call_tool(
+                json!(1),
+                "deja_remember",
+                json!({"goal": "Cleanup Goal", "flow": "flows/ok.yaml"}),
+            )
+            .await;
+        assert_eq!(rem["result"]["isError"], true);
+        assert_eq!(
+            fs::read_to_string(ws.path.join(".deja/reports/latest.json")).unwrap(),
+            sentinel
+        );
+        let stray: Vec<_> = fs::read_dir(ws.path.join(".deja/reports"))
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().starts_with("remember-"))
+            .collect();
+        assert!(
+            stray.is_empty(),
+            "failed persistence must remove freshly-written immutable report: {stray:?}"
+        );
+        client.close_and_join().await;
+    }
+}
+
+#[tokio::test]
+async fn regression_r3_f6_remember_requires_explicit_entry_flow_header() {
+    let ws = TempWs::new("r3-f6-header");
+    let build_file = ws.write_bytes("build/App.bin", b"v1");
+    ws.write(
+        "flows/headerless.yaml",
+        "- launchApp\n- assertVisible: OK\n",
+    );
+    ws.write(
+        "flows/url_only.yaml",
+        "url: http://127.0.0.1:3000\n---\n- assertVisible: OK\n",
+    );
+    ws.write(
+        "flows/parent_with_header.yaml",
+        "appId: dev.deja.mcp.test\n---\n- runFlow: headerless_sub.yaml\n",
+    );
+    ws.write(
+        "flows/headerless_sub.yaml",
+        "- launchApp\n- assertVisible: OK\n",
+    );
+
+    let driver = MockDriver::new(vec![make_hierarchy(
+        TEST_APP_ID,
+        vec![make_node(0, "ok", "OK")],
+    )]);
+    let factory = Arc::new(MockFactory::new(Some("ios-27.2"), driver));
+    let create_count = factory.create_count.clone();
+    let install_count = factory.install_count.clone();
+
+    let mut client = McpTestClient::spawn(
+        default_config(&ws, Some(build_file.clone())),
+        factory.clone(),
+        FramingMode::NewlineDelimited,
+        CancellationToken::new(),
+    );
+
+    // 1. Headerless commands-only entry flow rejected on iOS BEFORE attaching driver!
+    let r1 = client
+        .call_tool(
+            json!(1),
+            "deja_remember",
+            json!({"goal": "No Header", "flow": "flows/headerless.yaml"}),
+        )
+        .await;
+    assert_eq!(r1["result"]["isError"], true);
+    assert_eq!(
+        r1["result"]["structuredContent"]["code"],
+        "APP_ID_CONFINEMENT"
+    );
+    assert_eq!(
+        create_count.load(Ordering::SeqCst),
+        0,
+        "must reject headerless entry flow before creating driver"
+    );
+    assert_eq!(
+        install_count.load(Ordering::SeqCst),
+        0,
+        "must reject headerless entry flow before installing app"
+    );
+
+    // 2. `url:`-only entry flow rejected on native iOS BEFORE attaching driver!
+    let r2 = client
+        .call_tool(
+            json!(2),
+            "deja_remember",
+            json!({"goal": "Url Only Native", "flow": "flows/url_only.yaml"}),
+        )
+        .await;
+    assert_eq!(r2["result"]["isError"], true);
+    assert_eq!(
+        r2["result"]["structuredContent"]["code"],
+        "APP_ID_CONFINEMENT"
+    );
+    assert_eq!(create_count.load(Ordering::SeqCst), 0);
+
+    // 3. Entry flow WITH explicit `appId:` calling a headerless subflow STILL succeeds!
+    let r3 = client
+        .call_tool(
+            json!(3),
+            "deja_remember",
+            json!({"goal": "Header With Subflow", "flow": "flows/parent_with_header.yaml"}),
+        )
+        .await;
+    assert_eq!(
+        r3["result"]["isError"], false,
+        "explicit header entry flow with headerless subflow should succeed: {r3}"
+    );
+
+    // 4. Headerless inline `deja_exec_batch` STILL succeeds!
+    let r4 = client
+        .call_tool(
+            json!(4),
+            "deja_exec_batch",
+            json!({"steps": "- launchApp\n- assertVisible: OK\n"}),
+        )
+        .await;
+    assert_eq!(r4["result"]["isError"], false);
+
+    client.close_and_join().await;
+
+    // 5. On `"web"`, headerless entry flow is ALSO rejected before driver attach, while `url:` passes!
+    let web_driver = MockDriver::new(vec![make_hierarchy(
+        "http://127.0.0.1:3000",
+        vec![make_node(0, "ok", "OK")],
+    )]);
+    let web_factory = Arc::new(MockFactory::new(Some("web-chromium"), web_driver));
+    let web_creates = web_factory.create_count.clone();
+    let mut web_cfg = default_config(&ws, Some(build_file));
+    web_cfg.platform = "web".to_string();
+    web_cfg.app_id = "http://127.0.0.1:3000".to_string();
+    web_cfg.adapter = Some("playwright/v1".to_string());
+    web_cfg.browser = Some("chromium".to_string());
+
+    let mut web_client = McpTestClient::spawn(
+        web_cfg,
+        web_factory,
+        FramingMode::NewlineDelimited,
+        CancellationToken::new(),
+    );
+
+    let w_bad = web_client
+        .call_tool(
+            json!(10),
+            "deja_remember",
+            json!({"goal": "Web No Header", "flow": "flows/headerless.yaml"}),
+        )
+        .await;
+    assert_eq!(w_bad["result"]["isError"], true);
+    assert_eq!(
+        w_bad["result"]["structuredContent"]["code"],
+        "APP_ID_CONFINEMENT"
+    );
+    assert_eq!(web_creates.load(Ordering::SeqCst), 0);
+
+    let w_ok = web_client
+        .call_tool(
+            json!(11),
+            "deja_remember",
+            json!({"goal": "Web Url Header", "flow": "flows/url_only.yaml"}),
+        )
+        .await;
+    assert_eq!(
+        w_ok["result"]["isError"], false,
+        "web flow with url: header should succeed: {w_ok}"
+    );
+    web_client.close_and_join().await;
 }

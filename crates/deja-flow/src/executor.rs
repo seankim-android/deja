@@ -367,6 +367,7 @@ struct RuntimeState {
     last_hierarchy: Option<UiHierarchy>,
     last_hierarchy_is_fresh: bool,
     screenshots: Vec<PathBuf>,
+    created_strict_screenshot_dir: bool,
     hook_errors: Vec<String>,
     run_started_epoch_ms: u64,
 }
@@ -612,6 +613,7 @@ impl FlowExecutor {
             last_hierarchy: None,
             last_hierarchy_is_fresh: false,
             screenshots: Vec::new(),
+            created_strict_screenshot_dir: false,
             hook_errors: Vec::new(),
             run_started_epoch_ms,
         };
@@ -2850,6 +2852,129 @@ impl FlowExecutor {
                 self.driver_err_to_failed_step(step_index, "takeScreenshot", label.clone(), err)
             })?;
 
+        if self.config.screenshot_confine_to_dir {
+            let strict_dir = self
+                .config
+                .screenshot_dir
+                .as_ref()
+                .expect("validated strict screenshot dir");
+            ensure_strict_screenshot_dir(
+                &state.canonical_workspace,
+                strict_dir,
+                &mut state.created_strict_screenshot_dir,
+            )
+            .map_err(|err| FailedStepContext {
+                step_index,
+                command: "takeScreenshot".to_string(),
+                label: label.clone(),
+                kind: StepFailureKind::ParseOrConfinement,
+                message: self.scrub(&err.to_string()),
+                failed_app_id: None,
+                visible_context: None,
+                crash_signal: None,
+            })?;
+
+            // Re-verify `strict_dir` directly before atomic file creation; `target_path` is a
+            // single flat filename directly inside `strict_dir` (zero intermediate subdirectories).
+            let strict_meta =
+                fs::symlink_metadata(strict_dir).map_err(|err| FailedStepContext {
+                    step_index,
+                    command: "takeScreenshot".to_string(),
+                    label: label.clone(),
+                    kind: StepFailureKind::ParseOrConfinement,
+                    message: self.scrub(&format!("cannot inspect screenshot directory: {err}")),
+                    failed_app_id: None,
+                    visible_context: None,
+                    crash_signal: None,
+                })?;
+            if strict_meta.file_type().is_symlink() || !strict_meta.file_type().is_dir() {
+                return Err(Box::new(FailedStepContext {
+                    step_index,
+                    command: "takeScreenshot".to_string(),
+                    label: label.clone(),
+                    kind: StepFailureKind::ParseOrConfinement,
+                    message: "screenshot output directory is not a safe regular directory"
+                        .to_string(),
+                    failed_app_id: None,
+                    visible_context: None,
+                    crash_signal: None,
+                }));
+            }
+            let canon_strict = fs::canonicalize(strict_dir).map_err(|err| FailedStepContext {
+                step_index,
+                command: "takeScreenshot".to_string(),
+                label: label.clone(),
+                kind: StepFailureKind::ParseOrConfinement,
+                message: self.scrub(&format!("cannot resolve screenshot directory: {err}")),
+                failed_app_id: None,
+                visible_context: None,
+                crash_signal: None,
+            })?;
+            if canon_strict == state.canonical_workspace
+                || !canon_strict.starts_with(&state.canonical_workspace)
+            {
+                return Err(Box::new(FailedStepContext {
+                    step_index,
+                    command: "takeScreenshot".to_string(),
+                    label: label.clone(),
+                    kind: StepFailureKind::ParseOrConfinement,
+                    message: "screenshot output directory escaped confinement via symlink"
+                        .to_string(),
+                    failed_app_id: None,
+                    visible_context: None,
+                    crash_signal: None,
+                }));
+            }
+            let flat_name = target_path.file_name().ok_or_else(|| FailedStepContext {
+                step_index,
+                command: "takeScreenshot".to_string(),
+                label: label.clone(),
+                kind: StepFailureKind::ParseOrConfinement,
+                message: "screenshot target has no filename".to_string(),
+                failed_app_id: None,
+                visible_context: None,
+                crash_signal: None,
+            })?;
+            let final_target = canon_strict.join(flat_name);
+            let write_res = (|| -> std::io::Result<()> {
+                let mut f = fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&final_target)?;
+                if !f.metadata()?.is_file() {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "screenshot target is not a regular file",
+                    ));
+                }
+                std::io::Write::write_all(&mut f, &png_bytes)?;
+                f.sync_all()?;
+                Ok(())
+            })();
+            write_res.map_err(|err| {
+                let kind = if err.kind() == std::io::ErrorKind::AlreadyExists {
+                    StepFailureKind::ParseOrConfinement
+                } else {
+                    StepFailureKind::Transport
+                };
+                FailedStepContext {
+                    step_index,
+                    command: "takeScreenshot".to_string(),
+                    label,
+                    kind,
+                    message: self.scrub(&format!(
+                        "refusing to write screenshot {}: {err}",
+                        final_target.display()
+                    )),
+                    failed_app_id: None,
+                    visible_context: None,
+                    crash_signal: None,
+                }
+            })?;
+            state.screenshots.push(final_target);
+            return Ok(());
+        }
+
         if let Some(parent) = target_path.parent() {
             fs::create_dir_all(parent).map_err(|err| FailedStepContext {
                 step_index,
@@ -2861,47 +2986,6 @@ impl FlowExecutor {
                 visible_context: None,
                 crash_signal: None,
             })?;
-            if self.config.screenshot_confine_to_dir
-                && let Some(ref strict_dir) = self.config.screenshot_dir
-            {
-                let canon_strict =
-                    fs::canonicalize(strict_dir).map_err(|err| FailedStepContext {
-                        step_index,
-                        command: "takeScreenshot".to_string(),
-                        label: label.clone(),
-                        kind: StepFailureKind::ParseOrConfinement,
-                        message: self.scrub(&format!("cannot resolve screenshot directory: {err}")),
-                        failed_app_id: None,
-                        visible_context: None,
-                        crash_signal: None,
-                    })?;
-                let canon_parent = fs::canonicalize(parent).map_err(|err| FailedStepContext {
-                    step_index,
-                    command: "takeScreenshot".to_string(),
-                    label: label.clone(),
-                    kind: StepFailureKind::ParseOrConfinement,
-                    message: self.scrub(&format!("cannot resolve screenshot parent: {err}")),
-                    failed_app_id: None,
-                    visible_context: None,
-                    crash_signal: None,
-                })?;
-                if (canon_strict != state.canonical_workspace
-                    && !canon_strict.starts_with(&state.canonical_workspace))
-                    || (canon_parent != canon_strict && !canon_parent.starts_with(&canon_strict))
-                {
-                    return Err(Box::new(FailedStepContext {
-                        step_index,
-                        command: "takeScreenshot".to_string(),
-                        label: label.clone(),
-                        kind: StepFailureKind::ParseOrConfinement,
-                        message: "screenshot output directory escaped confinement via symlink"
-                            .to_string(),
-                        failed_app_id: None,
-                        visible_context: None,
-                        crash_signal: None,
-                    }));
-                }
-            }
         }
 
         if self.config.screenshot_no_clobber {
@@ -4088,20 +4172,52 @@ fn confine_write_path_strict_dir(
             "{kind} output path contains invalid characters: {raw_rel}"
         )));
     }
+    let mut flat_segments: Vec<String> = Vec::new();
     for component in Path::new(raw_rel).components() {
         match component {
+            Component::CurDir => {}
             Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
                 return Err(FlowExecutionError::PathConfinement(format!(
                     "{kind} output path cannot traverse outside its artifact directory: {raw_rel}"
                 )));
             }
-            Component::Normal(seg) if seg.to_string_lossy().starts_with('.') => {
-                return Err(FlowExecutionError::PathConfinement(format!(
-                    "{kind} output path cannot contain hidden path segments: {raw_rel}"
-                )));
+            Component::Normal(seg) => {
+                let seg_str = seg.to_str().ok_or_else(|| {
+                    FlowExecutionError::PathConfinement(format!(
+                        "{kind} output path contains invalid UTF-8"
+                    ))
+                })?;
+                if seg_str.is_empty() {
+                    continue;
+                }
+                if seg_str.starts_with('.') {
+                    return Err(FlowExecutionError::PathConfinement(format!(
+                        "{kind} output path cannot contain hidden path segments: {raw_rel}"
+                    )));
+                }
+                flat_segments.push(seg_str.to_string());
             }
-            _ => {}
         }
+    }
+    if flat_segments.is_empty() {
+        return Err(FlowExecutionError::PathConfinement(format!(
+            "{kind} output path must name a file: {raw_rel}"
+        )));
+    }
+
+    // Flatten relative subpaths (e.g. `sub/checkout.png` -> `sub__checkout.png`) into a single
+    // leaf filename directly inside the private `0o700` per-attempt directory so ZERO
+    // intermediate subdirectories are ever created beneath `strict_dir`.
+    let flat_filename = flat_segments.join("__");
+    if flat_filename.is_empty()
+        || flat_filename.starts_with('.')
+        || flat_filename.contains('/')
+        || flat_filename.contains('\\')
+        || flat_filename.contains('\0')
+    {
+        return Err(FlowExecutionError::PathConfinement(format!(
+            "{kind} output filename is not safe: {raw_rel}"
+        )));
     }
 
     let norm_strict = lexical_normalize(strict_dir);
@@ -4111,15 +4227,8 @@ fn confine_write_path_strict_dir(
         )));
     }
 
-    let lexical = lexical_normalize(&norm_strict.join(raw_rel));
-    if lexical == norm_strict || !lexical.starts_with(&norm_strict) {
-        return Err(FlowExecutionError::PathConfinement(format!(
-            "{kind} output path escapes artifact directory: {raw_rel}"
-        )));
-    }
-
-    // Walk every existing component from `canonical_workspace` down to `lexical` refusing symlinks.
-    let rel_from_ws = lexical
+    // Walk every existing component from `canonical_workspace` down to `norm_strict` refusing symlinks.
+    let rel_from_ws = norm_strict
         .strip_prefix(canonical_workspace)
         .map_err(|_| FlowExecutionError::PathConfinement(format!("{kind} escapes workspace")))?;
     let mut cursor = canonical_workspace.to_path_buf();
@@ -4130,42 +4239,151 @@ fn confine_write_path_strict_dir(
                 && lmeta.file_type().is_symlink()
             {
                 return Err(FlowExecutionError::PathConfinement(format!(
-                    "{kind} output path traverses or targets a symlink"
+                    "{kind} output directory traverses or targets a symlink"
                 )));
             }
         }
     }
 
-    // Also verify nearest existing ancestor resolves inside `canonical_workspace` (and `strict_dir` if it exists).
-    let mut ancestor = lexical.as_path();
-    while !ancestor.exists() {
-        let Some(parent) = ancestor.parent() else {
-            return Err(FlowExecutionError::PathConfinement(format!(
-                "{kind} output path has no existing ancestor inside workspace"
-            )));
-        };
-        ancestor = parent;
+    let target = norm_strict.join(&flat_filename);
+    if let Ok(lmeta) = fs::symlink_metadata(&target)
+        && lmeta.file_type().is_symlink()
+    {
+        return Err(FlowExecutionError::PathConfinement(format!(
+            "{kind} output path targets a symlink"
+        )));
     }
-    let canonical_ancestor = fs::canonicalize(ancestor).map_err(|err| {
-        FlowExecutionError::PathConfinement(format!("cannot resolve {kind} output ancestor: {err}"))
+
+    Ok(target)
+}
+
+/// Ensure `strict_dir` exists as a confined private (`0o700` on Unix) directory strictly inside
+/// `canonical_workspace`, creating missing parent components step-by-step refusing symlinks and
+/// atomically creating `strict_dir` with `DirBuilder::mode(0o700)` on first use.
+fn ensure_strict_screenshot_dir(
+    canonical_workspace: &Path,
+    strict_dir: &Path,
+    already_initialized: &mut bool,
+) -> Result<(), FlowExecutionError> {
+    let norm_strict = lexical_normalize(strict_dir);
+    if norm_strict == canonical_workspace || !norm_strict.starts_with(canonical_workspace) {
+        return Err(FlowExecutionError::PathConfinement(
+            "screenshot artifact directory escapes workspace".to_string(),
+        ));
+    }
+    let rel = norm_strict.strip_prefix(canonical_workspace).map_err(|_| {
+        FlowExecutionError::PathConfinement(
+            "screenshot artifact directory escapes workspace".to_string(),
+        )
     })?;
-    if canonical_ancestor != canonical_workspace
-        && !canonical_ancestor.starts_with(canonical_workspace)
-    {
-        return Err(FlowExecutionError::PathConfinement(format!(
-            "{kind} output ancestor escapes workspace via symlink"
-        )));
+    let comps: Vec<String> = rel
+        .components()
+        .map(|c| match c {
+            Component::Normal(s) => s.to_str().map(ToString::to_string).ok_or_else(|| {
+                FlowExecutionError::PathConfinement(
+                    "screenshot directory contains non-UTF-8 segment".to_string(),
+                )
+            }),
+            _ => Err(FlowExecutionError::PathConfinement(
+                "screenshot directory contains invalid path component".to_string(),
+            )),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if comps.is_empty() {
+        return Err(FlowExecutionError::PathConfinement(
+            "screenshot artifact directory must be inside workspace".to_string(),
+        ));
     }
-    if let Ok(canonical_strict) = fs::canonicalize(&norm_strict)
-        && ancestor.starts_with(&norm_strict)
-        && canonical_ancestor != canonical_strict
-        && !canonical_ancestor.starts_with(&canonical_strict)
-    {
-        return Err(FlowExecutionError::PathConfinement(format!(
-            "{kind} output ancestor escapes artifact directory via symlink"
-        )));
+
+    let mut cursor = canonical_workspace.to_path_buf();
+    for seg in &comps[..comps.len() - 1] {
+        cursor.push(seg);
+        match fs::symlink_metadata(&cursor) {
+            Ok(meta) => {
+                if meta.file_type().is_symlink() {
+                    return Err(FlowExecutionError::PathConfinement(
+                        "screenshot directory ancestor is a symlink".to_string(),
+                    ));
+                }
+                if !meta.file_type().is_dir() {
+                    return Err(FlowExecutionError::PathConfinement(
+                        "screenshot directory ancestor is not a directory".to_string(),
+                    ));
+                }
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                match fs::DirBuilder::new().create(&cursor) {
+                    Ok(()) => {}
+                    Err(create_err) if create_err.kind() == std::io::ErrorKind::AlreadyExists => {
+                        let meta = fs::symlink_metadata(&cursor).map_err(|e| {
+                            FlowExecutionError::PathConfinement(format!(
+                                "cannot inspect screenshot ancestor: {e}"
+                            ))
+                        })?;
+                        if meta.file_type().is_symlink() || !meta.file_type().is_dir() {
+                            return Err(FlowExecutionError::PathConfinement(
+                                "screenshot ancestor is not a safe directory".to_string(),
+                            ));
+                        }
+                    }
+                    Err(create_err) => {
+                        return Err(FlowExecutionError::PathConfinement(format!(
+                            "cannot create screenshot parent directory: {create_err}"
+                        )));
+                    }
+                }
+            }
+            Err(err) => {
+                return Err(FlowExecutionError::PathConfinement(format!(
+                    "cannot inspect screenshot ancestor: {err}"
+                )));
+            }
+        }
     }
-    Ok(lexical)
+
+    cursor.push(&comps[comps.len() - 1]);
+    if !*already_initialized {
+        match fs::symlink_metadata(&cursor) {
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                let mut builder = fs::DirBuilder::new();
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::DirBuilderExt;
+                    builder.mode(0o700);
+                }
+                builder.create(&cursor).map_err(|e| {
+                    FlowExecutionError::PathConfinement(format!(
+                        "cannot create private screenshot attempt directory: {e}"
+                    ))
+                })?;
+            }
+            Ok(meta) => {
+                if meta.file_type().is_symlink() || !meta.file_type().is_dir() {
+                    return Err(FlowExecutionError::PathConfinement(
+                        "screenshot attempt directory is a symlink or non-directory".to_string(),
+                    ));
+                }
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::MetadataExt;
+                    if (meta.mode() & 0o077) != 0 {
+                        return Err(FlowExecutionError::PathConfinement(
+                            "screenshot attempt directory must have private 0700 permissions"
+                                .to_string(),
+                        ));
+                    }
+                }
+            }
+            Err(err) => {
+                return Err(FlowExecutionError::PathConfinement(format!(
+                    "cannot inspect screenshot attempt directory: {err}"
+                )));
+            }
+        }
+        *already_initialized = true;
+    }
+
+    Ok(())
 }
 
 static MEDIA_STAGING_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);

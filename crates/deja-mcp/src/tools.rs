@@ -38,7 +38,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::backend::{McpDriverContext, McpDriverFactory, McpServerConfig};
 use crate::fs_safe::{
-    parse_safe_relative_segments, probe_confined_report_targets, read_confined_report_file,
+    create_confined_private_dir, parse_safe_relative_segments, read_confined_report_file,
     validate_remember_flow_path, verify_closure_files_nofollow, workspace_relative_display,
     write_atomic_confined,
 };
@@ -377,7 +377,7 @@ fn tool_response(redaction: &RedactionContext, payload: Value, is_error: bool) -
     })
 }
 
-fn tool_error(redaction: &RedactionContext, code: &str, message: &str) -> Value {
+pub(crate) fn tool_error(redaction: &RedactionContext, code: &str, message: &str) -> Value {
     let payload = json!({
         "code": code,
         "message": redaction.redact_str(message),
@@ -571,27 +571,91 @@ fn allocate_report_rel_path(command: RunCommand, store_id: Option<&str>) -> Stri
     }
 }
 
-fn write_internal_reports(
+fn write_immutable_report_only(
     canonical_workspace: &Path,
-    store_id: Option<&str>,
     immutable_rel_path: &str,
     redacted_json: &Value,
 ) -> std::io::Result<()> {
     let mut text = serde_json::to_string_pretty(redacted_json)
         .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err.to_string()))?;
     text.push('\n');
-    let bytes = text.as_bytes();
-
     let immutable_abs = canonical_workspace.join(immutable_rel_path);
-    write_atomic_confined(canonical_workspace, &immutable_abs, bytes)?;
+    write_atomic_confined(canonical_workspace, &immutable_abs, text.as_bytes())
+}
 
+fn write_latest_report_pointer(
+    canonical_workspace: &Path,
+    store_id: Option<&str>,
+    redacted_json: &Value,
+) -> std::io::Result<()> {
+    let mut text = serde_json::to_string_pretty(redacted_json)
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err.to_string()))?;
+    text.push('\n');
     let latest_rel = match store_id {
         Some(id) => format!(".deja/reports/stores/{id}/latest.json"),
         None => ".deja/reports/latest.json".to_string(),
     };
     let latest_abs = canonical_workspace.join(latest_rel);
-    write_atomic_confined(canonical_workspace, &latest_abs, bytes)?;
+    write_atomic_confined(canonical_workspace, &latest_abs, text.as_bytes())
+}
+
+fn write_internal_reports(
+    canonical_workspace: &Path,
+    store_id: Option<&str>,
+    immutable_rel_path: &str,
+    redacted_json: &Value,
+) -> std::io::Result<()> {
+    write_immutable_report_only(canonical_workspace, immutable_rel_path, redacted_json)?;
+    write_latest_report_pointer(canonical_workspace, store_id, redacted_json)?;
     Ok(())
+}
+
+fn steps_contain_take_screenshot(steps: &[FlowStep]) -> bool {
+    for step in steps {
+        match step {
+            FlowStep::TakeScreenshot(_) => return true,
+            FlowStep::RunFlow(rf) => {
+                if let RunFlowTarget::Commands(cmds) = &rf.target
+                    && steps_contain_take_screenshot(cmds)
+                {
+                    return true;
+                }
+            }
+            FlowStep::Retry(rt) => {
+                if let RunFlowTarget::Commands(cmds) = &rt.target
+                    && steps_contain_take_screenshot(cmds)
+                {
+                    return true;
+                }
+            }
+            FlowStep::Repeat(rep) if steps_contain_take_screenshot(&rep.commands) => {
+                return true;
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+fn parsed_flow_has_take_screenshot(parsed: &ParsedFlow) -> bool {
+    steps_contain_take_screenshot(&parsed.header.on_flow_start)
+        || steps_contain_take_screenshot(&parsed.steps)
+        || steps_contain_take_screenshot(&parsed.header.on_flow_complete)
+}
+
+fn closure_has_take_screenshot(closure: &FlowClosure) -> bool {
+    for file in &closure.files {
+        if file.kind != FlowReferenceKind::Flow {
+            continue;
+        }
+        if let Ok(text) = std::str::from_utf8(&file.bytes)
+            && let Ok(parsed) = parse_flow(text)
+            && parsed_flow_has_take_screenshot(&parsed)
+        {
+            return true;
+        }
+    }
+    false
 }
 
 const fn failure_category_wire(cat: FailureCategory) -> &'static str {
@@ -800,6 +864,37 @@ async fn execute_single_closure_attempt(
         .unwrap_or(0);
     let t0 = Instant::now();
 
+    let attempt_screenshots_dir = allocate_mcp_attempt_screenshots_dir(config);
+    if closure_has_take_screenshot(closure)
+        && let Err(err) =
+            create_confined_private_dir(&config.canonical_workspace_root, &attempt_screenshots_dir)
+    {
+        let ended_at = now_iso8601();
+        let duration_ms = t0.elapsed().as_millis() as u64;
+        let msg = redaction.redact_str(&format!(
+            "failed to create confined screenshot directory: {err}"
+        ));
+        return ExecutedAttempt {
+            started_at,
+            ended_at,
+            duration_ms,
+            passed: false,
+            assertions_executed: 0,
+            failure: Some(WalkFailure {
+                category: FailureCategory::Runner,
+                advisory: true,
+                repair_eligible: false,
+                failing_step: Some("takeScreenshot".to_string()),
+                raw_artifact_path: None,
+                crash: None,
+            }),
+            visible_context: None,
+            timing: RunTimingBreakdown::default(),
+            errors: vec![msg],
+            artifacts: Vec::new(),
+        };
+    }
+
     let mut exec_cfg = FlowExecutionConfig::new(config.canonical_workspace_root.clone())
         .with_closure_snapshot(closure);
     exec_cfg.app_id_override = Some(config.app_id.clone());
@@ -807,7 +902,7 @@ async fn execute_single_closure_attempt(
     exec_cfg.flow_timeout = Some(Duration::from_millis(timeout_ms));
     exec_cfg.redactor = redaction.redactor.clone();
     exec_cfg.provider_redactor = redaction.provider.clone();
-    exec_cfg.screenshot_dir = Some(allocate_mcp_attempt_screenshots_dir(config));
+    exec_cfg.screenshot_dir = Some(attempt_screenshots_dir);
     exec_cfg.screenshot_confine_to_dir = true;
     exec_cfg.screenshot_no_clobber = true;
 
@@ -1390,7 +1485,7 @@ async fn handle_deja_run(
                 &immutable_report_rel,
                 None,
             );
-            return ToolDispatchResult::Response(tool_response(&ctx.redaction, payload, true));
+            return ToolDispatchResult::Response(tool_response(&ctx.redaction, payload, false));
         }
         RunPlan::Execute(ep) => *ep,
     };
@@ -1584,7 +1679,7 @@ async fn handle_deja_run(
             &immutable_report_rel,
             None,
         );
-        return ToolDispatchResult::Response(tool_response(&ctx.redaction, payload, true));
+        return ToolDispatchResult::Response(tool_response(&ctx.redaction, payload, false));
     }
 
     let first = &attempts_raw[0];
@@ -1642,30 +1737,48 @@ async fn handle_deja_run(
         first.visible_context.clone()
     };
 
-    // Probe report-directory writability BEFORE persistence without publishing any report or
-    // touching `latest.json`, so SQLite never records an unwritable `report_path` AND `latest.json`
-    // is never published unless persistence actually succeeds.
-    let (candidate_report_path, mut report_write_warning) = match probe_confined_report_targets(
-        &ctx.config.canonical_workspace_root,
-        ctx.config.store_id.as_deref(),
+    // Write the immutable report file FIRST (without updating `latest.json` yet) so SQLite
+    // records `report_path` ONLY when that immutable report file already exists on disk, while
+    // `latest.json` is published ONLY after persistence succeeds.
+    let pre_core_result = build_core_run_result(
+        ctx,
+        RunCommand::Run,
+        &identity,
+        exec_plan.cache_status,
+        exec_plan.miss_reason,
+        final_outcome,
+        final_passed,
+        cmd_started_at.clone(),
+        now_iso8601(),
+        Some(exec_plan.display_flow_path.clone()),
+        Some(main_sha256.clone()),
+        assertion_count,
+        if final_passed {
+            None
+        } else {
+            first.failure.clone()
+        },
+        Some(to_execution_result(first, Some(&closure))),
+        attempts_report.clone(),
+        first.errors.clone(),
+        &timing,
+        exec_plan.new_build_replay.clone(),
+    );
+    let (written_immutable_path, mut report_write_warning) = write_immutable_run_report(
+        ctx,
+        &pre_core_result,
+        runtime.as_deref(),
+        visible_context.as_ref(),
+        &timing,
         &immutable_report_rel,
-    ) {
-        Ok(()) => (Some(immutable_report_rel.clone()), None),
-        Err(err) => (
-            None,
-            Some(
-                ctx.redaction
-                    .redact_str(&format!("failed to write run report artifact: {err}")),
-            ),
-        ),
-    };
+    );
 
     let store_t0 = Instant::now();
     let validation_at = first.ended_at.clone();
     let mut validation_input = RecordValidationInput::new(final_passed, validation_at)
         .with_flaky(is_flaky)
         .with_duration_ms(cmd_t0.elapsed().as_millis() as u64);
-    if let Some(ref rep_path) = candidate_report_path {
+    if let Some(ref rep_path) = written_immutable_path {
         validation_input = validation_input.with_report_path(rep_path.clone());
     }
     if let Some(ref rt) = runtime {
@@ -1781,6 +1894,9 @@ async fn handle_deja_run(
     timing.total_ms = cmd_t0.elapsed().as_millis() as u64;
 
     if let Err(err) = persist_res {
+        if let Some(ref rel) = written_immutable_path {
+            let _ = fs::remove_file(ctx.config.canonical_workspace_root.join(rel));
+        }
         let (outcome, miss) = match &err {
             StoreError::ManifestChanged(_) | StoreError::Core(CoreError::FlowChanged { .. }) => {
                 (RunOutcome::FlowChanged, Some(CacheMissReason::FlowChanged))
@@ -1820,7 +1936,7 @@ async fn handle_deja_run(
             &immutable_report_rel,
             None,
         );
-        return ToolDispatchResult::Response(tool_response(&ctx.redaction, payload, true));
+        return ToolDispatchResult::Response(tool_response(&ctx.redaction, payload, false));
     }
 
     let new_build_replay = exec_plan.new_build_replay.map(|mut nb| {
@@ -1853,22 +1969,18 @@ async fn handle_deja_run(
         new_build_replay,
     );
 
-    let final_report_path = if candidate_report_path.is_some() {
-        let (written, warn) = write_run_report(
+    if written_immutable_path.is_some()
+        && let Some(warn) = publish_final_run_report(
             ctx,
             &core_result,
             runtime.as_deref(),
             visible_context.as_ref(),
             &timing,
             &immutable_report_rel,
-        );
-        if let Some(w) = warn {
-            report_write_warning = Some(w);
-        }
-        written
-    } else {
-        None
-    };
+        )
+    {
+        report_write_warning = Some(warn);
+    }
 
     let payload = assemble_run_tool_payload(
         core_result,
@@ -1876,10 +1988,12 @@ async fn handle_deja_run(
         visible_context,
         report_write_warning.into_iter().collect(),
         timing,
-        final_report_path,
+        written_immutable_path,
     );
 
-    ToolDispatchResult::Response(tool_response(&ctx.redaction, payload, !final_passed))
+    // Valid schema-1 `RunResult` payloads (including failed or flaky replays) return `isError: false`;
+    // `isError: true` is reserved strictly for tool-level errors preventing a replay result.
+    ToolDispatchResult::Response(tool_response(&ctx.redaction, payload, false))
 }
 
 fn plan_run_execution(
@@ -2303,26 +2417,17 @@ fn build_core_run_result(
     }
 }
 
-fn write_run_report(
+fn serialize_redacted_run_report(
     ctx: &ToolContext,
     core_report: &RunResult,
     runtime: Option<&str>,
     visible_context: Option<&VisibleContext>,
     timing: &RunTimingBreakdown,
-    immutable_report_rel: &str,
-) -> (Option<String>, Option<String>) {
-    let mut report_val = match serde_json::to_value(core_report) {
-        Ok(val) => val,
-        Err(err) => {
-            return (
-                None,
-                Some(
-                    ctx.redaction
-                        .redact_str(&format!("failed to serialize run report artifact: {err}")),
-                ),
-            );
-        }
-    };
+) -> Result<Value, String> {
+    let mut report_val = serde_json::to_value(core_report).map_err(|err| {
+        ctx.redaction
+            .redact_str(&format!("failed to serialize run report artifact: {err}"))
+    })?;
     if let Some(obj) = report_val.as_object_mut() {
         if let Some(rt) = runtime {
             obj.insert("runtime".to_string(), Value::String(rt.to_string()));
@@ -2336,7 +2441,77 @@ fn write_run_report(
             obj.insert("visibleContext".to_string(), vc_val);
         }
     }
-    let redacted_report = ctx.redaction.redact_json(&report_val);
+    Ok(ctx.redaction.redact_json(&report_val))
+}
+
+fn write_immutable_run_report(
+    ctx: &ToolContext,
+    core_report: &RunResult,
+    runtime: Option<&str>,
+    visible_context: Option<&VisibleContext>,
+    timing: &RunTimingBreakdown,
+    immutable_report_rel: &str,
+) -> (Option<String>, Option<String>) {
+    let redacted_report =
+        match serialize_redacted_run_report(ctx, core_report, runtime, visible_context, timing) {
+            Ok(val) => val,
+            Err(warn) => return (None, Some(warn)),
+        };
+    match write_immutable_report_only(
+        &ctx.config.canonical_workspace_root,
+        immutable_report_rel,
+        &redacted_report,
+    ) {
+        Ok(()) => (Some(immutable_report_rel.to_string()), None),
+        Err(err) => (
+            None,
+            Some(
+                ctx.redaction
+                    .redact_str(&format!("failed to write run report artifact: {err}")),
+            ),
+        ),
+    }
+}
+
+fn publish_final_run_report(
+    ctx: &ToolContext,
+    core_report: &RunResult,
+    runtime: Option<&str>,
+    visible_context: Option<&VisibleContext>,
+    timing: &RunTimingBreakdown,
+    immutable_report_rel: &str,
+) -> Option<String> {
+    let redacted_report =
+        match serialize_redacted_run_report(ctx, core_report, runtime, visible_context, timing) {
+            Ok(val) => val,
+            Err(warn) => return Some(warn),
+        };
+    if let Err(err) = write_internal_reports(
+        &ctx.config.canonical_workspace_root,
+        ctx.config.store_id.as_deref(),
+        immutable_report_rel,
+        &redacted_report,
+    ) {
+        return Some(ctx.redaction.redact_str(&format!(
+            "failed to publish latest run report artifact: {err}"
+        )));
+    }
+    None
+}
+
+fn write_run_report(
+    ctx: &ToolContext,
+    core_report: &RunResult,
+    runtime: Option<&str>,
+    visible_context: Option<&VisibleContext>,
+    timing: &RunTimingBreakdown,
+    immutable_report_rel: &str,
+) -> (Option<String>, Option<String>) {
+    let redacted_report =
+        match serialize_redacted_run_report(ctx, core_report, runtime, visible_context, timing) {
+            Ok(val) => val,
+            Err(warn) => return (None, Some(warn)),
+        };
     match write_internal_reports(
         &ctx.config.canonical_workspace_root,
         ctx.config.store_id.as_deref(),
@@ -2569,6 +2744,10 @@ async fn handle_deja_remember(
     if let Err(msg) = verify_closure_files_nofollow(&ctx.config.canonical_workspace_root, &closure)
     {
         return ToolDispatchResult::Response(tool_error(&ctx.redaction, "PATH_CONFINEMENT", &msg));
+    }
+
+    if let Err((code, msg)) = validate_remember_entry_header(&closure, &ctx.config.platform) {
+        return ToolDispatchResult::Response(tool_error(&ctx.redaction, code, &msg));
     }
 
     if let Err(msg) =
@@ -2995,29 +3174,44 @@ async fn handle_deja_remember(
         return ToolDispatchResult::Response(tool_response(&ctx.redaction, payload, true));
     }
 
-    // Probe report-directory writability BEFORE persistence without writing any report or
-    // touching `latest.json`, so SQLite never records an unwritable `report_path` AND we NEVER
-    // publish `outcome: remembered` / `passed: true` unless walk/manifest persistence succeeds!
-    let (candidate_report_path, mut report_write_warning) = match probe_confined_report_targets(
-        &ctx.config.canonical_workspace_root,
-        ctx.config.store_id.as_deref(),
+    // Write the immutable report file FIRST (without updating `latest.json` yet) so SQLite
+    // records `report_path` ONLY when that immutable report file already exists on disk. If
+    // persistence fails, the freshly-written immutable file is deleted and `latest.json` is never
+    // touched so neither SQLite nor `latest.json` ever references an unpersisted report.
+    let pre_core_result = build_core_run_result(
+        ctx,
+        RunCommand::Remember,
+        &identity,
+        CacheStatus::NotChecked,
+        None,
+        RunOutcome::Remembered,
+        true,
+        cmd_started_at.clone(),
+        now_iso8601(),
+        Some(candidate_rel.clone()),
+        Some(main_sha256.clone()),
+        assertion_count,
+        None,
+        Some(to_execution_result(last_attempt, Some(&closure))),
+        None,
+        Vec::new(),
+        &timing,
+        None,
+    );
+    let (written_immutable_path, mut report_write_warning) = write_immutable_run_report(
+        ctx,
+        &pre_core_result,
+        runtime.as_deref(),
+        None,
+        &timing,
         &immutable_report_rel,
-    ) {
-        Ok(()) => (Some(immutable_report_rel.clone()), None),
-        Err(err) => (
-            None,
-            Some(
-                ctx.redaction
-                    .redact_str(&format!("failed to write run report artifact: {err}")),
-            ),
-        ),
-    };
+    );
 
     let phase_timings_json = serde_json::to_string(&timing).ok();
     let mut validation = RecordValidationInput::new(true, last_attempt.ended_at.clone())
         .with_origin(WalkOrigin::Remember)
         .with_duration_ms(cmd_t0.elapsed().as_millis() as u64);
-    if let Some(ref rep_path) = candidate_report_path {
+    if let Some(ref rep_path) = written_immutable_path {
         validation = validation.with_report_path(rep_path.clone());
     }
     if let Some(ref rt) = runtime {
@@ -3066,6 +3260,9 @@ async fn handle_deja_remember(
     let (stored_flow_path, stored_flow_sha256) = match persist_res {
         Ok(pair) => pair,
         Err(err) => {
+            if let Some(ref rel) = written_immutable_path {
+                let _ = fs::remove_file(ctx.config.canonical_workspace_root.join(rel));
+            }
             let drift_outcome = match &err {
                 StoreError::ManifestChanged(_)
                 | StoreError::Core(
@@ -3133,22 +3330,18 @@ async fn handle_deja_remember(
         None,
     );
 
-    let final_report_path = if candidate_report_path.is_some() {
-        let (written, warn) = write_run_report(
+    if written_immutable_path.is_some()
+        && let Some(warn) = publish_final_run_report(
             ctx,
             &core_result,
             runtime.as_deref(),
             None,
             &timing,
             &immutable_report_rel,
-        );
-        if let Some(w) = warn {
-            report_write_warning = Some(w);
-        }
-        written
-    } else {
-        None
-    };
+        )
+    {
+        report_write_warning = Some(warn);
+    }
 
     let payload = assemble_run_tool_payload(
         core_result,
@@ -3156,7 +3349,7 @@ async fn handle_deja_remember(
         None,
         report_write_warning.into_iter().collect(),
         timing,
-        final_report_path,
+        written_immutable_path,
     );
 
     ToolDispatchResult::Response(tool_response(&ctx.redaction, payload, false))
@@ -3393,13 +3586,27 @@ async fn handle_deja_exec_batch(
         }
     };
 
+    let attempt_screenshots_dir = allocate_mcp_attempt_screenshots_dir(&ctx.config);
+    if parsed_flow_has_take_screenshot(&parsed)
+        && let Err(err) = create_confined_private_dir(
+            &ctx.config.canonical_workspace_root,
+            &attempt_screenshots_dir,
+        )
+    {
+        return ToolDispatchResult::Response(tool_error(
+            &ctx.redaction,
+            "PATH_CONFINEMENT",
+            &format!("failed to create confined screenshot directory: {err}"),
+        ));
+    }
+
     let mut exec_cfg = FlowExecutionConfig::new(ctx.config.canonical_workspace_root.clone());
     exec_cfg.app_id_override = Some(ctx.config.app_id.clone());
     exec_cfg.env = ctx.config.env.clone();
     exec_cfg.flow_timeout = Some(Duration::from_millis(timeout_ms));
     exec_cfg.redactor = ctx.redaction.redactor.clone();
     exec_cfg.provider_redactor = ctx.redaction.provider.clone();
-    exec_cfg.screenshot_dir = Some(allocate_mcp_attempt_screenshots_dir(&ctx.config));
+    exec_cfg.screenshot_dir = Some(attempt_screenshots_dir);
     exec_cfg.screenshot_confine_to_dir = true;
     exec_cfg.screenshot_no_clobber = true;
     exec_cfg.capture_final_visible_context = observe_final;
@@ -3504,6 +3711,56 @@ async fn handle_deja_exec_batch(
         Value::Object(out),
         !outcome.passed,
     ))
+}
+
+fn validate_remember_entry_header(
+    closure: &FlowClosure,
+    platform: &str,
+) -> Result<(), (&'static str, String)> {
+    let Some(main_file) = closure.files.iter().find(|f| f.path == closure.main) else {
+        return Err((
+            "CLOSURE_ERROR",
+            format!(
+                "entry flow `{}` missing from collected closure",
+                closure.main
+            ),
+        ));
+    };
+    let text = std::str::from_utf8(&main_file.bytes).map_err(|err| {
+        (
+            "CLOSURE_ERROR",
+            format!(
+                "entry flow `{}` is not valid UTF-8: {err}",
+                main_file.source
+            ),
+        )
+    })?;
+    let parsed = parse_flow(text).map_err(|err| {
+        (
+            "CLOSURE_ERROR",
+            format!("entry flow `{}` failed to parse: {err}", main_file.source),
+        )
+    })?;
+    if platform == "web" {
+        if parsed.header.url.is_none() && parsed.header.app_id.is_none() {
+            return Err((
+                "APP_ID_CONFINEMENT",
+                format!(
+                    "entry flow `{}` must explicitly declare `url:` or `appId:` in its header before remembering",
+                    main_file.source
+                ),
+            ));
+        }
+    } else if parsed.header.app_id.is_none() {
+        return Err((
+            "APP_ID_CONFINEMENT",
+            format!(
+                "entry flow `{}` must explicitly declare `appId:` in its header before remembering",
+                main_file.source
+            ),
+        ));
+    }
+    Ok(())
 }
 
 fn validate_closure_mcp_policy(
