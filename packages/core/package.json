@@ -1,16 +1,16 @@
 {
-  "name": "@deja-qa/core",
+  "name": "@deja-run/core",
   "version": "0.1.0",
   "description": "Déjà orchestrator, plugin contracts, result schema",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/seankim-android/deja.git",
+    "url": "git+https://github.com/deja-run/deja.git",
     "directory": "packages/core"
   },
-  "homepage": "https://github.com/seankim-android/deja#readme",
+  "homepage": "https://github.com/deja-run/deja#readme",
   "bugs": {
-    "url": "https://github.com/seankim-android/deja/issues"
+    "url": "https://github.com/deja-run/deja/issues"
   },
   "type": "module",
   "main": "./dist/index.js",

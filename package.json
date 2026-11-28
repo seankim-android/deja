@@ -6,11 +6,11 @@
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/seankim-android/deja.git"
+    "url": "git+https://github.com/deja-run/deja.git"
   },
-  "homepage": "https://github.com/seankim-android/deja#readme",
+  "homepage": "https://github.com/deja-run/deja#readme",
   "bugs": {
-    "url": "https://github.com/seankim-android/deja/issues"
+    "url": "https://github.com/deja-run/deja/issues"
   },
   "keywords": [
     "deja",
@@ -50,12 +50,12 @@
     "react-dom": "^19.3.1"
   },
   "devDependencies": {
-    "@deja-qa/core": "workspace:*",
-    "@deja-qa/explorer-openclaw": "workspace:*",
-    "@deja-qa/maestro": "workspace:*",
-    "@deja-qa/metrics": "workspace:*",
-    "@deja-qa/repair": "workspace:*",
-    "@deja-qa/store-local": "workspace:*",
+    "@deja-run/core": "workspace:*",
+    "@deja-run/explorer-openclaw": "workspace:*",
+    "@deja-run/maestro": "workspace:*",
+    "@deja-run/metrics": "workspace:*",
+    "@deja-run/repair": "workspace:*",
+    "@deja-run/store-local": "workspace:*",
     "@happy-dom/global-registrator": "^21.0.4",
     "@testing-library/react": "^16.3.3",
     "@types/bun": "^1.4.5",

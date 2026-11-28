@@ -7,7 +7,7 @@ import { loadavg } from 'node:os'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { spawnSync } from 'node:child_process'
-import { idSelector, parseMaestroHierarchy, ProcessMaestroTransport } from '@deja-qa/maestro'
+import { idSelector, parseMaestroHierarchy, ProcessMaestroTransport } from '@deja-run/maestro'
 
 const executable = process.env.DEJA_MAESTRO
 const device = process.env.DEJA_SIM_UDID

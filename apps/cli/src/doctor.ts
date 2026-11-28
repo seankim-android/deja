@@ -7,7 +7,7 @@ import {
   maestroChildEnv,
   withoutJvmNotices,
   MAESTRO_ENGINE_PIN,
-} from '@deja-qa/maestro'
+} from '@deja-run/maestro'
 import { TESTED_RANGE_TEXT } from './engine.ts'
 
 export type DoctorStatus = 'ok' | 'warn' | 'fail'

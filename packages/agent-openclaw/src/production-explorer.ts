@@ -9,12 +9,12 @@ import type {
   WalkExplorer,
   WalkFailure,
   WalkStore,
-} from '@deja-qa/core'
+} from '@deja-run/core'
 import {
   countFlowAssertions,
   maestroChildEnv,
   type MaestroWalkRunner,
-} from '@deja-qa/maestro'
+} from '@deja-run/maestro'
 import {
   runColdExploration,
   type ColdExploreReport,

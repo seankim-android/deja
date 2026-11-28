@@ -6,8 +6,8 @@ Déjà is a verified memory layer for Maestro-compatible app tests across iOS, A
 
 <p align="center">
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/License-Apache%202.0-blue.svg"/></a>
-  <a href="https://github.com/seankim-android/deja/actions/workflows/rust-checks.yml"><img alt="Rust checks" src="https://github.com/seankim-android/deja/actions/workflows/rust-checks.yml/badge.svg"/></a>
-  <a href="https://github.com/seankim-android/deja/actions/workflows/portable-checks.yml"><img alt="Portable checks" src="https://github.com/seankim-android/deja/actions/workflows/portable-checks.yml/badge.svg"/></a>
+  <a href="https://github.com/deja-run/deja/actions/workflows/rust-checks.yml"><img alt="Rust checks" src="https://github.com/deja-run/deja/actions/workflows/rust-checks.yml/badge.svg"/></a>
+  <a href="https://github.com/deja-run/deja/actions/workflows/portable-checks.yml"><img alt="Portable checks" src="https://github.com/deja-run/deja/actions/workflows/portable-checks.yml/badge.svg"/></a>
 </p>
 
 <p align="center"><img src="demo/deja-preview.gif" width="80%"/></p>
@@ -55,7 +55,7 @@ These steps add Déjà to an iOS app on a simulator with no AI model required. Y
 **1. Install the CLI and its pinned runner.**
 
 ```sh
-git clone https://github.com/seankim-android/deja.git ~/deja
+git clone https://github.com/deja-run/deja.git ~/deja
 cd ~/deja && bun install
 # Run this line once. Use ~/.bashrc if your shell is bash.
 echo 'alias deja="bun ~/deja/apps/cli/deja.ts"' >> ~/.zshrc
@@ -229,7 +229,7 @@ Core open-source product (in active development under [`rust/`](rust/Cargo.toml)
 
 ## Contributing
 
-Pull requests from outside contributors are not accepted right now. Bug reports and ideas are welcome as [GitHub issues](https://github.com/seankim-android/deja/issues). See [CONTRIBUTING.md](CONTRIBUTING.md).
+Pull requests from outside contributors are not accepted right now. Bug reports and ideas are welcome as [GitHub issues](https://github.com/deja-run/deja/issues). See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 

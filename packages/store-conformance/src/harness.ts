@@ -45,6 +45,6 @@ const bunHarness: ContractHarness | undefined = typeof Bun === 'undefined'
 
 export function resolveHarness(harness?: ContractHarness): ContractHarness {
   const resolved = harness ?? bunHarness
-  if (!resolved) throw new Error('Pass a ContractHarness (see @deja-qa/store-conformance node-binding) when not running under Bun.')
+  if (!resolved) throw new Error('Pass a ContractHarness (see @deja-run/store-conformance node-binding) when not running under Bun.')
   return resolved
 }

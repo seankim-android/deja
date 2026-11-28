@@ -1,10 +1,10 @@
 // A third-party WalkStore: it knows nothing of store-local or store-sqlite. Walk metadata lives in
 // memory (shared per workspace, so two stores for one workspace agree). Only the verified flow is
-// written to disk, because the runner executes a file. Written against @deja-qa/core alone.
+// written to disk, because the runner executes a file. Written against @deja-run/core alone.
 import { createHash } from 'node:crypto'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
-import { ExpectedFlowChecksumMismatchError, normalizeGoal } from '@deja-qa/core'
+import { ExpectedFlowChecksumMismatchError, normalizeGoal } from '@deja-run/core'
 
 const memory = new Map()
 

@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { mkdir, mkdtemp, readdir, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { emptyWalkManifest } from '@deja-qa/core'
+import { emptyWalkManifest } from '@deja-run/core'
 import { ConsumerFlows, ManifestLockedError, WriterLock } from '../src/index.ts'
 
 let root = ''

@@ -1,16 +1,16 @@
 {
-  "name": "@deja-qa/explorer-openclaw",
+  "name": "@deja-run/explorer-openclaw",
   "version": "0.1.0",
   "description": "OpenClaw cold explorer (Kimi K3.1 Pro on Cerebras by default)",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/seankim-android/deja.git",
+    "url": "git+https://github.com/deja-run/deja.git",
     "directory": "packages/agent-openclaw"
   },
-  "homepage": "https://github.com/seankim-android/deja#readme",
+  "homepage": "https://github.com/deja-run/deja#readme",
   "bugs": {
-    "url": "https://github.com/seankim-android/deja/issues"
+    "url": "https://github.com/deja-run/deja/issues"
   },
   "type": "module",
   "main": "./dist/index.js",
@@ -40,8 +40,8 @@
     "prepublishOnly": "bun ../../scripts/publish-guard.ts"
   },
   "dependencies": {
-    "@deja-qa/core": "workspace:*",
-    "@deja-qa/maestro": "workspace:*",
+    "@deja-run/core": "workspace:*",
+    "@deja-run/maestro": "workspace:*",
     "@modelcontextprotocol/sdk": "^1.32.2"
   }
 }

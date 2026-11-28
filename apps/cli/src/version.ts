@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs'
-import { CONTRACT_VERSION } from '@deja-qa/core'
+import { CONTRACT_VERSION } from '@deja-run/core'
 
 // `bun build --compile --define` replaces these two names in a release binary (scripts/build-binary.ts).
 // A normal run leaves them undefined, so the version comes from package.json and the commit is "dev".
@@ -11,7 +11,7 @@ function packageVersion() {
   for (const relative of ['../package.json', '../../package.json']) {
     try {
       const parsed = JSON.parse(readFileSync(new URL(relative, import.meta.url), 'utf8')) as { name?: string, version?: string }
-      if (parsed.name === '@deja-qa/cli' && parsed.version) return parsed.version
+      if (parsed.name === '@deja-run/cli' && parsed.version) return parsed.version
     } catch {
       // Try the next location.
     }

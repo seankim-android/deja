@@ -1,16 +1,16 @@
 {
-  "name": "@deja-qa/maestro",
+  "name": "@deja-run/maestro",
   "version": "0.1.0",
   "description": "Maestro runner, platform adapters, failure classification, subflow composer",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/seankim-android/deja.git",
+    "url": "git+https://github.com/deja-run/deja.git",
     "directory": "packages/maestro"
   },
-  "homepage": "https://github.com/seankim-android/deja#readme",
+  "homepage": "https://github.com/deja-run/deja#readme",
   "bugs": {
-    "url": "https://github.com/seankim-android/deja/issues"
+    "url": "https://github.com/deja-run/deja/issues"
   },
   "type": "module",
   "main": "./dist/index.js",
@@ -40,10 +40,10 @@
     "prepublishOnly": "bun ../../scripts/publish-guard.ts"
   },
   "dependencies": {
-    "@deja-qa/core": "workspace:*",
+    "@deja-run/core": "workspace:*",
     "yaml": "^2.9.1"
   },
   "devDependencies": {
-    "@deja-qa/store-local": "workspace:*"
+    "@deja-run/store-local": "workspace:*"
   }
 }

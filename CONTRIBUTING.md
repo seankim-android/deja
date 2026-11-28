@@ -1,6 +1,6 @@
 # Contributing to Déjà
 
-**Pull requests from outside contributors are not accepted right now.** Please open a [GitHub issue](https://github.com/seankim-android/deja/issues) for bugs and ideas. The rest of this page applies once outside pull requests open.
+**Pull requests from outside contributors are not accepted right now.** Please open a [GitHub issue](https://github.com/deja-run/deja/issues) for bugs and ideas. The rest of this page applies once outside pull requests open.
 
 Thanks for helping. This page covers setup, the checks CI runs, what a good
 pull request looks like, and the Contributor License Agreement (CLA).
@@ -11,7 +11,7 @@ You need [Bun](https://bun.sh) 1.4 or newer (`engines.bun` is `>=1.4.0`). In
 CI, `portable-checks.yml` pins Bun 1.4.4.
 
 ```sh
-git clone https://github.com/seankim-android/deja.git
+git clone https://github.com/deja-run/deja.git
 cd deja
 bun install --frozen-lockfile
 ```
@@ -43,7 +43,7 @@ files, so commit (or remove) everything first.
   checked the change (commands run and their results).
 - Never commit secrets, tokens, API keys, or `.env` files. Use `example.com`
   for any email addresses in fixtures.
-- Use [GitHub issues](https://github.com/seankim-android/deja/issues) to report
+- Use [GitHub issues](https://github.com/deja-run/deja/issues) to report
   bugs or propose changes.
 
 ## Contributor License Agreement

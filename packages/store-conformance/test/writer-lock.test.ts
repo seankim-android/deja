@@ -4,7 +4,7 @@ import { existsSync, readFileSync, utimesSync, writeFileSync } from 'node:fs'
 import { mkdtemp, realpath, rm } from 'node:fs/promises'
 import { hostname, tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { StoreLockContentionError, StoreLockedError, StoreLockUnavailableError, WriterLock } from '@deja-qa/store-local'
+import { StoreLockContentionError, StoreLockedError, StoreLockUnavailableError, WriterLock } from '@deja-run/store-local'
 
 async function lockDirectory() {
   const directory = await realpath(await mkdtemp(join(tmpdir(), 'deja4-wl-')))

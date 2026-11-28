@@ -4,8 +4,8 @@ import {
   LOCAL_MEMORY_PATH,
   LocalWalkStore,
   storeMetadataPath,
-} from '@deja-qa/store-local'
-import type { WalkStore } from '@deja-qa/core'
+} from '@deja-run/store-local'
+import type { WalkStore } from '@deja-run/core'
 import type {
   MetadataTamper,
   StoreFailureInjection,

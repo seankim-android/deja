@@ -1,13 +1,13 @@
 import { existsSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { dirname, resolve, sep } from 'node:path'
-import { loadExploreConfiguration, type ExploreConfiguration } from '@deja-qa/explorer-openclaw'
+import { loadExploreConfiguration, type ExploreConfiguration } from '@deja-run/explorer-openclaw'
 import {
   androidMaestroAdapter,
   type MaestroExecutionAdapter,
-} from '@deja-qa/maestro'
-import type { CheckoutRepairPolicy } from '@deja-qa/repair'
-import { checkFlowsDir, checkManifestPath, MIN_FORBIDDEN_VALUE_LENGTH } from '@deja-qa/store-local'
+} from '@deja-run/maestro'
+import type { CheckoutRepairPolicy } from '@deja-run/repair'
+import { checkFlowsDir, checkManifestPath, MIN_FORBIDDEN_VALUE_LENGTH } from '@deja-run/store-local'
 
 export class CliConfigurationError extends Error {
   constructor(message: string, options?: ErrorOptions) {

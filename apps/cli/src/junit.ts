@@ -1,6 +1,6 @@
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { dirname, relative, sep } from 'node:path'
-import type { ReportReceipt, RunAttempt, RunReporter, RunResult } from '@deja-qa/core'
+import type { ReportReceipt, RunAttempt, RunReporter, RunResult } from '@deja-run/core'
 import type { Redactor } from './redaction.ts'
 
 /**

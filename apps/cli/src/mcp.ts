@@ -11,7 +11,7 @@ import {
   type CallToolResult,
   type Tool,
 } from '@modelcontextprotocol/sdk/types.js'
-import { InvalidWalkManifestError, type RunResult } from '@deja-qa/core'
+import { InvalidWalkManifestError, type RunResult } from '@deja-run/core'
 import { isMap, isScalar, parseAllDocuments } from 'yaml'
 import {
   ConsumerFlowError,
@@ -19,7 +19,7 @@ import {
   ManifestLockedError,
   StoreLockedError,
   StoreLockUnavailableError,
-} from '@deja-qa/store-local'
+} from '@deja-run/store-local'
 import { CliConfigurationError, defaultConfigPath, loadProductionConfiguration, type ProductionConfiguration } from './config.ts'
 import { selectEngine } from './engine.ts'
 import { createOrchestration, EngineRunReporter, type OrchestrationCapabilities } from './orchestration.ts'

@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { LocalVerifiedSubflowStore } from '../src/verified-subflow-store.ts'
 import { InvalidSubflowMemoryError } from '../src/verified-subflow-store.ts'
-import type { SubflowContract } from '@deja-qa/core'
+import type { SubflowContract } from '@deja-run/core'
 
 const at = '2026-11-22T00:00:00.000Z'
 

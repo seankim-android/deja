@@ -10,8 +10,8 @@ import {
   type GateGoalResult,
   type RunResult,
   type WalkStore,
-} from '@deja-qa/core'
-import type { MaestroExecutionAdapter } from '@deja-qa/maestro'
+} from '@deja-run/core'
+import type { MaestroExecutionAdapter } from '@deja-run/maestro'
 import { CliConfigurationError, type ProductionConfiguration } from './config.ts'
 import { redactJson, type Redactor } from './redaction.ts'
 

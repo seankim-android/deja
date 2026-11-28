@@ -1,4 +1,4 @@
-import type { EngineReport } from '@deja-qa/core'
+import type { EngineReport } from '@deja-run/core'
 import {
   MAESTRO_ENGINE_PIN,
   MAESTRO_TESTED_RANGE,
@@ -10,7 +10,7 @@ import {
   type InstallEngineOptions,
   type ResolveEngineOptions,
   type ResolvedEngine,
-} from '@deja-qa/maestro'
+} from '@deja-run/maestro'
 import { CliConfigurationError, type ProductionConfiguration } from './config.ts'
 
 export type SelectedEngine = { resolved: ResolvedEngine; report: EngineReport; warning?: string }

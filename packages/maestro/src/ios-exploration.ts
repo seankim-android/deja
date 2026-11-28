@@ -9,8 +9,8 @@ import type {
   Segment,
   StepResult,
   SystemUiState,
-} from '@deja-qa/core'
-import { normalizeElements, normalizedSnapshot } from '@deja-qa/core'
+} from '@deja-run/core'
+import { normalizeElements, normalizedSnapshot } from '@deja-run/core'
 import { parseAllDocuments } from 'yaml'
 import { tapSegment } from './selectors.ts'
 

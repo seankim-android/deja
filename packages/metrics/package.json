@@ -1,5 +1,5 @@
 {
-  "name": "@deja-qa/metrics",
+  "name": "@deja-run/metrics",
   "version": "0.1.0",
   "private": true,
   "description": "Internal cold/warm metrics analysis (not published)",

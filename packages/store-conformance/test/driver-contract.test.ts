@@ -4,12 +4,12 @@ import {
   type ExplorationDriver,
   type FingerprintRules,
   type RawElement,
-} from '@deja-qa/core'
+} from '@deja-run/core'
 import {
   iosExplorationDriver,
   type MaestroFlowResult,
   type MaestroTransport,
-} from '@deja-qa/maestro'
+} from '@deja-run/maestro'
 import {
   runExplorationDriverContractTests,
   type ContractScene,

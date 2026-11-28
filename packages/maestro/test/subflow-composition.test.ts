@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { mkdir, mkdtemp, realpath, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
-import type { ExecutionResult, VerifiedSubflowStore, WalkIdentity } from '@deja-qa/core'
+import type { ExecutionResult, VerifiedSubflowStore, WalkIdentity } from '@deja-run/core'
 import {
   MaestroLoginComposer,
   MaestroWalkRunner,
@@ -11,7 +11,7 @@ import {
   countFlowAssertions,
   readMaestroContinuation,
 } from '../src/index.ts'
-import { LocalVerifiedSubflowStore, LocalWalkStore } from '@deja-qa/store-local'
+import { LocalVerifiedSubflowStore, LocalWalkStore } from '@deja-run/store-local'
 import { runWalk018Verification } from '../../../scripts/verify-walk018-composition.ts'
 
 const repo = resolve(import.meta.dir, '../../..')

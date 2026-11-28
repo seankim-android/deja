@@ -7,20 +7,20 @@ import {
   type RunReporter,
   type RunResult,
   type WalkExplorer,
-} from '@deja-qa/core'
-import { OpenClawWalkExplorer } from '@deja-qa/explorer-openclaw'
-import { LocalWalkStore } from '@deja-qa/store-local'
+} from '@deja-run/core'
+import { OpenClawWalkExplorer } from '@deja-run/explorer-openclaw'
+import { LocalWalkStore } from '@deja-run/store-local'
 import {
   MaestroWalkRunner,
   androidMaestroAdapter,
   iosMaestroAdapter,
   webMaestroAdapter,
-} from '@deja-qa/maestro'
-import { BoundedSelectorRepairer } from '@deja-qa/repair'
+} from '@deja-run/maestro'
+import { BoundedSelectorRepairer } from '@deja-run/repair'
 import {
   LOCAL_LEXICAL_EMBEDDING_PROVIDER,
   LocalLexicalEmbeddingProvider,
-} from '@deja-qa/semantic-local'
+} from '@deja-run/semantic-local'
 import { buildFingerprint, CliConfigurationError, type ProductionConfiguration } from './config.ts'
 
 /** Adds the engine to every report, so the JSON report, the text output and the summary agree. */

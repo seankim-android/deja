@@ -10,12 +10,12 @@
         "react-dom": "^19.3.1",
       },
       "devDependencies": {
-        "@deja-qa/core": "workspace:*",
-        "@deja-qa/explorer-openclaw": "workspace:*",
-        "@deja-qa/maestro": "workspace:*",
-        "@deja-qa/metrics": "workspace:*",
-        "@deja-qa/repair": "workspace:*",
-        "@deja-qa/store-local": "workspace:*",
+        "@deja-run/core": "workspace:*",
+        "@deja-run/explorer-openclaw": "workspace:*",
+        "@deja-run/maestro": "workspace:*",
+        "@deja-run/metrics": "workspace:*",
+        "@deja-run/repair": "workspace:*",
+        "@deja-run/store-local": "workspace:*",
         "@happy-dom/global-registrator": "^21.0.4",
         "@testing-library/react": "^16.3.3",
         "@types/bun": "^1.4.5",
@@ -29,100 +29,100 @@
       },
     },
     "apps/cli": {
-      "name": "@deja-qa/cli",
+      "name": "@deja-run/cli",
       "version": "0.1.0",
       "bin": {
         "deja": "./dist/deja.js",
       },
       "dependencies": {
-        "@deja-qa/core": "workspace:*",
-        "@deja-qa/explorer-openclaw": "workspace:*",
-        "@deja-qa/maestro": "workspace:*",
-        "@deja-qa/repair": "workspace:*",
-        "@deja-qa/semantic-local": "workspace:*",
-        "@deja-qa/store-local": "workspace:*",
+        "@deja-run/core": "workspace:*",
+        "@deja-run/explorer-openclaw": "workspace:*",
+        "@deja-run/maestro": "workspace:*",
+        "@deja-run/repair": "workspace:*",
+        "@deja-run/semantic-local": "workspace:*",
+        "@deja-run/store-local": "workspace:*",
         "@modelcontextprotocol/sdk": "^1.32.2",
         "yaml": "^2.9.1",
       },
     },
     "packages/agent-openclaw": {
-      "name": "@deja-qa/explorer-openclaw",
+      "name": "@deja-run/explorer-openclaw",
       "version": "0.1.0",
       "dependencies": {
-        "@deja-qa/core": "workspace:*",
-        "@deja-qa/maestro": "workspace:*",
+        "@deja-run/core": "workspace:*",
+        "@deja-run/maestro": "workspace:*",
         "@modelcontextprotocol/sdk": "^1.32.2",
       },
     },
     "packages/core": {
-      "name": "@deja-qa/core",
+      "name": "@deja-run/core",
       "version": "0.1.0",
       "dependencies": {
         "yaml": "^2.9.1",
       },
     },
     "packages/maestro": {
-      "name": "@deja-qa/maestro",
+      "name": "@deja-run/maestro",
       "version": "0.1.0",
       "dependencies": {
-        "@deja-qa/core": "workspace:*",
+        "@deja-run/core": "workspace:*",
         "yaml": "^2.9.1",
       },
       "devDependencies": {
-        "@deja-qa/store-local": "workspace:*",
+        "@deja-run/store-local": "workspace:*",
       },
     },
     "packages/metrics": {
-      "name": "@deja-qa/metrics",
+      "name": "@deja-run/metrics",
       "version": "0.1.0",
     },
     "packages/repair": {
-      "name": "@deja-qa/repair",
+      "name": "@deja-run/repair",
       "version": "0.1.0",
       "dependencies": {
-        "@deja-qa/core": "workspace:*",
-        "@deja-qa/maestro": "workspace:*",
+        "@deja-run/core": "workspace:*",
+        "@deja-run/maestro": "workspace:*",
       },
       "devDependencies": {
-        "@deja-qa/store-local": "workspace:*",
+        "@deja-run/store-local": "workspace:*",
       },
     },
     "packages/semantic-local": {
-      "name": "@deja-qa/semantic-local",
+      "name": "@deja-run/semantic-local",
       "version": "0.1.0",
       "dependencies": {
-        "@deja-qa/core": "workspace:*",
+        "@deja-run/core": "workspace:*",
       },
     },
     "packages/store-conformance": {
-      "name": "@deja-qa/store-conformance",
+      "name": "@deja-run/store-conformance",
       "version": "0.1.0",
       "dependencies": {
-        "@deja-qa/core": "workspace:*",
-        "@deja-qa/store-local": "workspace:*",
-        "@deja-qa/store-sqlite": "workspace:*",
+        "@deja-run/core": "workspace:*",
+        "@deja-run/store-local": "workspace:*",
+        "@deja-run/store-sqlite": "workspace:*",
       },
       "devDependencies": {
-        "@deja-qa/cli": "workspace:*",
-        "@deja-qa/maestro": "workspace:*",
+        "@deja-run/cli": "workspace:*",
+        "@deja-run/maestro": "workspace:*",
       },
     },
     "packages/store-local": {
-      "name": "@deja-qa/store-local",
+      "name": "@deja-run/store-local",
       "version": "0.1.0",
       "dependencies": {
-        "@deja-qa/core": "workspace:*",
+        "@deja-run/core": "workspace:*",
       },
       "devDependencies": {
-        "@deja-qa/semantic-local": "workspace:*",
+        "@deja-run/semantic-local": "workspace:*",
       },
     },
     "packages/store-sqlite": {
-      "name": "@deja-qa/store-sqlite",
+      "name": "@deja-run/store-sqlite",
       "version": "0.1.0",
       "dependencies": {
-        "@deja-qa/core": "workspace:*",
-        "@deja-qa/store-local": "workspace:*",
+        "@deja-run/core": "workspace:*",
+        "@deja-run/store-local": "workspace:*",
       },
     },
   },
@@ -133,25 +133,25 @@
 
     "@babel/runtime": ["@babel/runtime@7.29.15", "", {}, "sha512-304gsbbGVmQc+cNGHzwHBlqepYdWLKj3VXCQBGt/EGcV7PUPfKI7kAUNW1FZEOCwlQiLvQjg1JEaAlRQ616h+Q=="],
 
-    "@deja-qa/cli": ["@deja-qa/cli@workspace:apps/cli"],
+    "@deja-run/cli": ["@deja-run/cli@workspace:apps/cli"],
 
-    "@deja-qa/core": ["@deja-qa/core@workspace:packages/core"],
+    "@deja-run/core": ["@deja-run/core@workspace:packages/core"],
 
-    "@deja-qa/explorer-openclaw": ["@deja-qa/explorer-openclaw@workspace:packages/agent-openclaw"],
+    "@deja-run/explorer-openclaw": ["@deja-run/explorer-openclaw@workspace:packages/agent-openclaw"],
 
-    "@deja-qa/maestro": ["@deja-qa/maestro@workspace:packages/maestro"],
+    "@deja-run/maestro": ["@deja-run/maestro@workspace:packages/maestro"],
 
-    "@deja-qa/metrics": ["@deja-qa/metrics@workspace:packages/metrics"],
+    "@deja-run/metrics": ["@deja-run/metrics@workspace:packages/metrics"],
 
-    "@deja-qa/repair": ["@deja-qa/repair@workspace:packages/repair"],
+    "@deja-run/repair": ["@deja-run/repair@workspace:packages/repair"],
 
-    "@deja-qa/semantic-local": ["@deja-qa/semantic-local@workspace:packages/semantic-local"],
+    "@deja-run/semantic-local": ["@deja-run/semantic-local@workspace:packages/semantic-local"],
 
-    "@deja-qa/store-conformance": ["@deja-qa/store-conformance@workspace:packages/store-conformance"],
+    "@deja-run/store-conformance": ["@deja-run/store-conformance@workspace:packages/store-conformance"],
 
-    "@deja-qa/store-local": ["@deja-qa/store-local@workspace:packages/store-local"],
+    "@deja-run/store-local": ["@deja-run/store-local@workspace:packages/store-local"],
 
-    "@deja-qa/store-sqlite": ["@deja-qa/store-sqlite@workspace:packages/store-sqlite"],
+    "@deja-run/store-sqlite": ["@deja-run/store-sqlite@workspace:packages/store-sqlite"],
 
     "@emnapi/core": ["@emnapi/core@2.0.0-beta.2", "", { "dependencies": { "@emnapi/wasi-threads": "2.2.0", "tslib": "^2.4.0" } }, "sha512-MzCVoWtcg4Pm2B3je5mMvYMvj3MmBKw+fU7vbsJc9/iT8ip6/eYIHo/Dsm/mr+wsHB6SEyJDuxB09Yy6r/8+4A=="],
 

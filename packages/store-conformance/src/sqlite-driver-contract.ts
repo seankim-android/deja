@@ -1,7 +1,7 @@
 import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { openSqlite, SQLITE_MEMORY_PATH, SQLiteWalkStore } from '@deja-qa/store-sqlite'
+import { openSqlite, SQLITE_MEMORY_PATH, SQLiteWalkStore } from '@deja-run/store-sqlite'
 import { resolveHarness, type ContractHarness } from './harness.ts'
 
 const identity = {

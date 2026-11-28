@@ -2,8 +2,8 @@
 import { createHash } from 'node:crypto'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { dirname, resolve } from 'node:path'
-import { composeMaestroLoginFlow } from '@deja-qa/maestro'
-import { validateSubflowContract } from '@deja-qa/core'
+import { composeMaestroLoginFlow } from '@deja-run/maestro'
+import { validateSubflowContract } from '@deja-run/core'
 
 const repo = resolve(import.meta.dir, '..')
 const sourceDirectory = 'demo/live-evidence/android'

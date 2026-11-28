@@ -17,8 +17,8 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.89"
 license = "Apache-2.0"
-repository = "https://github.com/seankim-android/deja"
-homepage = "https://github.com/seankim-android/deja#readme"
+repository = "https://github.com/deja-run/deja"
+homepage = "https://github.com/deja-run/deja#readme"
 publish = false
 
 [workspace.lints.rust]

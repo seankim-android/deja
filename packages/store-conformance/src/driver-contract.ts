@@ -4,7 +4,7 @@ import {
   fingerprintScreenV2,
   type ExplorationDriver,
   type FingerprintConfig,
-} from '@deja-qa/core'
+} from '@deja-run/core'
 
 /** A screen described the same way for every platform. The implementation turns it into a hierarchy. */
 export type ContractScene = {

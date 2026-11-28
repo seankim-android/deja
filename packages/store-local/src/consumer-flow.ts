@@ -29,7 +29,7 @@ import {
   type StoredWalk,
   type WalkIdentity,
   type WalkManifest,
-} from '@deja-qa/core'
+} from '@deja-run/core'
 import { closureSha256Of, collectFlowClosure, type ClosureFile, FlowClosureError, MissingFlowFileError, type FlowClosure } from './flow-closure.ts'
 import { bytesHoldForbiddenValue, ForbiddenValueTooShortError, holdsForbiddenValue, jsonHoldsForbiddenValue, MIN_FORBIDDEN_VALUE_LENGTH } from './secret-scan.ts'
 import { StoreLockedError, WriterLock } from './writer-lock.ts'

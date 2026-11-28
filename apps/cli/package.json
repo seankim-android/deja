@@ -1,16 +1,16 @@
 {
-  "name": "@deja-qa/cli",
+  "name": "@deja-run/cli",
   "version": "0.1.0",
   "description": "The deja CLI",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/seankim-android/deja.git",
+    "url": "git+https://github.com/deja-run/deja.git",
     "directory": "apps/cli"
   },
-  "homepage": "https://github.com/seankim-android/deja#readme",
+  "homepage": "https://github.com/deja-run/deja#readme",
   "bugs": {
-    "url": "https://github.com/seankim-android/deja/issues"
+    "url": "https://github.com/deja-run/deja/issues"
   },
   "type": "module",
   "bin": {
@@ -47,12 +47,12 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.2",
-    "@deja-qa/core": "workspace:*",
-    "@deja-qa/maestro": "workspace:*",
-    "@deja-qa/store-local": "workspace:*",
-    "@deja-qa/explorer-openclaw": "workspace:*",
-    "@deja-qa/repair": "workspace:*",
-    "@deja-qa/semantic-local": "workspace:*",
+    "@deja-run/core": "workspace:*",
+    "@deja-run/maestro": "workspace:*",
+    "@deja-run/store-local": "workspace:*",
+    "@deja-run/explorer-openclaw": "workspace:*",
+    "@deja-run/repair": "workspace:*",
+    "@deja-run/semantic-local": "workspace:*",
     "yaml": "^2.9.1"
   }
 }

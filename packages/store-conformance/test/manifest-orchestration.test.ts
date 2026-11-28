@@ -10,7 +10,7 @@ import {
   type RunnerRequest,
   type RunResult,
   type WalkRunner,
-} from '@deja-qa/core'
+} from '@deja-run/core'
 import {
   localStoreContract,
   sqliteStoreContract,

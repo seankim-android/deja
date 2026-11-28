@@ -11,7 +11,7 @@ import {
   type RunResult,
   type WalkRunner,
   type WalkStore,
-} from '@deja-qa/core'
+} from '@deja-run/core'
 import {
   localStoreContract,
   sqliteStoreContract,

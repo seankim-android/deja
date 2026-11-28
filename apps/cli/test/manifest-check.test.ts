@@ -4,8 +4,8 @@ import { spawnSync } from 'node:child_process'
 import { mkdir, symlink, mkdtemp, readdir, readFile, realpath, rm, stat, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
-import { serializeWalkManifest, type WalkManifest } from '@deja-qa/core'
-import { assertionsSha256, collectFlowClosure, ConsumerFlows } from '@deja-qa/store-local'
+import { serializeWalkManifest, type WalkManifest } from '@deja-run/core'
+import { assertionsSha256, collectFlowClosure, ConsumerFlows } from '@deja-run/store-local'
 import { runCli } from '../src/main.ts'
 
 const cli = resolve(import.meta.dir, '../deja.ts')

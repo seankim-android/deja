@@ -30,7 +30,7 @@ Learn once with a model, then replay with no model. Verification gates every sav
 
 ## Operating Context
 
-- CLI (`deja`) and Bun workspace packages under the `@deja-qa` scope (not yet published to npm).
+- CLI (`deja`) and Bun workspace packages under the `@deja-run` scope (not yet published to npm).
 - Maestro 2.12. Exploration and repair work on the Android emulator only; iOS and Chromium support replay only. On a new iOS build, replaying the last verified test is opt-in and off by default.
 - Optional cold exploration runs through the OpenClaw harness. Remember, replay and repair work without OpenClaw or any model. The default model is Kimi K3.1 Pro on Cerebras, and any OpenAI-compatible model can be configured.
 - An optional local run viewer (`viewer/`).
@@ -42,13 +42,13 @@ Learn once with a model, then replay with no model. Verification gates every sav
 
 ## Brand Commitments
 
-- The name is always spelled **Déjà**, with both accents, in the wordmark and in prose. The ASCII form `deja` / `deja-qa` is only for package names, domains and identifiers.
+- The name is always spelled **Déjà**, with both accents, in the wordmark and in prose. The ASCII form `deja` / `deja-run` is only for package names, domains and identifiers.
 - The "déjà vu" idea is binding: the identity should evoke seeing something again, or a repeat.
 - The mark must work as a CLI and terminal icon: monochrome, at small sizes, in README and terminal contexts, and as a 16px favicon.
 - Original work only. No imagery from *The Matrix* or other Warner Bros. properties: no green digital or code rain, no black cat, no katakana columns.
 - Formerly called WalkCache. That name and the "WC" placeholder favicon are retired and not brand assets.
 - The trademark policy is in TRADEMARKS.md (draft, DEJA-27).
-- npm scope `@deja-qa`, domain deja-qa.com.
+- npm scope `@deja-run`, domain deja-run.com.
 
 ## Evidence on Hand
 

@@ -1,4 +1,4 @@
-import type { RunResult, StoredValidation } from '@deja-qa/core'
+import type { RunResult, StoredValidation } from '@deja-run/core'
 
 export type ViewerReportState = 'ready' | 'malformed' | 'missing' | 'in-progress'
 

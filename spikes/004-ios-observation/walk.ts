@@ -14,10 +14,10 @@ import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import {
   findChromeIds, fingerprintScreenV2, type FingerprintConfig, type Observation, type Segment,
-} from '@deja-qa/core'
+} from '@deja-run/core'
 import {
   idSelector, iosExplorationDriver, McpMaestroTransport, ProcessMaestroTransport, tapSegment, waitVisibleSegment, type MaestroTransport,
-} from '@deja-qa/maestro'
+} from '@deja-run/maestro'
 
 const kind = process.argv[2]
 const repeats = Number(process.argv[3] ?? 6)

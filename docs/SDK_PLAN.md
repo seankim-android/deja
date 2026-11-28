@@ -5,7 +5,7 @@ Status: proposal. Nothing in this document is built yet unless it says "today".
 ## Goal
 
 Today Déjà is a Bun monorepo with one product surface: the `deja` CLI in `apps/cli`.
-Today each package and app is a Bun workspace with a private `@deja-qa/*` `package.json`, and they
+Today each package and app is a Bun workspace with a private `@deja-run/*` `package.json`, and they
 import each other only by package name. `scripts/workspace-boundaries.test.ts` fails on a relative
 cross-package import or an undeclared dependency. Nothing is published yet, and the `exports` maps
 still point at `.ts` sources, so nobody outside this repo can install them.
@@ -18,13 +18,13 @@ The goal is to let two kinds of users install Déjà from npm:
 2. **An agent framework that wants cached UI walks.** It wants to call "run this goal" from code or
    over MCP, and only pay for a model on a cache miss.
 
-### Usage example (today: `createDeja` in `@deja-qa/core`)
+### Usage example (today: `createDeja` in `@deja-run/core`)
 
 ```ts
-import { createDeja } from '@deja-qa/core'
-import { maestroRunner, androidAdapter } from '@deja-qa/maestro'
-import { sqliteStore } from '@deja-qa/store-sqlite'
-import { openClawExplorer } from '@deja-qa/explorer-openclaw'
+import { createDeja } from '@deja-run/core'
+import { maestroRunner, androidAdapter } from '@deja-run/maestro'
+import { sqliteStore } from '@deja-run/store-sqlite'
+import { openClawExplorer } from '@deja-run/explorer-openclaw'
 
 const adapter = androidAdapter({ device: 'emulator-5554' })
 const deja = createDeja({
@@ -52,7 +52,7 @@ Today `createDeja` takes `workspaceRoot`, `app`, `adapter`, `store`, `runner`, l
 `repairer` factories, and optional `reporter`, `semantic`, `flowSchemaVersion`, `now` and
 `artifactId`. It returns `{ identity, run, explore, remember }`, each taking the goal text. The
 `adapter` type, `DejaAdapter`, is defined in core (`id`, `platform`, `buildFingerprint`,
-`cacheIdentity`), and the `@deja-qa/maestro` adapters satisfy it structurally, so core imports
+`cacheIdentity`), and the `@deja-run/maestro` adapters satisfy it structurally, so core imports
 nothing from them. `run`, `explore` and `remember` take optional `{ signal, timeoutMs }`. An aborted `signal` rejects at
 the start of the call and before each explorer, repairer or runner call, but work already started
 (a running flow, explorer or repair) can still finish and persist. Explorers and repairers get
@@ -86,19 +86,19 @@ consumer's own flow files are the walks: see [Consumer-owned flows](REFERENCE.md
 
 ## Package layout
 
-All packages publish under the `@deja-qa` scope. See Risks for the name check.
+All packages publish under the `@deja-run` scope. See Risks for the name check.
 
 | Package | Today's folder | Exports | Depends on |
 | --- | --- | --- | --- |
-| `@deja-qa/core` | `packages/core` | `Deja`, `createDeja` (new), all contracts, `normalizeGoal`, result schema, semantic and subflow types | nothing |
-| `@deja-qa/maestro` | `packages/maestro` | `MaestroWalkRunner`, Android/Web/iOS adapters, `classifyMaestroFailure`, subflow composer | core |
-| `@deja-qa/store-local` | `packages/store-local` | `LocalWalkStore`, `InvalidWalkMemoryError` | core |
-| `@deja-qa/store-sqlite` | `packages/store-sqlite` | `SQLiteWalkStore` | core |
-| `@deja-qa/store-conformance` | `packages/store-conformance` | `WalkStoreContractImplementation` and the shared suite | core |
-| `@deja-qa/explorer-openclaw` | `packages/agent-openclaw` | `OpenClawWalkExplorer` | core, maestro |
-| `@deja-qa/repair` | `packages/repair` | `BoundedSelectorRepairer`, `CheckoutRepairPolicy` | core, maestro |
-| `@deja-qa/semantic-local` | `packages/semantic-local` | `LocalLexicalEmbeddingProvider` | core |
-| `@deja-qa/cli` (bin `deja`) | `apps/cli` | the `deja` CLI | all of the above |
+| `@deja-run/core` | `packages/core` | `Deja`, `createDeja` (new), all contracts, `normalizeGoal`, result schema, semantic and subflow types | nothing |
+| `@deja-run/maestro` | `packages/maestro` | `MaestroWalkRunner`, Android/Web/iOS adapters, `classifyMaestroFailure`, subflow composer | core |
+| `@deja-run/store-local` | `packages/store-local` | `LocalWalkStore`, `InvalidWalkMemoryError` | core |
+| `@deja-run/store-sqlite` | `packages/store-sqlite` | `SQLiteWalkStore` | core |
+| `@deja-run/store-conformance` | `packages/store-conformance` | `WalkStoreContractImplementation` and the shared suite | core |
+| `@deja-run/explorer-openclaw` | `packages/agent-openclaw` | `OpenClawWalkExplorer` | core, maestro |
+| `@deja-run/repair` | `packages/repair` | `BoundedSelectorRepairer`, `CheckoutRepairPolicy` | core, maestro |
+| `@deja-run/semantic-local` | `packages/semantic-local` | `LocalLexicalEmbeddingProvider` | core |
+| `@deja-run/cli` (bin `deja`) | `apps/cli` | the `deja` CLI | all of the above |
 
 Not published: `packages/metrics` (internal cold/warm analysis), `viewer/` and `src/` (the
 optional local viewer), `spikes/`, `demo/`.
@@ -128,7 +128,7 @@ Contract: `WalkExplorer.explore({ identity })` returns `ExplorationResult`. The 
 - persist only through `WalkStore.persistVerifiedCandidate`;
 - report `modelCalls` and `mcpCalls` honestly, or `null` with a `modelCallBasis` when not measured.
 
-Default: `@deja-qa/explorer-openclaw`, Kimi K3.1 Pro on Cerebras through OpenClaw, Android only.
+Default: `@deja-run/explorer-openclaw`, Kimi K3.1 Pro on Cerebras through OpenClaw, Android only.
 Today, Web and iOS use `UnsupportedPlatformExplorer`, exported from core, which returns
 `exploration-rejected` with zero model calls, so every host gets the same refusal.
 
@@ -139,7 +139,7 @@ contract is general. Until one exists, call the explorer contract "provisional".
 
 Contract: `WalkRunner.run(request)` returns `ExecutionResult` with timing, assertion count,
 artifacts, exit code and a conservative `WalkFailure`. `MaestroWalkRunner` is the only runner.
-Failure classification lives in `@deja-qa/maestro` and stays advisory: `unknown` is never
+Failure classification lives in `@deja-run/maestro` and stays advisory: `unknown` is never
 repair-eligible.
 
 ### Store
@@ -166,7 +166,7 @@ are not negotiable in the engine, not the policy: product assertion failures are
 - `WALK_RESULT_SCHEMA_VERSION` (1), the memory schema (2) and `maestro/v1` are part of the public
   contract. A breaking change to any of them is a major version, with a reader for the old schema.
 - `core` exports a `CONTRACT_VERSION` (1 today; bumped on a breaking change to a plugin contract).
-  Plugins declare the range they support in `peerDependencies` on `@deja-qa/core`.
+  Plugins declare the range they support in `peerDependencies` on `@deja-run/core`.
 - Today: `api/<package>.d.ts` is a checked-in snapshot of what each published package exports from its
   `exports` entry points (plus the declarations they reference), made from `tsc --emitDeclarationOnly`
   output (`bun scripts/api-snapshot.ts`). Internal changes do not change it. It records the
@@ -182,19 +182,19 @@ are not negotiable in the engine, not the policy: product assertion failures are
   `node:fs/promises`; `store-sqlite` has a driver seam (`src/driver.ts`) that loads `bun:sqlite` on Bun
   and `node:sqlite` on Node with a dynamic import, so neither runtime resolves the other's module; the
   conformance suite is runner-neutral and takes `describe`, `test` and `expect` from a binding
-  (`bun:test` by default, `node:test` from `@deja-qa/store-conformance/node`). CI runs the suite on
+  (`bun:test` by default, `node:test` from `@deja-run/store-conformance/node`). CI runs the suite on
   Node 22.13.0 and 24, and on Bun in `bun test`. The CLI is a Bun program and its binary is Bun.
 - **Format.** ESM only, `"type": "module"`, `exports` maps, `.d.ts` files. Build with tsup.
   Relative cross-package imports become package imports through Bun workspaces.
-- **CLI.** `npx @deja-qa/cli run checkout`. The config file is `deja.config.json`, runtime state lives
+- **CLI.** `npx @deja-run/cli run checkout`. The config file is `deja.config.json`, runtime state lives
   in `.deja/`, and environment defaults use `DEJA_*` variables (for example `DEJA_MAESTRO`).
 - **GitHub Action.** `deja-action`: install Maestro at a pinned version, run `deja run <goal>` for a
   list of goals, upload `.deja/reports/` as an artifact, and fail on exit codes 1, 3 and 4.
   Replay only by default; cold exploration in CI needs an explicit input and a provider key secret.
   It must run on a runner that has an emulator or simulator; the Action does not provide devices.
-- **MCP server.** `deja mcp` in `@deja-qa/cli` (DEJA-9) exposing `deja_run`, `deja_remember`, `deja_list` and
+- **MCP server.** `deja mcp` in `@deja-run/cli` (DEJA-9) exposing `deja_run`, `deja_remember`, `deja_list` and
   `deja_inspect` (underscores, since the Claude API rejects dots). It is part of the CLI, not a separate
-  `@deja-qa/mcp` package, to reuse the CLI's config and runner assembly without widening its exports (a separate package stays possible). `deja_explore` stays off unless the host enables it, since it spends model calls.
+  `@deja-run/mcp` package, to reuse the CLI's config and runner assembly without widening its exports (a separate package stays possible). `deja_explore` stays off unless the host enables it, since it spends model calls.
   `@modelcontextprotocol/sdk` is already a root dependency.
 
 ## Phased roadmap
@@ -209,7 +209,7 @@ Sizes: S is under a day, M is a few days, L is a week or more.
 | Done: remove `repair` -> `store-local` edge; explorer takes a narrow Maestro runner type | S | a test fails on a forbidden import |
 | tsup build per package, ESM and `.d.ts` | S | `npm pack` of each package installs into an empty Node 22 project and type-checks |
 | Done: remove `Bun.file`; sqlite driver seam | M | the store conformance suite passes on Node 22.13+ and Bun 1.4 |
-| Publish 0.1.0 under the chosen scope with provenance | S | `npm view @deja-qa/core version` prints 0.1.0 |
+| Publish 0.1.0 under the chosen scope with provenance | S | `npm view @deja-run/core version` prints 0.1.0 |
 
 ### Phase 1: stable API and CI
 
@@ -234,14 +234,16 @@ Sizes: S is under a day, M is a few days, L is a week or more.
 
 ## Risks and open questions
 
-- **Name and scope.** Decided 2026-11-22: packages publish under `@deja-qa`, and the project
-  domain is `deja-qa.com` (with `deja-qa.dev` if available). Plain `deja` is taken in too many
-  places: the `deja` npm package (v0.1.12, a dotfiles CLI by another maintainer) and `deja.dev`.
-  Checked 2026-11-22:
-  - `@deja-qa/core` returns 404 on npm, and `deja-qa` and `dejaqa` are free as unscoped names.
-  - `deja-qa.com`, `dejaqa.com`, `deja-qa.dev` and `dejaqa.dev` return 404 from registry RDAP (not
-    registered). A registrar can still mark a name premium or reserved.
-  - The `deja-qa` npm org was created on 2026-11-22. Still to do: buy the domain.
+- **Name and scope.** Decided 2026-11-27 (superseding the 2026-11-22 `@deja-qa` choice): GitHub
+  org is `deja-run` (`github.com/deja-run/deja`), packages publish under `@deja-run`, and the
+  project domain is `deja-run.com`. Plain `deja` is taken in too many places:
+  the `deja` npm package (v0.1.12, a dotfiles CLI by another maintainer), `deja.dev`, `deja.sh`,
+  and `deja.run`. Checked 2026-11-27:
+  - `@deja-run` on npm and `deja-run` on crates.io return 404 (not registered).
+  - `deja-run.com` (WHOIS) returns not found (unregistered). A registrar can still mark a name
+    premium or reserved.
+  - The `deja-run` GitHub org was set up on 2026-11-27. Still to do: claim the `deja-run` npm org
+    and buy `deja-run.com`.
   - Test data never uses the project domain. Fixture logins use the reserved `example.com`.
 - **Maestro version pinning.** All evidence is on Maestro 2.12.0, and Maestro Web is beta. Done
   (DEJA-24): Déjà pins 2.12.0 and its zip sha256, installs it with `deja engine install` into
@@ -260,11 +262,11 @@ Sizes: S is under a day, M is a few days, L is a week or more.
   speedup. Package READMEs, the docs site and the npm description must not say more. A new
   platform claim needs linked run evidence first.
 - **CLI name.** `deja` on npm belongs to someone else, so `npx deja` will not work. Document
-  `npx @deja-qa/cli` and install the bin as `deja`.
+  `npx @deja-run/cli` and install the bin as `deja`.
 
 ## Next 5 steps
 
-1. Done: the `deja-qa` npm org exists (created 2026-11-22).
+1. Pending: claim the `deja-run` npm org (superseding the `deja-qa` npm org created on 2026-11-22).
 2. Done: Bun workspaces, one `package.json` per package, and package imports.
 3. Done: removed the two forbidden edges; `scripts/workspace-boundaries.test.ts` fails if either
    comes back.

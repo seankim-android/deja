@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import type { RunArtifact, RunResult } from '@deja-qa/core'
+import type { RunArtifact, RunResult } from '@deja-run/core'
 import type {
   ViewerArtifact,
   ViewerHistory,

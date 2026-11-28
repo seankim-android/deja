@@ -6,7 +6,7 @@ import type {
   RunArtifact,
   SelectorRepairer,
   WalkStore,
-} from '@deja-qa/core'
+} from '@deja-run/core'
 import {
   BoundedCheckoutRepairer,
   runCheckoutBuildAndInstall,
@@ -16,7 +16,7 @@ import {
 import {
   countFlowAssertions,
   MaestroWalkRunner,
-} from '@deja-qa/maestro'
+} from '@deja-run/maestro'
 
 export type BoundedSelectorRepairerOptions = {
   workspaceRoot: string

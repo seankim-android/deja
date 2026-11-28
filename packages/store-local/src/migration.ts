@@ -13,7 +13,7 @@ import {
   type MigrationReport,
   type SkippedWalk,
   type StoredWalk,
-} from '@deja-qa/core'
+} from '@deja-run/core'
 import { ConsumerFlows, ConsumerFlowError, ManifestChangedError, type MaterializePlan } from './consumer-flow.ts'
 import { checkStoredSubflows, FlowClosureError } from './flow-closure.ts'
 

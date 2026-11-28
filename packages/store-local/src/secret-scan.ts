@@ -1,4 +1,4 @@
-import { findFlowStrings } from '@deja-qa/core'
+import { findFlowStrings } from '@deja-run/core'
 
 /** Shortest fixture value that can be scanned for without matching half of every file. */
 export const MIN_FORBIDDEN_VALUE_LENGTH = 3
