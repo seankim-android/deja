@@ -797,16 +797,12 @@ fn parse_affected_sources(
                 "`affectedSources` key {key:?} contains unsafe control, line-break, bidi, or zero-width characters"
             )));
         }
-        if let Some(tag) = key.strip_prefix("tag:") {
-            if tag.trim().is_empty() {
-                return Err(ConfigError(
-                    "`affectedSources` `tag:` key must include a non-empty tag name".to_string(),
-                ));
-            }
-        } else if key_looks_like_glob_or_path(key) {
-            compile_glob(key).map_err(|err| {
-                ConfigError(format!("invalid `affectedSources` key {key:?}: {err}"))
-            })?;
+        if let Some(tag) = key.strip_prefix("tag:")
+            && tag.trim().is_empty()
+        {
+            return Err(ConfigError(
+                "`affectedSources` `tag:` key must include a non-empty tag name".to_string(),
+            ));
         }
         let Some(arr) = value.as_array() else {
             return Err(ConfigError(format!(
@@ -830,27 +826,6 @@ fn parse_affected_sources(
         out.insert(key.clone(), globs);
     }
     Ok(out)
-}
-
-fn key_looks_like_glob_or_path(key: &str) -> bool {
-    if key == ".." {
-        return true;
-    }
-    let bytes = key.as_bytes();
-    if bytes.len() >= 3
-        && bytes[0].is_ascii_alphabetic()
-        && bytes[1] == b':'
-        && matches!(bytes[2], b'/' | b'\\')
-    {
-        return true;
-    }
-    key.contains('/')
-        || key.contains('\\')
-        || key.contains('*')
-        || key.contains('?')
-        || key.contains('[')
-        || key.contains('{')
-        || key.contains('}')
 }
 
 fn req_non_empty_string(
@@ -1270,6 +1245,7 @@ mod tests {
                 "appId": "dev.deja.app",
                 "affectedSources": {
                     "checkout": ["src/checkout/**", "src/shared/{cart,pay}.swift"],
+                    "Checkout [guest": ["src/guest/**"],
                     "flows/auth/*.yaml": ["ios/Auth/**"],
                     "tag:payments": ["src/billing/**"]
                 }
@@ -1285,21 +1261,25 @@ mod tests {
             env: &empty,
         })
         .expect("valid affectedSources must load");
-        assert_eq!(loaded.affected_sources.len(), 3);
+        assert_eq!(loaded.affected_sources.len(), 4);
         assert_eq!(
             loaded.affected_sources.get("tag:payments").unwrap(),
             &vec!["src/billing/**".to_string()]
         );
+        assert_eq!(
+            loaded.affected_sources.get("Checkout [guest").unwrap(),
+            &vec!["src/guest/**".to_string()]
+        );
 
-        // Invalid shapes / globs must fail closed.
+        // Invalid shapes / unsafe keys / invalid value globs must fail closed.
         for bad_json in [
             r#"{"workspaceRoot":".","platform":"ios","appId":"dev.deja.app","affectedSources":[]}"#,
             r#"{"workspaceRoot":".","platform":"ios","appId":"dev.deja.app","affectedSources":{"":"src/**"}}"#,
+            r#"{"workspaceRoot":".","platform":"ios","appId":"dev.deja.app","affectedSources":{"bad\nkey":["src/**"]}}"#,
             r#"{"workspaceRoot":".","platform":"ios","appId":"dev.deja.app","affectedSources":{"checkout":"src/**"}}"#,
             r#"{"workspaceRoot":".","platform":"ios","appId":"dev.deja.app","affectedSources":{"checkout":["../escape/**"]}}"#,
-            r#"{"workspaceRoot":".","platform":"ios","appId":"dev.deja.app","affectedSources":{"flows/[unclosed":["src/**"]}}"#,
+            r#"{"workspaceRoot":".","platform":"ios","appId":"dev.deja.app","affectedSources":{"checkout":["src/[unclosed"]}}"#,
             r#"{"workspaceRoot":".","platform":"ios","appId":"dev.deja.app","affectedSources":{"tag:":["src/**"]}}"#,
-            r#"{"workspaceRoot":".","platform":"ios","appId":"dev.deja.app","affectedSources":{"../bad/flow.yaml":["src/**"]}}"#,
         ] {
             fs::write(&cfg, bad_json).unwrap();
             assert!(

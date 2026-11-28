@@ -9968,7 +9968,7 @@ async fn deja80_option_injection_and_flag_hygiene_rejected_before_invoking_git()
         &["deja", "run", "--all", "--always-include", "g1"],
         // `--fallback-all-on` without `--changed-from`.
         &["deja", "run", "--all", "--fallback-all-on", "Package.swift"],
-        // Invalid `--fallback-all-on` glob.
+        // Invalid `--fallback-all-on` globs (strictly file path globs).
         &[
             "deja",
             "run",
@@ -9978,7 +9978,16 @@ async fn deja80_option_injection_and_flag_hygiene_rejected_before_invoking_git()
             "--fallback-all-on",
             "../escape/**",
         ],
-        // Invalid `--always-include` glob.
+        &[
+            "deja",
+            "run",
+            "--all",
+            "--changed-from",
+            "HEAD~1",
+            "--fallback-all-on",
+            "flows/[unclosed",
+        ],
+        // Unsafe `--always-include` values (empty, whitespace, control/bidi).
         &[
             "deja",
             "run",
@@ -9986,7 +9995,25 @@ async fn deja80_option_injection_and_flag_hygiene_rejected_before_invoking_git()
             "--changed-from",
             "HEAD~1",
             "--always-include",
-            "flows/[unclosed",
+            "",
+        ],
+        &[
+            "deja",
+            "run",
+            "--all",
+            "--changed-from",
+            "HEAD~1",
+            "--always-include",
+            "   ",
+        ],
+        &[
+            "deja",
+            "run",
+            "--all",
+            "--changed-from",
+            "HEAD~1",
+            "--always-include",
+            "bad\nline",
         ],
     ];
 
@@ -10007,4 +10034,528 @@ async fn deja80_option_injection_and_flag_hygiene_rejected_before_invoking_git()
             "git MUST NOT be invoked for invalid argv={argv:?}"
         );
     }
+}
+
+#[tokio::test]
+async fn regression_deja80_r1_f1_diff_relative_true_forces_repo_relative_paths() {
+    let repo = TempWs::new("deja80-r1-f1-diff-rel");
+    let mobile = repo.path.join("apps/mobile");
+    fs::create_dir_all(mobile.join("build")).unwrap();
+    fs::create_dir_all(mobile.join("flows")).unwrap();
+    fs::write(mobile.join("build/App.bin"), b"build-v1").unwrap();
+    fs::write(
+        mobile.join("flows/g1.yaml"),
+        format!(
+            "appId: {TEST_APP_ID}\n---\n- launchApp\n- inputText: \"g1\"\n- tapOn:\n    id: done\n- assertVisible: Done\n"
+        ),
+    )
+    .unwrap();
+    fs::write(
+        mobile.join("flows/g2.yaml"),
+        format!(
+            "appId: {TEST_APP_ID}\n---\n- launchApp\n- inputText: \"g2\"\n- tapOn:\n    id: done\n- assertVisible: Done\n"
+        ),
+    )
+    .unwrap();
+    seed_manifest_at_dir(&mobile, &[("g1", "flows/g1.yaml"), ("g2", "flows/g2.yaml")]);
+    write_deja80_config(&mobile, None);
+    let base_sha = init_git_repo_and_commit_all(&repo.path, "base");
+
+    // Enable `diff.relative = true` in the repository's local `.git/config`.
+    git_cmd_in(&repo.path, &["config", "diff.relative", "true"]);
+
+    // Edit `apps/mobile/flows/g1.yaml` (unstaged) and verify `g1` IS selected.
+    fs::write(
+        mobile.join("flows/g1.yaml"),
+        format!(
+            "# diff.relative=true edit\nappId: {TEST_APP_ID}\n---\n- launchApp\n- inputText: \"g1\"\n- tapOn:\n    id: done\n- assertVisible: Done\n"
+        ),
+    )
+    .unwrap();
+
+    let (deps, cap) = make_deps(
+        &mobile,
+        Arc::new(BatchMockFactory::new(Some("ios-27.2"))),
+        default_probes(),
+        CancellationToken::new(),
+    );
+    let code = run_cli_from_args(
+        [
+            "deja",
+            "run",
+            "--all",
+            "--verify",
+            "--changed-from",
+            &base_sha,
+            "--json",
+        ],
+        &deps,
+    )
+    .await;
+    assert_eq!(code, 0, "stderr: {}", cap.lock().unwrap().stderr);
+    let parsed: Value = serde_json::from_str(&cap.lock().unwrap().stdout).unwrap();
+    assert_eq!(parsed["selection"]["fallbackAll"], false);
+    assert_eq!(parsed["goals"].as_array().unwrap().len(), 1);
+    assert_eq!(parsed["goals"][0]["goal"], "g1");
+    assert_eq!(parsed["goals"][0]["selectionReason"], "changed-closure");
+    assert_eq!(parsed["selection"]["skippedGoals"], json!(["g2"]));
+
+    // Also test a committed edit under `diff.relative = true`!
+    let base2 = commit_all(&repo.path, "sync g1");
+    fs::write(
+        mobile.join("flows/g2.yaml"),
+        format!(
+            "# committed diff.relative=true edit\nappId: {TEST_APP_ID}\n---\n- launchApp\n- inputText: \"g2\"\n- tapOn:\n    id: done\n- assertVisible: Done\n"
+        ),
+    )
+    .unwrap();
+    commit_all(&repo.path, "edit g2");
+    let (deps2, cap2) = make_deps(
+        &mobile,
+        Arc::new(BatchMockFactory::new(Some("ios-27.2"))),
+        default_probes(),
+        CancellationToken::new(),
+    );
+    let code2 = run_cli_from_args(
+        [
+            "deja",
+            "run",
+            "--all",
+            "--verify",
+            "--changed-from",
+            &base2,
+            "--json",
+        ],
+        &deps2,
+    )
+    .await;
+    assert_eq!(code2, 0, "stderr: {}", cap2.lock().unwrap().stderr);
+    let parsed2: Value = serde_json::from_str(&cap2.lock().unwrap().stdout).unwrap();
+    assert_eq!(parsed2["goals"].as_array().unwrap().len(), 1);
+    assert_eq!(parsed2["goals"][0]["goal"], "g2");
+    assert_eq!(parsed2["goals"][0]["selectionReason"], "changed-closure");
+}
+
+#[tokio::test]
+async fn regression_deja80_r1_f2_untracked_external_file_triggers_fallback_all_on() {
+    let repo = TempWs::new("deja80-r1-f2-ext-untracked");
+    let mobile = repo.path.join("apps/mobile");
+    fs::create_dir_all(mobile.join("build")).unwrap();
+    fs::create_dir_all(mobile.join("flows")).unwrap();
+    fs::write(mobile.join("build/App.bin"), b"build-v1").unwrap();
+    fs::write(
+        mobile.join("flows/g1.yaml"),
+        format!(
+            "appId: {TEST_APP_ID}\n---\n- launchApp\n- inputText: \"g1\"\n- tapOn:\n    id: done\n- assertVisible: Done\n"
+        ),
+    )
+    .unwrap();
+    fs::write(
+        mobile.join("flows/g2.yaml"),
+        format!(
+            "appId: {TEST_APP_ID}\n---\n- launchApp\n- inputText: \"g2\"\n- tapOn:\n    id: done\n- assertVisible: Done\n"
+        ),
+    )
+    .unwrap();
+    seed_manifest_at_dir(&mobile, &[("g1", "flows/g1.yaml"), ("g2", "flows/g2.yaml")]);
+    write_deja80_config(&mobile, None);
+    let base_sha = init_git_repo_and_commit_all(&repo.path, "base");
+
+    // Add an UNTRACKED repo-root file `ci/new.yml` outside `apps/mobile/`.
+    repo.write("ci/new.yml", "name: new-ci-job\n");
+
+    // Without `--fallback-all-on`, untracked external file is ignored -> 0 selected.
+    let factory_no_fb = Arc::new(BatchMockFactory::new(Some("ios-27.2")));
+    let (deps_no_fb, cap_no_fb) = make_deps(
+        &mobile,
+        factory_no_fb.clone(),
+        default_probes(),
+        CancellationToken::new(),
+    );
+    let code_no_fb = run_cli_from_args(
+        [
+            "deja",
+            "run",
+            "--all",
+            "--changed-from",
+            &base_sha,
+            "--json",
+        ],
+        &deps_no_fb,
+    )
+    .await;
+    assert_eq!(code_no_fb, 0);
+    assert_eq!(factory_no_fb.total_create_calls(), 0);
+    let parsed_no_fb: Value = serde_json::from_str(&cap_no_fb.lock().unwrap().stdout).unwrap();
+    assert_eq!(parsed_no_fb["selection"]["selectedCount"], 0);
+
+    // With `--fallback-all-on ci/**`, untracked external `ci/new.yml` triggers `fallback-all`!
+    let (deps_fb, cap_fb) = make_deps(
+        &mobile,
+        Arc::new(BatchMockFactory::new(Some("ios-27.2"))),
+        default_probes(),
+        CancellationToken::new(),
+    );
+    let code_fb = run_cli_from_args(
+        [
+            "deja",
+            "run",
+            "--all",
+            "--changed-from",
+            &base_sha,
+            "--fallback-all-on",
+            "ci/**",
+            "--json",
+        ],
+        &deps_fb,
+    )
+    .await;
+    assert_eq!(code_fb, 0, "stderr: {}", cap_fb.lock().unwrap().stderr);
+    let parsed_fb: Value = serde_json::from_str(&cap_fb.lock().unwrap().stdout).unwrap();
+    assert_eq!(parsed_fb["selection"]["fallbackAll"], true);
+    assert_eq!(parsed_fb["counts"]["total"], 2);
+    assert_eq!(parsed_fb["goals"][0]["selectionReason"], "fallback-all");
+    assert_eq!(parsed_fb["goals"][1]["selectionReason"], "fallback-all");
+}
+
+#[tokio::test]
+async fn regression_deja80_r1_f3_classic_mode_selects_from_all_replayable_validation_runs() {
+    let ws = TempWs::new("deja80-r1-f3-classic-runs");
+    ws.write_build("build/App.bin", b"build-v1");
+    ws.write(
+        "deja.config.json",
+        &json!({
+            "workspaceRoot": ".",
+            "platform": "ios",
+            "appId": TEST_APP_ID,
+            "adapter": "maestro-ios/v1",
+            "buildPath": "build/App.bin",
+            "device": TEST_UDID
+        })
+        .to_string(),
+    );
+
+    // Remember the same classic goal across TWO distinct runtimes with DIFFERENT flow files
+    // (`cand/r1.yaml` on `ios-26.0`, then `cand/r2.yaml` on `ios-27.2`), plus an untouched sibling.
+    ws.write(
+        "cand/r1.yaml",
+        &format!(
+            "# runtime-1 flow\nappId: {TEST_APP_ID}\n---\n- launchApp\n- inputText: \"r1\"\n- tapOn:\n    id: done\n- assertVisible: Done\n"
+        ),
+    );
+    ws.write(
+        "cand/r2.yaml",
+        &format!(
+            "# runtime-2 flow\nappId: {TEST_APP_ID}\n---\n- launchApp\n- inputText: \"r2\"\n- tapOn:\n    id: done\n- assertVisible: Done\n"
+        ),
+    );
+    write_tagged_flow(&ws, "cand/untouched.yaml", "untouched");
+
+    let f_r1 = Arc::new(BatchMockFactory::new(Some("ios-26.0")));
+    let (deps_r1, cap_r1) = make_deps(
+        &ws.path,
+        f_r1.clone(),
+        default_probes(),
+        CancellationToken::new(),
+    );
+    assert_eq!(
+        run_cli_from_args(
+            [
+                "deja",
+                "remember",
+                "multi runtime",
+                "--flow",
+                "cand/r1.yaml"
+            ],
+            &deps_r1,
+        )
+        .await,
+        0,
+        "remember r1 failed: {}",
+        cap_r1.lock().unwrap().stderr
+    );
+    let (deps_u, cap_u) = make_deps(
+        &ws.path,
+        f_r1.clone(),
+        default_probes(),
+        CancellationToken::new(),
+    );
+    assert_eq!(
+        run_cli_from_args(
+            [
+                "deja",
+                "remember",
+                "untouched",
+                "--flow",
+                "cand/untouched.yaml"
+            ],
+            &deps_u,
+        )
+        .await,
+        0,
+        "remember untouched failed: {}",
+        cap_u.lock().unwrap().stderr
+    );
+
+    let f_r2 = Arc::new(BatchMockFactory::new(Some("ios-27.2")));
+    let (deps_r2, cap_r2) = make_deps(&ws.path, f_r2, default_probes(), CancellationToken::new());
+    assert_eq!(
+        run_cli_from_args(
+            [
+                "deja",
+                "remember",
+                "multi runtime",
+                "--flow",
+                "cand/r2.yaml"
+            ],
+            &deps_r2,
+        )
+        .await,
+        0,
+        "remember r2 failed: {}",
+        cap_r2.lock().unwrap().stderr
+    );
+
+    // Inspect stored SQLite runs to grab the exact earlier runtime (`ios-26.0`) flow path and
+    // verify `walks.flow_path` now points to the newer runtime (`ios-27.2`) flow path!
+    let ro = SqliteWalkStore::open_readonly(SqliteStoreOptions::new(&ws.path)).unwrap();
+    let walks = ro.list_walks().unwrap();
+    let multi_walk = walks
+        .iter()
+        .find(|w| w.goal_key == "multi runtime")
+        .expect("multi runtime walk recorded");
+    let runs = ro.list_validation_runs(&multi_walk.identity()).unwrap();
+    let r1_run = runs
+        .iter()
+        .find(|r| r.runtime.as_deref() == Some("ios-26.0"))
+        .expect("ios-26.0 validation run present");
+    let r2_run = runs
+        .iter()
+        .find(|r| r.runtime.as_deref() == Some("ios-27.2"))
+        .expect("ios-27.2 validation run present");
+    assert_ne!(
+        r1_run.flow_path, r2_run.flow_path,
+        "test requires distinct flow files across the two runtimes"
+    );
+    assert_eq!(
+        multi_walk.flow_path, r2_run.flow_path,
+        "walks.flow_path reflects latest runtime; earlier runtime lives in validation_runs"
+    );
+    let r1_flow_rel = r1_run.flow_path.clone();
+    drop(ro);
+
+    ws.write("goals.txt", "multi runtime\nuntouched\n");
+    let base_sha = init_git_repo_and_commit_all(&ws.path, "classic multi-runtime base");
+
+    // Edit ONLY the earlier runtime's stored flow file (`r1_flow_rel`), leaving `walks.flow_path`
+    // (`r2_run.flow_path`) completely untouched!
+    let orig_r1 = fs::read_to_string(ws.path.join(&r1_flow_rel)).unwrap();
+    fs::write(
+        ws.path.join(&r1_flow_rel),
+        format!("{orig_r1}# edited r1\n"),
+    )
+    .unwrap();
+
+    let (deps_run, cap_run) = make_deps(
+        &ws.path,
+        Arc::new(BatchMockFactory::new(Some("ios-26.0"))),
+        default_probes(),
+        CancellationToken::new(),
+    );
+    let _code = run_cli_from_args(
+        [
+            "deja",
+            "run",
+            "--goals",
+            "goals.txt",
+            "--changed-from",
+            &base_sha,
+            "--json",
+        ],
+        &deps_run,
+    )
+    .await;
+    let parsed: Value = serde_json::from_str(&cap_run.lock().unwrap().stdout).unwrap();
+    assert_eq!(parsed["selection"]["fallbackAll"], false);
+    assert_eq!(parsed["goals"].as_array().unwrap().len(), 1);
+    assert_eq!(parsed["goals"][0]["goal"], "multi runtime");
+    assert_eq!(parsed["goals"][0]["selectionReason"], "changed-closure");
+    assert_eq!(parsed["selection"]["skippedGoals"], json!(["untouched"]));
+}
+
+#[tokio::test]
+async fn regression_deja80_r1_f4_submodule_mode_160000_triggers_fallback_all() {
+    let ws = TempWs::new("deja80-r1-f4-gitlink");
+    ws.write_build("build/App.bin", b"build-v1");
+    write_tagged_flow(&ws, "flows/g1.yaml", "g1");
+    write_tagged_flow(&ws, "flows/g2.yaml", "g2");
+    seed_manifest_at_dir(
+        &ws.path,
+        &[("g1", "flows/g1.yaml"), ("g2", "flows/g2.yaml")],
+    );
+    write_deja80_config(&ws.path, None);
+    let base_sha = init_git_repo_and_commit_all(&ws.path, "base");
+
+    // Stage a gitlink (mode 160000, NO trailing slash) directly into the index.
+    let cacheinfo = format!("160000,{base_sha},submod");
+    git_cmd_in(
+        &ws.path,
+        &["update-index", "--add", "--cacheinfo", &cacheinfo],
+    );
+
+    // 4a. Staged gitlink triggers fail-closed `fallback-all`.
+    let (deps_staged, cap_staged) = make_deps(
+        &ws.path,
+        Arc::new(BatchMockFactory::new(Some("ios-27.2"))),
+        default_probes(),
+        CancellationToken::new(),
+    );
+    let code_staged = run_cli_from_args(
+        [
+            "deja",
+            "run",
+            "--all",
+            "--changed-from",
+            &base_sha,
+            "--json",
+        ],
+        &deps_staged,
+    )
+    .await;
+    assert_eq!(
+        code_staged,
+        0,
+        "stderr: {}",
+        cap_staged.lock().unwrap().stderr
+    );
+    let parsed_staged: Value = serde_json::from_str(&cap_staged.lock().unwrap().stdout).unwrap();
+    assert_eq!(parsed_staged["selection"]["fallbackAll"], true);
+    assert!(
+        parsed_staged["selection"]["fallbackReason"]
+            .as_str()
+            .unwrap()
+            .contains("submodule/gitlink")
+    );
+    assert_eq!(parsed_staged["counts"]["total"], 2);
+    assert_eq!(parsed_staged["goals"][0]["selectionReason"], "fallback-all");
+    assert_eq!(parsed_staged["goals"][1]["selectionReason"], "fallback-all");
+
+    // 4b. Committed gitlink (`base_sha..HEAD`) ALSO triggers fail-closed `fallback-all`.
+    git_cmd_in(&ws.path, &["commit", "-q", "-m", "commit gitlink"]);
+    let (deps_committed, cap_committed) = make_deps(
+        &ws.path,
+        Arc::new(BatchMockFactory::new(Some("ios-27.2"))),
+        default_probes(),
+        CancellationToken::new(),
+    );
+    let code_committed = run_cli_from_args(
+        [
+            "deja",
+            "run",
+            "--all",
+            "--changed-from",
+            &base_sha,
+            "--json",
+        ],
+        &deps_committed,
+    )
+    .await;
+    assert_eq!(
+        code_committed,
+        0,
+        "stderr: {}",
+        cap_committed.lock().unwrap().stderr
+    );
+    let parsed_committed: Value =
+        serde_json::from_str(&cap_committed.lock().unwrap().stdout).unwrap();
+    assert_eq!(parsed_committed["selection"]["fallbackAll"], true);
+    assert!(
+        parsed_committed["selection"]["fallbackReason"]
+            .as_str()
+            .unwrap()
+            .contains("submodule/gitlink")
+    );
+    assert_eq!(parsed_committed["counts"]["total"], 2);
+}
+
+#[tokio::test]
+async fn regression_deja80_r1_f5_literal_non_glob_goal_name_in_always_include_and_affected_sources()
+{
+    let ws = TempWs::new("deja80-r1-f5-literal-goal");
+    ws.write_build("build/App.bin", b"build-v1");
+    write_tagged_flow(&ws, "flows/guest.yaml", "guest");
+    write_tagged_flow(&ws, "flows/settings.yaml", "settings");
+    ws.write("README.md", "# docs\n");
+    seed_manifest_at_dir(
+        &ws.path,
+        &[
+            ("Checkout [guest", "flows/guest.yaml"),
+            ("settings", "flows/settings.yaml"),
+        ],
+    );
+    write_deja80_config(
+        &ws.path,
+        Some(json!({
+            "Checkout [guest": ["src/guest/**"]
+        })),
+    );
+    let base_sha = init_git_repo_and_commit_all(&ws.path, "base");
+
+    // 5a. `--always-include "Checkout [guest"` (literal goal name, NOT valid glob) selects it cleanly!
+    ws.write("README.md", "# docs updated\n");
+    let (deps_ai, cap_ai) = make_deps(
+        &ws.path,
+        Arc::new(BatchMockFactory::new(Some("ios-27.2"))),
+        default_probes(),
+        CancellationToken::new(),
+    );
+    let code_ai = run_cli_from_args(
+        [
+            "deja",
+            "run",
+            "--all",
+            "--changed-from",
+            &base_sha,
+            "--always-include",
+            "Checkout [guest",
+            "--json",
+        ],
+        &deps_ai,
+    )
+    .await;
+    assert_eq!(code_ai, 0, "stderr: {}", cap_ai.lock().unwrap().stderr);
+    let parsed_ai: Value = serde_json::from_str(&cap_ai.lock().unwrap().stdout).unwrap();
+    assert_eq!(parsed_ai["selection"]["fallbackAll"], false);
+    assert_eq!(parsed_ai["goals"].as_array().unwrap().len(), 1);
+    assert_eq!(parsed_ai["goals"][0]["goal"], "Checkout [guest");
+    assert_eq!(parsed_ai["goals"][0]["selectionReason"], "always-include");
+    assert_eq!(parsed_ai["selection"]["skippedGoals"], json!(["settings"]));
+
+    // 5b. `affectedSources` key `"Checkout [guest"` selects it via `src/guest/**` without `--always-include`!
+    ws.write("src/guest/cart.swift", "// guest cart change\n");
+    let (deps_as, cap_as) = make_deps(
+        &ws.path,
+        Arc::new(BatchMockFactory::new(Some("ios-27.2"))),
+        default_probes(),
+        CancellationToken::new(),
+    );
+    let code_as = run_cli_from_args(
+        [
+            "deja",
+            "run",
+            "--all",
+            "--changed-from",
+            &base_sha,
+            "--json",
+        ],
+        &deps_as,
+    )
+    .await;
+    assert_eq!(code_as, 0, "stderr: {}", cap_as.lock().unwrap().stderr);
+    let parsed_as: Value = serde_json::from_str(&cap_as.lock().unwrap().stdout).unwrap();
+    assert_eq!(parsed_as["selection"]["fallbackAll"], false);
+    assert_eq!(parsed_as["goals"].as_array().unwrap().len(), 1);
+    assert_eq!(parsed_as["goals"][0]["goal"], "Checkout [guest");
+    assert_eq!(parsed_as["goals"][0]["selectionReason"], "changed-closure");
+    assert_eq!(parsed_as["selection"]["skippedGoals"], json!(["settings"]));
 }

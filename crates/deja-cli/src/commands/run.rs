@@ -372,7 +372,7 @@ pub async fn run(
             }
         }
         for pattern in &args.always_include {
-            if let Err(msg) = compile_glob(pattern) {
+            if pattern.trim().is_empty() {
                 return emit_early_exec_error(
                     deps,
                     "run",
@@ -382,7 +382,21 @@ pub async fn run(
                     args.summary,
                     &early_redaction,
                     "USAGE_ERROR",
-                    &format!("invalid `--always-include` pattern {pattern:?}: {msg}"),
+                    "`--always-include` value must not be empty or whitespace",
+                    EXIT_USAGE_OR_CONFIG,
+                );
+            }
+            if pattern.contains('\0') || has_unsafe_control_or_bidi_char(pattern) {
+                return emit_early_exec_error(
+                    deps,
+                    "run",
+                    &raw_goal_fallback,
+                    cli_junit.as_deref(),
+                    json_mode,
+                    args.summary,
+                    &early_redaction,
+                    "USAGE_ERROR",
+                    "`--always-include` value must not contain NUL, control, line-break, bidi, or zero-width characters",
                     EXIT_USAGE_OR_CONFIG,
                 );
             }

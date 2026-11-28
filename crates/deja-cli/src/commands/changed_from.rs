@@ -12,10 +12,10 @@ use std::process::Stdio;
 use std::sync::Arc;
 
 use deja_core::{
-    Goal, ManifestWalk, StoredWalk, YamlValue, collect_flow_closure, normalize_goal,
-    parse_yaml_documents, spelling_key,
+    Goal, ManifestWalk, StaleBuildPolicy, StoredWalk, YamlValue, collect_flow_closure,
+    normalize_goal, parse_yaml_documents, spelling_key,
 };
-use deja_store::{ConsumerFlows, SqliteWalkStore};
+use deja_store::{ConsumerFlows, SqliteWalkStore, ValidationRunRecord};
 use tokio::process::Command;
 use tokio_util::sync::CancellationToken;
 
@@ -88,7 +88,7 @@ impl GitChangeSet {
 
 struct CompiledAlwaysInclude {
     normalized_goal_key: Option<String>,
-    glob: CompiledGlob,
+    glob: Option<CompiledGlob>,
 }
 
 struct CompiledAffectedSourceRule {
@@ -97,6 +97,12 @@ struct CompiledAffectedSourceRule {
     tag_key: String,
     key_glob: Option<CompiledGlob>,
     value_globs: Vec<CompiledGlob>,
+}
+
+#[derive(Debug)]
+struct ClassicWalkEntry {
+    walk: StoredWalk,
+    runs: Vec<ValidationRunRecord>,
 }
 
 #[derive(Debug)]
@@ -134,25 +140,14 @@ pub async fn resolve_and_select_goals(
         .collect();
     let always_include_rules: Vec<CompiledAlwaysInclude> = always_include_raw
         .iter()
-        .filter_map(|raw| {
-            let glob = compile_glob(raw).ok()?;
-            let normalized_goal_key = normalize_goal(raw).ok().map(|g| g.key);
-            Some(CompiledAlwaysInclude {
-                normalized_goal_key,
-                glob,
-            })
+        .map(|raw| CompiledAlwaysInclude {
+            normalized_goal_key: normalize_goal(raw).ok().map(|g| g.key),
+            glob: compile_glob(raw).ok(),
         })
         .collect();
     let affected_source_rules = compile_affected_source_rules(&config.affected_sources);
 
-    let git_state = collect_git_changes(
-        &config.workspace_root,
-        &config.config_path,
-        base_ref,
-        env,
-        cancel,
-    )
-    .await?;
+    let git_state = collect_git_changes(&config.workspace_root, base_ref, env, cancel).await?;
 
     let (fallback_all, fallback_reason, changed_files_count, changed_ws_files) = match git_state {
         Ok(changes) => {
@@ -250,18 +245,29 @@ fn select_affected_goals(
         })
     });
 
-    let classic_walks: Vec<StoredWalk> = if consumer.is_none() {
+    let mut classic_store_error = false;
+    let classic_entries: Vec<ClassicWalkEntry> = if consumer.is_none() {
         let mut all = Vec::new();
         for store in opened_stores {
-            if let Ok(walks) = store.list_walks() {
-                for w in walks {
-                    if w.app_id == config.app_id
-                        && w.platform == config.platform
-                        && w.adapter == config.adapter
-                        && w.browser == config.browser
-                    {
-                        all.push(w);
+            match store.list_walks() {
+                Ok(walks) => {
+                    for walk in walks {
+                        if walk.app_id == config.app_id
+                            && walk.platform == config.platform
+                            && walk.adapter == config.adapter
+                            && walk.browser == config.browser
+                        {
+                            match store.list_validation_runs(&walk.identity()) {
+                                Ok(runs) => all.push(ClassicWalkEntry { walk, runs }),
+                                Err(_) => {
+                                    classic_store_error = true;
+                                }
+                            }
+                        }
                     }
+                }
+                Err(_) => {
+                    classic_store_error = true;
                 }
             }
         }
@@ -274,14 +280,18 @@ fn select_affected_goals(
     let mut skipped_goals = Vec::new();
 
     for goal in candidate_goals {
-        let closure_info = resolve_goal_closure_info(
-            goal,
-            config,
-            consumer.is_some(),
-            manifest_by_key.as_ref(),
-            &classic_walks,
-            build_fingerprint,
-        );
+        let closure_info = if classic_store_error {
+            None
+        } else {
+            resolve_goal_closure_info(
+                goal,
+                config,
+                consumer.is_some(),
+                manifest_by_key.as_ref(),
+                &classic_entries,
+                build_fingerprint,
+            )
+        };
 
         let Some(info) = closure_info else {
             // Precedence 2: Missing or broken closure -> fail-closed selected.
@@ -314,10 +324,10 @@ fn select_affected_goals(
         // Precedence 5: `--always-include` matching normalized goal key or closure/main flow glob.
         let matched_always_include = always_include_rules.iter().any(|rule| {
             rule.normalized_goal_key.as_deref() == Some(goal.key.as_str())
-                || info
-                    .closure_files
-                    .iter()
-                    .any(|path| rule.glob.matches(path))
+                || rule
+                    .glob
+                    .as_ref()
+                    .is_some_and(|g| info.closure_files.iter().any(|path| g.matches(path)))
         });
         if matched_always_include {
             selected.push((goal.clone(), SelectionReason::AlwaysInclude));
@@ -392,7 +402,7 @@ fn resolve_goal_closure_info(
     config: &LoadedConfig,
     manifest_mode: bool,
     manifest_by_key: Option<&BTreeMap<String, ManifestWalk>>,
-    classic_walks: &[StoredWalk],
+    classic_entries: &[ClassicWalkEntry],
     build_fingerprint: &str,
 ) -> Option<GoalClosureInfo> {
     if manifest_mode {
@@ -412,33 +422,88 @@ fn resolve_goal_closure_info(
             header_tags,
         })
     } else {
-        let matching: Vec<&StoredWalk> = classic_walks
+        let matching: Vec<&ClassicWalkEntry> = classic_entries
             .iter()
-            .filter(|w| w.goal_key == goal.key)
+            .filter(|entry| entry.walk.goal_key == goal.key)
             .collect();
         if matching.is_empty() {
             return None;
         }
-        // Prefer walks for the active build fingerprint; otherwise fall back to the most recently
-        // validated walk(s) (supporting `staleBuild: "replay-last-verified"`).
-        let exact_build: Vec<&StoredWalk> = matching
-            .iter()
-            .copied()
-            .filter(|w| w.build_fingerprint == build_fingerprint)
-            .collect();
-        let selected_walks: Vec<&StoredWalk> = if !exact_build.is_empty() {
-            exact_build
-        } else {
-            let mut sorted = matching;
-            sorted.sort_by(|a, b| b.last_validation.at.cmp(&a.last_validation.at));
-            vec![sorted[0]]
-        };
+
+        // Collect the union of every replayable validation run's `flow_path` and `subflow_files`
+        // across all shard stores and runtimes so editing an earlier runtime's flow closure for a
+        // goal recorded across multiple runtimes ALWAYS selects that goal.
+        let mut candidate_flow_paths: BTreeSet<String> = BTreeSet::new();
+        let mut recorded_subflow_paths: BTreeSet<String> = BTreeSet::new();
+        let allow_stale_replay = config.stale_build == Some(StaleBuildPolicy::ReplayLastVerified);
+
+        for entry in &matching {
+            if entry.runs.is_empty() {
+                if entry.walk.build_fingerprint == build_fingerprint || allow_stale_replay {
+                    candidate_flow_paths.insert(entry.walk.flow_path.clone());
+                    if let Some(ref subflows) = entry.walk.subflow_files {
+                        for sf in subflows {
+                            recorded_subflow_paths.insert(sf.path.clone());
+                        }
+                    }
+                }
+                continue;
+            }
+
+            // 1. Every passing run recorded on the current build fingerprint across ALL runtimes.
+            for run in &entry.runs {
+                if run.passed && run.build_fingerprint == build_fingerprint {
+                    candidate_flow_paths.insert(run.flow_path.clone());
+                    if let Some(ref subflows) = run.subflow_files {
+                        for sf in subflows {
+                            recorded_subflow_paths.insert(sf.path.clone());
+                        }
+                    }
+                }
+            }
+
+            // 2. When `staleBuild: "replay-last-verified"` is active, include the latest passing
+            //    run per distinct runtime (plus the overall latest passing run) across prior builds.
+            if allow_stale_replay {
+                let mut latest_by_runtime: BTreeMap<Option<&str>, &ValidationRunRecord> =
+                    BTreeMap::new();
+                for run in &entry.runs {
+                    if !run.passed {
+                        continue;
+                    }
+                    let rt_key = run.runtime.as_deref();
+                    latest_by_runtime
+                        .entry(rt_key)
+                        .and_modify(|existing| {
+                            if run.validated_at > existing.validated_at {
+                                *existing = run;
+                            }
+                        })
+                        .or_insert(run);
+                }
+                for run in latest_by_runtime.into_values() {
+                    candidate_flow_paths.insert(run.flow_path.clone());
+                    if let Some(ref subflows) = run.subflow_files {
+                        for sf in subflows {
+                            recorded_subflow_paths.insert(sf.path.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        if candidate_flow_paths.is_empty() {
+            // No replayable passing run exists (e.g., stale build without staleBuild policy or
+            // failed validation) -> fail-closed select so `run_batch` surfaces the exact refusal.
+            return None;
+        }
 
         let mut closure_files_set = BTreeSet::new();
         let mut header_tags_set = BTreeSet::new();
-        for walk in selected_walks {
-            let flow_abs = config.workspace_root.join(&walk.flow_path);
+        for flow_path in &candidate_flow_paths {
+            let flow_abs = config.workspace_root.join(flow_path);
             let closure = collect_flow_closure(&config.workspace_root, &flow_abs).ok()?;
+            closure_files_set.insert(normalize_rel_posix(flow_path));
             for file in &closure.files {
                 closure_files_set.insert(file.source.clone());
             }
@@ -446,6 +511,12 @@ fn resolve_goal_closure_info(
                 for tag in extract_flow_header_tags(&main_file.bytes) {
                     header_tags_set.insert(tag);
                 }
+            }
+        }
+        for sf_path in recorded_subflow_paths {
+            let norm = normalize_rel_posix(&sf_path);
+            if !norm.is_empty() {
+                closure_files_set.insert(norm);
             }
         }
         Some(GoalClosureInfo {
@@ -653,7 +724,6 @@ async fn run_git_bytes(
 
 async fn collect_git_changes(
     workspace_root: &Path,
-    config_path: &Path,
     base_ref: &str,
     env: &BTreeMap<String, String>,
     cancel: &CancellationToken,
@@ -707,7 +777,7 @@ async fn collect_git_changes(
     // 2. Resolve `<base_ref>^{commit}` strictly to a commit SHA.
     let commit_expr = format!("{base_ref}^{{commit}}");
     let base_out = match run_git_bytes(
-        workspace_root,
+        &repo_toplevel,
         &["rev-parse", "--verify", "--quiet", &commit_expr],
         env,
         cancel,
@@ -737,14 +807,21 @@ async fn collect_git_changes(
     let mut changed_external_repo_files = BTreeSet::new();
     let mut changed_repo_files = BTreeSet::new();
 
-    // 3a. Committed changes: try `<base_sha>...HEAD --`, fallback `<base_sha>..HEAD --`.
+    // 3a. Committed changes: run at `repo_toplevel` with `-c diff.relative=false --no-relative`
+    //     and `--raw --no-renames -z` so `diff.relative=true` never strips `repo_prefix` and
+    //     submodule/gitlink mode `160000` changes always trigger fail-closed `fallback-all`.
     let triple_dot = format!("{base_sha}...HEAD");
     let committed_out = match run_git_bytes(
-        workspace_root,
+        &repo_toplevel,
         &[
+            "-c",
+            "diff.relative=false",
+            "-c",
+            "diff.renames=false",
             "diff",
-            "--name-only",
+            "--raw",
             "--no-renames",
+            "--no-relative",
             "-z",
             &triple_dot,
             "--",
@@ -758,11 +835,16 @@ async fn collect_git_changes(
         Ok(_) => {
             let double_dot = format!("{base_sha}..HEAD");
             match run_git_bytes(
-                workspace_root,
+                &repo_toplevel,
                 &[
+                    "-c",
+                    "diff.relative=false",
+                    "-c",
+                    "diff.renames=false",
                     "diff",
-                    "--name-only",
+                    "--raw",
                     "--no-renames",
+                    "--no-relative",
                     "-z",
                     &double_dot,
                     "--",
@@ -786,7 +868,7 @@ async fn collect_git_changes(
         Err(GitRunError::Failed(msg)) => return Ok(Err(msg)),
     };
 
-    if let Err(reason) = ingest_repo_rel_nul_paths(
+    if let Err(reason) = ingest_raw_diff_nul_records(
         &committed_out.stdout,
         &repo_prefix,
         &mut changed_ws_files,
@@ -796,10 +878,21 @@ async fn collect_git_changes(
         return Ok(Err(reason));
     }
 
-    // 3b. Unstaged working-tree changes (`git diff --name-only --no-renames -z --`).
+    // 3b. Unstaged working-tree changes (`git -C <toplevel> diff --raw --no-renames --no-relative -z --`).
     let unstaged_out = match run_git_bytes(
-        workspace_root,
-        &["diff", "--name-only", "--no-renames", "-z", "--"],
+        &repo_toplevel,
+        &[
+            "-c",
+            "diff.relative=false",
+            "-c",
+            "diff.renames=false",
+            "diff",
+            "--raw",
+            "--no-renames",
+            "--no-relative",
+            "-z",
+            "--",
+        ],
         env,
         cancel,
     )
@@ -814,7 +907,7 @@ async fn collect_git_changes(
         Err(GitRunError::Cancelled) => return Err(ChangedFromError::Cancelled),
         Err(GitRunError::Failed(msg)) => return Ok(Err(msg)),
     };
-    if let Err(reason) = ingest_repo_rel_nul_paths(
+    if let Err(reason) = ingest_raw_diff_nul_records(
         &unstaged_out.stdout,
         &repo_prefix,
         &mut changed_ws_files,
@@ -824,14 +917,19 @@ async fn collect_git_changes(
         return Ok(Err(reason));
     }
 
-    // 3c. Staged index changes (`git diff --cached --name-only --no-renames -z --`).
+    // 3c. Staged index changes (`git -C <toplevel> diff --cached --raw --no-renames --no-relative -z --`).
     let staged_out = match run_git_bytes(
-        workspace_root,
+        &repo_toplevel,
         &[
+            "-c",
+            "diff.relative=false",
+            "-c",
+            "diff.renames=false",
             "diff",
             "--cached",
-            "--name-only",
+            "--raw",
             "--no-renames",
+            "--no-relative",
             "-z",
             "--",
         ],
@@ -849,7 +947,7 @@ async fn collect_git_changes(
         Err(GitRunError::Cancelled) => return Err(ChangedFromError::Cancelled),
         Err(GitRunError::Failed(msg)) => return Ok(Err(msg)),
     };
-    if let Err(reason) = ingest_repo_rel_nul_paths(
+    if let Err(reason) = ingest_raw_diff_nul_records(
         &staged_out.stdout,
         &repo_prefix,
         &mut changed_ws_files,
@@ -859,10 +957,12 @@ async fn collect_git_changes(
         return Ok(Err(reason));
     }
 
-    // 3d. Untracked non-ignored files (`git ls-files --others --exclude-standard -z`,
-    //     already relative to `workspace_root`).
+    // 3d. Untracked non-ignored files across the entire repository (`git -C <toplevel> ls-files
+    //     --others --exclude-standard -z`), uniformly partitioned by `repo_prefix` so untracked
+    //     repo-root files (e.g. `ci/new.yml` or an external config) are checked against
+    //     `--fallback-all-on` and active-config triggers too.
     let untracked_out = match run_git_bytes(
-        workspace_root,
+        &repo_toplevel,
         &["ls-files", "--others", "--exclude-standard", "-z"],
         env,
         cancel,
@@ -874,60 +974,14 @@ async fn collect_git_changes(
         Err(GitRunError::Cancelled) => return Err(ChangedFromError::Cancelled),
         Err(GitRunError::Failed(msg)) => return Ok(Err(msg)),
     };
-    if let Err(reason) = ingest_ws_rel_untracked_nul_paths(
+    if let Err(reason) = ingest_repo_rel_untracked_nul_paths(
         &untracked_out.stdout,
         &repo_prefix,
         &mut changed_ws_files,
+        &mut changed_external_repo_files,
         &mut changed_repo_files,
     ) {
         return Ok(Err(reason));
-    }
-
-    // 3e. If the active config file lives inside the git repo but outside a subdirectory workspace,
-    //     check O(1) whether that specific config file is untracked (non-ignored) at repo root.
-    if !repo_prefix.is_empty()
-        && let (Ok(canon_top), Ok(canon_cfg)) = (
-            std::fs::canonicalize(&repo_toplevel),
-            std::fs::canonicalize(config_path),
-        )
-        && let Ok(rel) = canon_cfg.strip_prefix(&canon_top)
-    {
-        let cfg_repo_rel = rel.to_string_lossy().replace('\\', "/");
-        if !cfg_repo_rel.is_empty() && !cfg_repo_rel.starts_with(&repo_prefix) {
-            let ext_cfg_out = match run_git_bytes(
-                &canon_top,
-                &[
-                    "ls-files",
-                    "--others",
-                    "--exclude-standard",
-                    "-z",
-                    "--",
-                    &cfg_repo_rel,
-                ],
-                env,
-                cancel,
-            )
-            .await
-            {
-                Ok(out) if out.status.success() => out,
-                Ok(_) => {
-                    return Ok(Err(
-                        "git ls-files check for external configuration file failed".to_string(),
-                    ));
-                }
-                Err(GitRunError::Cancelled) => return Err(ChangedFromError::Cancelled),
-                Err(GitRunError::Failed(msg)) => return Ok(Err(msg)),
-            };
-            if let Err(reason) = ingest_repo_rel_nul_paths(
-                &ext_cfg_out.stdout,
-                &repo_prefix,
-                &mut changed_ws_files,
-                &mut changed_external_repo_files,
-                &mut changed_repo_files,
-            ) {
-                return Ok(Err(reason));
-            }
-        }
     }
 
     Ok(Ok(GitChangeSet {
@@ -938,21 +992,65 @@ async fn collect_git_changes(
     }))
 }
 
-fn ingest_repo_rel_nul_paths(
+/// Parse NUL-delimited `git diff --raw --no-renames --no-relative -z` records:
+/// `:<old_mode> <new_mode> <old_oid> <new_oid> <status>\0<path>\0`.
+///
+/// Fails closed (triggering `fallback-all`) on submodule/gitlink mode `160000`, combined/unmerged
+/// diffs (`::`), rename/copy entries, malformed records, non-UTF-8 paths, or trailing `/` entries.
+fn ingest_raw_diff_nul_records(
     stdout: &[u8],
     repo_prefix: &str,
     changed_ws_files: &mut BTreeSet<String>,
     changed_external_repo_files: &mut BTreeSet<String>,
     changed_repo_files: &mut BTreeSet<String>,
 ) -> Result<(), String> {
-    for raw in stdout.split(|&b| b == 0) {
-        if raw.is_empty() {
-            continue;
+    if stdout.is_empty() {
+        return Ok(());
+    }
+    let mut fields: Vec<&[u8]> = stdout.split(|&b| b == 0).collect();
+    if fields.last().is_some_and(|s| s.is_empty()) {
+        fields.pop();
+    }
+    let mut idx = 0usize;
+    while idx < fields.len() {
+        let header_bytes = fields[idx];
+        idx += 1;
+        let Ok(header) = std::str::from_utf8(header_bytes) else {
+            return Err("non-UTF-8 header in raw git diff output".to_string());
+        };
+        if header.starts_with("::") {
+            return Err("unmerged git conflict / combined diff detected".to_string());
         }
-        let Ok(text) = std::str::from_utf8(raw) else {
+        let Some(rest) = header.strip_prefix(':') else {
+            return Err("malformed raw git diff record header".to_string());
+        };
+        let parts: Vec<&str> = rest.split_ascii_whitespace().collect();
+        if parts.len() != 5 {
+            return Err("malformed raw git diff metadata fields".to_string());
+        }
+        let old_mode = parts[0];
+        let new_mode = parts[1];
+        let status = parts[4];
+        if status.starts_with('R') || status.starts_with('C') {
+            return Err(format!(
+                "unexpected rename/copy status `{status}` in raw git diff"
+            ));
+        }
+
+        let Some(path_bytes) = fields.get(idx).copied() else {
+            return Err("truncated path in raw git diff output".to_string());
+        };
+        idx += 1;
+        if path_bytes.is_empty() {
+            return Err("empty path in raw git diff output".to_string());
+        }
+        let Ok(text) = std::str::from_utf8(path_bytes) else {
             return Err("non-UTF-8 path in git diff output".to_string());
         };
         let path = text.replace('\\', "/");
+        if old_mode == "160000" || new_mode == "160000" {
+            return Err(format!("submodule/gitlink changed: `{path}`"));
+        }
         if path.ends_with('/') {
             return Err(format!(
                 "nested git repository or directory entry `{path}` detected in git diff"
@@ -983,10 +1081,11 @@ fn is_deja_ephemeral_untracked(ws_rel: &str) -> bool {
         || ws_rel.starts_with(".deja/gate/")
 }
 
-fn ingest_ws_rel_untracked_nul_paths(
+fn ingest_repo_rel_untracked_nul_paths(
     stdout: &[u8],
     repo_prefix: &str,
     changed_ws_files: &mut BTreeSet<String>,
+    changed_external_repo_files: &mut BTreeSet<String>,
     changed_repo_files: &mut BTreeSet<String>,
 ) -> Result<(), String> {
     for raw in stdout.split(|&b| b == 0) {
@@ -1000,16 +1099,25 @@ fn ingest_ws_rel_untracked_nul_paths(
         if path.ends_with('/') {
             return Err(format!("untracked nested git repository `{path}` detected"));
         }
-        if path.is_empty() || is_deja_ephemeral_untracked(&path) {
+        if path.is_empty() {
             continue;
         }
-        let repo_rel = if repo_prefix.is_empty() {
-            path.clone()
+        if repo_prefix.is_empty() {
+            if is_deja_ephemeral_untracked(&path) {
+                continue;
+            }
+            changed_repo_files.insert(path.clone());
+            changed_ws_files.insert(path);
+        } else if let Some(ws_rel) = path.strip_prefix(repo_prefix) {
+            if ws_rel.is_empty() || is_deja_ephemeral_untracked(ws_rel) {
+                continue;
+            }
+            changed_repo_files.insert(path.clone());
+            changed_ws_files.insert(ws_rel.to_string());
         } else {
-            format!("{repo_prefix}{path}")
-        };
-        changed_repo_files.insert(repo_rel);
-        changed_ws_files.insert(path);
+            changed_repo_files.insert(path.clone());
+            changed_external_repo_files.insert(path);
+        }
     }
     Ok(())
 }
@@ -1060,39 +1168,88 @@ mod tests {
     }
 
     #[test]
-    fn ingest_nul_paths_rejects_non_utf8_and_nested_gitlinks() {
+    fn ingest_raw_diff_and_untracked_detect_submodules_non_utf8_and_prefix_split() {
         let mut ws = BTreeSet::new();
         let mut ext = BTreeSet::new();
         let mut repo = BTreeSet::new();
 
-        // Non-UTF-8 bytes fail closed.
-        assert!(
-            ingest_repo_rel_nul_paths(b"good.yaml\0\xff\xfe\0", "", &mut ws, &mut ext, &mut repo)
-                .is_err()
-        );
+        // Standard `--raw -z` records split cleanly across `repo_prefix`.
+        let raw_ok = b":100644 100644 aaaaaaa bbbbbbb M\0mobile/flows/a.yaml\0:000000 100644 0000000 ccccccc A\0backend/api.rs\0";
+        ingest_raw_diff_nul_records(raw_ok, "mobile/", &mut ws, &mut ext, &mut repo).unwrap();
+        assert!(ws.contains("flows/a.yaml"));
+        assert!(ext.contains("backend/api.rs"));
+        assert_eq!(ws.len(), 1);
+        assert_eq!(ext.len(), 1);
 
-        // Trailing `/` nested gitlink in untracked files fails closed.
-        ws.clear();
-        repo.clear();
-        assert!(
-            ingest_ws_rel_untracked_nul_paths(b"nested-repo/\0", "", &mut ws, &mut repo).is_err()
-        );
+        // Submodule / gitlink mode `160000` (added, modified, deleted) fails closed.
+        for rec in [
+            b":000000 160000 0000000 aaaaaaa A\0submod\0".as_slice(),
+            b":160000 160000 aaaaaaa bbbbbbb M\0submod\0".as_slice(),
+            b":160000 000000 aaaaaaa 0000000 D\0submod\0".as_slice(),
+        ] {
+            ws.clear();
+            ext.clear();
+            repo.clear();
+            let err = ingest_raw_diff_nul_records(rec, "", &mut ws, &mut ext, &mut repo)
+                .expect_err("gitlink mode 160000 must fail closed");
+            assert!(err.contains("submodule/gitlink"), "unexpected error: {err}");
+        }
 
-        // Subdirectory prefix splits workspace vs external paths cleanly.
+        // Non-UTF-8 path in raw diff fails closed.
         ws.clear();
         ext.clear();
         repo.clear();
-        ingest_repo_rel_nul_paths(
-            b"mobile/flows/a.yaml\0backend/api.rs\0",
+        assert!(
+            ingest_raw_diff_nul_records(
+                b":100644 100644 aaaaaaa bbbbbbb M\0\xff\xfe\0",
+                "",
+                &mut ws,
+                &mut ext,
+                &mut repo,
+            )
+            .is_err()
+        );
+
+        // Combined / unmerged diff (`::`) fails closed.
+        assert!(
+            ingest_raw_diff_nul_records(
+                b"::100644 100644 100644 aaa bbb ccc MM\0conflict.yaml\0",
+                "",
+                &mut ws,
+                &mut ext,
+                &mut repo,
+            )
+            .is_err()
+        );
+
+        // Untracked repo-root files partition into `ws` vs `ext`, skip `.deja/memory/`,
+        // and fail closed on trailing `/` nested git repos.
+        ws.clear();
+        ext.clear();
+        repo.clear();
+        ingest_repo_rel_untracked_nul_paths(
+            b"mobile/flows/new.yaml\0mobile/.deja/memory/walks.sqlite\0ci/new.yml\0",
             "mobile/",
             &mut ws,
             &mut ext,
             &mut repo,
         )
         .unwrap();
-        assert!(ws.contains("flows/a.yaml"));
-        assert!(ext.contains("backend/api.rs"));
-        assert_eq!(ws.len(), 1);
-        assert_eq!(ext.len(), 1);
+        assert_eq!(ws.into_iter().collect::<Vec<_>>(), vec!["flows/new.yaml"]);
+        assert_eq!(ext.into_iter().collect::<Vec<_>>(), vec!["ci/new.yml"]);
+
+        let mut ws2 = BTreeSet::new();
+        let mut ext2 = BTreeSet::new();
+        let mut repo2 = BTreeSet::new();
+        assert!(
+            ingest_repo_rel_untracked_nul_paths(
+                b"nested-repo/\0",
+                "",
+                &mut ws2,
+                &mut ext2,
+                &mut repo2,
+            )
+            .is_err()
+        );
     }
 }
