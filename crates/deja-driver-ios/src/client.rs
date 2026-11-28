@@ -531,7 +531,7 @@ impl AgentClient {
 
     /// Post-launch AX warmup call inside `DejaXCTestRunner`.
     pub async fn warmup(&self, req: &WarmupRequest) -> Result<WarmupResponse> {
-        let wait_ms = req.timeout_ms.unwrap_or(10_000).min(30_000);
+        let wait_ms = req.timeout_ms.unwrap_or(10_000).min(60_000);
         let timeout = self
             .request_timeout
             .max(Duration::from_millis(wait_ms.saturating_add(5_000)));

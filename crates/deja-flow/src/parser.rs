@@ -151,8 +151,10 @@ pub struct LaunchAppStep {
     pub clear_state: bool,
     pub clear_keychain: bool,
     pub stop_app: bool,
-    #[serde(default)]
-    pub permissions: BTreeMap<String, String>,
+    /// `None` when omitted in YAML (preserving platform default permissions, e.g. Maestro's
+    /// `all: allow` on iOS); `Some(empty)` when explicitly written as `permissions: {}`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permissions: Option<BTreeMap<String, String>>,
     #[serde(default)]
     pub arguments: BTreeMap<String, LaunchArgumentValue>,
 }
@@ -164,7 +166,7 @@ impl Default for LaunchAppStep {
             clear_state: false,
             clear_keychain: false,
             stop_app: true,
-            permissions: BTreeMap::new(),
+            permissions: None,
             arguments: BTreeMap::new(),
         }
     }
@@ -900,7 +902,7 @@ fn parse_launch_app(value: &YamlValue) -> Result<LaunchAppStep, FlowParseError> 
                     }
                     "stopApp" => step.stop_app = yaml_to_bool(v, "launchApp", "stopApp")?,
                     "permissions" => {
-                        step.permissions = parse_env_map(v, "launchApp.permissions")?;
+                        step.permissions = Some(parse_env_map(v, "launchApp.permissions")?);
                     }
                     "arguments" => {
                         let Some(arg_entries) = v.as_map() else {
@@ -1859,4 +1861,46 @@ fn parse_retry(value: &YamlValue, depth: usize) -> Result<RetryStep, FlowParseEr
         env,
         label,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{FlowStep, parse_flow};
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn parse_launch_app_distinguishes_omitted_empty_and_explicit_permissions() {
+        let yaml = r#"appId: dev.deja.example
+---
+- launchApp
+- launchApp:
+    appId: dev.deja.example
+    permissions: {}
+- launchApp:
+    appId: dev.deja.example
+    permissions:
+      all: deny
+      location: allow
+"#;
+        let parsed = parse_flow(yaml).expect("parse flow yaml");
+        assert_eq!(parsed.steps.len(), 3);
+
+        match &parsed.steps[0] {
+            FlowStep::LaunchApp(step) => assert_eq!(step.permissions, None),
+            other => panic!("expected LaunchApp, got {other:?}"),
+        }
+        match &parsed.steps[1] {
+            FlowStep::LaunchApp(step) => assert_eq!(step.permissions, Some(BTreeMap::new())),
+            other => panic!("expected LaunchApp, got {other:?}"),
+        }
+        match &parsed.steps[2] {
+            FlowStep::LaunchApp(step) => {
+                let mut expected = BTreeMap::new();
+                expected.insert("all".to_string(), "deny".to_string());
+                expected.insert("location".to_string(), "allow".to_string());
+                assert_eq!(step.permissions, Some(expected));
+            }
+            other => panic!("expected LaunchApp, got {other:?}"),
+        }
+    }
 }

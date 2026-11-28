@@ -558,7 +558,7 @@ final class XcuiActions {
         guard let appId = validateAppId(json["appId"] as? String) else {
             return HttpResponse.jsonError(status: 400, message: "missing or invalid appId")
         }
-        let timeoutMs = max(0, min(30_000, intValue(json["timeoutMs"]) ?? 10_000))
+        let timeoutMs = max(0, min(60_000, intValue(json["timeoutMs"]) ?? 10_000))
         let includeSystemUi = boolValue(json["includeSystemUi"]) ?? false
         let returnHierarchy = boolValue(json["returnHierarchy"]) ?? false
 
@@ -929,7 +929,12 @@ final class XcuiActions {
                 return false
             }
             if let text {
-                let candidates = [node.label, node.title, node.value ?? ""]
+                let candidates = [
+                    node.label,
+                    node.title,
+                    node.value ?? "",
+                    node.placeholderValue ?? "",
+                ]
                 let textHit = candidates.contains { candidate in
                     guard !candidate.isEmpty else { return false }
                     return exactText ? (candidate == text) : candidate.contains(text)
@@ -952,15 +957,19 @@ final class XcuiActions {
         var seen = Set<String>()
         for node in nodes {
             if node.inVolatileChrome || !node.isOnScreen { continue }
-            let rawCandidates: [String] = [node.label, node.title, node.identifier, node.value ?? ""]
+            let rawCandidates: [String] = [
+                node.label,
+                node.title,
+                node.identifier,
+                node.value ?? "",
+                node.placeholderValue ?? "",
+            ]
             for raw in rawCandidates {
-                let normalized = raw
-                    .components(separatedBy: .whitespacesAndNewlines)
-                    .filter { !$0.isEmpty }
-                    .joined(separator: " ")
-                if normalized.isEmpty { continue }
-                if seen.insert(normalized).inserted {
-                    result.append(normalized)
+                // Preserve exact raw whitespace/newlines so Rust exact-value redactors match
+                // secrets containing repeated spaces or newlines BEFORE whitespace normalization.
+                if raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { continue }
+                if seen.insert(raw).inserted {
+                    result.append(raw)
                     if result.count >= Self.maxVisibleSampleItems {
                         return result
                     }
