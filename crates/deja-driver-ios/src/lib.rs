@@ -35,8 +35,9 @@ pub use process::{
 pub use runner::{IosRunnerConfig, IosRunnerSession};
 pub use simctl::{
     SimDevice, SimRuntime, Simctl, SimctlEnv, clear_app_data_container,
-    clear_app_data_container_cancellable, find_device_runtime_version, map_privacy_action,
-    map_privacy_service, normalize_ios_runtime_identifier, normalize_runtime_identifier,
+    clear_app_data_container_cancellable, clear_app_group_container_cancellable,
+    find_device_runtime_version, map_privacy_action, map_privacy_service,
+    normalize_ios_runtime_identifier, normalize_runtime_identifier, parse_app_group_containers,
     validate_env_key, validate_launch_arg_key, validate_launch_inputs, validate_media_paths,
     validate_open_link_url,
 };

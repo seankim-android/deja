@@ -1570,11 +1570,11 @@ async fn flow_executor_drives_deja_fixture_end_to_end_and_reuses_warm_session() 
 - tapOn:
     id: password_input
 - inputText: testing123
-- hideKeyboard
 - tapOn:
     id: login_button
 - assertVisible:
     id: screen_catalog
+- hideKeyboard
 - tapOn:
     id: add_to_cart
 - assertVisible:
@@ -1667,6 +1667,54 @@ async fn flow_executor_drives_deja_fixture_end_to_end_and_reuses_warm_session() 
         !visible_ctx.items().is_empty(),
         "VisibleContext on missing assertion must be non-empty"
     );
+
+    // 7b. Fail-closed `hideKeyboard` on a software keyboard with no safe non-submitting dismiss
+    //     button (refusing to submit via Return).
+    let fail_closed_kb_yaml = r#"appId: dev.deja.ios.checkout
+---
+- launchApp:
+    appId: dev.deja.ios.checkout
+    clearState: true
+- assertVisible:
+    id: screen_login
+- tapOn:
+    id: password_input
+- inputText: testing123
+"#;
+    let kb_setup = flow2_executor
+        .execute_yaml(&driver, fail_closed_kb_yaml, &cancel)
+        .await;
+    assert!(
+        kb_setup.passed,
+        "keyboard setup flow failed: {:?} | failure={:?}",
+        kb_setup.failed_step, kb_setup.failure
+    );
+    let kb_tree = driver
+        .hierarchy(FIXTURE_BUNDLE_ID, true, None, &cancel)
+        .await
+        .expect("hierarchy after focusing password_input");
+    let software_kb_visible = kb_tree
+        .nodes
+        .iter()
+        .any(|n| n.element_type.eq_ignore_ascii_case("Keyboard") && n.is_on_screen);
+    if software_kb_visible {
+        match driver.hide_keyboard(FIXTURE_BUNDLE_ID, &cancel).await {
+            Err(DriverError::Transport {
+                operation,
+                transient: false,
+                detail,
+            }) => {
+                assert_eq!(operation, "hide_keyboard");
+                assert!(
+                    detail.contains("refusing to press Return") || detail.contains("dismiss"),
+                    "unexpected hide_keyboard detail: {detail}"
+                );
+            }
+            other => {
+                panic!("expected fail-closed hide_keyboard on Return-only keyboard, got {other:?}")
+            }
+        }
+    }
 
     // 8. Clean shutdown leaves 0 orphaned xcodebuild PIDs for this simulator.
     driver.shutdown().await.expect("IosDriver shutdown");

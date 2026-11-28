@@ -558,7 +558,7 @@ final class XcuiActions {
         guard let appId = validateAppId(json["appId"] as? String) else {
             return HttpResponse.jsonError(status: 400, message: "missing or invalid appId")
         }
-        let timeoutMs = max(0, min(30_000, intValue(json["timeoutMs"]) ?? 10_000))
+        let timeoutMs = max(0, min(60_000, intValue(json["timeoutMs"]) ?? 10_000))
         let includeSystemUi = boolValue(json["includeSystemUi"]) ?? false
         let returnHierarchy = boolValue(json["returnHierarchy"]) ?? false
 

@@ -619,10 +619,11 @@ impl Simctl {
         self.clear_state_cancellable(udid, bundle_id, &cancel).await
     }
 
-    /// Terminates `bundle_id` and wipes its confined CoreSimulator data container (`Documents/`,
-    /// `Library/`, `tmp/`), cooperatively cancelling any in-progress directory wipe and awaiting
-    /// the blocking worker to finish BEFORE returning `IosDriverError::Cancelled` so no background
-    /// deletion can race a subsequent app launch.
+    /// Terminates `bundle_id` and wipes both its confined CoreSimulator private `data` container
+    /// (`Documents/`, `Library/`, `tmp/`) AND any App Group containers reported by
+    /// `xcrun simctl get_app_container <udid> <bundle_id> groups`, cooperatively cancelling any
+    /// in-progress directory wipe and awaiting the blocking worker to finish BEFORE returning
+    /// `IosDriverError::Cancelled` so no background deletion can race a subsequent app launch.
     pub async fn clear_state_cancellable(
         &self,
         udid: &str,
@@ -654,6 +655,10 @@ impl Simctl {
             ));
         }
 
+        let group_paths = self
+            .list_app_group_containers(&canonical, &bundle, cancel)
+            .await?;
+
         if cancel.is_cancelled() {
             return Err(IosDriverError::Cancelled);
         }
@@ -663,7 +668,11 @@ impl Simctl {
         let cancel_flag = Arc::new(AtomicBool::new(false));
         let flag_for_worker = Arc::clone(&cancel_flag);
         let mut handle = tokio::task::spawn_blocking(move || {
-            clear_app_data_container_cancellable(&container_path, &udid_clone, &flag_for_worker)
+            clear_app_data_container_cancellable(&container_path, &udid_clone, &flag_for_worker)?;
+            for group_path in &group_paths {
+                clear_app_group_container_cancellable(group_path, &udid_clone, &flag_for_worker)?;
+            }
+            Ok(())
         });
 
         tokio::select! {
@@ -680,6 +689,46 @@ impl Simctl {
                 Ok(())
             }
         }
+    }
+
+    async fn list_app_group_containers(
+        &self,
+        canonical_udid: &str,
+        bundle_id: &str,
+        cancel: &CancellationToken,
+    ) -> Result<Vec<PathBuf>> {
+        if cancel.is_cancelled() {
+            return Err(IosDriverError::Cancelled);
+        }
+        let mut cmd = self.command();
+        cmd.args(["get_app_container", canonical_udid, bundle_id, "groups"]);
+        let output = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Err(IosDriverError::Cancelled),
+            res = cmd.output() => res.map_err(|source| IosDriverError::CommandSpawn {
+                program: "xcrun".to_string(),
+                source,
+            })?,
+        };
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let lower = stderr.to_ascii_lowercase();
+            // Apps without any App Group entitlements report empty/missing group containers.
+            if lower.contains("no group")
+                || lower.contains("no such file")
+                || lower.contains("not found")
+                || lower.contains("no container")
+            {
+                return Ok(Vec::new());
+            }
+            return Err(IosDriverError::CommandFailed {
+                program: "xcrun simctl".to_string(),
+                args: format!("get_app_container {canonical_udid} {bundle_id} groups"),
+                status: output.status.code(),
+                stderr: stderr.trim().to_string(),
+            });
+        }
+        parse_app_group_containers(&String::from_utf8_lossy(&output.stdout))
     }
 }
 
@@ -892,6 +941,211 @@ fn remove_entry_cancellable(path: &Path, cancelled: &AtomicBool) -> Result<()> {
         context: format!("remove container directory {}", path.display()),
         source,
     })?;
+    Ok(())
+}
+
+/// Parses `xcrun simctl get_app_container <udid> <bundle_id> groups` output (`<group_id>\t<path>`
+/// or `<group_id> <path>` per line) into absolute container paths.
+pub fn parse_app_group_containers(stdout: &str) -> Result<Vec<PathBuf>> {
+    let mut paths = Vec::new();
+    for raw_line in stdout.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let path_part = if let Some((_, rhs)) = line.split_once('\t') {
+            rhs.trim()
+        } else if let Some(idx) = line.find(char::is_whitespace) {
+            line[idx..].trim()
+        } else {
+            return Err(IosDriverError::InvalidPath(format!(
+                "malformed simctl app group container line: {line}"
+            )));
+        };
+        if path_part.is_empty() || !path_part.starts_with('/') {
+            return Err(IosDriverError::InvalidPath(format!(
+                "expected absolute App Group container path, got `{path_part}`"
+            )));
+        }
+        paths.push(PathBuf::from(path_part));
+    }
+    Ok(paths)
+}
+
+/// Path-confined simulator App Group container wipe with cooperative cancellation.
+///
+/// Refuses symlinks, verifies the canonical path lies directly under
+/// `.../CoreSimulator/Devices/<UDID>/data/Containers/Shared/AppGroup/<container-id>`,
+/// preserves `.com.apple.mobile_container_manager.metadata.plist` and top-level `Documents/`,
+/// `Library/`, and `tmp/` directories while wiping their children AND any custom app-created
+/// shared files/directories placed directly in the App Group root.
+pub fn clear_app_group_container_cancellable(
+    container_path: &Path,
+    udid: &str,
+    cancelled: &AtomicBool,
+) -> Result<()> {
+    let canonical_udid = validate_udid(udid)?;
+    if cancelled.load(Ordering::SeqCst) {
+        return Err(IosDriverError::Cancelled);
+    }
+
+    let meta = std::fs::symlink_metadata(container_path).map_err(|source| IosDriverError::Io {
+        context: format!("stat App Group container {}", container_path.display()),
+        source,
+    })?;
+    if meta.file_type().is_symlink() {
+        return Err(IosDriverError::InvalidPath(format!(
+            "refusing symlink App Group container {}",
+            container_path.display()
+        )));
+    }
+    if !meta.is_dir() {
+        return Err(IosDriverError::InvalidPath(format!(
+            "App Group container is not a directory: {}",
+            container_path.display()
+        )));
+    }
+
+    let canonical_container =
+        std::fs::canonicalize(container_path).map_err(|source| IosDriverError::Io {
+            context: format!(
+                "canonicalize App Group container {}",
+                container_path.display()
+            ),
+            source,
+        })?;
+
+    verify_app_group_confinement(&canonical_container, &canonical_udid)?;
+
+    let entries = std::fs::read_dir(&canonical_container).map_err(|source| IosDriverError::Io {
+        context: format!("read App Group container {}", canonical_container.display()),
+        source,
+    })?;
+
+    for entry_res in entries {
+        if cancelled.load(Ordering::SeqCst) {
+            return Err(IosDriverError::Cancelled);
+        }
+        let entry = entry_res.map_err(|source| IosDriverError::Io {
+            context: format!(
+                "iterate App Group container {}",
+                canonical_container.display()
+            ),
+            source,
+        })?;
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if name_str == ".com.apple.mobile_container_manager.metadata.plist" {
+            continue;
+        }
+        let child_path = entry.path();
+        if matches!(name_str.as_ref(), "Documents" | "Library" | "tmp") {
+            clear_confined_subdir_children(&canonical_container, &child_path, cancelled)?;
+        } else {
+            remove_entry_cancellable(&child_path, cancelled)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn clear_confined_subdir_children(
+    canonical_container: &Path,
+    subdir: &Path,
+    cancelled: &AtomicBool,
+) -> Result<()> {
+    if cancelled.load(Ordering::SeqCst) {
+        return Err(IosDriverError::Cancelled);
+    }
+    let sub_meta = match std::fs::symlink_metadata(subdir) {
+        Ok(meta) => meta,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(source) => {
+            return Err(IosDriverError::Io {
+                context: format!("stat container subdir {}", subdir.display()),
+                source,
+            });
+        }
+    };
+
+    if sub_meta.file_type().is_symlink() {
+        return Err(IosDriverError::InvalidPath(format!(
+            "refusing symlink subdir {}",
+            subdir.display()
+        )));
+    }
+    if !sub_meta.is_dir() {
+        return Err(IosDriverError::InvalidPath(format!(
+            "expected directory for container subdir {}",
+            subdir.display()
+        )));
+    }
+
+    let canonical_sub = std::fs::canonicalize(subdir).map_err(|source| IosDriverError::Io {
+        context: format!("canonicalize container subdir {}", subdir.display()),
+        source,
+    })?;
+    if !canonical_sub.starts_with(canonical_container) {
+        return Err(IosDriverError::InvalidPath(format!(
+            "container subdir escaped confinement: {}",
+            canonical_sub.display()
+        )));
+    }
+
+    let entries = std::fs::read_dir(&canonical_sub).map_err(|source| IosDriverError::Io {
+        context: format!("read container subdir {}", canonical_sub.display()),
+        source,
+    })?;
+
+    for entry_res in entries {
+        if cancelled.load(Ordering::SeqCst) {
+            return Err(IosDriverError::Cancelled);
+        }
+        let entry = entry_res.map_err(|source| IosDriverError::Io {
+            context: format!("iterate container subdir {}", canonical_sub.display()),
+            source,
+        })?;
+        remove_entry_cancellable(&entry.path(), cancelled)?;
+    }
+    Ok(())
+}
+
+fn verify_app_group_confinement(canonical_container: &Path, canonical_udid: &str) -> Result<()> {
+    let components: Vec<String> = canonical_container
+        .components()
+        .filter_map(|c| match c {
+            Component::Normal(os) => Some(os.to_string_lossy().into_owned()),
+            _ => None,
+        })
+        .collect();
+
+    // Expected tail: CoreSimulator / Devices / <UDID> / data / Containers / Shared / AppGroup / <container-uuid>
+    let expected_prefix_len = 7;
+    if components.len() < expected_prefix_len + 1 {
+        return Err(IosDriverError::InvalidPath(format!(
+            "App Group container path outside CoreSimulator Devices/<UDID>: {}",
+            canonical_container.display()
+        )));
+    }
+
+    let tail = &components[components.len() - (expected_prefix_len + 1)..];
+    let matches_layout = tail[0] == "CoreSimulator"
+        && tail[1] == "Devices"
+        && tail[2].eq_ignore_ascii_case(canonical_udid)
+        && tail[3] == "data"
+        && tail[4] == "Containers"
+        && tail[5] == "Shared"
+        && tail[6] == "AppGroup"
+        && !tail[7].is_empty()
+        && tail[7] != "."
+        && tail[7] != "..";
+
+    if !matches_layout {
+        return Err(IosDriverError::InvalidPath(format!(
+            "App Group container path failed CoreSimulator confinement for UDID {canonical_udid}: {}",
+            canonical_container.display()
+        )));
+    }
     Ok(())
 }
 
@@ -1308,6 +1562,161 @@ mod tests {
             .expect_err("cancelled wipe must return Cancelled");
         assert!(matches!(err, IosDriverError::Cancelled));
         assert!(keep.exists(), "cancelled wipe must not delete entries");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn parses_app_group_containers_and_wipes_confined_app_groups() {
+        use super::{clear_app_group_container_cancellable, parse_app_group_containers};
+        use std::sync::atomic::AtomicBool;
+
+        let root = unique_temp_dir("app-group");
+        let group_container = root
+            .join("CoreSimulator")
+            .join("Devices")
+            .join(TEST_UDID)
+            .join("data")
+            .join("Containers")
+            .join("Shared")
+            .join("AppGroup")
+            .join("55555555-2222-3333-4444-555555555555");
+        std::fs::create_dir_all(group_container.join("Library/Preferences")).unwrap();
+        std::fs::create_dir_all(group_container.join("SharedCache/sub")).unwrap();
+        std::fs::write(
+            group_container.join("Library/Preferences/group.dev.deja.plist"),
+            b"prefs",
+        )
+        .unwrap();
+        std::fs::write(group_container.join("shared.sqlite"), b"db").unwrap();
+        std::fs::write(group_container.join("SharedCache/sub/item"), b"cache").unwrap();
+        let metadata = group_container.join(".com.apple.mobile_container_manager.metadata.plist");
+        std::fs::write(&metadata, b"keep-meta").unwrap();
+
+        let parsed = parse_app_group_containers(&format!(
+            "group.dev.deja.one\t{}\ngroup.dev.deja.two   /tmp/other\n\n",
+            group_container.display()
+        ))
+        .expect("parse app groups");
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0], group_container);
+        assert_eq!(parsed[1], PathBuf::from("/tmp/other"));
+        assert!(parse_app_group_containers("").unwrap().is_empty());
+        assert!(parse_app_group_containers("malformed-without-path").is_err());
+        assert!(parse_app_group_containers("group.id\trelative/path").is_err());
+
+        clear_app_group_container_cancellable(&group_container, TEST_UDID, &AtomicBool::new(false))
+            .expect("app group wipe should succeed");
+        assert!(metadata.exists(), "metadata plist must be preserved");
+        assert!(group_container.join("Library").is_dir());
+        assert_eq!(
+            std::fs::read_dir(group_container.join("Library"))
+                .unwrap()
+                .count(),
+            0
+        );
+        assert!(!group_container.join("shared.sqlite").exists());
+        assert!(!group_container.join("SharedCache").exists());
+
+        // Reject outside-simulator path or wrong UDID.
+        let outside = root.join("outside-group");
+        std::fs::create_dir_all(&outside).unwrap();
+        assert!(
+            clear_app_group_container_cancellable(&outside, TEST_UDID, &AtomicBool::new(false))
+                .is_err()
+        );
+        assert!(
+            clear_app_group_container_cancellable(
+                &group_container,
+                "DA910389-DF0B-4254-BB78-7164E0E27609",
+                &AtomicBool::new(false)
+            )
+            .is_err()
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn clear_state_cancellable_wipes_both_data_and_app_group_containers() {
+        use super::{Simctl, SimctlEnv};
+        use std::ffi::OsString;
+        use std::os::unix::fs::PermissionsExt;
+        use tokio_util::sync::CancellationToken;
+
+        let root = unique_temp_dir("clear-state-groups");
+        let bin_dir = root.join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+
+        let data_container = root
+            .join("CoreSimulator")
+            .join("Devices")
+            .join(TEST_UDID)
+            .join("data")
+            .join("Containers")
+            .join("Data")
+            .join("Application")
+            .join("11111111-2222-3333-4444-555555555555");
+        let group_container = root
+            .join("CoreSimulator")
+            .join("Devices")
+            .join(TEST_UDID)
+            .join("data")
+            .join("Containers")
+            .join("Shared")
+            .join("AppGroup")
+            .join("66666666-2222-3333-4444-555555555555");
+
+        std::fs::create_dir_all(data_container.join("Documents")).unwrap();
+        std::fs::write(data_container.join("Documents/user.txt"), b"private").unwrap();
+        std::fs::create_dir_all(group_container.join("Library/Preferences")).unwrap();
+        std::fs::write(
+            group_container.join("Library/Preferences/group.dev.deja.plist"),
+            b"shared",
+        )
+        .unwrap();
+        std::fs::write(group_container.join("shared.db"), b"sqlite").unwrap();
+
+        let xcrun_path = bin_dir.join("xcrun");
+        std::fs::write(
+            &xcrun_path,
+            format!(
+                r#"#!/bin/sh
+if [ "$2" = "get_app_container" ] && [ "$5" = "data" ]; then
+  echo "{data}"
+  exit 0
+fi
+if [ "$2" = "get_app_container" ] && [ "$5" = "groups" ]; then
+  printf 'group.dev.deja.shared\t%s\n' "{group}"
+  exit 0
+fi
+exit 0
+"#,
+                data = data_container.display(),
+                group = group_container.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&xcrun_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let simctl = Simctl::with_env(SimctlEnv {
+            env_path: Some(OsString::from(bin_dir.as_os_str())),
+            developer_dir: None,
+        });
+        let cancel = CancellationToken::new();
+        simctl
+            .clear_state_cancellable(TEST_UDID, "dev.deja.ios.checkout", &cancel)
+            .await
+            .expect("clear_state should wipe both private data and App Group");
+
+        assert!(!data_container.join("Documents/user.txt").exists());
+        assert!(
+            !group_container
+                .join("Library/Preferences/group.dev.deja.plist")
+                .exists()
+        );
+        assert!(!group_container.join("shared.db").exists());
 
         let _ = std::fs::remove_dir_all(&root);
     }
