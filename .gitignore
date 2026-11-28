@@ -43,5 +43,6 @@ demo/film/device.mp4
 .claude/settings.local.json
 dist-bin/
 
-# Rust / Cargo build output (Cargo.lock is intentionally tracked)
+# Rust / Cargo build output (Cargo.lock is intentionally tracked; keep legacy /rust/target/ ignored for upgraded checkouts)
 /target/
+/rust/target/

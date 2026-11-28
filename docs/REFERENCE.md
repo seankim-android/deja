@@ -28,12 +28,15 @@ compare like-for-like lifecycles before drawing timing conclusions. See
 
 ## CLI
 
-From a configured fixture directory, use `bun ../../apps/cli/deja.ts …`; from the repository
-root, use `bun run deja -- … --config <path>`. Help works without configuration:
+On the promoted pure-Rust workspace, runnable commands today are:
 
 ```sh
-bun run deja -- --help
+cargo run -- --help
+cargo run -- guide
+cargo run --bin deja-repo-check -- --require-clean --check-chart
 ```
+
+The command table and sections below document the full Déjà CLI contract originally validated on the retired TypeScript/Bun prototype (reproducible at pre-`DEJA-75` commit `fedb4e5` via `bun run deja -- --help`) and currently being ported to native Rust in `DEJA-61`..`DEJA-67`:
 
 | Command | Behavior |
 | --- | --- |

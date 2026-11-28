@@ -25,9 +25,10 @@ create a GitHub release on your own. Everything below describes the steps for wh
    ```
 
 3. The [Release workflow](../.github/workflows/release.yml) runs on the tag push (or on manual
-   dispatch with the tag name). It verifies the version against `Cargo.toml`, runs
-   `deja-repo-check --require-clean --check-chart`, builds both native binaries, smoke-checks each
-   on a clean `PATH=/usr/bin:/bin`, computes `SHA256SUMS`, and creates a **draft** GitHub release.
+   dispatch with the tag name). A `resolve` job pins the tag to one commit on `main` and verifies
+   `Cargo.toml`, both platform builds check out that exact SHA, run
+   `deja-repo-check --require-clean --check-chart`, build and smoke-check the native binaries on a
+   clean `PATH=/usr/bin:/bin` (failing closed until `DEJA-65` ships runnable `run`/`remember`/`gate`/`manifest`/`doctor` subcommands), re-verify the tag did not move, compute `SHA256SUMS`, and create a **draft** GitHub release.
 4. Open the draft, verify the files and `SHA256SUMS`, then publish it by hand.
 
 The workflow runs only on a pushed `v*` tag or manual dispatch, never on pull requests or pushes to

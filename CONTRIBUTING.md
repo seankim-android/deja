@@ -7,34 +7,32 @@ pull request looks like, and the Contributor License Agreement (CLA).
 
 ## Setup
 
-You need [Bun](https://bun.sh) 1.4 or newer (`engines.bun` is `>=1.4.0`). In
-CI, `portable-checks.yml` pins Bun 1.4.4.
+You need [Rust](https://www.rust-lang.org/tools/install) `1.89` or newer with `rustfmt` and `clippy`.
 
 ```sh
 git clone https://github.com/deja-run/deja.git
 cd deja
-bun install --frozen-lockfile
+cargo fetch --locked
 ```
 
-The checks below need no device, emulator, or model credentials. Running real
-Maestro walks needs more setup; see the Quick start in [README.md](README.md)
-and [docs/REFERENCE.md](docs/REFERENCE.md).
+The checks below need no device, emulator, or model credentials. Running the live iOS Simulator spike requires macOS and Xcode; see the Quick start in [README.md](README.md) and [docs/REFERENCE.md](docs/REFERENCE.md).
 
 ## Checks
 
-These are the steps `.github/workflows/portable-checks.yml` runs. Run them before you
-open a pull request:
+These are the steps `.github/workflows/rust-checks.yml` runs on Ubuntu and macOS. Run them from the repository root before you open a pull request:
 
 ```sh
-bun run lint                            # oxlint
-bun test --timeout=10000                # unit and integration-contract tests
-bun run build                           # TypeScript typecheck (tsc -b) and viewer build
-bun scripts/validate-release-artifacts.ts   # tracked-file, secret-scan, Markdown-link and clean-checkout checks
+cargo fmt --all -- --check
+cargo fetch --locked
+cargo clippy --locked --offline --workspace --all-targets --all-features -- -D warnings
+cargo test --locked --offline --workspace --all-features
+DEJA_BOUNDARIES_ALL_TARGETS=1 cargo test --locked --offline -p deja-cli --test workspace_boundaries --all-features
+cargo run --locked --offline --bin deja-repo-check -- --require-clean --check-chart
 ```
 
-There is no separate typecheck script; `bun run build` runs `tsc -b` first.
-The artifact validator fails if the checkout has any untracked or modified
-files, so commit (or remove) everything first.
+`deja-repo-check --require-clean --check-chart` fails if the checkout has any untracked or modified
+files, broken local Markdown links, secret/path leaks, or an out-of-date `docs/results-chart.svg`,
+so commit (or remove) everything first.
 
 ## Pull requests
 
