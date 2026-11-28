@@ -10,9 +10,10 @@ pub mod simctl;
 
 pub use cache::{RunnerBuildArtifact, ToolchainInfo, ensure_runner_built, resolve_deja_home};
 pub use client::{
-    AGENT_TOKEN_HEADER, ActionResponse, AgentClient, AppStateResponse, ElementFrame,
-    HealthResponse, HierarchyNode, HierarchyResponse, KeyRequest, SwipeRequest, TapRequest,
-    TypeRequest,
+    AGENT_TOKEN_HEADER, ActKind, ActRequest, ActResponse, ActionResponse, AgentClient,
+    AppStateResponse, ElementFrame, HealthResponse, HierarchyNode, HierarchyResponse, KeyRequest,
+    SwipeRequest, TapRequest, TextMatchMode, TypeRequest, WaitForSelectorRequest,
+    WaitForSelectorResponse, WarmupRequest, WarmupResponse, compute_hierarchy_hash,
 };
 pub use error::{IosDriverError, Result};
 pub use process::{

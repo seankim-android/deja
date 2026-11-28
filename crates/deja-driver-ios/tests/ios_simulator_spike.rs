@@ -1,7 +1,8 @@
 use deja_driver_ios::{
-    AgentClient, HierarchyResponse, IosDriverError, IosRunnerConfig, IosRunnerSession, KeyRequest,
-    Simctl, SimctlEnv, SwipeRequest, TapRequest, TypeRequest, find_xcodebuild_test_pids_for_udid,
-    send_sigterm_to_pid, validate_udid,
+    ActKind, ActRequest, AgentClient, HierarchyResponse, IosDriverError, IosRunnerConfig,
+    IosRunnerSession, KeyRequest, Simctl, SimctlEnv, SwipeRequest, TapRequest, TextMatchMode,
+    TypeRequest, WaitForSelectorRequest, WarmupRequest, compute_hierarchy_hash,
+    find_xcodebuild_test_pids_for_udid, send_sigterm_to_pid, validate_udid,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -483,7 +484,7 @@ async fn spike_deja_fixture_checkout_no_maestro() {
         assert!(h.contains_text("Order #WC-2026 · Mochi sticker pack"));
     }
 
-    // Exercise POST /swipe and POST /key ("home") to verify all 7 endpoints live.
+    // Exercise POST /swipe and POST /key ("home") to verify all endpoints live.
     let swipe_resp = client
         .swipe(&SwipeRequest {
             app_id: FIXTURE_BUNDLE_ID.to_string(),
@@ -492,6 +493,7 @@ async fn spike_deja_fixture_checkout_no_maestro() {
             end_x: 200.0,
             end_y: 250.0,
             duration_ms: Some(300),
+            hold_duration_ms: None,
         })
         .await
         .expect("POST /swipe");
@@ -732,4 +734,673 @@ async fn spike_sigterm_mid_run_leaves_zero_orphans() {
         "orphaned_xcodebuild_pids_after_sigterm: {}",
         remaining_pids.len()
     );
+}
+
+async fn run_baseline_checkout_flow(
+    simctl: &Simctl,
+    udid: &str,
+    client: &AgentClient,
+    order_code: &str,
+) -> (u64, u32) {
+    let started = Instant::now();
+    let mut http_calls: u32 = 0;
+
+    simctl
+        .clear_state(udid, FIXTURE_BUNDLE_ID)
+        .await
+        .expect("clear_state DejaFixture");
+
+    let mut launch_args = BTreeMap::new();
+    launch_args.insert("DEJA_FIXTURE_ORDER".to_string(), order_code.to_string());
+    let launch_env = BTreeMap::new();
+    let app_pid = simctl
+        .launch_app(udid, FIXTURE_BUNDLE_ID, &launch_args, &launch_env)
+        .await
+        .expect("launch DejaFixture");
+    assert!(app_pid.is_some());
+
+    let state_deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        http_calls += 1;
+        let app_state = client
+            .app_state(FIXTURE_BUNDLE_ID)
+            .await
+            .expect("GET /appState");
+        if app_state.state == "running_foreground" && app_state.state_code == 4 {
+            break;
+        }
+        assert!(
+            Instant::now() < state_deadline,
+            "timed out waiting for foreground"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    let mut latencies = Vec::new();
+    let login_tree = wait_for_hierarchy(
+        client,
+        FIXTURE_BUNDLE_ID,
+        false,
+        Duration::from_secs(10),
+        &mut latencies,
+        "baseline login screen",
+        |h| h.find_by_id("screen_login").is_some() && h.contains_text("Déjà iOS Shop"),
+    )
+    .await;
+    http_calls += latencies.len() as u32;
+    latencies.clear();
+
+    tap_id(client, &login_tree, "username_input").await;
+    http_calls += 1;
+    let type_email = client
+        .type_text(&TypeRequest {
+            app_id: FIXTURE_BUNDLE_ID.to_string(),
+            text: "qa@example.com".to_string(),
+            settle_keyboard: Some(true),
+        })
+        .await
+        .expect("POST /type email");
+    assert!(type_email.ok);
+    http_calls += 1;
+
+    let after_email = wait_for_hierarchy(
+        client,
+        FIXTURE_BUNDLE_ID,
+        false,
+        Duration::from_secs(10),
+        &mut latencies,
+        "baseline email visible",
+        |h| h.contains_text("qa@example.com"),
+    )
+    .await;
+    http_calls += latencies.len() as u32;
+    latencies.clear();
+
+    tap_id(client, &after_email, "password_input").await;
+    http_calls += 1;
+    let type_pw = client
+        .type_text(&TypeRequest {
+            app_id: FIXTURE_BUNDLE_ID.to_string(),
+            text: "testing123".to_string(),
+            settle_keyboard: Some(true),
+        })
+        .await
+        .expect("POST /type password");
+    assert!(type_pw.ok);
+    http_calls += 1;
+
+    let ready_login = wait_for_hierarchy(
+        client,
+        FIXTURE_BUNDLE_ID,
+        false,
+        Duration::from_secs(10),
+        &mut latencies,
+        "baseline login button",
+        |h| h.find_by_id("login_button").is_some(),
+    )
+    .await;
+    http_calls += latencies.len() as u32;
+    latencies.clear();
+
+    tap_id(client, &ready_login, "login_button").await;
+    http_calls += 1;
+
+    let catalog_tree = wait_for_hierarchy(
+        client,
+        FIXTURE_BUNDLE_ID,
+        false,
+        Duration::from_secs(10),
+        &mut latencies,
+        "baseline catalog",
+        |h| {
+            h.find_by_id("screen_catalog").is_some()
+                && h.contains_text("Mochi sticker pack")
+                && h.contains_text("$5.00 · 6 stickers")
+        },
+    )
+    .await;
+    http_calls += latencies.len() as u32;
+    latencies.clear();
+
+    tap_id(client, &catalog_tree, "add_to_cart").await;
+    http_calls += 1;
+
+    let cart_tree = wait_for_hierarchy(
+        client,
+        FIXTURE_BUNDLE_ID,
+        false,
+        Duration::from_secs(10),
+        &mut latencies,
+        "baseline cart",
+        |h| {
+            h.find_by_id("screen_cart").is_some()
+                && h.contains_text("1 × Mochi sticker pack")
+                && h.contains_text("Total: $5.00")
+        },
+    )
+    .await;
+    http_calls += latencies.len() as u32;
+    latencies.clear();
+
+    tap_id(client, &cart_tree, "checkout_button").await;
+    http_calls += 1;
+
+    let expected_order = format!("Order #{order_code} · Mochi sticker pack");
+    let _confirm = wait_for_hierarchy(
+        client,
+        FIXTURE_BUNDLE_ID,
+        false,
+        Duration::from_secs(10),
+        &mut latencies,
+        "baseline confirmation",
+        |h| {
+            h.find_by_id("order_confirmation").is_some()
+                && h.contains_text("Order confirmed")
+                && h.contains_text(&expected_order)
+        },
+    )
+    .await;
+    http_calls += latencies.len() as u32;
+
+    (started.elapsed().as_millis() as u64, http_calls)
+}
+
+async fn run_optimized_checkout_flow(
+    simctl: &Simctl,
+    udid: &str,
+    client: &AgentClient,
+    order_code: &str,
+) -> (u64, u32, HierarchyResponse) {
+    let started = Instant::now();
+    let mut http_calls: u32 = 0;
+
+    simctl
+        .clear_state(udid, FIXTURE_BUNDLE_ID)
+        .await
+        .expect("clear_state DejaFixture");
+
+    let mut launch_args = BTreeMap::new();
+    launch_args.insert("DEJA_FIXTURE_ORDER".to_string(), order_code.to_string());
+    let launch_env = BTreeMap::new();
+    let app_pid = simctl
+        .launch_app(udid, FIXTURE_BUNDLE_ID, &launch_args, &launch_env)
+        .await
+        .expect("launch DejaFixture");
+    assert!(app_pid.is_some());
+
+    // 1. Single POST /warmup waits for running_foreground, warms AX, and returns initial hierarchy.
+    http_calls += 1;
+    let warmup = client
+        .warmup(&WarmupRequest {
+            app_id: FIXTURE_BUNDLE_ID.to_string(),
+            timeout_ms: Some(10_000),
+            include_system_ui: Some(false),
+            return_hierarchy: Some(true),
+        })
+        .await
+        .expect("POST /warmup");
+    assert!(warmup.ok);
+    assert_eq!(warmup.state, "running_foreground");
+    assert_eq!(warmup.state_code, 4);
+
+    let login_tree = match warmup.hierarchy {
+        Some(h) if h.find_by_id("username_input").is_some() && h.contains_text("Déjà iOS Shop") => {
+            h
+        }
+        _ => {
+            http_calls += 1;
+            let wait = client
+                .wait_for_selector(&WaitForSelectorRequest {
+                    app_id: FIXTURE_BUNDLE_ID.to_string(),
+                    identifier: Some("username_input".to_string()),
+                    text: None,
+                    text_match: None,
+                    not_visible: None,
+                    wait_stable: None,
+                    stable_polls: None,
+                    timeout_ms: Some(10_000),
+                    include_system_ui: Some(false),
+                    return_hierarchy: Some(true),
+                })
+                .await
+                .expect("POST /waitForSelector login");
+            assert!(wait.matched, "login screen should match");
+            wait.hierarchy.expect("login hierarchy")
+        }
+    };
+    assert_eq!(
+        login_tree.hierarchy_hash,
+        compute_hierarchy_hash(&login_tree.nodes),
+        "Swift and Rust hierarchy hashes must match bit-for-bit on login screen"
+    );
+
+    // 2. Tap username_input, then compound type + returnHierarchy (gives password_input coords).
+    tap_id(client, &login_tree, "username_input").await;
+    http_calls += 1;
+
+    http_calls += 1;
+    let email_act = client
+        .act(&ActRequest {
+            app_id: FIXTURE_BUNDLE_ID.to_string(),
+            kind: ActKind::Type {
+                text: "qa@example.com".to_string(),
+                settle_keyboard: Some(true),
+            },
+            post_action_delay_ms: None,
+            return_hierarchy: Some(true),
+            include_system_ui: Some(false),
+            known_hash: None,
+        })
+        .await
+        .expect("POST /act type email");
+    assert!(email_act.ok);
+    let after_email = email_act.hierarchy.expect("post-email hierarchy");
+    assert!(after_email.contains_text("qa@example.com"));
+    assert_eq!(
+        after_email.hierarchy_hash,
+        compute_hierarchy_hash(&after_email.nodes),
+        "Swift and Rust hierarchy hashes must match after typing email"
+    );
+
+    // 3. Tap password_input, then compound type + returnHierarchy (gives login_button coords).
+    tap_id(client, &after_email, "password_input").await;
+    http_calls += 1;
+
+    http_calls += 1;
+    let pw_act = client
+        .act(&ActRequest {
+            app_id: FIXTURE_BUNDLE_ID.to_string(),
+            kind: ActKind::Type {
+                text: "testing123".to_string(),
+                settle_keyboard: Some(true),
+            },
+            post_action_delay_ms: None,
+            return_hierarchy: Some(true),
+            include_system_ui: Some(false),
+            known_hash: None,
+        })
+        .await
+        .expect("POST /act type password");
+    assert!(pw_act.ok);
+    let ready_login = pw_act.hierarchy.expect("post-password hierarchy");
+
+    // 4. Compound tap login_button + post-action hierarchy; fallback to server-side /waitForSelector.
+    let login_btn = ready_login
+        .find_by_id("login_button")
+        .expect("login_button present");
+    let (lx, ly) = login_btn.frame.center();
+    http_calls += 1;
+    let login_act = client
+        .act(&ActRequest {
+            app_id: FIXTURE_BUNDLE_ID.to_string(),
+            kind: ActKind::Tap {
+                x: lx,
+                y: ly,
+                count: Some(1),
+                duration_ms: None,
+            },
+            post_action_delay_ms: None,
+            return_hierarchy: Some(true),
+            include_system_ui: Some(false),
+            known_hash: None,
+        })
+        .await
+        .expect("POST /act tap login_button");
+    assert!(login_act.ok);
+
+    let catalog_tree = match login_act.hierarchy {
+        Some(h)
+            if h.find_by_id("add_to_cart").is_some()
+                && h.contains_text("Mochi sticker pack")
+                && h.contains_text("$5.00 · 6 stickers") =>
+        {
+            h
+        }
+        _ => {
+            http_calls += 1;
+            let wait = client
+                .wait_for_selector(&WaitForSelectorRequest {
+                    app_id: FIXTURE_BUNDLE_ID.to_string(),
+                    identifier: Some("add_to_cart".to_string()),
+                    text: None,
+                    text_match: None,
+                    not_visible: None,
+                    wait_stable: None,
+                    stable_polls: None,
+                    timeout_ms: Some(10_000),
+                    include_system_ui: Some(false),
+                    return_hierarchy: Some(true),
+                })
+                .await
+                .expect("POST /waitForSelector add_to_cart");
+            assert!(wait.matched, "catalog screen should appear");
+            let h = wait.hierarchy.expect("catalog hierarchy");
+            assert!(h.contains_text("Mochi sticker pack"));
+            assert!(h.contains_text("$5.00 · 6 stickers"));
+            h
+        }
+    };
+
+    // 5. Compound tap add_to_cart + post-action hierarchy.
+    let add_btn = catalog_tree
+        .find_by_id("add_to_cart")
+        .expect("add_to_cart present");
+    let (ax, ay) = add_btn.frame.center();
+    http_calls += 1;
+    let add_act = client
+        .act(&ActRequest {
+            app_id: FIXTURE_BUNDLE_ID.to_string(),
+            kind: ActKind::Tap {
+                x: ax,
+                y: ay,
+                count: Some(1),
+                duration_ms: None,
+            },
+            post_action_delay_ms: None,
+            return_hierarchy: Some(true),
+            include_system_ui: Some(false),
+            known_hash: None,
+        })
+        .await
+        .expect("POST /act tap add_to_cart");
+    assert!(add_act.ok);
+
+    let cart_tree = match add_act.hierarchy {
+        Some(h)
+            if h.find_by_id("checkout_button").is_some()
+                && h.contains_text("1 × Mochi sticker pack")
+                && h.contains_text("Total: $5.00") =>
+        {
+            h
+        }
+        _ => {
+            http_calls += 1;
+            let wait = client
+                .wait_for_selector(&WaitForSelectorRequest {
+                    app_id: FIXTURE_BUNDLE_ID.to_string(),
+                    identifier: Some("checkout_button".to_string()),
+                    text: None,
+                    text_match: None,
+                    not_visible: None,
+                    wait_stable: None,
+                    stable_polls: None,
+                    timeout_ms: Some(10_000),
+                    include_system_ui: Some(false),
+                    return_hierarchy: Some(true),
+                })
+                .await
+                .expect("POST /waitForSelector checkout_button");
+            assert!(wait.matched, "cart screen should appear");
+            let h = wait.hierarchy.expect("cart hierarchy");
+            assert!(h.contains_text("1 × Mochi sticker pack"));
+            assert!(h.contains_text("Total: $5.00"));
+            h
+        }
+    };
+
+    // 6. Compound tap checkout_button + verify confirmation screen.
+    let checkout_btn = cart_tree
+        .find_by_id("checkout_button")
+        .expect("checkout_button present");
+    let (cx, cy) = checkout_btn.frame.center();
+    http_calls += 1;
+    let checkout_act = client
+        .act(&ActRequest {
+            app_id: FIXTURE_BUNDLE_ID.to_string(),
+            kind: ActKind::Tap {
+                x: cx,
+                y: cy,
+                count: Some(1),
+                duration_ms: None,
+            },
+            post_action_delay_ms: None,
+            return_hierarchy: Some(true),
+            include_system_ui: Some(false),
+            known_hash: None,
+        })
+        .await
+        .expect("POST /act tap checkout_button");
+    assert!(checkout_act.ok);
+
+    let expected_order = format!("Order #{order_code} · Mochi sticker pack");
+    let confirm_tree = match checkout_act.hierarchy {
+        Some(h)
+            if h.find_by_id("order_confirmation").is_some()
+                && h.contains_text("Order confirmed")
+                && h.contains_text(&expected_order) =>
+        {
+            h
+        }
+        _ => {
+            http_calls += 1;
+            let wait = client
+                .wait_for_selector(&WaitForSelectorRequest {
+                    app_id: FIXTURE_BUNDLE_ID.to_string(),
+                    identifier: None,
+                    text: Some(expected_order.clone()),
+                    text_match: Some(TextMatchMode::Contains),
+                    not_visible: None,
+                    wait_stable: None,
+                    stable_polls: None,
+                    timeout_ms: Some(10_000),
+                    include_system_ui: Some(false),
+                    return_hierarchy: Some(true),
+                })
+                .await
+                .expect("POST /waitForSelector order confirmation");
+            assert!(
+                wait.matched,
+                "order confirmation `{expected_order}` should appear"
+            );
+            let h = wait.hierarchy.expect("confirmation hierarchy");
+            assert!(h.find_by_id("order_confirmation").is_some());
+            assert!(h.contains_text("Order confirmed"));
+            h
+        }
+    };
+    assert_eq!(
+        confirm_tree.hierarchy_hash,
+        compute_hierarchy_hash(&confirm_tree.nodes),
+        "Swift and Rust hierarchy hashes must match on confirmation screen"
+    );
+
+    (
+        started.elapsed().as_millis() as u64,
+        http_calls,
+        confirm_tree,
+    )
+}
+
+#[tokio::test]
+#[ignore = "requires macOS + Xcode + dedicated iOS simulator (DEJA_IOS_TEST_UDID)"]
+async fn benchmark_deja_fixture_optimized_and_session_reuse() {
+    let udid = require_test_udid();
+    assert_no_maestro_or_java_on_sanitized_path().await;
+
+    let env = sanitized_simctl_env();
+    let simctl = Simctl::with_env(env.clone());
+    simctl
+        .ensure_booted(&udid)
+        .await
+        .expect("boot dedicated iOS simulator");
+
+    let fixture_build_dir = TempDirGuard::new("fixture-bench");
+    let app_path = build_deja_fixture(fixture_build_dir.path(), &env).await;
+    simctl
+        .install_app(&udid, &app_path)
+        .await
+        .expect("install DejaFixture.app");
+
+    let deja_home = TempDirGuard::new("deja-home-bench");
+    let cancel = CancellationToken::new();
+
+    // Warm build cache once, then measure warm attach.
+    let mut seed_cfg = IosRunnerConfig::new(&udid);
+    seed_cfg.deja_home = Some(deja_home.path().to_path_buf());
+    seed_cfg.env = env.clone();
+    seed_cfg.startup_timeout = Duration::from_secs(90);
+    let seed = IosRunnerSession::start(seed_cfg, cancel.clone())
+        .await
+        .expect("seed runner start");
+    seed.shutdown().await.expect("seed shutdown");
+
+    let mut warm_cfg = IosRunnerConfig::new(&udid);
+    warm_cfg.deja_home = Some(deja_home.path().to_path_buf());
+    warm_cfg.env = env.clone();
+    warm_cfg.startup_timeout = Duration::from_secs(60);
+    let session = IosRunnerSession::start(warm_cfg, cancel.clone())
+        .await
+        .expect("warm runner start");
+    assert!(session.build_artifact().was_cache_hit);
+    let warm_attach_ms = session.attach_duration().as_millis() as u64;
+    let client = session.client();
+
+    // 1. Baseline legacy flow (per-endpoint /appState + /hierarchy poll loops + /tap + /type).
+    let (baseline_flow_ms, baseline_http_calls) =
+        run_baseline_checkout_flow(&simctl, &udid, client, "WC-2026").await;
+
+    // 2. Optimized flow #1 on the same warm runner session (DEJA-77 endpoints).
+    let verify_t0 = Instant::now();
+    let health = session.verify_healthy().await.expect("verify_healthy #1");
+    let verify_1_ms = verify_t0.elapsed().as_secs_f64() * 1000.0;
+    assert_eq!(health.status, "ok");
+
+    let (optimized_flow_1_ms, optimized_flow_1_http_calls, confirm_tree) =
+        run_optimized_checkout_flow(&simctl, &udid, client, "WC-2026").await;
+
+    // 3. Verify GET /hierarchy?knownHash=<hash> short-circuit & compare latency.
+    let mut full_samples_ms = Vec::new();
+    let mut short_circuit_samples_ms = Vec::new();
+    for _ in 0..8 {
+        let t_full = Instant::now();
+        let full = client
+            .hierarchy(FIXTURE_BUNDLE_ID, false)
+            .await
+            .expect("full /hierarchy");
+        full_samples_ms.push(t_full.elapsed().as_secs_f64() * 1000.0);
+        assert!(!full.unchanged);
+        assert_eq!(
+            full.hierarchy_hash,
+            compute_hierarchy_hash(&full.nodes),
+            "live /hierarchy hash must match Rust compute_hierarchy_hash"
+        );
+
+        let t_short = Instant::now();
+        let short = client
+            .hierarchy_with_known_hash(FIXTURE_BUNDLE_ID, false, Some(&confirm_tree.hierarchy_hash))
+            .await
+            .expect("short-circuit /hierarchy");
+        short_circuit_samples_ms.push(t_short.elapsed().as_secs_f64() * 1000.0);
+        assert!(short.unchanged, "knownHash match must short-circuit");
+        assert!(short.nodes.is_empty(), "unchanged response must omit nodes");
+        assert_eq!(short.node_count, 0);
+        assert_eq!(short.hierarchy_hash, confirm_tree.hierarchy_hash);
+    }
+
+    // 4. Verify waitForSelector waitStable=true and timeout visibleSample payload.
+    let stable_wait = client
+        .wait_for_selector(&WaitForSelectorRequest {
+            app_id: FIXTURE_BUNDLE_ID.to_string(),
+            identifier: Some("order_confirmation".to_string()),
+            text: None,
+            text_match: None,
+            not_visible: Some(false),
+            wait_stable: Some(true),
+            stable_polls: Some(2),
+            timeout_ms: Some(2_000),
+            include_system_ui: Some(false),
+            return_hierarchy: Some(false),
+        })
+        .await
+        .expect("wait_for_selector waitStable");
+    assert!(stable_wait.matched);
+    assert!(stable_wait.polls >= 2);
+    assert_eq!(stable_wait.hierarchy_hash, confirm_tree.hierarchy_hash);
+
+    let miss_wait = client
+        .wait_for_selector(&WaitForSelectorRequest {
+            app_id: FIXTURE_BUNDLE_ID.to_string(),
+            identifier: Some("nonexistent_checkout_id_77".to_string()),
+            text: None,
+            text_match: None,
+            not_visible: Some(false),
+            wait_stable: Some(false),
+            stable_polls: None,
+            timeout_ms: Some(250),
+            include_system_ui: Some(false),
+            return_hierarchy: Some(false),
+        })
+        .await
+        .expect("wait_for_selector timeout");
+    assert!(!miss_wait.matched);
+    assert!(
+        !miss_wait.visible_sample.is_empty() && miss_wait.visible_sample.len() <= 30,
+        "expected 1..=30 visibleSample items on timeout, got {:?}",
+        miss_wait.visible_sample
+    );
+    assert!(
+        miss_wait
+            .visible_sample
+            .iter()
+            .any(|s| s.contains("Order confirmed")),
+        "expected visibleSample to include 'Order confirmed', got {:?}",
+        miss_wait.visible_sample
+    );
+
+    // 5. Verify zero-fling drag-and-hold swipe (`holdDurationMs: 150`).
+    let hold_swipe = client
+        .swipe(&SwipeRequest {
+            app_id: FIXTURE_BUNDLE_ID.to_string(),
+            start_x: 200.0,
+            start_y: 500.0,
+            end_x: 200.0,
+            end_y: 250.0,
+            duration_ms: Some(300),
+            hold_duration_ms: Some(150),
+        })
+        .await
+        .expect("POST /swipe with holdDurationMs");
+    assert!(hold_swipe.ok);
+
+    // 6. Warm session reuse for Flow #2 (`DEJA_FIXTURE_ORDER=WC-2027`, 0 ms attach!).
+    let verify_2_t0 = Instant::now();
+    let health_2 = session.verify_healthy().await.expect("verify_healthy #2");
+    let verify_2_ms = verify_2_t0.elapsed().as_secs_f64() * 1000.0;
+    assert_eq!(
+        health_2.pid, health.pid,
+        "must reuse the exact same runner PID"
+    );
+
+    let (optimized_flow_2_ms, optimized_flow_2_http_calls, confirm_2) =
+        run_optimized_checkout_flow(&simctl, &udid, client, "WC-2027").await;
+    assert!(confirm_2.contains_text("Order #WC-2027 · Mochi sticker pack"));
+
+    session.shutdown().await.expect("bench session shutdown");
+    let orphans = find_xcodebuild_test_pids_for_udid(&udid).expect("ps orphan check");
+    assert!(
+        orphans.is_empty(),
+        "expected 0 orphaned xcodebuild PIDs after benchmark shutdown, found {orphans:?}"
+    );
+
+    let (_, full_med, full_p95, _) = summarize_latencies(&full_samples_ms);
+    let (_, short_med, short_p95, _) = summarize_latencies(&short_circuit_samples_ms);
+
+    println!("=== DEJA-77 BENCHMARK EVIDENCE ===");
+    println!("warm_attach_ms: {warm_attach_ms}");
+    println!("baseline_flow_ms: {baseline_flow_ms}");
+    println!("baseline_http_calls: {baseline_http_calls}");
+    println!("optimized_flow_1_ms: {optimized_flow_1_ms}");
+    println!("optimized_flow_1_http_calls: {optimized_flow_1_http_calls}");
+    println!("optimized_flow_2_ms: {optimized_flow_2_ms}");
+    println!("optimized_flow_2_http_calls: {optimized_flow_2_http_calls}");
+    println!("second_flow_attach_ms: 0");
+    println!("verify_healthy_ms: run1={verify_1_ms:.2}ms run2={verify_2_ms:.2}ms");
+    println!(
+        "hierarchy_full_ms: median={full_med:.2}ms p95={full_p95:.2}ms | knownHash_short_circuit_ms: median={short_med:.2}ms p95={short_p95:.2}ms"
+    );
+    println!(
+        "timeout_visible_sample_count: {}",
+        miss_wait.visible_sample.len()
+    );
+    println!("orphaned_xcodebuild_pids: {}", orphans.len());
 }
