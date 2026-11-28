@@ -339,9 +339,31 @@ enum OpenMode {
 struct StoreInner {
     mode: OpenMode,
     conn: Option<Connection>,
-    conn_immutable: bool,
-    conn_stamp: Option<DbFileStamp>,
+    ro_state: ReadOnlyConnState,
     lock: Option<WriterLock>,
+}
+
+#[derive(Debug, Default)]
+enum ReadOnlyConnState {
+    #[default]
+    Direct,
+    Immutable {
+        db_stamp: Option<DbFileStamp>,
+    },
+    WalSnapshot {
+        temp_dir: PathBuf,
+        db_stamp: Option<DbFileStamp>,
+        wal_stamp: Option<SidecarStamp>,
+    },
+}
+
+impl ReadOnlyConnState {
+    fn cleanup(&mut self) {
+        let old = std::mem::take(self);
+        if let Self::WalSnapshot { temp_dir, .. } = old {
+            let _ = fs::remove_dir_all(temp_dir);
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -349,6 +371,12 @@ struct DbFileStamp {
     len: u64,
     modified: SystemTime,
     change_counter: [u8; 4],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SidecarStamp {
+    len: u64,
+    modified: SystemTime,
 }
 
 impl Drop for StoreInner {
@@ -359,6 +387,7 @@ impl Drop for StoreInner {
             let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
         }
         self.conn.take();
+        self.ro_state.cleanup();
         if let Some(mut lock) = self.lock.take() {
             lock.release();
         }
@@ -468,8 +497,7 @@ impl SqliteWalkStore {
             inner: Mutex::new(StoreInner {
                 mode: OpenMode::Writable,
                 conn: Some(conn),
-                conn_immutable: false,
-                conn_stamp: None,
+                ro_state: ReadOnlyConnState::Direct,
                 lock: Some(lock),
             }),
         })
@@ -486,11 +514,11 @@ impl SqliteWalkStore {
         let target =
             canonical_metadata_target(&options.workspace_root, Path::new(&relative_memory_path))?;
 
-        let (conn, conn_immutable, conn_stamp) = if target.exists {
-            let (conn, immutable, stamp) = open_readonly_connection(&target.path)?;
-            (Some(conn), immutable, stamp)
+        let (conn, ro_state) = if target.exists {
+            let (conn, state) = open_readonly_connection(&target.path)?;
+            (Some(conn), state)
         } else {
-            (None, false, None)
+            (None, ReadOnlyConnState::Direct)
         };
 
         Ok(Self {
@@ -501,8 +529,7 @@ impl SqliteWalkStore {
             inner: Mutex::new(StoreInner {
                 mode: OpenMode::ReadOnly,
                 conn,
-                conn_immutable,
-                conn_stamp,
+                ro_state,
                 lock: None,
             }),
         })
@@ -549,8 +576,7 @@ impl SqliteWalkStore {
                 let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
             }
             guard.conn.take();
-            guard.conn_immutable = false;
-            guard.conn_stamp = None;
+            guard.ro_state.cleanup();
             if let Some(mut lock) = guard.lock.take() {
                 lock.release();
             }
@@ -571,24 +597,36 @@ impl SqliteWalkStore {
             canonical_metadata_target(&self.workspace_root, Path::new(&self.relative_memory_path))?;
         if !target.exists {
             guard.conn.take();
-            guard.conn_immutable = false;
-            guard.conn_stamp = None;
+            guard.ro_state.cleanup();
             return Ok(None);
         }
-        if guard.mode == OpenMode::ReadOnly && guard.conn.is_some() && guard.conn_immutable {
-            let wal_exists = wal_sidecar_exists(&target.path);
-            let current_stamp = read_db_file_stamp(&target.path);
-            if wal_exists || current_stamp != guard.conn_stamp {
+        if guard.mode == OpenMode::ReadOnly && guard.conn.is_some() {
+            let needs_reopen = match &guard.ro_state {
+                ReadOnlyConnState::Direct => false,
+                ReadOnlyConnState::Immutable { db_stamp } => {
+                    non_empty_wal_exists(&target.path)
+                        || read_db_file_stamp(&target.path) != *db_stamp
+                }
+                ReadOnlyConnState::WalSnapshot {
+                    db_stamp,
+                    wal_stamp,
+                    ..
+                } => {
+                    shm_sidecar_exists(&target.path)
+                        || !non_empty_wal_exists(&target.path)
+                        || read_db_file_stamp(&target.path) != *db_stamp
+                        || read_sidecar_stamp(&append_suffix(&target.path, "-wal")) != *wal_stamp
+                }
+            };
+            if needs_reopen {
                 guard.conn.take();
-                guard.conn_immutable = false;
-                guard.conn_stamp = None;
+                guard.ro_state.cleanup();
             }
         }
         if guard.conn.is_none() {
-            let (conn, immutable, stamp) = open_readonly_connection(&target.path)?;
+            let (conn, state) = open_readonly_connection(&target.path)?;
             guard.conn = Some(conn);
-            guard.conn_immutable = immutable;
-            guard.conn_stamp = stamp;
+            guard.ro_state = state;
         }
         Ok(guard.conn.as_ref())
     }
@@ -776,6 +814,18 @@ impl SqliteWalkStore {
     /// Create or update a walk and its `(build_fingerprint, runtime)` validation run inside a
     /// single `BEGIN IMMEDIATE` transaction, preserving other builds and runtimes (`DEJA-12`, `DEJA-55`).
     pub fn upsert_walk(&self, input: &UpsertWalkInput) -> Result<StoredWalk, StoreError> {
+        let (stored, ()) = self.upsert_walk_and_then(input, |_| Ok(()))?;
+        Ok(stored)
+    }
+
+    /// Crate-internal variant of [`SqliteWalkStore::upsert_walk`] that runs
+    /// `after_upsert_before_commit` while the `BEGIN IMMEDIATE` transaction is still open;
+    /// if the callback returns `Err`, the SQLite transaction rolls back automatically.
+    pub(crate) fn upsert_walk_and_then<T>(
+        &self,
+        input: &UpsertWalkInput,
+        after_upsert_before_commit: impl FnOnce(&StoredWalk) -> Result<T, StoreError>,
+    ) -> Result<(StoredWalk, T), StoreError> {
         let norm = normalize_walk_identity(&input.identity)?;
         if norm.flow_schema_version != DEFAULT_FLOW_SCHEMA_VERSION {
             return Err(StoreError::InvalidIdentity(format!(
@@ -1072,7 +1122,9 @@ impl SqliteWalkStore {
             .ok_or_else(|| {
                 StoreError::InvalidWalkMemory("validation_runs row missing after upsert".into())
             })?;
-            hydrate_stored_walk(tx, &walk_row, &run_row)
+            let stored = hydrate_stored_walk(tx, &walk_row, &run_row)?;
+            let extra = after_upsert_before_commit(&stored)?;
+            Ok((stored, extra))
         })
     }
 
@@ -1376,6 +1428,11 @@ impl SqliteWalkStore {
         identity: &WalkIdentity,
         options: &PersistVerifiedCandidateOptions,
     ) -> Result<StoredWalk, StoreError> {
+        if !options.validation.passed {
+            return Err(StoreError::ConsumerFlow(
+                "cannot persist a candidate flow from a failed validation".to_string(),
+            ));
+        }
         let norm = normalize_walk_identity(identity)?;
         validate_validation_input(&options.validation)?;
         let canonical_root = fs::canonicalize(&self.workspace_root)?;
@@ -1833,6 +1890,11 @@ impl SqliteWalkStore {
             return Ok(None);
         };
         let runs = query_all_runs_for_walk(conn, walk.id)?;
+        // Verify every child table row's `integrity_sha256` so corrupt/tampered history,
+        // subflow, or repair records always fail closed before gate evaluation.
+        let _ = query_validation_history(conn, walk.id)?;
+        let _ = query_walk_files(conn, walk.id)?;
+        let _ = query_repair_history(conn, walk.id)?;
         Ok(Some((walk, runs)))
     }
 
@@ -1854,8 +1916,26 @@ fn append_suffix(path: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(os)
 }
 
-fn wal_sidecar_exists(db_path: &Path) -> bool {
-    fs::symlink_metadata(append_suffix(db_path, "-wal")).is_ok()
+fn shm_sidecar_exists(db_path: &Path) -> bool {
+    fs::symlink_metadata(append_suffix(db_path, "-shm")).is_ok()
+}
+
+fn non_empty_wal_exists(db_path: &Path) -> bool {
+    fs::symlink_metadata(append_suffix(db_path, "-wal"))
+        .ok()
+        .is_some_and(|meta| meta.file_type().is_file() && meta.len() > 0)
+}
+
+fn read_sidecar_stamp(path: &Path) -> Option<SidecarStamp> {
+    let meta = fs::symlink_metadata(path).ok()?;
+    if !meta.file_type().is_file() {
+        return None;
+    }
+    let modified = meta.modified().ok()?;
+    Some(SidecarStamp {
+        len: meta.len(),
+        modified,
+    })
 }
 
 fn read_db_file_stamp(path: &Path) -> Option<DbFileStamp> {
@@ -1873,6 +1953,37 @@ fn read_db_file_stamp(path: &Path) -> Option<DbFileStamp> {
         modified,
         change_counter,
     })
+}
+
+fn create_private_temp_dir(prefix: &str) -> Result<PathBuf, StoreError> {
+    let dir = std::env::temp_dir().join(format!(
+        "deja-{prefix}-{}-{}",
+        std::process::id(),
+        generate_token()
+    ));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        fs::DirBuilder::new().mode(0o700).create(&dir)?;
+    }
+    #[cfg(not(unix))]
+    {
+        fs::create_dir(&dir)?;
+    }
+    Ok(dir)
+}
+
+fn copy_file_nofollow(src: &Path, dst: &Path) -> Result<(), StoreError> {
+    let mut reader = open_read_nofollow(src).map_err(|err| {
+        StoreError::InvalidWalkMemory(format!(
+            "cannot read SQLite file safely ({}): {err}",
+            src.display()
+        ))
+    })?;
+    let mut writer = create_new_nofollow(dst)?;
+    std::io::copy(&mut reader, &mut writer)?;
+    writer.sync_all()?;
+    Ok(())
 }
 
 fn encode_sqlite_uri_path(path: &Path) -> String {
@@ -1895,34 +2006,101 @@ fn encode_sqlite_uri_path(path: &Path) -> String {
     out
 }
 
-fn open_readonly_connection(
-    path: &Path,
-) -> Result<(Connection, bool, Option<DbFileStamp>), StoreError> {
-    let use_immutable = !wal_sidecar_exists(path);
-    let conn = if use_immutable {
+fn open_readonly_connection(path: &Path) -> Result<(Connection, ReadOnlyConnState), StoreError> {
+    let wal_has_frames = non_empty_wal_exists(path);
+    let shm_exists = shm_sidecar_exists(path);
+
+    if !wal_has_frames && !shm_exists {
+        // Cleanly closed DB (no active WAL frames, no -shm): open immutable so SQLite creates
+        // ZERO -wal and ZERO -shm files in the workspace.
         let uri = encode_sqlite_uri_path(path);
         let flags = OpenFlags::SQLITE_OPEN_READ_ONLY
             | OpenFlags::SQLITE_OPEN_URI
             | OpenFlags::SQLITE_OPEN_NO_MUTEX;
-        Connection::open_with_flags(&uri, flags).map_err(|err| {
+        let conn = Connection::open_with_flags(&uri, flags).map_err(|err| {
             StoreError::InvalidWalkMemory(format!("walks.sqlite cannot be opened read-only: {err}"))
-        })?
-    } else {
-        let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
-        Connection::open_with_flags(path, flags).map_err(|err| {
-            StoreError::InvalidWalkMemory(format!("walks.sqlite cannot be opened read-only: {err}"))
-        })?
-    };
+        })?;
+        apply_readonly_pragmas(&conn).map_err(|err| {
+            StoreError::InvalidWalkMemory(format!("walks.sqlite cannot be read: {err}"))
+        })?;
+        verify_readonly_schema(&conn)?;
+        let db_stamp = read_db_file_stamp(path);
+        return Ok((conn, ReadOnlyConnState::Immutable { db_stamp }));
+    }
+
+    if wal_has_frames && !shm_exists {
+        // Uncheckpointed -wal exists WITHOUT -shm: copy .sqlite + .sqlite-wal into a private 0700
+        // temp directory and replay/checkpoint ONLY the private copy, so ZERO -shm/-wal files are
+        // ever created in the workspace directory while all committed WAL frames remain readable!
+        let wal_src = append_suffix(path, "-wal");
+        let db_stamp = read_db_file_stamp(path);
+        let wal_stamp = read_sidecar_stamp(&wal_src);
+        let temp_dir = create_private_temp_dir("ro-wal")?;
+        let open_res = (|| -> Result<Connection, StoreError> {
+            let tmp_db = temp_dir.join("walks.sqlite");
+            let tmp_wal = temp_dir.join("walks.sqlite-wal");
+            copy_file_nofollow(path, &tmp_db)?;
+            copy_file_nofollow(&wal_src, &tmp_wal)?;
+
+            // Recover/checkpoint WAL frames into the private copy only.
+            {
+                let rw_flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+                let rw_conn = Connection::open_with_flags(&tmp_db, rw_flags).map_err(|err| {
+                    StoreError::InvalidWalkMemory(format!(
+                        "walks.sqlite WAL snapshot cannot be recovered: {err}"
+                    ))
+                })?;
+                let _ = rw_conn.pragma_update(None, "busy_timeout", 5000);
+                rw_conn
+                    .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+                    .map_err(|err| {
+                        StoreError::InvalidWalkMemory(format!(
+                            "walks.sqlite WAL snapshot cannot be checkpointed: {err}"
+                        ))
+                    })?;
+            }
+
+            let ro_flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+            let conn = Connection::open_with_flags(&tmp_db, ro_flags).map_err(|err| {
+                StoreError::InvalidWalkMemory(format!(
+                    "walks.sqlite WAL snapshot cannot be opened read-only: {err}"
+                ))
+            })?;
+            apply_readonly_pragmas(&conn).map_err(|err| {
+                StoreError::InvalidWalkMemory(format!("walks.sqlite cannot be read: {err}"))
+            })?;
+            verify_readonly_schema(&conn)?;
+            Ok(conn)
+        })();
+        match open_res {
+            Ok(conn) => {
+                return Ok((
+                    conn,
+                    ReadOnlyConnState::WalSnapshot {
+                        temp_dir,
+                        db_stamp,
+                        wal_stamp,
+                    },
+                ));
+            }
+            Err(err) => {
+                let _ = fs::remove_dir_all(&temp_dir);
+                return Err(err);
+            }
+        }
+    }
+
+    // Live writer already maintains -shm alongside -wal: open standard read-only directly without
+    // creating new sidecar files, seeing all live committed WAL frames.
+    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    let conn = Connection::open_with_flags(path, flags).map_err(|err| {
+        StoreError::InvalidWalkMemory(format!("walks.sqlite cannot be opened read-only: {err}"))
+    })?;
     apply_readonly_pragmas(&conn).map_err(|err| {
         StoreError::InvalidWalkMemory(format!("walks.sqlite cannot be read: {err}"))
     })?;
     verify_readonly_schema(&conn)?;
-    let stamp = if use_immutable {
-        read_db_file_stamp(path)
-    } else {
-        None
-    };
-    Ok((conn, use_immutable, stamp))
+    Ok((conn, ReadOnlyConnState::Direct))
 }
 
 fn miss(reason: CacheMissReason) -> LookupResult {
@@ -2616,14 +2794,11 @@ fn hydrate_stored_walk(
     run: &ValidationRunRecord,
 ) -> Result<StoredWalk, StoreError> {
     let history = query_validation_history(conn, walk.id)?;
-    let subflow_files = if run.closure_sha256.is_some() {
+    let run_is_legacy = run.closure_sha256.is_none() && run.subflow_files.is_none();
+    let subflow_files = if run.closure_sha256.is_some() || run_is_legacy {
         None
-    } else if let Some(ref sf) = run.subflow_files {
-        Some(sf.clone())
-    } else if walk.has_files {
-        Some(query_walk_files(conn, walk.id)?)
     } else {
-        None
+        run.subflow_files.clone()
     };
     let repairs = query_repair_history(conn, walk.id)?;
     Ok(StoredWalk {
@@ -2638,11 +2813,7 @@ fn hydrate_stored_walk(
         flow_path: run.flow_path.clone(),
         flow_sha256: run.flow_sha256.clone(),
         subflow_files,
-        legacy_closure: if walk.legacy_closure {
-            Some(true)
-        } else {
-            None
-        },
+        legacy_closure: if run_is_legacy { Some(true) } else { None },
         closure_sha256: run.closure_sha256.clone(),
         last_validation: WalkValidation {
             passed: run.passed,
@@ -2799,12 +2970,11 @@ fn verify_classic_stored_flow_inner(
         )));
     }
 
-    let is_legacy = walk.legacy_closure || run.subflow_files.is_none();
-    let subflows = if is_legacy {
-        None
-    } else {
-        run.subflow_files.as_deref()
-    };
+    let _ = walk;
+    // Derive legacy closure status strictly from the selected `validation_runs` row so an
+    // imported legacy run on another build never clobbers a verified multi-file run!
+    let is_legacy = run.subflow_files.is_none();
+    let subflows = run.subflow_files.as_deref();
     match check_stored_subflows(&canonical_root, &run.flow_path, subflows, is_legacy)? {
         StoredClosureCheck::Ok => Ok(ClassicFlowCheck::Ok(canonical)),
         StoredClosureCheck::Legacy => Ok(ClassicFlowCheck::Legacy),

@@ -277,14 +277,13 @@ pub fn evaluate_gate(
                 .collect();
 
             for run in matching_runs {
-                let external_flaky = options.flaky_failures.iter().any(|item| {
-                    item.goal_key == key
-                        && item.build_fingerprint == identity.build_fingerprint
-                        && item.at == run.validated_at
-                });
-                let is_flaky = run.flaky || external_flaky;
-
                 if !run.passed {
+                    let external_flaky = options.flaky_failures.iter().any(|item| {
+                        item.goal_key == key
+                            && item.build_fingerprint == identity.build_fingerprint
+                            && item.at == run.validated_at
+                    });
+                    let is_flaky = run.flaky || external_flaky;
                     evidence.push(ShardEvidence {
                         store_label: store_label.clone(),
                         outcome: if is_flaky {
@@ -304,8 +303,9 @@ pub fn evaluate_gate(
                     continue;
                 }
 
-                // Defensive fail-closed: even a passing run carrying durable `flaky = 1` never opens the gate.
-                if is_flaky {
+                // Defensive fail-closed: a passing run carrying durable `flaky = 1` never opens
+                // the gate, while external `flaky_failures` markers apply only to failed runs.
+                if run.flaky {
                     evidence.push(ShardEvidence {
                         store_label: store_label.clone(),
                         outcome: GateOutcome::Flaky,
