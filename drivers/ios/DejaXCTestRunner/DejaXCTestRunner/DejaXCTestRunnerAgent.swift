@@ -70,29 +70,39 @@ final class DejaXCTestRunnerAgent: XCTestCase {
         actions: XcuiActions,
         respond: @escaping (HttpResponse) -> Void
     ) {
-        defer { releaseExecutionSlot() }
+        var slotReleased = false
+        defer {
+            if !slotReleased {
+                releaseExecutionSlot()
+            }
+        }
 
         let (result, issues) = runCapturingIssues {
             actions.handle(request)
         }
+        let finalResponse: HttpResponse
         switch result {
         case .success(let response):
             if !issues.isEmpty && response.status < 400 {
-                respond(
-                    HttpResponse.jsonError(
-                        status: 500,
-                        message: "XCTest recorded issue(s): \(issues.joined(separator: "; "))"
-                    )
+                finalResponse = HttpResponse.jsonError(
+                    status: 500,
+                    message: "XCTest recorded issue(s): \(issues.joined(separator: "; "))"
                 )
             } else {
-                respond(response)
+                finalResponse = response
             }
         case .failure(let error):
             let detail = issues.isEmpty
                 ? error.localizedDescription
                 : "\(error.localizedDescription) (issues: \(issues.joined(separator: "; ")))"
-            respond(HttpResponse.jsonError(status: 500, message: detail))
+            finalResponse = HttpResponse.jsonError(status: 500, message: detail)
         }
+
+        // Release BEFORE writing the HTTP response so a client that immediately sends the next
+        // sequential request upon receiving this response can never race and receive 409.
+        releaseExecutionSlot()
+        slotReleased = true
+        respond(finalResponse)
     }
 
     func testRunAgent() {

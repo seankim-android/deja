@@ -267,6 +267,8 @@ pub struct ActResponse {
     pub elapsed_ms: u64,
     #[serde(default)]
     pub hierarchy: Option<HierarchyResponse>,
+    #[serde(default)]
+    pub hierarchy_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -839,6 +841,17 @@ mod tests {
         let wu = serde_json::to_value(&warmup).expect("serialize WarmupRequest");
         assert_eq!(wu["timeoutMs"], 5_000);
         assert_eq!(wu["returnHierarchy"], true);
+
+        let partial_act: super::ActResponse = serde_json::from_str(
+            r#"{"ok":true,"elapsedMs":42,"hierarchyError":"snapshot failed"}"#,
+        )
+        .expect("decode partial-success ActResponse");
+        assert!(partial_act.ok);
+        assert!(partial_act.hierarchy.is_none());
+        assert_eq!(
+            partial_act.hierarchy_error.as_deref(),
+            Some("snapshot failed")
+        );
     }
 
     #[tokio::test]

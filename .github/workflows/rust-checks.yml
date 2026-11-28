@@ -40,9 +40,9 @@ jobs:
 
           changed=""
           if [ "$EVENT_NAME" = "pull_request" ] && git rev-parse --verify HEAD^2 >/dev/null 2>&1; then
-            changed=$(git diff --name-only HEAD^1 HEAD)
+            changed=$(git diff --name-only --no-renames HEAD^1 HEAD)
           elif [ "$EVENT_NAME" = "push" ] && [ -n "${PUSH_BEFORE:-}" ] && [ "$PUSH_BEFORE" != "0000000000000000000000000000000000000000" ] && git rev-parse --verify "$PUSH_BEFORE^{commit}" >/dev/null 2>&1; then
-            changed=$(git diff --name-only "$PUSH_BEFORE" HEAD)
+            changed=$(git diff --name-only --no-renames "$PUSH_BEFORE" HEAD)
           else
             echo "run_macos=true" >> "$GITHUB_OUTPUT"
             exit 0

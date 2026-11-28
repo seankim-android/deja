@@ -392,7 +392,10 @@ final class XcuiActions {
             case .success(let capture):
                 response["hierarchy"] = capture.toJsonObject(knownHash: knownHash)
             case .failure(let msg):
-                return HttpResponse.jsonError(status: 500, message: msg)
+                // Preserve `ok: true` because the action already ran; expose the observation
+                // error separately so callers can retry only the snapshot without re-running
+                // a non-idempotent tap/type/swipe.
+                response["hierarchyError"] = msg
             }
         }
 
@@ -558,19 +561,23 @@ final class XcuiActions {
             if app.state == .runningForeground {
                 switch captureHierarchy(appId: appId, includeSystemUi: includeSystemUi) {
                 case .success(let capture):
-                    var body: [String: Any] = [
-                        "ok": true,
-                        "appId": appId,
-                        "state": capture.stateName,
-                        "stateCode": capture.stateCode,
-                        "elapsedMs": elapsedMs(since: started),
-                        "nodeCount": capture.nodes.count,
-                        "hierarchyHash": capture.hierarchyHash,
-                    ]
-                    if returnHierarchy {
-                        body["hierarchy"] = capture.toJsonObject(knownHash: nil)
+                    if capture.stateCode == 4 && capture.nodes.contains(where: { $0.source == "app" }) {
+                        var body: [String: Any] = [
+                            "ok": true,
+                            "appId": appId,
+                            "state": capture.stateName,
+                            "stateCode": capture.stateCode,
+                            "elapsedMs": elapsedMs(since: started),
+                            "nodeCount": capture.nodes.count,
+                            "hierarchyHash": capture.hierarchyHash,
+                        ]
+                        if returnHierarchy {
+                            body["hierarchy"] = capture.toJsonObject(knownHash: nil)
+                        }
+                        return HttpResponse.json(200, object: body)
+                    } else {
+                        lastError = "app state was \(capture.stateName) during warmup snapshot"
                     }
-                    return HttpResponse.json(200, object: body)
                 case .failure(let msg):
                     lastError = msg
                 }
@@ -820,7 +827,8 @@ final class XcuiActions {
 
         if (state != .runningForeground || includeSystemUi) && !truncated {
             let springboard = XCUIApplication(bundleIdentifier: Self.springboardBundleId)
-            if let sbSnapshot = try? springboard.snapshot() {
+            do {
+                let sbSnapshot = try springboard.snapshot()
                 let sbRootBounds = sanitizeRect(sbSnapshot.frame)
                 appendSnapshotTree(
                     sbSnapshot,
@@ -835,6 +843,15 @@ final class XcuiActions {
                     hasher: &hasher,
                     nextRetainedOrdinal: &nextRetainedOrdinal
                 )
+            } catch {
+                if state != .runningForeground {
+                    return .failure(
+                        "failed to capture SpringBoard hierarchy snapshot: \(error.localizedDescription)"
+                    )
+                }
+                // System UI overlay was requested alongside a foreground app, but could not be
+                // observed; mark truncated so `notVisible` waits do not treat omission as absence.
+                truncated = true
             }
         }
 
