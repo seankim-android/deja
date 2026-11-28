@@ -540,19 +540,53 @@ pub(crate) fn resolve_key_press(press: &KeyPress) -> Result<ResolvedKeyAction> {
     })
 }
 
+fn shift_us_char(ch: char) -> char {
+    match ch {
+        'a'..='z' => ch.to_ascii_uppercase(),
+        '1' => '!',
+        '2' => '@',
+        '3' => '#',
+        '4' => '$',
+        '5' => '%',
+        '6' => '^',
+        '7' => '&',
+        '8' => '*',
+        '9' => '(',
+        '0' => ')',
+        '`' => '~',
+        '-' => '_',
+        '=' => '+',
+        '[' => '{',
+        ']' => '}',
+        '\\' => '|',
+        ';' => ':',
+        '\'' => '"',
+        ',' => '<',
+        '.' => '>',
+        '/' => '?',
+        other => other,
+    }
+}
+
 fn single_char_key_spec(ch: char, modifiers: u8, has_shortcut_mod: bool) -> CdpKeySpec {
     let shift = (modifiers & MODIFIER_SHIFT) != 0;
-    let effective_char = if shift && ch.is_ascii_lowercase() {
-        ch.to_ascii_uppercase()
-    } else {
-        ch
-    };
+    let effective_char = if shift { shift_us_char(ch) } else { ch };
     let (code, vk) = match ch {
         'a'..='z' | 'A'..='Z' => {
             let upper = ch.to_ascii_uppercase();
             (format!("Key{upper}"), i32::from(upper as u8))
         }
         '0'..='9' => (format!("Digit{ch}"), i32::from(ch as u8)),
+        '!' => ("Digit1".to_string(), i32::from(b'1')),
+        '@' => ("Digit2".to_string(), i32::from(b'2')),
+        '#' => ("Digit3".to_string(), i32::from(b'3')),
+        '$' => ("Digit4".to_string(), i32::from(b'4')),
+        '%' => ("Digit5".to_string(), i32::from(b'5')),
+        '^' => ("Digit6".to_string(), i32::from(b'6')),
+        '&' => ("Digit7".to_string(), i32::from(b'7')),
+        '*' => ("Digit8".to_string(), i32::from(b'8')),
+        '(' => ("Digit9".to_string(), i32::from(b'9')),
+        ')' => ("Digit0".to_string(), i32::from(b'0')),
         '-' | '_' => ("Minus".to_string(), 189),
         '=' | '+' => ("Equal".to_string(), 187),
         '[' | '{' => ("BracketLeft".to_string(), 219),

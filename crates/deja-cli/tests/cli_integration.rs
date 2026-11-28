@@ -4996,3 +4996,105 @@ async fn codex_r2_f1_web_gate_enforces_configured_viewport_and_headless_mode() {
     assert_eq!(h_json["verdict"], "closed");
     assert_eq!(h_json["goals"][0]["outcome"], "not-run");
 }
+
+#[tokio::test]
+async fn codex_r3_f3_doctor_and_runtime_skip_broken_path_chromium_candidate() {
+    let ws = TempWs::new("web-skip-broken");
+    let bin_dir = ws.path.join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    let broken_chromium = bin_dir.join("chromium");
+    let working_chrome = bin_dir.join("google-chrome");
+    fs::write(
+        &broken_chromium,
+        "#!/bin/sh\necho 'broken stub' >&2\nexit 1\n",
+    )
+    .unwrap();
+    fs::write(
+        &working_chrome,
+        "#!/bin/sh\necho 'Google Chrome 147.0.1.2'\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&broken_chromium, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::set_permissions(&working_chrome, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    let mut env = BTreeMap::new();
+    env.insert("PATH".to_string(), bin_dir.to_string_lossy().into_owned());
+
+    // 1. `RealDoctorProbes` skips broken `chromium` and reports ready with working `google-chrome`.
+    let probes = deja_cli::driver_factory::RealDoctorProbes;
+    let checks = probes
+        .probe(&DoctorProbeRequest {
+            platform: Some("web".to_string()),
+            device: Some("chromium".to_string()),
+            env: env.clone(),
+            deja_home: None,
+        })
+        .await;
+    let web_check = checks
+        .iter()
+        .find(|c| c.name == "web-chromium")
+        .expect("web-chromium check");
+    assert_eq!(web_check.status, DoctorCheckStatus::Ready);
+    assert!(
+        web_check.detail.contains("147.0.1.2"),
+        "expected doctor to skip broken chromium and find 147.0.1.2, got {}",
+        web_check.detail
+    );
+
+    // 2. `RealDriverFactory::resolve_runtime` also skips broken `chromium` and uses `google-chrome`.
+    let ctx = DriverContext {
+        platform: "web".to_string(),
+        device: "chromium".to_string(),
+        app_id: "http://127.0.0.1:4174".to_string(),
+        build_path: ws.path.clone(),
+        expected_build_fingerprint: None,
+        workspace_root: ws.path.clone(),
+        disable_animations: true,
+        crash_report_grace_ms: 0,
+        crash_report_dir: None,
+        deja_home: None,
+        headless: Some(true),
+        screen_size: Some(json!("1280x800")),
+        timeout_ms: 30_000,
+        env: env.clone(),
+    };
+    let cancel = CancellationToken::new();
+    let rt = RealDriverFactory
+        .resolve_runtime(&ctx, &cancel)
+        .await
+        .expect("resolve_runtime must skip broken PATH candidate");
+    assert_eq!(rt.as_deref(), Some("chromium-147.0.1.2@1280x800"));
+
+    // 3. Explicit broken `DEJA_CHROME` fails closed in BOTH doctor and `resolve_runtime`.
+    env.insert(
+        "DEJA_CHROME".to_string(),
+        broken_chromium.to_string_lossy().into_owned(),
+    );
+    let broken_checks = probes
+        .probe(&DoctorProbeRequest {
+            platform: Some("web".to_string()),
+            device: Some("chromium".to_string()),
+            env: env.clone(),
+            deja_home: None,
+        })
+        .await;
+    let broken_web = broken_checks
+        .iter()
+        .find(|c| c.name == "web-chromium")
+        .expect("web-chromium check");
+    assert_eq!(broken_web.status, DoctorCheckStatus::NotReady);
+
+    let mut broken_ctx = ctx;
+    broken_ctx.env = env;
+    assert!(
+        RealDriverFactory
+            .resolve_runtime(&broken_ctx, &cancel)
+            .await
+            .is_err(),
+        "explicit broken DEJA_CHROME must fail closed"
+    );
+}

@@ -24,8 +24,8 @@ use deja_driver_ios::{
     find_device_runtime_version,
 };
 use deja_driver_web::{
-    ScreenSize, WebDriver, WebDriverConfig, WebDriverError, discover_chromium,
-    format_web_runtime_suffix, probe_chromium_version,
+    ScreenSize, WebDriver, WebDriverConfig, WebDriverError, discover_working_chromium,
+    format_web_runtime_suffix,
 };
 use deja_flow::{PlatformDriver, decode_xml};
 use serde::{Deserialize, Serialize};
@@ -162,20 +162,14 @@ impl DriverFactory for RealDriverFactory {
                     };
                     let suffix =
                         format_web_runtime_suffix(screen_size, ctx.headless.unwrap_or(true));
-                    let binary = discover_chromium(&ctx.env).map_err(|err| match err {
-                        WebDriverError::InvalidChromiumPath { .. } => {
-                            DriverFactoryError::UnsupportedOrConfig(err.to_string())
-                        }
-                        other => DriverFactoryError::Runtime(other.to_string()),
-                    })?;
-                    let version = probe_chromium_version(&binary, cancel)
+                    let (_binary, version) = discover_working_chromium(&ctx.env, cancel)
                         .await
                         .map_err(|err| match err {
                             WebDriverError::Cancelled => DriverFactoryError::Cancelled,
-                            other => DriverFactoryError::Runtime(format!(
-                                "failed to probe Chromium version at {}: {other}",
-                                binary.display()
-                            )),
+                            WebDriverError::InvalidChromiumPath { .. } => {
+                                DriverFactoryError::UnsupportedOrConfig(err.to_string())
+                            }
+                            other => DriverFactoryError::Runtime(other.to_string()),
                         })?;
                     Ok(Some(format!("chromium-{version}{suffix}")))
                 }
@@ -1017,32 +1011,13 @@ async fn probe_adb(env: &BTreeMap<String, String>, required: bool) -> DoctorChec
 
 async fn probe_chromium(env: &BTreeMap<String, String>, required: bool) -> DoctorCheck {
     let cancel = CancellationToken::new();
-    match discover_chromium(env) {
-        Ok(binary) => match probe_chromium_version(&binary, &cancel).await {
-            Ok(version) => DoctorCheck {
-                name: "web-chromium".to_string(),
-                status: DoctorCheckStatus::Ready,
-                required,
-                detail: format!("Chromium {version} ({})", binary.display()),
-                remediation: None,
-            },
-            Err(err) => DoctorCheck {
-                name: "web-chromium".to_string(),
-                status: if required {
-                    DoctorCheckStatus::NotReady
-                } else {
-                    DoctorCheckStatus::Warn
-                },
-                required,
-                detail: format!(
-                    "Chromium binary at {} failed version probe: {err}",
-                    binary.display()
-                ),
-                remediation: Some(
-                    "Install Chromium or Google Chrome, ensure it is executable on PATH or in /Applications, or set DEJA_CHROME"
-                        .to_string(),
-                ),
-            },
+    match discover_working_chromium(env, &cancel).await {
+        Ok((binary, version)) => DoctorCheck {
+            name: "web-chromium".to_string(),
+            status: DoctorCheckStatus::Ready,
+            required,
+            detail: format!("Chromium {version} ({})", binary.display()),
+            remediation: None,
         },
         Err(err) => DoctorCheck {
             name: "web-chromium".to_string(),

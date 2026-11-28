@@ -1,7 +1,7 @@
 //! Chromium binary discovery, version probing, private temp profile management,
 //! and zero-`unsafe` process-group lifecycle management.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -63,6 +63,20 @@ pub fn discover_chromium(env: &BTreeMap<String, String>) -> Result<PathBuf> {
     discover_chromium_with_cwd_and_fallbacks(env, None, OS_CHROMIUM_FALLBACKS)
 }
 
+/// Discovers the first working Chromium or Google Chrome executable and returns `(path, version)`.
+///
+/// - When `DEJA_CHROME` or `CHROME_PATH` is explicitly set and non-empty, fails closed if that
+///   executable is missing, non-executable, or fails `--version` probing (never falls through).
+/// - Otherwise iterates every executable candidate discovered on `PATH` and OS-specific install
+///   locations in precedence order, skipping broken candidates whose `--version` probe fails and
+///   returning the first working binary.
+pub async fn discover_working_chromium(
+    env: &BTreeMap<String, String>,
+    cancel: &CancellationToken,
+) -> Result<(PathBuf, String)> {
+    discover_working_chromium_with_cwd_and_fallbacks(env, None, OS_CHROMIUM_FALLBACKS, cancel).await
+}
+
 #[cfg(test)]
 pub(crate) fn discover_chromium_with_fallbacks(
     env: &BTreeMap<String, String>,
@@ -76,6 +90,56 @@ pub(crate) fn discover_chromium_with_cwd_and_fallbacks(
     cwd_override: Option<&Path>,
     os_fallbacks: &[&str],
 ) -> Result<PathBuf> {
+    let (candidates, _is_explicit) =
+        discover_chromium_candidates_with_cwd_and_fallbacks(env, cwd_override, os_fallbacks)?;
+    candidates.into_iter().next().ok_or_else(|| {
+        WebDriverError::ChromiumNotFound(
+            "install Chromium or Google Chrome, ensure it is on PATH or in /Applications, or set DEJA_CHROME"
+                .to_string(),
+        )
+    })
+}
+
+pub(crate) async fn discover_working_chromium_with_cwd_and_fallbacks(
+    env: &BTreeMap<String, String>,
+    cwd_override: Option<&Path>,
+    os_fallbacks: &[&str],
+    cancel: &CancellationToken,
+) -> Result<(PathBuf, String)> {
+    if cancel.is_cancelled() {
+        return Err(WebDriverError::Cancelled);
+    }
+    let (candidates, is_explicit) =
+        discover_chromium_candidates_with_cwd_and_fallbacks(env, cwd_override, os_fallbacks)?;
+    let mut failures: Vec<String> = Vec::new();
+    for candidate in candidates {
+        match probe_chromium_version(&candidate, cancel).await {
+            Ok(version) => return Ok((candidate, version)),
+            Err(WebDriverError::Cancelled) => return Err(WebDriverError::Cancelled),
+            Err(err) => {
+                if is_explicit {
+                    return Err(err);
+                }
+                debug!(
+                    path = %candidate.display(),
+                    error = %err,
+                    "skipping unusable Chromium candidate"
+                );
+                failures.push(format!("{}: {err}", candidate.display()));
+            }
+        }
+    }
+    Err(WebDriverError::ChromiumNotFound(format!(
+        "no working Chromium executable found ({})",
+        failures.join("; ")
+    )))
+}
+
+fn discover_chromium_candidates_with_cwd_and_fallbacks(
+    env: &BTreeMap<String, String>,
+    cwd_override: Option<&Path>,
+    os_fallbacks: &[&str],
+) -> Result<(Vec<PathBuf>, bool)> {
     for var in ["DEJA_CHROME", "CHROME_PATH"] {
         if let Some(raw) = env.get(var) {
             let trimmed = raw.trim();
@@ -83,10 +147,13 @@ pub(crate) fn discover_chromium_with_cwd_and_fallbacks(
                 let raw_path = PathBuf::from(trimmed);
                 let candidate = resolve_override_path(var, &raw_path, cwd_override)?;
                 validate_executable_override(var, &candidate)?;
-                return Ok(candidate);
+                return Ok((vec![candidate], true));
             }
         }
     }
+
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    let mut seen: HashSet<PathBuf> = HashSet::new();
 
     if let Some(path_var) = env.get("PATH")
         && !path_var.is_empty()
@@ -97,8 +164,8 @@ pub(crate) fn discover_chromium_with_cwd_and_fallbacks(
             }
             for bin in PATH_BINARY_NAMES {
                 let candidate = dir.join(bin);
-                if is_executable_file(&candidate) {
-                    return Ok(candidate);
+                if is_executable_file(&candidate) && seen.insert(candidate.clone()) {
+                    candidates.push(candidate);
                 }
             }
         }
@@ -106,15 +173,19 @@ pub(crate) fn discover_chromium_with_cwd_and_fallbacks(
 
     for fallback in os_fallbacks {
         let candidate = PathBuf::from(fallback);
-        if is_executable_file(&candidate) {
-            return Ok(candidate);
+        if is_executable_file(&candidate) && seen.insert(candidate.clone()) {
+            candidates.push(candidate);
         }
     }
 
-    Err(WebDriverError::ChromiumNotFound(
-        "install Chromium or Google Chrome, ensure it is on PATH or in /Applications, or set DEJA_CHROME"
-            .to_string(),
-    ))
+    if candidates.is_empty() {
+        return Err(WebDriverError::ChromiumNotFound(
+            "install Chromium or Google Chrome, ensure it is on PATH or in /Applications, or set DEJA_CHROME"
+                .to_string(),
+        ));
+    }
+
+    Ok((candidates, false))
 }
 
 fn resolve_override_path(var: &str, raw: &Path, cwd_override: Option<&Path>) -> Result<PathBuf> {

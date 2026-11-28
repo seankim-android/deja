@@ -18,7 +18,7 @@ use tokio::sync::Mutex as AsyncMutex;
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
 
-use crate::browser::{BrowserLaunchOptions, ManagedBrowser, discover_chromium};
+use crate::browser::{BrowserLaunchOptions, ManagedBrowser, discover_working_chromium};
 use crate::cdp::{
     CdpClient, PageSessionIds, RecordedCrash, create_and_attach_page_in_context,
     create_isolated_context_and_page, now_epoch_ms,
@@ -157,11 +157,16 @@ pub struct WebDriver {
     browser: AsyncMutex<Option<ManagedBrowser>>,
     lifecycle: AsyncMutex<()>,
     crashes: Arc<StdMutex<Option<RecordedCrash>>>,
+    browser_exit_crash: StdMutex<Option<RecordedCrash>>,
     attach_count: AtomicU64,
     /// `true` once the active `BrowserContext` has performed navigation or mutating UI actions;
     /// triggers fresh `BrowserContext` rotation on the next [`PlatformDriver::ensure_session`]
     /// while keeping Chromium warm.
     context_dirty: AtomicBool,
+    /// `true` once an active session crashes, detaches, disconnects, or fails mid-rotation.
+    /// While `true`, mid-flow operations fail closed instead of silently respawning `about:blank`;
+    /// only an explicit [`PlatformDriver::ensure_session`] (or [`PlatformDriver::shutdown`]) clears it.
+    session_broken: AtomicBool,
     /// Last non-truncated `(hierarchy_hash, clipped_geometry_hash)` observed on the active page,
     /// ensuring `known_hash` short-circuits invalidate whenever any node's `visible_frame` changes
     /// even if unclipped `frame` & `hittable` are unchanged.
@@ -181,8 +186,10 @@ impl WebDriver {
             browser: AsyncMutex::new(None),
             lifecycle: AsyncMutex::new(()),
             crashes: Arc::new(StdMutex::new(None)),
+            browser_exit_crash: StdMutex::new(None),
             attach_count: AtomicU64::new(0),
             context_dirty: AtomicBool::new(false),
+            session_broken: AtomicBool::new(false),
             last_clipped_hash: StdMutex::new(None),
         }
     }
@@ -248,12 +255,69 @@ impl WebDriver {
     }
 
     fn record_browser_exit_crash(&self, status: Option<i32>) {
-        let mut guard = self.crashes.lock().unwrap_or_else(|p| p.into_inner());
-        *guard = Some(RecordedCrash {
+        let crash = RecordedCrash {
             epoch_ms: now_epoch_ms(),
             process: "chromium".to_string(),
             detail: format!("Chromium process exited unexpectedly (exit={status:?})"),
-        });
+        };
+        {
+            let mut exit_guard = self
+                .browser_exit_crash
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            *exit_guard = Some(crash.clone());
+        }
+        let mut guard = self.crashes.lock().unwrap_or_else(|p| p.into_inner());
+        *guard = Some(crash);
+    }
+
+    fn current_session_crash(&self, handle: Option<&ActiveHandle>) -> Option<RecordedCrash> {
+        if let Some(crash) = handle.and_then(|h| h.cdp.session_crash()) {
+            return Some(crash);
+        }
+        self.browser_exit_crash
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+    }
+
+    fn broken_session_error(&self, handle: Option<&ActiveHandle>, fallback: &str) -> DriverError {
+        if let Some(crash) = self.current_session_crash(handle) {
+            return DriverError::AppCrashed(DriverCrashSignal {
+                source: CrashSignalSource::CrashReport,
+                report_file: None,
+                process: Some(crash.process),
+                detail: Some(crash.detail),
+            });
+        }
+        DriverError::SessionClosed(fallback.to_string())
+    }
+
+    fn map_active_err(
+        &self,
+        handle: &ActiveHandle,
+        operation: &str,
+        err: WebDriverError,
+    ) -> DriverError {
+        if matches!(
+            err,
+            WebDriverError::CdpClosed(_)
+                | WebDriverError::TargetCrashed { .. }
+                | WebDriverError::WebSocket(_)
+        ) || handle.cdp.is_closed()
+            || handle.cdp.is_detached()
+        {
+            self.session_broken.store(true, Ordering::SeqCst);
+            if let Some(crash) = self.current_session_crash(Some(handle)) {
+                return DriverError::AppCrashed(DriverCrashSignal {
+                    source: CrashSignalSource::CrashReport,
+                    report_file: None,
+                    process: Some(crash.process),
+                    detail: Some(crash.detail),
+                });
+            }
+        }
+        map_web_err(operation, err)
     }
 
     async fn poll_unexpected_browser_exit(&self) -> bool {
@@ -267,7 +331,69 @@ impl WebDriver {
         false
     }
 
-    async fn ensure_active_handle(
+    /// Returns the active, healthy browser handle for mid-flow operations without EVER silently
+    /// respawning a crashed, detached, or unexpectedly closed browser session.
+    ///
+    /// Lazily attaches only when the driver has no session yet and has not entered a broken state;
+    /// once a session crashes or disconnects, callers receive `AppCrashed` / `SessionClosed`
+    /// immediately until an explicit [`PlatformDriver::ensure_session`] recovers it.
+    async fn require_active_handle(
+        &self,
+        cancel: &CancellationToken,
+    ) -> std::result::Result<ActiveHandle, DriverError> {
+        if cancel.is_cancelled() {
+            return Err(DriverError::Cancelled);
+        }
+
+        if self.poll_unexpected_browser_exit().await {
+            self.session_broken.store(true, Ordering::SeqCst);
+            let current = self.current_handle();
+            return Err(self.broken_session_error(
+                current.as_ref(),
+                "Chromium process exited unexpectedly during active session",
+            ));
+        }
+
+        if let Some(handle) = self.current_handle() {
+            if handle.cdp.is_detached() {
+                self.session_broken.store(true, Ordering::SeqCst);
+                return Err(self.broken_session_error(
+                    Some(&handle),
+                    "Chromium target detached unexpectedly during active session",
+                ));
+            }
+            if handle.cdp.is_closed() {
+                self.session_broken.store(true, Ordering::SeqCst);
+                let _ = self.poll_unexpected_browser_exit().await;
+                return Err(self.broken_session_error(
+                    Some(&handle),
+                    "CDP WebSocket closed unexpectedly during active session",
+                ));
+            }
+            if self.session_broken.load(Ordering::SeqCst) {
+                return Err(self.broken_session_error(
+                    Some(&handle),
+                    "Chromium session is unhealthy; call ensure_session to recover",
+                ));
+            }
+            return Ok(handle);
+        }
+
+        if self.session_broken.load(Ordering::SeqCst) {
+            return Err(self.broken_session_error(
+                None,
+                "Chromium session crashed or closed; call ensure_session to recover",
+            ));
+        }
+
+        // Brand-new or cleanly shut-down driver: lazily initialize a fresh session.
+        self.ensure_or_recover_session(cancel).await
+    }
+
+    /// Ensures a healthy warm browser session exists, tearing down and recovering any crashed,
+    /// detached, or disconnected session. Invoked explicitly by [`PlatformDriver::ensure_session`]
+    /// (and lazily on first use of a brand-new driver).
+    async fn ensure_or_recover_session(
         &self,
         cancel: &CancellationToken,
     ) -> std::result::Result<ActiveHandle, DriverError> {
@@ -276,7 +402,8 @@ impl WebDriver {
         }
 
         // Fast path: reuse healthy warm browser + page session with zero relaunch.
-        if let Some(handle) = self.current_handle()
+        if !self.session_broken.load(Ordering::SeqCst)
+            && let Some(handle) = self.current_handle()
             && !handle.cdp.is_closed()
             && !handle.cdp.is_detached()
             && !self.poll_unexpected_browser_exit().await
@@ -294,7 +421,8 @@ impl WebDriver {
         }
 
         // Re-check under `lifecycle` in case a concurrent caller already initialized the session.
-        if let Some(handle) = self.current_handle()
+        if !self.session_broken.load(Ordering::SeqCst)
+            && let Some(handle) = self.current_handle()
             && !handle.cdp.is_closed()
             && !handle.cdp.is_detached()
             && !self.poll_unexpected_browser_exit().await
@@ -341,6 +469,7 @@ impl WebDriver {
                 }
                 self.set_handle(Some(handle.clone()));
                 self.context_dirty.store(false, Ordering::SeqCst);
+                self.session_broken.store(false, Ordering::SeqCst);
                 self.attach_count.fetch_add(1, Ordering::SeqCst);
                 debug!(
                     attach_count = self.attach_count(),
@@ -367,7 +496,7 @@ impl WebDriver {
             return Ok((None, ws_url.clone()));
         }
 
-        let executable = discover_chromium(&self.config.env)?;
+        let (executable, _version) = discover_working_chromium(&self.config.env, cancel).await?;
         let launch_opts = BrowserLaunchOptions {
             executable,
             headless: self.config.headless,
@@ -382,6 +511,14 @@ impl WebDriver {
 
     async fn teardown_locked(&self) {
         self.context_dirty.store(false, Ordering::SeqCst);
+        self.session_broken.store(false, Ordering::SeqCst);
+        {
+            let mut exit_guard = self
+                .browser_exit_crash
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            *exit_guard = None;
+        }
         self.clear_clipped_hash();
         let old_handle = {
             let mut guard = self.active.lock().unwrap_or_else(|p| p.into_inner());
@@ -425,6 +562,7 @@ impl WebDriver {
         cancel: &CancellationToken,
     ) -> Result<ActiveHandle> {
         self.set_handle(None);
+        self.session_broken.store(true, Ordering::SeqCst);
         self.context_dirty.store(false, Ordering::SeqCst);
         // Clear active target before disposing so intentional detach is never misclassified.
         handle.cdp.set_active_target(None, None);
@@ -455,6 +593,7 @@ impl WebDriver {
             ids: new_ids,
         };
         self.set_handle(Some(new_handle.clone()));
+        self.session_broken.store(false, Ordering::SeqCst);
         self.context_dirty.store(false, Ordering::SeqCst);
         Ok(new_handle)
     }
@@ -470,6 +609,7 @@ impl WebDriver {
         cancel: &CancellationToken,
     ) -> Result<ActiveHandle> {
         self.set_handle(None);
+        self.session_broken.store(true, Ordering::SeqCst);
         handle.cdp.set_active_target(None, None);
         handle.cdp.reset_network_state();
         if let Err(WebDriverError::Cancelled) = handle
@@ -503,6 +643,7 @@ impl WebDriver {
             },
         };
         self.set_handle(Some(new_handle.clone()));
+        self.session_broken.store(false, Ordering::SeqCst);
         Ok(new_handle)
     }
 
@@ -1297,7 +1438,7 @@ impl PlatformDriver for WebDriver {
 
     fn ensure_session<'a>(&'a self, cancel: &'a CancellationToken) -> DriverFuture<'a, ()> {
         Box::pin(async move {
-            let _ = self.ensure_active_handle(cancel).await?;
+            let _ = self.ensure_or_recover_session(cancel).await?;
             if self.context_dirty.load(Ordering::SeqCst) {
                 let _lifecycle = tokio::select! {
                     biased;
@@ -1316,9 +1457,11 @@ impl PlatformDriver for WebDriver {
                         .reset_browser_context_locked(&current, cancel)
                         .await
                         .map_err(|err| map_web_err("ensure_session.rotate_context", err))?;
-                } else if self.current_handle().is_none() {
+                } else if self.current_handle().is_none()
+                    || self.session_broken.load(Ordering::SeqCst)
+                {
                     drop(_lifecycle);
-                    let _ = self.ensure_active_handle(cancel).await?;
+                    let _ = self.ensure_or_recover_session(cancel).await?;
                 }
             }
             Ok(())
@@ -1353,7 +1496,7 @@ impl PlatformDriver for WebDriver {
             let url =
                 validate_loopback_http_url(app_id).map_err(|err| map_web_err("launch_app", err))?;
 
-            let mut handle = self.ensure_active_handle(cancel).await?;
+            let mut handle = self.require_active_handle(cancel).await?;
 
             if opts.clear_state || opts.stop_app {
                 let _lifecycle = tokio::select! {
@@ -1365,18 +1508,20 @@ impl PlatformDriver for WebDriver {
                     handle = self
                         .reset_browser_context_locked(&handle, cancel)
                         .await
-                        .map_err(|err| map_web_err("launch_app.clear_state", err))?;
+                        .map_err(|err| {
+                            self.map_active_err(&handle, "launch_app.clear_state", err)
+                        })?;
                 } else if opts.stop_app {
                     handle = self
                         .replace_target_same_context_locked(&handle, cancel)
                         .await
-                        .map_err(|err| map_web_err("launch_app.stop_app", err))?;
+                        .map_err(|err| self.map_active_err(&handle, "launch_app.stop_app", err))?;
                 }
             }
 
             self.navigate_and_settle(&handle, &url, cancel)
                 .await
-                .map_err(|err| map_web_err("launch_app", err))
+                .map_err(|err| self.map_active_err(&handle, "launch_app", err))
         })
     }
 
@@ -1386,7 +1531,7 @@ impl PlatformDriver for WebDriver {
         cancel: &'a CancellationToken,
     ) -> DriverFuture<'a, ()> {
         Box::pin(async move {
-            let handle = self.ensure_active_handle(cancel).await?;
+            let handle = self.require_active_handle(cancel).await?;
             let _lifecycle = tokio::select! {
                 biased;
                 _ = cancel.cancelled() => return Err(DriverError::Cancelled),
@@ -1395,7 +1540,7 @@ impl PlatformDriver for WebDriver {
             let _ = self
                 .replace_target_same_context_locked(&handle, cancel)
                 .await
-                .map_err(|err| map_web_err("stop_app", err))?;
+                .map_err(|err| self.map_active_err(&handle, "stop_app", err))?;
             Ok(())
         })
     }
@@ -1414,7 +1559,7 @@ impl PlatformDriver for WebDriver {
         cancel: &'a CancellationToken,
     ) -> DriverFuture<'a, ()> {
         Box::pin(async move {
-            let handle = self.ensure_active_handle(cancel).await?;
+            let handle = self.require_active_handle(cancel).await?;
             let _lifecycle = tokio::select! {
                 biased;
                 _ = cancel.cancelled() => return Err(DriverError::Cancelled),
@@ -1423,7 +1568,7 @@ impl PlatformDriver for WebDriver {
             let _ = self
                 .reset_browser_context_locked(&handle, cancel)
                 .await
-                .map_err(|err| map_web_err("clear_state", err))?;
+                .map_err(|err| self.map_active_err(&handle, "clear_state", err))?;
             Ok(())
         })
     }
@@ -1450,10 +1595,10 @@ impl PlatformDriver for WebDriver {
             }
             let validated =
                 validate_loopback_http_url(url).map_err(|err| map_web_err("open_link", err))?;
-            let handle = self.ensure_active_handle(cancel).await?;
+            let handle = self.require_active_handle(cancel).await?;
             self.navigate_and_settle(&handle, &validated, cancel)
                 .await
-                .map_err(|err| map_web_err("open_link", err))
+                .map_err(|err| self.map_active_err(&handle, "open_link", err))
         })
     }
 
@@ -1480,10 +1625,10 @@ impl PlatformDriver for WebDriver {
         cancel: &'a CancellationToken,
     ) -> DriverFuture<'a, UiHierarchy> {
         Box::pin(async move {
-            let handle = self.ensure_active_handle(cancel).await?;
+            let handle = self.require_active_handle(cancel).await?;
             self.fetch_hierarchy_with_handle(&handle, app_id, known_hash, cancel)
                 .await
-                .map_err(|err| map_web_err("hierarchy", err))
+                .map_err(|err| self.map_active_err(&handle, "hierarchy", err))
         })
     }
 
@@ -1494,10 +1639,10 @@ impl PlatformDriver for WebDriver {
         cancel: &'a CancellationToken,
     ) -> DriverFuture<'a, ()> {
         Box::pin(async move {
-            let handle = self.ensure_active_handle(cancel).await?;
+            let handle = self.require_active_handle(cancel).await?;
             self.tap_with_handle(&handle, point, cancel)
                 .await
-                .map_err(|err| map_web_err("tap_point", err))
+                .map_err(|err| self.map_active_err(&handle, "tap_point", err))
         })
     }
 
@@ -1509,10 +1654,10 @@ impl PlatformDriver for WebDriver {
         cancel: &'a CancellationToken,
     ) -> DriverFuture<'a, ()> {
         Box::pin(async move {
-            let handle = self.ensure_active_handle(cancel).await?;
+            let handle = self.require_active_handle(cancel).await?;
             self.long_press_with_handle(&handle, point, duration_ms, cancel)
                 .await
-                .map_err(|err| map_web_err("long_press_point", err))
+                .map_err(|err| self.map_active_err(&handle, "long_press_point", err))
         })
     }
 
@@ -1523,10 +1668,10 @@ impl PlatformDriver for WebDriver {
         cancel: &'a CancellationToken,
     ) -> DriverFuture<'a, ()> {
         Box::pin(async move {
-            let handle = self.ensure_active_handle(cancel).await?;
+            let handle = self.require_active_handle(cancel).await?;
             self.double_tap_with_handle(&handle, point, cancel)
                 .await
-                .map_err(|err| map_web_err("double_tap_point", err))
+                .map_err(|err| self.map_active_err(&handle, "double_tap_point", err))
         })
     }
 
@@ -1536,10 +1681,10 @@ impl PlatformDriver for WebDriver {
         cancel: &'a CancellationToken,
     ) -> DriverFuture<'a, ()> {
         Box::pin(async move {
-            let handle = self.ensure_active_handle(cancel).await?;
+            let handle = self.require_active_handle(cancel).await?;
             self.swipe_with_handle(&handle, params, cancel)
                 .await
-                .map_err(|err| map_web_err("swipe", err))
+                .map_err(|err| self.map_active_err(&handle, "swipe", err))
         })
     }
 
@@ -1550,10 +1695,10 @@ impl PlatformDriver for WebDriver {
         cancel: &'a CancellationToken,
     ) -> DriverFuture<'a, ()> {
         Box::pin(async move {
-            let handle = self.ensure_active_handle(cancel).await?;
+            let handle = self.require_active_handle(cancel).await?;
             self.input_text_with_handle(&handle, text, cancel)
                 .await
-                .map_err(|err| map_web_err("input_text", err))
+                .map_err(|err| self.map_active_err(&handle, "input_text", err))
         })
     }
 
@@ -1564,10 +1709,10 @@ impl PlatformDriver for WebDriver {
         cancel: &'a CancellationToken,
     ) -> DriverFuture<'a, ()> {
         Box::pin(async move {
-            let handle = self.ensure_active_handle(cancel).await?;
+            let handle = self.require_active_handle(cancel).await?;
             self.erase_text_with_handle(&handle, count, cancel)
                 .await
-                .map_err(|err| map_web_err("erase_text", err))
+                .map_err(|err| self.map_active_err(&handle, "erase_text", err))
         })
     }
 
@@ -1578,10 +1723,10 @@ impl PlatformDriver for WebDriver {
         cancel: &'a CancellationToken,
     ) -> DriverFuture<'a, ()> {
         Box::pin(async move {
-            let handle = self.ensure_active_handle(cancel).await?;
+            let handle = self.require_active_handle(cancel).await?;
             self.press_key_with_handle(&handle, key, cancel)
                 .await
-                .map_err(|err| map_web_err("press_key", err))
+                .map_err(|err| self.map_active_err(&handle, "press_key", err))
         })
     }
 
@@ -1600,10 +1745,10 @@ impl PlatformDriver for WebDriver {
 
     fn back<'a>(&'a self, _app_id: &'a str, cancel: &'a CancellationToken) -> DriverFuture<'a, ()> {
         Box::pin(async move {
-            let handle = self.ensure_active_handle(cancel).await?;
+            let handle = self.require_active_handle(cancel).await?;
             self.back_with_handle(&handle, cancel)
                 .await
-                .map_err(|err| map_web_err("back", err))
+                .map_err(|err| self.map_active_err(&handle, "back", err))
         })
     }
 
@@ -1613,7 +1758,7 @@ impl PlatformDriver for WebDriver {
         cancel: &'a CancellationToken,
     ) -> DriverFuture<'a, Vec<u8>> {
         Box::pin(async move {
-            let handle = self.ensure_active_handle(cancel).await?;
+            let handle = self.require_active_handle(cancel).await?;
             let resp = handle
                 .cdp
                 .call_session(
@@ -1624,7 +1769,7 @@ impl PlatformDriver for WebDriver {
                     cancel,
                 )
                 .await
-                .map_err(|err| map_web_err("take_screenshot", err))?;
+                .map_err(|err| self.map_active_err(&handle, "take_screenshot", err))?;
             let data = resp.get("data").and_then(Value::as_str).ok_or_else(|| {
                 map_web_err(
                     "take_screenshot",
@@ -1648,7 +1793,7 @@ impl PlatformDriver for WebDriver {
                 return Err(DriverError::Cancelled);
             }
             let started = Instant::now();
-            let handle = self.ensure_active_handle(cancel).await?;
+            let handle = self.require_active_handle(cancel).await?;
 
             let action_res = match &req.action {
                 ActAction::Tap { x, y } => {
@@ -1699,7 +1844,7 @@ impl PlatformDriver for WebDriver {
                 ActAction::HideKeyboard => Ok(()),
                 ActAction::Back => self.back_with_handle(&handle, cancel).await,
             };
-            action_res.map_err(|err| map_web_err("act_and_observe", err))?;
+            action_res.map_err(|err| self.map_active_err(&handle, "act_and_observe", err))?;
 
             if let Some(delay_ms) = req.post_action_delay_ms
                 && delay_ms > 0
@@ -1720,10 +1865,12 @@ impl PlatformDriver for WebDriver {
                         cancel,
                     )
                     .await
-                    .map_err(|err| map_web_err("act_and_observe.hierarchy", err))
+                    .map_err(|err| self.map_active_err(&handle, "act_and_observe.hierarchy", err))
                 {
                     Ok(h) => (Some(h), None),
                     Err(DriverError::Cancelled) => return Err(DriverError::Cancelled),
+                    Err(err @ DriverError::AppCrashed(_))
+                    | Err(err @ DriverError::SessionClosed(_)) => return Err(err),
                     Err(err) => (None, Some(err.to_string())),
                 }
             } else {

@@ -325,10 +325,10 @@ pub const AX_DOM_SCRIPT: &str = r#"(() => {
   }
 
   function extractAccessibleName(el, tag) {
-    const ariaLabel = cleanText(el.getAttribute('aria-label'));
-    if (ariaLabel) return ariaLabel;
     const labelledBy = resolveAriaLabelledBy(el);
     if (labelledBy) return labelledBy;
+    const ariaLabel = cleanText(el.getAttribute('aria-label'));
+    if (ariaLabel) return ariaLabel;
     if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') {
       const formLabel = resolveFormLabel(el);
       if (formLabel) return formLabel;
@@ -480,14 +480,15 @@ pub const AX_DOM_SCRIPT: &str = r#"(() => {
         visW > 0 &&
         visH > 0;
 
-      const disabledFieldset =
-        (tag === 'INPUT' || tag === 'BUTTON' || tag === 'SELECT' || tag === 'TEXTAREA') &&
-        typeof el.closest === 'function' &&
-        Boolean(el.closest('fieldset[disabled]'));
+      let nativelyDisabled = false;
+      try {
+        nativelyDisabled = typeof el.matches === 'function' && el.matches(':disabled');
+      } catch (_err) {
+        nativelyDisabled = Boolean(el.disabled);
+      }
       const enabled =
-        !Boolean(el.disabled) &&
-        el.getAttribute('aria-disabled') !== 'true' &&
-        !disabledFieldset;
+        !nativelyDisabled &&
+        el.getAttribute('aria-disabled') !== 'true';
       const pointerEventsNone = style.pointerEvents === 'none';
 
       let hittable = isOnScreen && enabled && !pointerEventsNone;
@@ -549,7 +550,20 @@ pub const AX_DOM_SCRIPT: &str = r#"(() => {
     const oy = style.overflowY || '';
     const clipX = ox === 'hidden' || ox === 'clip' || ox === 'scroll' || ox === 'auto';
     const clipY = oy === 'hidden' || oy === 'clip' || oy === 'scroll' || oy === 'auto';
-    const childClip = (clipX || clipY) ? intersectClip(effectiveClip, rect, clipX, clipY) : effectiveClip;
+    let childClip = effectiveClip;
+    if (clipX || clipY) {
+      const borderLeft = parseFloat(style.borderLeftWidth || '0') || 0;
+      const borderTop = parseFloat(style.borderTopWidth || '0') || 0;
+      const scrollportLeft = rect.left + borderLeft;
+      const scrollportTop = rect.top + borderTop;
+      const scrollportRect = {
+        left: scrollportLeft,
+        top: scrollportTop,
+        right: scrollportLeft + (el.clientWidth || 0),
+        bottom: scrollportTop + (el.clientHeight || 0),
+      };
+      childClip = intersectClip(effectiveClip, scrollportRect, clipX, clipY);
+    }
 
     const children = childElementsOf(el);
     for (let i = 0; i < children.length; i++) {

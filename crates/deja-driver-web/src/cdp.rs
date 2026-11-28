@@ -82,6 +82,7 @@ pub(crate) struct CdpEventState {
     network_notify: Notify,
     detached: AtomicBool,
     detached_notify: Notify,
+    session_crash: StdMutex<Option<RecordedCrash>>,
     crash_sink: Arc<StdMutex<Option<RecordedCrash>>>,
 }
 
@@ -99,6 +100,7 @@ impl CdpEventState {
             network_notify: Notify::new(),
             detached: AtomicBool::new(false),
             detached_notify: Notify::new(),
+            session_crash: StdMutex::new(None),
             crash_sink,
         }
     }
@@ -177,6 +179,10 @@ impl CdpEventState {
             process: process.into(),
             detail: detail.into(),
         };
+        {
+            let mut session_guard = self.session_crash.lock().unwrap_or_else(|p| p.into_inner());
+            *session_guard = Some(crash.clone());
+        }
         let mut guard = self.crash_sink.lock().unwrap_or_else(|p| p.into_inner());
         *guard = Some(crash);
     }
@@ -669,6 +675,15 @@ impl CdpClient {
 
     pub(crate) fn is_detached(&self) -> bool {
         self.inner.events.detached.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn session_crash(&self) -> Option<RecordedCrash> {
+        self.inner
+            .events
+            .session_crash
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
     }
 
     fn closed_message(&self) -> String {

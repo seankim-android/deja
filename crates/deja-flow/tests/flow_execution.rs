@@ -4562,3 +4562,111 @@ appId: dev.deja.checkout
         "scrollUntilVisible must keep scrolling when overflow clip leaves only 10% visible"
     );
 }
+
+#[tokio::test]
+async fn codex_r3_f2_web_selector_tap_refuses_occluded_element_while_assert_and_point_tap_succeed()
+{
+    let ws = TempDir::new("codex-r3-f2-occluded-web-tap");
+    let web_caps = DriverCapabilities::with([
+        DriverCapability::AccessibilityTree,
+        DriverCapability::CompoundAct,
+    ]);
+
+    let make_occluded_screen = |hittable: bool| {
+        let mut btn = node(
+            0,
+            None,
+            "pay_btn",
+            "Pay now",
+            UiRect::new(100.0, 200.0, 180.0, 48.0),
+        );
+        btn.source = "web".to_string();
+        btn.is_on_screen = true;
+        btn.hittable = hittable;
+        hierarchy_of(vec![btn])
+    };
+
+    // 1. Occluded button (`hittable: false`) on `"web"`: `tapOn`, `doubleTapOn`, and `longPressOn`
+    // MUST fail without dispatching ANY tap event onto the obscuring overlay!
+    for tap_yaml in [
+        "appId: http://127.0.0.1:4174\n---\n- tapOn:\n    id: pay_btn\n",
+        "appId: http://127.0.0.1:4174\n---\n- doubleTapOn:\n    id: pay_btn\n",
+        "appId: http://127.0.0.1:4174\n---\n- longPressOn:\n    id: pay_btn\n",
+    ] {
+        let driver = MockDriver::with_caps("web", web_caps.clone());
+        driver.set_screen(make_occluded_screen(false));
+        let mut cfg = FlowExecutionConfig::new(ws.path().to_path_buf());
+        cfg.default_step_timeout = Duration::from_millis(200);
+        let out = FlowExecutor::new(cfg)
+            .execute_yaml(&driver, tap_yaml, &CancellationToken::new())
+            .await;
+        assert!(
+            !out.passed,
+            "web selector tap on occluded element must fail: {tap_yaml}"
+        );
+        let failed = out.failed_step.expect("failed_step present");
+        assert_eq!(failed.kind, StepFailureKind::SelectorNotFound);
+        assert!(
+            failed.message.contains("occluded"),
+            "failure message should mention occlusion: {}",
+            failed.message
+        );
+        let tap_events: Vec<_> = driver
+            .events()
+            .into_iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    DriverEvent::Tap(_, _)
+                        | DriverEvent::DoubleTap(_, _)
+                        | DriverEvent::LongPress(_, _, _)
+                )
+            })
+            .collect();
+        assert!(
+            tap_events.is_empty(),
+            "occluded selector tap must NEVER dispatch pointer events: {tap_events:?}"
+        );
+    }
+
+    // 2. `assertVisible` AND explicit coordinate `point:` taps STILL succeed on the same screen!
+    let driver_ok = MockDriver::with_caps("web", web_caps.clone());
+    driver_ok.set_screen(make_occluded_screen(false));
+    let ok_yaml = r#"
+appId: http://127.0.0.1:4174
+---
+- assertVisible:
+    id: pay_btn
+- tapOn:
+    point: "50, 50"
+"#;
+    let ok_out = FlowExecutor::new(FlowExecutionConfig::new(ws.path().to_path_buf()))
+        .execute_yaml(&driver_ok, ok_yaml, &CancellationToken::new())
+        .await;
+    assert!(
+        ok_out.passed,
+        "assertVisible and explicit point tap must still succeed: {:#?}",
+        ok_out.failed_step
+    );
+    assert!(driver_ok.events().contains(&DriverEvent::Tap(50.0, 50.0)));
+
+    // 3. When the overlay clears on poll #2 (`hittable: false` -> `hittable: true`), `tapOn`
+    // keeps polling and taps cleanly once unoccluded!
+    let driver_poll = MockDriver::with_caps("web", web_caps);
+    driver_poll.push_hierarchy(make_occluded_screen(false));
+    driver_poll.set_screen(make_occluded_screen(true));
+    let poll_yaml = "appId: http://127.0.0.1:4174\n---\n- tapOn:\n    id: pay_btn\n";
+    let poll_out = FlowExecutor::new(FlowExecutionConfig::new(ws.path().to_path_buf()))
+        .execute_yaml(&driver_poll, poll_yaml, &CancellationToken::new())
+        .await;
+    assert!(
+        poll_out.passed,
+        "tapOn must wait until overlay clears and succeed: {:#?}",
+        poll_out.failed_step
+    );
+    assert!(
+        driver_poll
+            .events()
+            .contains(&DriverEvent::Tap(190.0, 224.0))
+    );
+}

@@ -7,7 +7,7 @@ pub mod driver;
 pub mod error;
 pub mod input;
 
-pub use browser::{discover_chromium, probe_chromium_version};
+pub use browser::{discover_chromium, discover_working_chromium, probe_chromium_version};
 pub use driver::{WebDriver, WebDriverConfig};
 pub use error::{Result, WebDriverError, map_web_err};
 pub use input::{ScreenSize, format_web_runtime_suffix, validate_loopback_http_url};

@@ -1148,7 +1148,10 @@ pub async fn wait_local<D: PlatformDriver + ?Sized>(
                         }
                     }
 
-                    let matched_node = compiled.match_one(&effective.nodes).cloned();
+                    let matched_node = compiled
+                        .match_one(&effective.nodes)
+                        .filter(|node| !req.require_hittable || node.hittable)
+                        .cloned();
                     let condition_met = if req.not_visible {
                         // Never falsely pass `not_visible` on a truncated hierarchy capture!
                         if effective_truncated {

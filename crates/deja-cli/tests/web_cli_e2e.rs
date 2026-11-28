@@ -506,6 +506,8 @@ async fn live_web_dom_ancestor_opacity_and_clipped_visible_frame_in_chromium() {
       #clip_box { width: 120px; height: 60px; overflow: hidden; margin-top: 20px; }
       #clipped_btn { width: 320px; height: 60px; border: 0; }
       #pay_btn { width: 160px; height: 44px; margin-top: 16px; }
+      #border_clip { position: relative; width: 200px; height: 120px; border: 40px solid #333; overflow: hidden; margin-top: 16px; }
+      #behind_border { position: absolute; left: -35px; top: 10px; width: 30px; height: 30px; border: 0; }
     </style>
   </head>
   <body>
@@ -516,6 +518,20 @@ async fn live_web_dom_ancestor_opacity_and_clipped_visible_frame_in_chromium() {
       <button id="clipped_btn" type="button">Wide clipped button</button>
     </div>
     <button id="pay_btn" aria-label="Submit order" type="button">Pay now</button>
+    <span id="lbl_ref">Referenced Label</span>
+    <button id="labelled_btn" aria-labelledby="lbl_ref" aria-label="Fallback Label" type="button">Btn</button>
+    <div id="border_clip">
+      <button id="behind_border" type="button">Hidden Behind Border</button>
+    </div>
+    <fieldset disabled>
+      <legend><button id="in_legend" type="button">OK</button></legend>
+      <button id="in_body" type="button">No</button>
+    </fieldset>
+    <select id="opt_select">
+      <optgroup disabled>
+        <option id="disabled_opt">Locked</option>
+      </optgroup>
+    </select>
     <p id="click_status">idle</p>
     <script>
       document.getElementById('clipped_btn').addEventListener('click', () => {
@@ -648,6 +664,60 @@ async fn live_web_dom_ancestor_opacity_and_clipped_visible_frame_in_chromium() {
         .match_one(&h.nodes)
         .expect("by_text(Pay now) must match pay_btn");
     assert_eq!(match_visible.identifier, "pay_btn");
+
+    // Codex R3 Finding 4: overflow container clips descendants to scrollport (excluding 40px
+    // border), so a button positioned solely behind the border is NOT on-screen or hittable!
+    let behind_border = h
+        .nodes
+        .iter()
+        .find(|n| n.identifier == "behind_border")
+        .expect("behind_border node present");
+    assert!(
+        !behind_border.is_on_screen
+            && !behind_border.hittable
+            && behind_border.visible_frame.is_none(),
+        "element positioned solely behind overflow container border must not be on-screen or hittable: {behind_border:#?}"
+    );
+
+    // Codex R3 Finding 5: `aria-labelledby` takes precedence over `aria-label` per W3C AccName.
+    let labelled_btn = h
+        .nodes
+        .iter()
+        .find(|n| n.identifier == "labelled_btn")
+        .expect("labelled_btn node present");
+    assert_eq!(labelled_btn.label, "Referenced Label");
+    assert_eq!(labelled_btn.title, "Btn");
+
+    // Codex R3 Finding 7: Chromium native `:disabled` keeps controls inside a disabled
+    // `<fieldset>`'s first `<legend>` enabled while disabling controls in its body and `<option>`
+    // inside `<optgroup disabled>`.
+    let in_legend = h
+        .nodes
+        .iter()
+        .find(|n| n.identifier == "in_legend")
+        .expect("in_legend node present");
+    let in_body = h
+        .nodes
+        .iter()
+        .find(|n| n.identifier == "in_body")
+        .expect("in_body node present");
+    let disabled_opt = h
+        .nodes
+        .iter()
+        .find(|n| n.identifier == "disabled_opt")
+        .expect("disabled_opt node present");
+    assert!(
+        in_legend.enabled,
+        "button inside disabled fieldset's first <legend> must remain enabled: {in_legend:#?}"
+    );
+    assert!(
+        !in_body.enabled,
+        "button inside disabled fieldset body must be disabled: {in_body:#?}"
+    );
+    assert!(
+        !disabled_opt.enabled,
+        "option inside <optgroup disabled> must be disabled: {disabled_opt:#?}"
+    );
 
     driver.shutdown().await.unwrap();
     stop.store(true, Ordering::SeqCst);

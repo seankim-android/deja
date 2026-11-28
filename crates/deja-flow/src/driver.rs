@@ -636,6 +636,10 @@ pub struct WaitSelectorRequest {
     pub app_id: String,
     pub selector: Selector,
     pub not_visible: bool,
+    /// When `true` (used for Web selector-based taps), a matched element is only accepted once
+    /// `node.hittable == true` so occluded elements behind a modal/overlay keep polling until
+    /// unoccluded or timeout instead of dispatching a click onto the obscuring overlay.
+    pub require_hittable: bool,
     pub wait_stable: bool,
     pub stable_polls: usize,
     /// When `Some(n)`, fails fast on a missing selector once the screen produces `n`
@@ -656,6 +660,7 @@ impl WaitSelectorRequest {
             app_id: app_id.into(),
             selector,
             not_visible: false,
+            require_hittable: false,
             wait_stable: false,
             stable_polls: 2,
             fail_fast_on_settle_polls: None,

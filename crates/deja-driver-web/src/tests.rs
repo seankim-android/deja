@@ -28,8 +28,9 @@ use tokio_util::sync::CancellationToken;
 
 use crate::browser::{
     BrowserLaunchOptions, ManagedBrowser, TempProfileDir, discover_chromium_with_cwd_and_fallbacks,
-    discover_chromium_with_fallbacks, extract_devtools_ws_url_from_line,
-    parse_chromium_version_output, probe_chromium_version, safe_pgid,
+    discover_chromium_with_fallbacks, discover_working_chromium_with_cwd_and_fallbacks,
+    extract_devtools_ws_url_from_line, parse_chromium_version_output, probe_chromium_version,
+    safe_pgid,
 };
 use crate::cdp::{CdpClient, RecordedCrash, now_epoch_ms};
 use crate::dom::{
@@ -366,6 +367,7 @@ struct MockCdpServer {
     ws_url: String,
     calls: Arc<StdMutex<Vec<RecordedCdpCall>>>,
     event_tx: Arc<StdMutex<Option<mpsc::UnboundedSender<Value>>>>,
+    drop_tx: Arc<StdMutex<Option<tokio::sync::oneshot::Sender<()>>>>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -377,9 +379,12 @@ impl MockCdpServer {
         let calls: Arc<StdMutex<Vec<RecordedCdpCall>>> = Arc::new(StdMutex::new(Vec::new()));
         let event_tx: Arc<StdMutex<Option<mpsc::UnboundedSender<Value>>>> =
             Arc::new(StdMutex::new(None));
+        let drop_tx: Arc<StdMutex<Option<tokio::sync::oneshot::Sender<()>>>> =
+            Arc::new(StdMutex::new(None));
 
         let calls_clone = Arc::clone(&calls);
         let event_slot = Arc::clone(&event_tx);
+        let drop_slot = Arc::clone(&drop_tx);
         let task = tokio::spawn(async move {
             while let Ok((stream, _)) = listener.accept().await {
                 let Ok(ws) = accept_async(stream).await else {
@@ -387,9 +392,14 @@ impl MockCdpServer {
                 };
                 let (mut sink, mut source) = ws.split();
                 let (out_tx, mut out_rx) = mpsc::unbounded_channel::<Value>();
+                let (conn_drop_tx, mut conn_drop_rx) = tokio::sync::oneshot::channel::<()>();
                 {
                     let mut slot = event_slot.lock().unwrap();
                     *slot = Some(out_tx.clone());
+                }
+                {
+                    let mut dslot = drop_slot.lock().unwrap();
+                    *dslot = Some(conn_drop_tx);
                 }
                 let writer = tokio::spawn(async move {
                     while let Some(msg) = out_rx.recv().await {
@@ -402,29 +412,38 @@ impl MockCdpServer {
 
                 let handler_c = Arc::clone(&handler);
                 let calls_c = Arc::clone(&calls_clone);
-                while let Some(Ok(frame)) = source.next().await {
-                    let Message::Text(txt) = frame else {
-                        continue;
-                    };
-                    let Ok(val) = serde_json::from_str::<Value>(txt.as_str()) else {
-                        continue;
-                    };
-                    let call = RecordedCdpCall {
-                        id: val.get("id").and_then(Value::as_u64).unwrap_or(0),
-                        session_id: val
-                            .get("sessionId")
-                            .and_then(Value::as_str)
-                            .map(ToString::to_string),
-                        method: val
-                            .get("method")
-                            .and_then(Value::as_str)
-                            .unwrap_or("")
-                            .to_string(),
-                        params: val.get("params").cloned().unwrap_or(Value::Null),
-                    };
-                    calls_c.lock().unwrap().push(call.clone());
-                    if let Some(resp) = handler_c(call, out_tx.clone()) {
-                        let _ = out_tx.send(resp);
+                loop {
+                    tokio::select! {
+                        biased;
+                        _ = &mut conn_drop_rx => break,
+                        next_item = source.next() => {
+                            let Some(Ok(frame)) = next_item else {
+                                break;
+                            };
+                            let Message::Text(txt) = frame else {
+                                continue;
+                            };
+                            let Ok(val) = serde_json::from_str::<Value>(txt.as_str()) else {
+                                continue;
+                            };
+                            let call = RecordedCdpCall {
+                                id: val.get("id").and_then(Value::as_u64).unwrap_or(0),
+                                session_id: val
+                                    .get("sessionId")
+                                    .and_then(Value::as_str)
+                                    .map(ToString::to_string),
+                                method: val
+                                    .get("method")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("")
+                                    .to_string(),
+                                params: val.get("params").cloned().unwrap_or(Value::Null),
+                            };
+                            calls_c.lock().unwrap().push(call.clone());
+                            if let Some(resp) = handler_c(call, out_tx.clone()) {
+                                let _ = out_tx.send(resp);
+                            }
+                        }
                     }
                 }
                 writer.abort();
@@ -435,6 +454,7 @@ impl MockCdpServer {
             ws_url,
             calls,
             event_tx,
+            drop_tx,
             task,
         }
     }
@@ -446,6 +466,12 @@ impl MockCdpServer {
     fn push_event(&self, event: Value) {
         if let Some(tx) = self.event_tx.lock().unwrap().as_ref() {
             let _ = tx.send(event);
+        }
+    }
+
+    fn drop_active_connection(&self) {
+        if let Some(tx) = self.drop_tx.lock().unwrap().take() {
+            let _ = tx.send(());
         }
     }
 }
@@ -2256,4 +2282,214 @@ async fn codex_r2_f7_bare_relative_override_resolves_to_absolute_path_never_path
         WebDriverError::InvalidChromiumPath { ref source_var, ref path, .. }
             if source_var == "CHROME_PATH" && path.is_absolute()
     ));
+}
+
+// ===========================================================================
+// Codex Round 3 Regression Tests (Findings 1, 3, 4, 5, 6, 7)
+// ===========================================================================
+
+#[tokio::test]
+async fn codex_r3_f1_crash_and_disconnect_fail_active_flow_and_defer_recovery_to_ensure_session() {
+    use deja_flow::{Selector, WaitSelectorRequest, wait_local};
+
+    let server = MockCdpServer::start(standard_mock_handler(
+        Arc::new(StdMutex::new(sample_dom_snapshot(false))),
+        Arc::new(StdMutex::new(None)),
+    ))
+    .await;
+    let driver = WebDriver::with_cdp_url_for_tests(WebDriverConfig::new(), server.ws_url.clone());
+    let cancel = CancellationToken::new();
+    let app = "http://127.0.0.1:4174";
+
+    // 1. Renderer crash (`Inspector.targetCrashed`) between steps MUST fail the very next
+    // `hierarchy()` and `assertNotVisible` (`wait_local`) with `AppCrashed` without respawning!
+    driver.ensure_session(&cancel).await.unwrap();
+    assert_eq!(driver.attach_count(), 1);
+    let _ = driver.hierarchy(app, false, None, &cancel).await.unwrap();
+
+    server.push_event(json!({
+        "method": "Inspector.targetCrashed",
+        "sessionId": "sess-1",
+        "params": {}
+    }));
+    tokio::time::sleep(Duration::from_millis(30)).await;
+
+    let h_err = driver
+        .hierarchy(app, false, None, &cancel)
+        .await
+        .expect_err("hierarchy after renderer crash must fail instead of respawning");
+    assert!(
+        matches!(h_err, DriverError::AppCrashed(_)),
+        "expected AppCrashed, got {h_err:?}"
+    );
+    assert_eq!(
+        driver.attach_count(),
+        1,
+        "mid-flow crash must NEVER silently respawn a fresh browser"
+    );
+
+    // An `assertNotVisible` poll right after the crash MUST ALSO fail with `AppCrashed`, never
+    // passing against a silently respawned `about:blank` page!
+    let nv_err = wait_local(
+        &driver,
+        &WaitSelectorRequest::not_visible(
+            app,
+            Selector::by_text("Sign in"),
+            Duration::from_millis(500),
+        ),
+        &cancel,
+    )
+    .await
+    .expect_err("assertNotVisible must fail with AppCrashed after renderer crash");
+    assert!(
+        matches!(nv_err, DriverError::AppCrashed(_)),
+        "expected AppCrashed from assertNotVisible, got {nv_err:?}"
+    );
+    assert_eq!(driver.attach_count(), 1);
+
+    // Explicit `ensure_session` recovers cleanly!
+    driver.ensure_session(&cancel).await.unwrap();
+    assert_eq!(driver.attach_count(), 2);
+    let recovered = driver.hierarchy(app, false, None, &cancel).await.unwrap();
+    assert_eq!(recovered.nodes.len(), 3);
+
+    // 2. Unexpected WebSocket disconnect MUST fail the active flow cleanly (no silent respawn)
+    // and recover only on the next explicit `ensure_session`.
+    server.drop_active_connection();
+    tokio::time::sleep(Duration::from_millis(30)).await;
+
+    let drop_err = driver
+        .hierarchy(app, false, None, &cancel)
+        .await
+        .expect_err("hierarchy after unexpected CDP disconnect must fail closed");
+    assert!(
+        matches!(drop_err, DriverError::SessionClosed(_)),
+        "expected SessionClosed after socket drop, got {drop_err:?}"
+    );
+    assert_eq!(driver.attach_count(), 2);
+
+    driver.ensure_session(&cancel).await.unwrap();
+    assert_eq!(driver.attach_count(), 3);
+    let recovered2 = driver.hierarchy(app, false, None, &cancel).await.unwrap();
+    assert_eq!(recovered2.nodes.len(), 3);
+    driver.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn codex_r3_f3_discover_working_chromium_skips_broken_path_candidate_and_fails_closed_on_override()
+ {
+    let dir = TempDir::new("working-chromium");
+    let path_dir = dir.path().join("bin");
+    let broken_chromium = path_dir.join("chromium");
+    let working_chrome = path_dir.join("google-chrome");
+
+    write_executable(
+        &broken_chromium,
+        "#!/bin/sh\necho 'missing lib' >&2\nexit 1\n",
+    );
+    write_executable(
+        &working_chrome,
+        "#!/bin/sh\necho 'Google Chrome 147.0.1.2'\n",
+    );
+
+    let cancel = CancellationToken::new();
+
+    // 1. Implicit PATH discovery skips broken `chromium` and returns working `google-chrome`.
+    let mut env = BTreeMap::new();
+    env.insert("PATH".to_string(), path_dir.to_string_lossy().into_owned());
+    let (chosen, version) =
+        discover_working_chromium_with_cwd_and_fallbacks(&env, None, &[], &cancel)
+            .await
+            .expect("should skip broken chromium and find working google-chrome");
+    assert_eq!(chosen, working_chrome);
+    assert_eq!(version, "147.0.1.2");
+
+    // 2. Explicit broken `DEJA_CHROME` still fails closed and NEVER falls back to PATH.
+    env.insert(
+        "DEJA_CHROME".to_string(),
+        broken_chromium.to_string_lossy().into_owned(),
+    );
+    let err = discover_working_chromium_with_cwd_and_fallbacks(&env, None, &[], &cancel)
+        .await
+        .expect_err("explicit broken DEJA_CHROME must fail closed");
+    assert!(
+        matches!(
+            err,
+            WebDriverError::BrowserExitedEarly {
+                status: Some(1),
+                ..
+            }
+        ),
+        "expected BrowserExitedEarly on broken explicit override, got {err:?}"
+    );
+}
+
+#[test]
+fn codex_r3_f6_shift_maps_digits_and_punctuation_preserving_physical_code() {
+    let cases = [
+        ("1", "!", "Digit1", i32::from(b'1')),
+        ("2", "@", "Digit2", i32::from(b'2')),
+        ("3", "#", "Digit3", i32::from(b'3')),
+        ("4", "$", "Digit4", i32::from(b'4')),
+        ("5", "%", "Digit5", i32::from(b'5')),
+        ("6", "^", "Digit6", i32::from(b'6')),
+        ("7", "&", "Digit7", i32::from(b'7')),
+        ("8", "*", "Digit8", i32::from(b'8')),
+        ("9", "(", "Digit9", i32::from(b'9')),
+        ("0", ")", "Digit0", i32::from(b'0')),
+        ("`", "~", "Backquote", 192),
+        ("-", "_", "Minus", 189),
+        ("=", "+", "Equal", 187),
+        ("[", "{", "BracketLeft", 219),
+        ("]", "}", "BracketRight", 221),
+        ("\\", "|", "Backslash", 220),
+        (";", ":", "Semicolon", 186),
+        ("'", "\"", "Quote", 222),
+        (",", "<", "Comma", 188),
+        (".", ">", "Period", 190),
+        ("/", "?", "Slash", 191),
+    ];
+
+    for (raw, expected_shifted, expected_code, expected_vk) in cases {
+        let resolved = resolve_key_press(&KeyPress {
+            key: raw.to_string(),
+            modifiers: vec!["Shift".to_string()],
+            count: 1,
+        })
+        .unwrap();
+        match resolved {
+            ResolvedKeyAction::Dispatch { spec, count } => {
+                assert_eq!(count, 1);
+                assert_eq!(spec.key, expected_shifted, "raw={raw}");
+                assert_eq!(spec.text.as_deref(), Some(expected_shifted), "raw={raw}");
+                assert_eq!(spec.unmodified_text.as_deref(), Some(raw), "raw={raw}");
+                assert_eq!(spec.code, expected_code, "raw={raw}");
+                assert_eq!(spec.windows_virtual_key_code, expected_vk, "raw={raw}");
+                assert_eq!(spec.modifiers, MODIFIER_SHIFT, "raw={raw}");
+            }
+            other => panic!("expected Dispatch for Shift+{raw}, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn codex_r3_f4_f5_f7_dom_script_scrollport_labelledby_and_native_disabled_invariants() {
+    let script = crate::dom::AX_DOM_SCRIPT;
+    // Finding 4: scrollport clipping uses borderLeftWidth/borderTopWidth + clientWidth/clientHeight.
+    assert!(script.contains("borderLeftWidth"));
+    assert!(script.contains("borderTopWidth"));
+    assert!(script.contains("el.clientWidth"));
+    assert!(script.contains("el.clientHeight"));
+    // Finding 5: `resolveAriaLabelledBy` precedes `aria-label` in `extractAccessibleName`.
+    let fn_start = script.find("function extractAccessibleName").unwrap();
+    let fn_slice = &script[fn_start..fn_start + 350];
+    let pos_labelledby = fn_slice.find("resolveAriaLabelledBy").unwrap();
+    let pos_aria_label = fn_slice.find("getAttribute('aria-label')").unwrap();
+    assert!(
+        pos_labelledby < pos_aria_label,
+        "aria-labelledby must resolve before aria-label per W3C AccName"
+    );
+    // Finding 7: native `:disabled` matching replaces manual fieldset ancestor walk.
+    assert!(script.contains("el.matches(':disabled')"));
+    assert!(!script.contains("fieldset[disabled]"));
 }
