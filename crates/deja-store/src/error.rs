@@ -112,6 +112,7 @@ impl StoreError {
             Self::Core(CoreError::FlowChanged { .. }) => "FLOW_CHANGED",
             Self::Core(CoreError::AssertionHashChanged { .. }) => "ASSERTIONS_CHANGED",
             Self::Core(CoreError::InvalidManifest(_)) => "INVALID_MANIFEST",
+            Self::Core(CoreError::Cancelled) => "CANCELLED",
             Self::Core(_) => "CORE_ERROR",
             Self::Sqlite(_) => "SQLITE_ERROR",
             Self::Io(_) => "IO_ERROR",

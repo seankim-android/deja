@@ -4,7 +4,7 @@
 //! cancellation (`DEJA-66`).
 
 use std::cmp::Reverse;
-use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -25,18 +25,19 @@ use deja_store::{
     validate_store_id,
 };
 use sha2::{Digest, Sha256};
-use tokio::sync::{Mutex as AsyncMutex, OnceCell};
+use tokio::sync::{Mutex as AsyncMutex, MutexGuard, OnceCell};
+use tokio_util::sync::CancellationToken;
 
 use crate::CliDeps;
 use crate::cli::RunArgs;
 use crate::commands::exec_common::{
     ExecutedAttempt, GoalTargetFilter, allocate_batch_id, allocate_batch_report_rel_path_for_id,
     allocate_report_rel_path, build_base_report, build_consumer_flows, build_driver_context,
-    check_closure_forbidden_values, emit_early_exec_error,
+    check_closure_forbidden_values, collect_config_manifest_protected_paths, emit_early_exec_error,
     execute_single_attempt_with_screenshot_dir, failure_run_outcome, make_walk_identity,
     parse_goals_file_for_target, to_execution_result, validate_closure_app_id_confinement,
-    validate_explicit_output_path, validate_no_implicit_report_collision,
-    write_internal_batch_reports, write_internal_reports,
+    validate_explicit_output_path_with_precomputed_manifest, validate_no_implicit_report_collision,
+    validate_non_overlapping_outputs, write_internal_batch_reports, write_internal_reports,
 };
 use crate::commands::manifest::has_unsafe_control_or_bidi_char;
 use crate::commands::run::{
@@ -78,6 +79,17 @@ struct BatchGoal {
     index: usize,
     goal: Goal,
     historical_median_ms: Option<u64>,
+    /// Strict non-empty subset of shard indices eligible to execute this goal (`None` means all
+    /// shards are eligible, or no shard is eligible so any shard may emit the refusal/error).
+    eligible_shards: Option<BTreeSet<usize>>,
+}
+
+impl BatchGoal {
+    fn is_eligible_for(&self, shard_idx: usize) -> bool {
+        self.eligible_shards
+            .as_ref()
+            .is_none_or(|allowed| allowed.contains(&shard_idx))
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -200,6 +212,30 @@ pub async fn run_batch(
     cli_junit: Option<PathBuf>,
     explicit_report: Option<PathBuf>,
 ) -> u8 {
+    run_batch_inner(
+        args,
+        explicit_config,
+        json_mode,
+        deps,
+        goals_abs,
+        cli_junit,
+        explicit_report,
+        Arc::new(AsyncMutex::new(())),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_batch_inner(
+    args: &RunArgs,
+    explicit_config: Option<&Path>,
+    json_mode: bool,
+    deps: &CliDeps,
+    goals_abs: Option<PathBuf>,
+    cli_junit: Option<PathBuf>,
+    explicit_report: Option<PathBuf>,
+    manifest_mutex: Arc<AsyncMutex<()>>,
+) -> u8 {
     let early_redaction =
         RedactionContext::new(&deps.cwd, deps.home_dir.as_deref(), &[], &deps.env);
     let first_devices_override: Option<String> = args.devices.first().map(|d| d.trim().to_string());
@@ -250,9 +286,35 @@ pub async fn run_batch(
         extra_protected_owned.iter().map(PathBuf::as_path).collect();
 
     let effective_junit: Option<PathBuf> = cli_junit.clone().or_else(|| config.junit.clone());
+    if let Err(msg) =
+        validate_non_overlapping_outputs(effective_junit.as_deref(), explicit_report.as_deref())
+    {
+        return emit_early_exec_error(
+            deps,
+            "run",
+            "batch",
+            None,
+            json_mode,
+            args.summary,
+            &redaction,
+            "OUTPUT_PATH_COLLISION",
+            &msg,
+            EXIT_USAGE_OR_CONFIG,
+        );
+    }
+
+    // Collect manifest-wide protected paths ONCE for the entire batch (preflight + every worker).
+    let manifest_protected = Arc::new(collect_config_manifest_protected_paths(&config));
+
     if let Some(ref jpath) = effective_junit
-        && let Err(msg) =
-            validate_explicit_output_path(jpath, "--junit", &config, None, &extra_protected_refs)
+        && let Err(msg) = validate_explicit_output_path_with_precomputed_manifest(
+            jpath,
+            "--junit",
+            &config,
+            None,
+            &manifest_protected,
+            &extra_protected_refs,
+        )
     {
         return emit_early_exec_error(
             deps,
@@ -268,8 +330,14 @@ pub async fn run_batch(
         );
     }
     if let Some(ref rpath) = explicit_report
-        && let Err(msg) =
-            validate_explicit_output_path(rpath, "--report", &config, None, &extra_protected_refs)
+        && let Err(msg) = validate_explicit_output_path_with_precomputed_manifest(
+            rpath,
+            "--report",
+            &config,
+            None,
+            &manifest_protected,
+            &extra_protected_refs,
+        )
     {
         return emit_early_exec_error(
             deps,
@@ -572,52 +640,60 @@ pub async fn run_batch(
         }
     }
 
-    // Compute `build_fingerprint` ONCE via `stores[0]` and broadcast read-only (`Arc<String>`).
+    // Compute `build_fingerprint` ONCE via `stores[0]` inside a cancellable `spawn_blocking` task
+    // and broadcast read-only (`Arc<String>`).
     let build_path = config
         .build_path
         .as_ref()
         .expect("Execute capability requires build_path");
     let fp_t0 = Instant::now();
-    let fp_res = match opened_stores[0].fingerprint_with_cache(
-        &config.workspace_root,
-        build_path,
-        &config.platform,
-    ) {
-        Ok(r) => r,
-        Err(err) => {
-            close_all_stores(&opened_stores);
-            let code = exit_code_for_store_error(&err);
-            return emit_early_exec_error(
-                deps,
-                "run",
-                "batch",
-                effective_junit.as_deref(),
-                json_mode,
-                args.summary,
-                &redaction,
-                err.code(),
-                &format!("failed to fingerprint build: {err}"),
-                code,
-            );
-        }
-    };
-    let build_fingerprint_ms = fp_t0.elapsed().as_millis() as u64;
-    let build_fingerprint = Arc::new(fp_res.digest);
-
-    // Pool all integrity-verified historical `duration_ms` samples across EVERY shard store so
-    // LPT uses the exact pooled median rather than a skewed median-of-shard-medians.
-    let mut pooled_samples_by_goal: BTreeMap<String, Vec<u64>> = BTreeMap::new();
-    for store in &opened_stores {
-        match store.goal_duration_samples_ms() {
-            Ok(map) => {
-                for (goal_key, samples) in map {
-                    pooled_samples_by_goal
-                        .entry(goal_key)
-                        .or_default()
-                        .extend(samples);
-                }
+    let mut cancelled_during_setup = deps.cancel.is_cancelled();
+    let build_fingerprint = if cancelled_during_setup {
+        Arc::new(String::new())
+    } else {
+        let fp_store = Arc::clone(&opened_stores[0]);
+        let fp_ws = config.workspace_root.clone();
+        let fp_build_path = build_path.clone();
+        let fp_platform = config.platform.clone();
+        let fp_cancel_flag = Arc::new(AtomicBool::new(false));
+        let fp_worker_flag = Arc::clone(&fp_cancel_flag);
+        let mut fp_handle = tokio::task::spawn_blocking(move || {
+            fp_store.fingerprint_with_cache_cancellable(
+                &fp_ws,
+                &fp_build_path,
+                &fp_platform,
+                &fp_worker_flag,
+            )
+        });
+        let fp_outcome: Result<String, Option<StoreError>> = tokio::select! {
+            biased;
+            _ = deps.cancel.cancelled() => {
+                fp_cancel_flag.store(true, Ordering::SeqCst);
+                let _ = fp_handle.await;
+                Err(None)
             }
-            Err(err) => {
+            res = &mut fp_handle => match res {
+                Ok(Ok(r)) => Ok(r.digest),
+                Ok(Err(StoreError::Core(CoreError::Cancelled))) => Err(None),
+                Ok(Err(err)) => {
+                    if deps.cancel.is_cancelled() {
+                        Err(None)
+                    } else {
+                        Err(Some(err))
+                    }
+                }
+                Err(join_err) => Err(Some(StoreError::Io(std::io::Error::other(format!(
+                    "build fingerprinting task failed: {join_err}"
+                ))))),
+            },
+        };
+        match fp_outcome {
+            Ok(digest) => Arc::new(digest),
+            Err(None) => {
+                cancelled_during_setup = true;
+                Arc::new(String::new())
+            }
+            Err(Some(err)) => {
                 close_all_stores(&opened_stores);
                 let code = exit_code_for_store_error(&err);
                 return emit_early_exec_error(
@@ -629,21 +705,62 @@ pub async fn run_batch(
                     args.summary,
                     &redaction,
                     err.code(),
-                    &err.to_string(),
+                    &format!("failed to fingerprint build: {err}"),
                     code,
                 );
             }
         }
-    }
+    };
+    let build_fingerprint_ms = fp_t0.elapsed().as_millis() as u64;
+
+    // Pool all integrity-verified historical `duration_ms` samples across EVERY shard store so
+    // LPT uses the exact pooled median rather than a skewed median-of-shard-medians.
     let mut aggregated_medians: BTreeMap<String, u64> = BTreeMap::new();
-    for (goal_key, mut vals) in pooled_samples_by_goal {
-        if let Some(med) = integer_median(&mut vals) {
-            aggregated_medians.insert(goal_key, med);
+    if !cancelled_during_setup {
+        let mut pooled_samples_by_goal: BTreeMap<String, Vec<u64>> = BTreeMap::new();
+        for store in &opened_stores {
+            if deps.cancel.is_cancelled() {
+                cancelled_during_setup = true;
+                break;
+            }
+            match store.goal_duration_samples_ms() {
+                Ok(map) => {
+                    for (goal_key, samples) in map {
+                        pooled_samples_by_goal
+                            .entry(goal_key)
+                            .or_default()
+                            .extend(samples);
+                    }
+                }
+                Err(err) => {
+                    close_all_stores(&opened_stores);
+                    let code = exit_code_for_store_error(&err);
+                    return emit_early_exec_error(
+                        deps,
+                        "run",
+                        "batch",
+                        effective_junit.as_deref(),
+                        json_mode,
+                        args.summary,
+                        &redaction,
+                        err.code(),
+                        &err.to_string(),
+                        code,
+                    );
+                }
+            }
+        }
+        if !cancelled_during_setup {
+            for (goal_key, mut vals) in pooled_samples_by_goal {
+                if let Some(med) = integer_median(&mut vals) {
+                    aggregated_medians.insert(goal_key, med);
+                }
+            }
         }
     }
 
     // Build ordered input goals + LPT work queue: `(Reverse(historical_median_ms), index)`.
-    let input_goals: Vec<BatchGoal> = normalized_goals
+    let mut input_goals: Vec<BatchGoal> = normalized_goals
         .into_iter()
         .enumerate()
         .map(|(index, goal)| {
@@ -652,6 +769,7 @@ pub async fn run_batch(
                 index,
                 goal,
                 historical_median_ms,
+                eligible_shards: None,
             }
         })
         .collect();
@@ -662,7 +780,6 @@ pub async fn run_batch(
 
     // Resolve runtime ONCE per shard via `driver_factory.resolve_runtime`.
     let mut opened_shards: Vec<OpenedShard> = Vec::with_capacity(shard_specs.len());
-    let mut cancelled_during_setup = deps.cancel.is_cancelled();
     if !cancelled_during_setup {
         for (spec, store) in shard_specs.iter().zip(opened_stores.iter()) {
             let mut base_ctx = build_driver_context(
@@ -717,12 +834,45 @@ pub async fn run_batch(
         }
     }
 
+    // In multi-device sharding, probe read-only replay eligibility per `(goal, shard)` BEFORE
+    // spawning workers so each goal is scheduled only onto shards whose store/runtime can execute
+    // it (e.g., strict replay after `--verify --devices d1,d2` where goal A lives in store `d1`
+    // and goal B lives in store `d2`).
+    if !cancelled_during_setup && opened_shards.len() > 1 {
+        for bg in &mut lpt_sorted {
+            if deps.cancel.is_cancelled() {
+                cancelled_during_setup = true;
+                break;
+            }
+            let identity = make_walk_identity(&config, &bg.goal, (*build_fingerprint).clone());
+            let mut eligible = BTreeSet::new();
+            for (shard_idx, shard) in opened_shards.iter().enumerate() {
+                if let Ok(RunPlan::Execute(_)) = plan_execution(
+                    &config,
+                    consumer.as_deref(),
+                    &shard.store,
+                    &identity,
+                    shard.runtime.as_deref(),
+                    args.verify,
+                ) {
+                    eligible.insert(shard_idx);
+                }
+            }
+            if !eligible.is_empty() && eligible.len() < opened_shards.len() {
+                bg.eligible_shards = Some(eligible.clone());
+                input_goals[bg.index].eligible_shards = Some(eligible);
+            }
+        }
+    }
+
     let total_goals = input_goals.len();
     let results: Arc<AsyncMutex<Vec<Option<BatchGoalOutcomeRecord>>>> =
         Arc::new(AsyncMutex::new(vec![None; total_goals]));
     let refused_junit = Arc::new(AtomicBool::new(false));
     let refused_report = Arc::new(AtomicBool::new(false));
     let last_attach_error: Arc<AsyncMutex<Option<(u8, String)>>> = Arc::new(AsyncMutex::new(None));
+    let shard_attach_errors: Arc<AsyncMutex<BTreeMap<usize, (u8, String)>>> =
+        Arc::new(AsyncMutex::new(BTreeMap::new()));
 
     if cancelled_during_setup {
         close_all_stores(&opened_stores);
@@ -730,7 +880,6 @@ pub async fn run_batch(
         let queue: Arc<AsyncMutex<VecDeque<BatchGoal>>> =
             Arc::new(AsyncMutex::new(VecDeque::from(lpt_sorted)));
         let shared_staged: Arc<OnceCell<Option<SharedStagedBuild>>> = Arc::new(OnceCell::new());
-        let manifest_mutex: Arc<AsyncMutex<()>> = Arc::new(AsyncMutex::new(()));
         let extra_protected_arc = Arc::new(extra_protected_owned);
         let batch_screenshot_root = Arc::new(config.workspace_root.join(&batch_screenshots_rel));
 
@@ -741,7 +890,7 @@ pub async fn run_batch(
             .unwrap_or_else(|| usize::from(config.retries));
 
         let mut handles = Vec::with_capacity(opened_shards.len());
-        for shard in &opened_shards {
+        for (shard_idx, shard) in opened_shards.iter().enumerate() {
             let worker_ctx = WorkerSharedContext {
                 config: Arc::clone(&config),
                 consumer: consumer.clone(),
@@ -753,6 +902,7 @@ pub async fn run_batch(
                 max_extra_retries,
                 effective_junit: effective_junit.clone(),
                 explicit_report: explicit_report.clone(),
+                manifest_protected: Arc::clone(&manifest_protected),
                 extra_protected: Arc::clone(&extra_protected_arc),
                 batch_screenshot_root: Arc::clone(&batch_screenshot_root),
                 queue: Arc::clone(&queue),
@@ -762,8 +912,10 @@ pub async fn run_batch(
                 refused_junit: Arc::clone(&refused_junit),
                 refused_report: Arc::clone(&refused_report),
                 last_attach_error: Arc::clone(&last_attach_error),
+                shard_attach_errors: Arc::clone(&shard_attach_errors),
             };
             let worker_shard = WorkerShard {
+                shard_idx,
                 device: shard.device.clone(),
                 store_id: shard.store_id.clone(),
                 store: Arc::clone(&shard.store),
@@ -788,9 +940,10 @@ pub async fn run_batch(
     let cancelled = deps.cancel.is_cancelled() || cancelled_during_setup;
     let cancel_signal = deps.cancel_signal.load(Ordering::SeqCst);
     let attach_fallback = last_attach_error.lock().await.clone();
+    let per_shard_attach = shard_attach_errors.lock().await.clone();
 
     // Assemble deterministic `0..N` input-order results, marking any unstarted goals as skipped
-    // (on cancellation) or errored (if all shards failed to attach).
+    // (on cancellation) or errored (if eligible shard(s) failed to attach).
     let mut locked_results = results.lock().await;
     let mut final_records: Vec<BatchGoalOutcomeRecord> = Vec::with_capacity(total_goals);
     for bg in &input_goals {
@@ -799,12 +952,19 @@ pub async fn run_batch(
         } else if cancelled {
             final_records.push(make_skipped_goal_record(bg, &redaction));
         } else {
-            let (code, msg) = attach_fallback.clone().unwrap_or_else(|| {
-                (
-                    EXIT_FAILURE,
-                    "no available shard worker to execute remaining goal".to_string(),
-                )
+            let eligible_err = bg.eligible_shards.as_ref().and_then(|allowed| {
+                allowed
+                    .iter()
+                    .find_map(|idx| per_shard_attach.get(idx).cloned())
             });
+            let (code, msg) = eligible_err
+                .or_else(|| attach_fallback.clone())
+                .unwrap_or_else(|| {
+                    (
+                        EXIT_FAILURE,
+                        "no available shard worker to execute remaining goal".to_string(),
+                    )
+                });
             final_records.push(make_error_goal_record(
                 bg,
                 code,
@@ -1121,6 +1281,7 @@ fn derive_batch_outcome(cancelled: bool, exit_code: u8, goals: &[BatchGoalResult
 }
 
 struct WorkerShard {
+    shard_idx: usize,
     device: String,
     store_id: Option<String>,
     store: Arc<SqliteWalkStore>,
@@ -1140,6 +1301,7 @@ struct WorkerSharedContext {
     max_extra_retries: usize,
     effective_junit: Option<PathBuf>,
     explicit_report: Option<PathBuf>,
+    manifest_protected: Arc<BTreeSet<PathBuf>>,
     extra_protected: Arc<Vec<PathBuf>>,
     batch_screenshot_root: Arc<PathBuf>,
     queue: Arc<AsyncMutex<VecDeque<BatchGoal>>>,
@@ -1149,6 +1311,23 @@ struct WorkerSharedContext {
     refused_junit: Arc<AtomicBool>,
     refused_report: Arc<AtomicBool>,
     last_attach_error: Arc<AsyncMutex<Option<(u8, String)>>>,
+    shard_attach_errors: Arc<AsyncMutex<BTreeMap<usize, (u8, String)>>>,
+}
+
+async fn acquire_manifest_lock_cancellable<'a>(
+    manifest_mutex: &'a AsyncMutex<()>,
+    cancel: &CancellationToken,
+) -> Option<MutexGuard<'a, ()>> {
+    let guard = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => return None,
+        guard = manifest_mutex.lock() => guard,
+    };
+    if cancel.is_cancelled() {
+        drop(guard);
+        return None;
+    }
+    Some(guard)
 }
 
 async fn run_shard_worker(shard: WorkerShard, ctx: WorkerSharedContext) {
@@ -1164,7 +1343,20 @@ async fn run_shard_worker(shard: WorkerShard, ctx: WorkerSharedContext) {
             if ctx.deps.cancel.is_cancelled() {
                 None
             } else {
-                q.pop_front()
+                // Pop the highest-LPT goal eligible on this shard, preferring shard-constrained
+                // goals ahead of unconstrained goals so exclusive goals run in parallel while
+                // keeping exact LPT order whenever goals are unconstrained.
+                let pos = q
+                    .iter()
+                    .position(|bg| {
+                        bg.eligible_shards.is_some() && bg.is_eligible_for(shard.shard_idx)
+                    })
+                    .or_else(|| {
+                        q.iter().position(|bg| {
+                            bg.eligible_shards.is_none() && bg.is_eligible_for(shard.shard_idx)
+                        })
+                    });
+                pos.and_then(|idx| q.remove(idx))
             }
         };
         let Some(bg) = maybe_goal else {
@@ -1261,11 +1453,12 @@ async fn run_shard_worker(shard: WorkerShard, ctx: WorkerSharedContext) {
             ctx.extra_protected.iter().map(PathBuf::as_path).collect();
 
         if let Some(ref jpath) = ctx.effective_junit
-            && let Err(msg) = validate_explicit_output_path(
+            && let Err(msg) = validate_explicit_output_path_with_precomputed_manifest(
                 jpath,
                 "--junit",
                 &ctx.config,
                 Some(&closure),
+                &ctx.manifest_protected,
                 &extra_prot_refs,
             )
         {
@@ -1285,11 +1478,12 @@ async fn run_shard_worker(shard: WorkerShard, ctx: WorkerSharedContext) {
             continue;
         }
         if let Some(ref rpath) = ctx.explicit_report
-            && let Err(msg) = validate_explicit_output_path(
+            && let Err(msg) = validate_explicit_output_path_with_precomputed_manifest(
                 rpath,
                 "--report",
                 &ctx.config,
                 Some(&closure),
+                &ctx.manifest_protected,
                 &extra_prot_refs,
             )
         {
@@ -1431,6 +1625,10 @@ async fn run_shard_worker(shard: WorkerShard, ctx: WorkerSharedContext) {
                     let code = err.exit_code();
                     let msg = err.to_string();
                     *ctx.last_attach_error.lock().await = Some((code, msg.clone()));
+                    ctx.shard_attach_errors
+                        .lock()
+                        .await
+                        .insert(shard.shard_idx, (code, msg.clone()));
                     let rec = make_error_goal_record(
                         &bg,
                         code,
@@ -1487,6 +1685,10 @@ async fn run_shard_worker(shard: WorkerShard, ctx: WorkerSharedContext) {
                     let code = err.exit_code();
                     let msg = err.to_string();
                     *ctx.last_attach_error.lock().await = Some((code, msg.clone()));
+                    ctx.shard_attach_errors
+                        .lock()
+                        .await
+                        .insert(shard.shard_idx, (code, msg.clone()));
                     let rec = make_error_goal_record(
                         &bg,
                         code,
@@ -1537,6 +1739,10 @@ async fn run_shard_worker(shard: WorkerShard, ctx: WorkerSharedContext) {
                     store_goal_record(&ctx.results, bg.index, rec).await;
                 } else {
                     *ctx.last_attach_error.lock().await = Some((code, msg.clone()));
+                    ctx.shard_attach_errors
+                        .lock()
+                        .await
+                        .insert(shard.shard_idx, (code, msg.clone()));
                     let rec = make_error_goal_record(
                         &bg,
                         code,
@@ -1792,7 +1998,23 @@ async fn run_shard_worker(shard: WorkerShard, ctx: WorkerSharedContext) {
         let persist_res: Result<(), StoreError> = match &exec_plan.mode {
             ExecMode::ManifestVerify { flow_rel } => {
                 if final_passed {
-                    let _manifest_guard = ctx.manifest_mutex.lock().await;
+                    let Some(_manifest_guard) =
+                        acquire_manifest_lock_cancellable(&ctx.manifest_mutex, &ctx.deps.cancel)
+                            .await
+                    else {
+                        let rec = make_cancelled_goal_record(
+                            &bg,
+                            goal_t0.elapsed().as_millis() as u64,
+                            &shard.device,
+                            shard.store_id.as_deref(),
+                            shard.runtime.as_deref(),
+                            "cancelled while waiting for manifest lock",
+                            &ctx.redaction,
+                        );
+                        store_goal_record(&ctx.results, bg.index, rec).await;
+                        shard.goals_executed.fetch_add(1, Ordering::SeqCst);
+                        break;
+                    };
                     let cf = ctx.consumer.as_deref().expect("manifest mode");
                     cf.save_verified_manifest_walk(
                         &shard.store,
@@ -2340,5 +2562,458 @@ mod tests {
         assert_eq!(compute_batch_exit_code(false, 0, false, &[7, 6]), 6);
         assert_eq!(compute_batch_exit_code(false, 0, false, &[7, 0]), 7);
         assert_eq!(compute_batch_exit_code(false, 0, false, &[0, 0]), 0);
+    }
+
+    #[tokio::test]
+    async fn acquire_manifest_lock_cancellable_aborts_on_pre_cancel_and_while_waiting() {
+        // 1. Pre-cancelled token on an UNCONTENDED mutex must immediately return `None` (testing
+        //    both biased select and the post-acquire cancellation recheck).
+        let uncontended = Arc::new(AsyncMutex::new(()));
+        let pre_cancel = CancellationToken::new();
+        pre_cancel.cancel();
+        assert!(
+            acquire_manifest_lock_cancellable(&uncontended, &pre_cancel)
+                .await
+                .is_none()
+        );
+
+        // 2. Contended mutex held by another task: cancelling unblocks immediately WITHOUT waiting
+        //    for the holder to release the lock.
+        let contended = Arc::new(AsyncMutex::new(()));
+        let held = contended.lock().await;
+        let cancel = CancellationToken::new();
+        let cancel_bg = cancel.clone();
+        let waiter_mutex = Arc::clone(&contended);
+        let waiter = tokio::spawn(async move {
+            acquire_manifest_lock_cancellable(&waiter_mutex, &cancel_bg)
+                .await
+                .is_some()
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(15)).await;
+        cancel.cancel();
+        let acquired = tokio::time::timeout(std::time::Duration::from_secs(2), waiter)
+            .await
+            .expect("waiting on manifest_mutex must unblock promptly on cancel")
+            .unwrap();
+        assert!(!acquired);
+        drop(held);
+    }
+
+    #[tokio::test]
+    async fn regression_deja66_r2_f3_held_manifest_mutex_cancel_writes_no_sqlite_or_manifest() {
+        use std::collections::BTreeMap;
+        use std::fs;
+        use std::sync::Mutex as StdMutex;
+        use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+        use deja_core::{
+            DEFAULT_FLOW_SCHEMA_VERSION, MANIFEST_HASH_VERSION, ManifestWalk,
+            WALK_MANIFEST_VERSION, WalkIdentity, WalkManifest, collect_flow_closure,
+            fingerprint_file, serialize_walk_manifest,
+        };
+        use deja_flow::{
+            DriverCapabilities, DriverCapability, DriverCrashSignal, DriverFuture, KeyPress,
+            LaunchOptions, OpenLinkOptions, PlatformDriver, SwipeParams, UiHierarchy, UiNode,
+            UiPoint, UiRect, UiSize,
+        };
+        use tokio::sync::oneshot;
+
+        use crate::driver_factory::{
+            DoctorCheck, DoctorProbeRequest, DoctorProbes, DriverFactory, FactoryFuture,
+        };
+        use crate::output::OutputSink;
+
+        struct NoopProbes;
+        impl DoctorProbes for NoopProbes {
+            fn probe<'a>(
+                &'a self,
+                _req: &'a DoctorProbeRequest,
+            ) -> FactoryFuture<'a, Vec<DoctorCheck>> {
+                Box::pin(async { Vec::new() })
+            }
+        }
+
+        struct NotifyPassDriver {
+            caps: DriverCapabilities,
+            on_first_observe: Arc<StdMutex<Option<oneshot::Sender<()>>>>,
+        }
+        impl PlatformDriver for NotifyPassDriver {
+            fn platform(&self) -> &'static str {
+                "ios"
+            }
+            fn capabilities(&self) -> &DriverCapabilities {
+                &self.caps
+            }
+            fn ensure_session<'a>(
+                &'a self,
+                _cancel: &'a CancellationToken,
+            ) -> DriverFuture<'a, ()> {
+                Box::pin(async { Ok(()) })
+            }
+            fn launch_app<'a>(
+                &'a self,
+                _app_id: &'a str,
+                _opts: &'a LaunchOptions,
+                _cancel: &'a CancellationToken,
+            ) -> DriverFuture<'a, ()> {
+                Box::pin(async { Ok(()) })
+            }
+            fn stop_app<'a>(
+                &'a self,
+                _app_id: &'a str,
+                _cancel: &'a CancellationToken,
+            ) -> DriverFuture<'a, ()> {
+                Box::pin(async { Ok(()) })
+            }
+            fn kill_app<'a>(
+                &'a self,
+                _app_id: &'a str,
+                _cancel: &'a CancellationToken,
+            ) -> DriverFuture<'a, ()> {
+                Box::pin(async { Ok(()) })
+            }
+            fn clear_state<'a>(
+                &'a self,
+                _app_id: &'a str,
+                _cancel: &'a CancellationToken,
+            ) -> DriverFuture<'a, ()> {
+                Box::pin(async { Ok(()) })
+            }
+            fn clear_keychain<'a>(
+                &'a self,
+                _cancel: &'a CancellationToken,
+            ) -> DriverFuture<'a, ()> {
+                Box::pin(async { Ok(()) })
+            }
+            fn open_link<'a>(
+                &'a self,
+                _app_id: Option<&'a str>,
+                _url: &'a str,
+                _opts: &'a OpenLinkOptions,
+                _cancel: &'a CancellationToken,
+            ) -> DriverFuture<'a, ()> {
+                Box::pin(async { Ok(()) })
+            }
+            fn add_media<'a>(
+                &'a self,
+                _paths: &'a [PathBuf],
+                _cancel: &'a CancellationToken,
+            ) -> DriverFuture<'a, ()> {
+                Box::pin(async { Ok(()) })
+            }
+            fn hierarchy<'a>(
+                &'a self,
+                app_id: &'a str,
+                _include_system_ui: bool,
+                _known_hash: Option<&'a str>,
+                _cancel: &'a CancellationToken,
+            ) -> DriverFuture<'a, UiHierarchy> {
+                let tx = self.on_first_observe.lock().unwrap().take();
+                let app = app_id.to_string();
+                Box::pin(async move {
+                    if let Some(tx) = tx {
+                        let _ = tx.send(());
+                    }
+                    let node = UiNode {
+                        identifier: "ok".to_string(),
+                        label: "Done".to_string(),
+                        title: "Done".to_string(),
+                        hittable: true,
+                        frame: UiRect::new(10.0, 10.0, 100.0, 44.0),
+                        ..UiNode::default()
+                    };
+                    Ok(UiHierarchy {
+                        app_id: app,
+                        state: "foreground".to_string(),
+                        viewport: Some(UiSize::new(390.0, 844.0)),
+                        truncated: false,
+                        hierarchy_hash: String::new(),
+                        unchanged: false,
+                        nodes: vec![node],
+                    })
+                })
+            }
+            fn tap_point<'a>(
+                &'a self,
+                _app_id: &'a str,
+                _point: UiPoint,
+                _cancel: &'a CancellationToken,
+            ) -> DriverFuture<'a, ()> {
+                Box::pin(async { Ok(()) })
+            }
+            fn long_press_point<'a>(
+                &'a self,
+                _app_id: &'a str,
+                _point: UiPoint,
+                _duration_ms: Option<u64>,
+                _cancel: &'a CancellationToken,
+            ) -> DriverFuture<'a, ()> {
+                Box::pin(async { Ok(()) })
+            }
+            fn double_tap_point<'a>(
+                &'a self,
+                _app_id: &'a str,
+                _point: UiPoint,
+                _cancel: &'a CancellationToken,
+            ) -> DriverFuture<'a, ()> {
+                Box::pin(async { Ok(()) })
+            }
+            fn swipe<'a>(
+                &'a self,
+                _params: &'a SwipeParams,
+                _cancel: &'a CancellationToken,
+            ) -> DriverFuture<'a, ()> {
+                Box::pin(async { Ok(()) })
+            }
+            fn input_text<'a>(
+                &'a self,
+                _app_id: &'a str,
+                _text: &'a str,
+                _cancel: &'a CancellationToken,
+            ) -> DriverFuture<'a, ()> {
+                Box::pin(async { Ok(()) })
+            }
+            fn erase_text<'a>(
+                &'a self,
+                _app_id: &'a str,
+                _count: u32,
+                _cancel: &'a CancellationToken,
+            ) -> DriverFuture<'a, ()> {
+                Box::pin(async { Ok(()) })
+            }
+            fn press_key<'a>(
+                &'a self,
+                _app_id: &'a str,
+                _key: &'a KeyPress,
+                _cancel: &'a CancellationToken,
+            ) -> DriverFuture<'a, ()> {
+                Box::pin(async { Ok(()) })
+            }
+            fn hide_keyboard<'a>(
+                &'a self,
+                _app_id: &'a str,
+                _cancel: &'a CancellationToken,
+            ) -> DriverFuture<'a, ()> {
+                Box::pin(async { Ok(()) })
+            }
+            fn back<'a>(
+                &'a self,
+                _app_id: &'a str,
+                _cancel: &'a CancellationToken,
+            ) -> DriverFuture<'a, ()> {
+                Box::pin(async { Ok(()) })
+            }
+            fn take_screenshot<'a>(
+                &'a self,
+                _app_id: &'a str,
+                _cancel: &'a CancellationToken,
+            ) -> DriverFuture<'a, Vec<u8>> {
+                Box::pin(async { Ok(Vec::new()) })
+            }
+            fn check_app_crash<'a>(
+                &'a self,
+                _app_id: &'a str,
+                _since_epoch_ms: u64,
+                _cancel: &'a CancellationToken,
+            ) -> DriverFuture<'a, Option<DriverCrashSignal>> {
+                Box::pin(async { Ok(None) })
+            }
+            fn shutdown<'a>(&'a self) -> DriverFuture<'a, ()> {
+                Box::pin(async { Ok(()) })
+            }
+        }
+
+        struct NotifyFactory {
+            on_first_observe: Arc<StdMutex<Option<oneshot::Sender<()>>>>,
+        }
+        impl DriverFactory for NotifyFactory {
+            fn resolve_runtime<'a>(
+                &'a self,
+                _ctx: &'a DriverContext,
+                _cancel: &'a CancellationToken,
+            ) -> FactoryFuture<'a, Result<Option<String>, DriverFactoryError>> {
+                Box::pin(async { Ok(Some("ios-27.2".to_string())) })
+            }
+            fn create<'a>(
+                &'a self,
+                _ctx: &'a DriverContext,
+                _cancel: &'a CancellationToken,
+            ) -> FactoryFuture<'a, Result<Box<dyn PlatformDriver>, DriverFactoryError>>
+            {
+                let slot = Arc::clone(&self.on_first_observe);
+                Box::pin(async move {
+                    Ok(Box::new(NotifyPassDriver {
+                        caps: DriverCapabilities::with([
+                            DriverCapability::AccessibilityTree,
+                            DriverCapability::AppCrashReports,
+                        ]),
+                        on_first_observe: slot,
+                    }) as Box<dyn PlatformDriver>)
+                })
+            }
+            fn install_app<'a>(
+                &'a self,
+                _ctx: &'a DriverContext,
+                _cancel: &'a CancellationToken,
+            ) -> FactoryFuture<'a, Result<(), DriverFactoryError>> {
+                Box::pin(async { Ok(()) })
+            }
+        }
+
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let root = std::env::temp_dir().join(format!(
+            "deja-r2f3-manifest-mutex-{}-{nanos:x}",
+            std::process::id()
+        ));
+        fs::create_dir_all(root.join("flows")).unwrap();
+        fs::create_dir_all(root.join("build")).unwrap();
+        fs::write(root.join("build/App.bin"), b"build-v1").unwrap();
+        fs::write(
+            root.join("flows/g1.yaml"),
+            "appId: com.example.r2f3\n---\n- assertVisible: Done\n",
+        )
+        .unwrap();
+        let cl = collect_flow_closure(&root, &root.join("flows/g1.yaml")).unwrap();
+        let orig_assertions = assertions_sha256(&cl).unwrap();
+        // Put a DIFFERENT closure hash in `deja.walks.json` (same assertions) so `--verify` would
+        // rewrite `deja.walks.json` if `save_verified_manifest_walk` were ever called!
+        let stale_manifest = WalkManifest {
+            manifest_version: WALK_MANIFEST_VERSION,
+            hash_version: MANIFEST_HASH_VERSION,
+            walks: vec![ManifestWalk {
+                goal: "g1".to_string(),
+                app_id: "com.example.r2f3".to_string(),
+                platform: "ios".to_string(),
+                adapter: "maestro-ios/v1".to_string(),
+                browser: None,
+                flow: "flows/g1.yaml".to_string(),
+                closure_sha256: "0".repeat(64),
+                assertions_sha256: orig_assertions,
+                owner_rules: None,
+                profile: None,
+            }],
+        };
+        let manifest_before = serialize_walk_manifest(&stale_manifest).unwrap();
+        fs::write(root.join("deja.walks.json"), &manifest_before).unwrap();
+        fs::write(
+            root.join("deja.config.json"),
+            serde_json::json!({
+                "workspaceRoot": ".",
+                "platform": "ios",
+                "appId": "com.example.r2f3",
+                "adapter": "maestro-ios/v1",
+                "device": "00000000-0000-4000-8000-000000000001",
+                "buildPath": "build/App.bin",
+                "manifest": "deja.walks.json"
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let (obs_tx, obs_rx) = oneshot::channel();
+        let factory = Arc::new(NotifyFactory {
+            on_first_observe: Arc::new(StdMutex::new(Some(obs_tx))),
+        });
+        let (sink, captured) = OutputSink::captured();
+        let cancel = CancellationToken::new();
+        let deps = CliDeps {
+            cwd: root.clone(),
+            home_dir: Some(root.join(".home")),
+            env: BTreeMap::new(),
+            output: sink,
+            driver_factory: factory,
+            doctor_probes: Arc::new(NoopProbes),
+            cancel: cancel.clone(),
+            cancel_signal: Arc::new(std::sync::atomic::AtomicU8::new(0)),
+        };
+        let args = RunArgs {
+            goal: Vec::new(),
+            goals: None,
+            all: true,
+            devices: Vec::new(),
+            verify: true,
+            flow: None,
+            device: None,
+            store: None,
+            junit: None,
+            report: None,
+            summary: false,
+            rerun_failed: false,
+            retries: None,
+        };
+
+        // Hold `manifest_mutex` BEFORE starting `run_batch_inner` so the worker blocks right at
+        // `acquire_manifest_lock_cancellable` after executing `g1`!
+        let manifest_mutex = Arc::new(AsyncMutex::new(()));
+        let held_guard = manifest_mutex.lock().await;
+
+        let batch_fut = run_batch_inner(
+            &args,
+            None,
+            true,
+            &deps,
+            None,
+            None,
+            None,
+            Arc::clone(&manifest_mutex),
+        );
+        let cancel_trigger = cancel.clone();
+        let canceller = tokio::spawn(async move {
+            tokio::time::timeout(Duration::from_secs(3), obs_rx)
+                .await
+                .expect("driver hierarchy observe timed out")
+                .expect("driver observe must run");
+            // Brief settle so worker reaches `manifest_mutex.lock()` before cancel fires.
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            cancel_trigger.cancel();
+        });
+
+        let code = tokio::time::timeout(Duration::from_secs(5), batch_fut)
+            .await
+            .expect(
+                "worker waiting on manifest_mutex must cancel without waiting for guard release",
+            );
+        canceller.await.unwrap();
+        drop(held_guard);
+
+        assert_eq!(code, 1, "cancelled verify batch must exit 1");
+        let stdout = captured.lock().unwrap().stdout.clone();
+        let parsed: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+        assert_eq!(parsed["cancelled"], true);
+        assert_eq!(parsed["goals"][0]["outcome"], "cancelled");
+
+        // Manifest MUST be untouched (`"0" * 64` still intact)!
+        assert_eq!(
+            fs::read_to_string(root.join("deja.walks.json")).unwrap(),
+            manifest_before,
+            "cancelled worker waiting on manifest mutex must NOT update deja.walks.json"
+        );
+        // SQLite MUST contain zero validation runs for `g1`!
+        let fp = fingerprint_file(&root, &root.join("build/App.bin")).unwrap();
+        let ro = SqliteWalkStore::open_readonly(SqliteStoreOptions::new(&root)).unwrap();
+        let runs = ro
+            .list_validation_runs(&WalkIdentity {
+                goal: "g1".to_string(),
+                app_id: "com.example.r2f3".to_string(),
+                platform: "ios".to_string(),
+                flow_schema_version: DEFAULT_FLOW_SCHEMA_VERSION.to_string(),
+                build_fingerprint: fp,
+                adapter: Some("maestro-ios/v1".to_string()),
+                browser: None,
+            })
+            .unwrap();
+        assert!(
+            runs.is_empty(),
+            "cancelled worker waiting on manifest mutex must NOT write validation_runs to SQLite"
+        );
+        assert!(
+            !root.join(".deja/memory/walks.sqlite.lock").exists(),
+            "store lock must be cleaned up"
+        );
+
+        let _ = fs::remove_dir_all(&root);
     }
 }

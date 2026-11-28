@@ -26,7 +26,7 @@ use crate::commands::exec_common::{
     build_driver_context, check_closure_forbidden_values, emit_early_exec_error,
     execute_single_attempt, failure_run_outcome, finalize_run_report, make_walk_identity,
     parse_goal_tokens, to_execution_result, validate_closure_app_id_confinement,
-    validate_early_output_path, validate_explicit_output_path,
+    validate_early_output_path, validate_explicit_output_path, validate_non_overlapping_outputs,
 };
 use crate::commands::manifest::has_unsafe_control_or_bidi_char;
 use crate::config::{CommandCapability, LoadConfigOptions, LoadedConfig, load_config};
@@ -77,6 +77,22 @@ pub async fn run(
             lexical_normalize(&deps.cwd.join(p))
         }
     });
+    if let Err(msg) =
+        validate_non_overlapping_outputs(cli_junit.as_deref(), explicit_report.as_deref())
+    {
+        return emit_early_exec_error(
+            deps,
+            "run",
+            &raw_goal_fallback,
+            None,
+            json_mode,
+            args.summary,
+            &early_redaction,
+            "OUTPUT_PATH_COLLISION",
+            &msg,
+            EXIT_USAGE_OR_CONFIG,
+        );
+    }
     if let Some(ref jpath) = cli_junit {
         if let Err(msg) = validate_early_output_path(
             jpath,
@@ -375,6 +391,22 @@ pub async fn run(
     );
 
     let effective_junit: Option<PathBuf> = cli_junit.clone().or_else(|| config.junit.clone());
+    if let Err(msg) =
+        validate_non_overlapping_outputs(effective_junit.as_deref(), explicit_report.as_deref())
+    {
+        return emit_early_exec_error(
+            deps,
+            "run",
+            &raw_goal,
+            None,
+            json_mode,
+            args.summary,
+            &redaction,
+            "OUTPUT_PATH_COLLISION",
+            &msg,
+            EXIT_USAGE_OR_CONFIG,
+        );
+    }
     if let Some(ref jpath) = effective_junit {
         if let Err(msg) = validate_explicit_output_path(jpath, "--junit", &config, None, &[]) {
             return emit_early_exec_error(

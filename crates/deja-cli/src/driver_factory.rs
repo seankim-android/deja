@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use deja_core::fingerprint_tree;
+use deja_core::fingerprint_tree_cancellable;
 use deja_driver_ios::cache::{
     build_cache_key, detect_toolchain, native_simulator_arch, resolve_deja_home,
 };
@@ -566,11 +566,14 @@ fn stage_and_verify_ios_app_bundle_inner(
         return Err(StageBundleError::Cancelled);
     }
 
-    let staged_fp = fingerprint_tree(&staged.temp_dir, &staged.app_path, "iOS").map_err(|err| {
-        StageBundleError::Failed(format!(
-            "failed to fingerprint staged iOS `.app` bundle: {err}"
-        ))
-    })?;
+    let staged_fp =
+        fingerprint_tree_cancellable(&staged.temp_dir, &staged.app_path, "iOS", cancel_flag)
+            .map_err(|err| match err {
+                deja_core::CoreError::Cancelled => StageBundleError::Cancelled,
+                other => StageBundleError::Failed(format!(
+                    "failed to fingerprint staged iOS `.app` bundle: {other}"
+                )),
+            })?;
     if cancel_flag.load(Ordering::Relaxed) {
         return Err(StageBundleError::Cancelled);
     }
@@ -1401,6 +1404,71 @@ mod tests {
         assert!(
             !staged_dir.exists(),
             "cancelled staging must clean up temporary staging directory {}",
+            staged_dir.display()
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn stage_ios_bundle_cancellable_aborts_during_fingerprinting_and_cleans_up() {
+        let unique = format!(
+            "deja-stage-fp-cancel-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        );
+        let root = std::env::temp_dir().join(unique);
+        let app_dir = root.join("Big.app");
+        fs::create_dir_all(&app_dir).unwrap();
+        let plist = r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>CFBundleIdentifier</key><string>com.example.big</string>
+</dict></plist>
+"#;
+        fs::write(app_dir.join("Info.plist"), plist).unwrap();
+        let blob = vec![0x42u8; deja_core::FINGERPRINT_CHUNK_BYTES * 4];
+        for i in 0..8 {
+            fs::write(app_dir.join(format!("asset-{i:02}.bin")), &blob).unwrap();
+        }
+
+        // Flip `cancel_flag` from a concurrent thread as soon as the copy completes (inside the
+        // fingerprinting window) and ensure either Cancelled (with staging dir cleaned) or valid
+        // completion occurs — never a leaked temp dir or panic.
+        let staged_dir_slot: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
+        let staged_dir_slot_hook = Arc::clone(&staged_dir_slot);
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        let worker_flag = Arc::clone(&cancel_flag);
+
+        let hook: StageTestHook = Box::new(move |temp_dir: &Path, flag: &AtomicBool| {
+            *staged_dir_slot_hook.lock().unwrap() = Some(temp_dir.to_path_buf());
+            // Flip flag directly after copy so `verify_ios_app_bundle` / `fingerprint_tree_cancellable`
+            // sees cancellation before hashing completes.
+            flag.store(true, Ordering::SeqCst);
+        });
+
+        let res = stage_and_verify_ios_app_bundle_inner(
+            &app_dir,
+            "com.example.big",
+            None,
+            &worker_flag,
+            Some(hook),
+        );
+        assert!(
+            matches!(res, Err(StageBundleError::Cancelled)),
+            "expected Cancelled when flag flips before fingerprinting"
+        );
+        let staged_dir = staged_dir_slot
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("temp dir recorded");
+        assert!(
+            !staged_dir.exists(),
+            "temp staging directory must be removed on cancellation: {}",
             staged_dir.display()
         );
 

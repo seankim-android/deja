@@ -4927,6 +4927,7 @@ struct BatchMockFactory {
     flaky_goals_seen: Arc<Mutex<std::collections::HashMap<String, usize>>>,
     staged_dirs: Arc<Mutex<Vec<PathBuf>>>,
     installed_app_paths: Arc<Mutex<Vec<PathBuf>>>,
+    fail_create_devices: BTreeMap<String, String>,
     stage_real_ios_bundle: bool,
     on_goal: Option<AsyncGoalHook>,
 }
@@ -4945,6 +4946,7 @@ impl BatchMockFactory {
             flaky_goals_seen: Arc::new(Mutex::new(std::collections::HashMap::new())),
             staged_dirs: Arc::new(Mutex::new(Vec::new())),
             installed_app_paths: Arc::new(Mutex::new(Vec::new())),
+            fail_create_devices: BTreeMap::new(),
             stage_real_ios_bundle: false,
             on_goal: None,
         }
@@ -5026,6 +5028,9 @@ impl DriverFactory for BatchMockFactory {
         Box::pin(async move {
             if cancel.is_cancelled() {
                 return Err(DriverFactoryError::Cancelled);
+            }
+            if let Some(err_msg) = self.fail_create_devices.get(&ctx.device) {
+                return Err(DriverFactoryError::Runtime(err_msg.clone()));
             }
             if self.stage_real_ios_bundle {
                 assert!(
@@ -7117,4 +7122,412 @@ async fn regression_deja66_r1_f8_lpt_uses_pooled_samples_not_median_of_shard_med
     );
     assert_eq!(parsed["goals"][0]["historicalMedianMs"], 100);
     assert_eq!(parsed["goals"][1]["historicalMedianMs"], 500);
+}
+
+#[tokio::test]
+async fn regression_deja66_r2_f1_strict_replay_schedules_each_goal_on_its_eligible_shard() {
+    let ws = TempWs::new("deja66-r2-f1-shard-elig");
+    ws.write_build("build/App.bin", b"build-v1");
+    // Strict replay mode (NO `staleBuild: replay-last-verified`!): a shard can only replay a goal
+    // if THAT shard's store has a verified validation for the current build + runtime.
+    ws.write(
+        "deja.config.json",
+        &json!({
+            "workspaceRoot": ".",
+            "platform": "ios",
+            "appId": TEST_APP_ID,
+            "adapter": "maestro-ios/v1",
+            "buildPath": "build/App.bin",
+            "manifest": "deja.walks.json"
+        })
+        .to_string(),
+    );
+    write_tagged_flow(&ws, "flows/a.yaml", "goal a");
+    write_tagged_flow(&ws, "flows/b.yaml", "goal b");
+    seed_manifest_walk(
+        &ws,
+        &[
+            (
+                "goal a",
+                TEST_APP_ID,
+                "ios",
+                "maestro-ios/v1",
+                "flows/a.yaml",
+            ),
+            (
+                "goal b",
+                TEST_APP_ID,
+                "ios",
+                "maestro-ios/v1",
+                "flows/b.yaml",
+            ),
+        ],
+    );
+
+    // 1. Verify `--all --verify --devices TEST_UDID,TEST_UDID_2` so each shard verifies ONE goal
+    //    into its own isolated store (use a 2-party barrier so each shard claims exactly 1 goal).
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let verify_hook: AsyncGoalHook = {
+        let b = Arc::clone(&barrier);
+        Arc::new(
+            move |_device: String, _tag: String, _cancel: CancellationToken| {
+                let b = Arc::clone(&b);
+                Box::pin(async move {
+                    let _ = tokio::time::timeout(Duration::from_secs(3), b.wait()).await;
+                })
+            },
+        )
+    };
+    let verify_factory =
+        Arc::new(BatchMockFactory::new(Some("ios-27.2")).with_on_goal(verify_hook));
+    let (verify_deps, verify_cap) = make_deps(
+        &ws.path,
+        Arc::clone(&verify_factory) as Arc<dyn DriverFactory>,
+        default_probes(),
+        CancellationToken::new(),
+    );
+    let devices_forward = format!("{TEST_UDID},{TEST_UDID_2}");
+    let verify_code = run_cli_from_args(
+        [
+            "deja",
+            "run",
+            "--all",
+            "--verify",
+            "--devices",
+            &devices_forward,
+            "--json",
+        ],
+        &verify_deps,
+    )
+    .await;
+    assert_eq!(
+        verify_code,
+        0,
+        "verify stderr: {}",
+        verify_cap.lock().unwrap().stderr
+    );
+    let verify_json: Value = serde_json::from_str(&verify_cap.lock().unwrap().stdout).unwrap();
+    let goal_a_dev = verify_json["goals"][0]["device"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let goal_b_dev = verify_json["goals"][1]["device"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_ne!(
+        goal_a_dev, goal_b_dev,
+        "barrier must assign goal a and goal b to distinct shards"
+    );
+
+    // 2. Now run strict replay `--all --devices <goal_b_dev>,<goal_a_dev>` (NO `--verify`!)
+    //    putting `goal_b_dev` FIRST as shard 0 while `goal a` sits ahead in the queue (or even if
+    //    shard 0 wakes up first!). Both goals MUST route to their respective verified shards and
+    //    pass with exit 0!
+    let devices_reversed = format!("{goal_b_dev},{goal_a_dev}");
+    let replay_factory = Arc::new(BatchMockFactory::new(Some("ios-27.2")));
+    let (replay_deps, replay_cap) = make_deps(
+        &ws.path,
+        Arc::clone(&replay_factory) as Arc<dyn DriverFactory>,
+        default_probes(),
+        CancellationToken::new(),
+    );
+    let replay_code = run_cli_from_args(
+        [
+            "deja",
+            "run",
+            "--all",
+            "--devices",
+            &devices_reversed,
+            "--json",
+        ],
+        &replay_deps,
+    )
+    .await;
+    assert_eq!(
+        replay_code,
+        0,
+        "strict replay must route each goal to its eligible shard; stdout={} stderr={}",
+        replay_cap.lock().unwrap().stdout,
+        replay_cap.lock().unwrap().stderr
+    );
+    let replay_json: Value = serde_json::from_str(&replay_cap.lock().unwrap().stdout).unwrap();
+    assert_eq!(replay_json["passed"], true);
+    assert_eq!(replay_json["goals"][0]["outcome"], "passed");
+    assert_eq!(replay_json["goals"][0]["device"], goal_a_dev);
+    assert_eq!(replay_json["goals"][1]["outcome"], "passed");
+    assert_eq!(replay_json["goals"][1]["device"], goal_b_dev);
+
+    // 3. Verify no hang if one eligible shard fails driver attach: the healthy shard executes its
+    //    eligible goal cleanly and exits, and the stranded goal reports the failed shard's error.
+    let mut failing_factory = BatchMockFactory::new(Some("ios-27.2"));
+    failing_factory.fail_create_devices.insert(
+        goal_a_dev.clone(),
+        "simulator unavailable on shard a".to_string(),
+    );
+    let (fail_deps, fail_cap) = make_deps(
+        &ws.path,
+        Arc::new(failing_factory) as Arc<dyn DriverFactory>,
+        default_probes(),
+        CancellationToken::new(),
+    );
+    let fail_code = tokio::time::timeout(
+        Duration::from_secs(5),
+        run_cli_from_args(
+            [
+                "deja",
+                "run",
+                "--all",
+                "--devices",
+                &devices_reversed,
+                "--json",
+            ],
+            &fail_deps,
+        ),
+    )
+    .await
+    .expect("batch run must not hang when an eligible shard fails to attach");
+    assert_eq!(fail_code, 1);
+    let fail_json: Value = serde_json::from_str(&fail_cap.lock().unwrap().stdout).unwrap();
+    assert_eq!(fail_json["goals"][0]["outcome"], "error");
+    assert!(
+        fail_json["goals"][0]["errors"][0]
+            .as_str()
+            .unwrap_or("")
+            .contains("simulator unavailable on shard a")
+    );
+    assert_eq!(fail_json["goals"][1]["outcome"], "passed");
+    assert_eq!(fail_json["goals"][1]["device"], goal_b_dev);
+}
+
+#[tokio::test]
+async fn regression_deja66_r2_f2_rejects_overlapping_junit_and_report_destinations() {
+    let ws = TempWs::new("deja66-r2-f2-overlap");
+    ws.write_build("build/App.bin", b"build-v1");
+    ws.write(
+        "flows/g1.yaml",
+        &format!("appId: {TEST_APP_ID}\n---\n- assertVisible: g1\n"),
+    );
+    ws.write("goals.txt", "g1\n");
+    let sentinel = "SENTINEL_MUST_STAY_UNTOUCHED\n";
+    ws.write("out/shared.xml", sentinel);
+
+    // Case A: batch `deja run --goals goals.txt --junit out/shared.xml --report out/shared.xml`
+    ws.write(
+        "deja.config.json",
+        &json!({
+            "workspaceRoot": ".",
+            "platform": "ios",
+            "appId": TEST_APP_ID,
+            "device": TEST_UDID,
+            "buildPath": "build/App.bin"
+        })
+        .to_string(),
+    );
+    let (deps_a, cap_a) = make_deps(
+        &ws.path,
+        Arc::new(BatchMockFactory::new(Some("ios-27.2"))),
+        default_probes(),
+        CancellationToken::new(),
+    );
+    let code_a = run_cli_from_args(
+        [
+            "deja",
+            "run",
+            "--goals",
+            "goals.txt",
+            "--junit",
+            "out/shared.xml",
+            "--report",
+            "out/shared.xml",
+            "--json",
+        ],
+        &deps_a,
+    )
+    .await;
+    assert_eq!(code_a, 2, "stderr: {}", cap_a.lock().unwrap().stderr);
+    assert_eq!(
+        fs::read_to_string(ws.path.join("out/shared.xml")).unwrap(),
+        sentinel,
+        "overlapping --junit and --report must fail before touching disk"
+    );
+
+    // Case B: single-goal `deja run g1 --junit out/shared.xml --report ./out/../out/shared.xml`
+    let (deps_b, _) = make_deps(
+        &ws.path,
+        Arc::new(BatchMockFactory::new(Some("ios-27.2"))),
+        default_probes(),
+        CancellationToken::new(),
+    );
+    let code_b = run_cli_from_args(
+        [
+            "deja",
+            "run",
+            "g1",
+            "--junit",
+            "out/shared.xml",
+            "--report",
+            "./out/../out/shared.xml",
+            "--json",
+        ],
+        &deps_b,
+    )
+    .await;
+    assert_eq!(code_b, 2);
+    assert_eq!(
+        fs::read_to_string(ws.path.join("out/shared.xml")).unwrap(),
+        sentinel
+    );
+
+    // Case C: `deja remember g1 --flow flows/g1.yaml --junit out/shared.xml --report out/shared.xml`
+    let (deps_c, _) = make_deps(
+        &ws.path,
+        Arc::new(BatchMockFactory::new(Some("ios-27.2"))),
+        default_probes(),
+        CancellationToken::new(),
+    );
+    let code_c = run_cli_from_args(
+        [
+            "deja",
+            "remember",
+            "g1",
+            "--flow",
+            "flows/g1.yaml",
+            "--junit",
+            "out/shared.xml",
+            "--report",
+            "out/shared.xml",
+            "--json",
+        ],
+        &deps_c,
+    )
+    .await;
+    assert_eq!(code_c, 2);
+    assert_eq!(
+        fs::read_to_string(ws.path.join("out/shared.xml")).unwrap(),
+        sentinel
+    );
+
+    // Case D: `config.junit` matches `--report` across batch `run`, single-goal `run`, and `remember`.
+    ws.write(
+        "deja.config.json",
+        &json!({
+            "workspaceRoot": ".",
+            "platform": "ios",
+            "appId": TEST_APP_ID,
+            "device": TEST_UDID,
+            "buildPath": "build/App.bin",
+            "junit": "out/shared.xml"
+        })
+        .to_string(),
+    );
+    for argv in [
+        vec![
+            "deja",
+            "run",
+            "--goals",
+            "goals.txt",
+            "--report",
+            "out/shared.xml",
+            "--json",
+        ],
+        vec!["deja", "run", "g1", "--report", "out/shared.xml", "--json"],
+        vec![
+            "deja",
+            "remember",
+            "g1",
+            "--flow",
+            "flows/g1.yaml",
+            "--report",
+            "out/shared.xml",
+            "--json",
+        ],
+    ] {
+        let (deps_d, _) = make_deps(
+            &ws.path,
+            Arc::new(BatchMockFactory::new(Some("ios-27.2"))),
+            default_probes(),
+            CancellationToken::new(),
+        );
+        let code_d = run_cli_from_args(argv, &deps_d).await;
+        assert_eq!(code_d, 2);
+        assert_eq!(
+            fs::read_to_string(ws.path.join("out/shared.xml")).unwrap(),
+            sentinel,
+            "config.junit overlapping --report must fail before prepare_safe_junit unlinks file"
+        );
+    }
+}
+
+#[tokio::test]
+async fn regression_deja66_r2_f4_batch_build_fingerprint_cancellation_closes_stores_and_exits_cleanly()
+ {
+    let ws = TempWs::new("deja66-r2-f4-fp-cancel");
+    let app_dir = ws.path.join("build/Big.app");
+    fs::create_dir_all(&app_dir).unwrap();
+    let blob = vec![0x77u8; deja_core::FINGERPRINT_CHUNK_BYTES * 2];
+    for i in 0..8 {
+        fs::write(app_dir.join(format!("blob-{i:02}.bin")), &blob).unwrap();
+    }
+    ws.write(
+        "deja.config.json",
+        &json!({
+            "workspaceRoot": ".",
+            "platform": "ios",
+            "appId": TEST_APP_ID,
+            "adapter": "maestro-ios/v1",
+            "device": TEST_UDID,
+            "buildPath": "build/Big.app",
+            "manifest": "deja.walks.json"
+        })
+        .to_string(),
+    );
+    write_tagged_flow(&ws, "flows/g1.yaml", "g1");
+    seed_manifest_walk(
+        &ws,
+        &[("g1", TEST_APP_ID, "ios", "maestro-ios/v1", "flows/g1.yaml")],
+    );
+
+    let cancel = CancellationToken::new();
+    let (deps, cap) = make_deps(
+        &ws.path,
+        Arc::new(BatchMockFactory::new(Some("ios-27.2"))),
+        default_probes(),
+        cancel.clone(),
+    );
+    deps.cancel_signal.store(
+        deja_cli::exit_codes::CANCEL_SIGNAL_SIGTERM,
+        Ordering::SeqCst,
+    );
+    cancel.cancel();
+
+    let code = run_cli_from_args(
+        [
+            "deja",
+            "run",
+            "--all",
+            "--junit",
+            "out/fp-cancel.xml",
+            "--json",
+        ],
+        &deps,
+    )
+    .await;
+    assert_eq!(
+        code, 143,
+        "SIGTERM cancel before/during fingerprinting must exit 143"
+    );
+    assert!(
+        !ws.path.join(".deja/memory/walks.sqlite.lock").exists(),
+        "all shard store locks must be released when cancelled during fingerprinting"
+    );
+
+    let parsed: Value = serde_json::from_str(&cap.lock().unwrap().stdout).unwrap();
+    assert_eq!(parsed["cancelled"], true);
+    assert_eq!(parsed["outcome"], "cancelled");
+    assert_eq!(parsed["goals"][0]["outcome"], "skipped");
+
+    let xml = fs::read_to_string(ws.path.join("out/fp-cancel.xml")).unwrap();
+    assert!(deja_flow::reports_failure(&xml));
+    assert!(xml.contains(r#"status="SKIPPED""#));
 }

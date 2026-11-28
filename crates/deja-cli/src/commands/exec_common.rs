@@ -1,7 +1,7 @@
 //! Shared flow validation, live execution, crash-check fallback, timing, and reporting helpers
 //! used by `deja remember` and `deja run`.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -282,6 +282,29 @@ pub fn write_internal_reports(
     Ok(())
 }
 
+/// Reject `--report` and `--junit` (or `config.junit`) destinations that resolve to the same
+/// file path (comparing both lexically normalized paths and resolved-ancestor paths) so writing
+/// both outputs cannot clobber one with the other.
+pub fn validate_non_overlapping_outputs(
+    junit_path: Option<&Path>,
+    report_path: Option<&Path>,
+) -> Result<(), String> {
+    let (Some(jpath), Some(rpath)) = (junit_path, report_path) else {
+        return Ok(());
+    };
+    let norm_j = lexical_normalize(jpath);
+    let norm_r = lexical_normalize(rpath);
+    let res_j = resolve_with_nearest_ancestor(&norm_j).unwrap_or_else(|_| norm_j.clone());
+    let res_r = resolve_with_nearest_ancestor(&norm_r).unwrap_or_else(|_| norm_r.clone());
+    if norm_j == norm_r || res_j == norm_r || norm_j == res_r || res_j == res_r {
+        return Err(format!(
+            "refusing to write --report and --junit to the same path: {}",
+            rpath.display()
+        ));
+    }
+    Ok(())
+}
+
 /// Early safety check for explicit `--report` / `--junit` paths BEFORE `load_config` or
 /// `prepare_safe_junit` touches disk, preventing accidental clobbering/deletion of config,
 /// manifest, goals input files, flow closure files, symlinks, directories, or `.deja/memory/`
@@ -341,8 +364,10 @@ pub fn validate_early_output_path(
             && !manifest_str.trim().is_empty()
         {
             let manifest_abs = lexical_normalize(&candidate_ws.join(manifest_str));
-            protected_files.push(manifest_abs.clone());
-            collect_manifest_protected_paths(&candidate_ws, &manifest_abs, &mut protected_files);
+            let mut manifest_set = BTreeSet::new();
+            manifest_set.insert(manifest_abs.clone());
+            collect_manifest_protected_paths(&candidate_ws, &manifest_abs, &mut manifest_set);
+            protected_files.extend(manifest_set);
         }
     }
 
@@ -368,7 +393,7 @@ pub fn validate_early_output_path(
 fn collect_manifest_protected_paths(
     workspace_root: &Path,
     manifest_abs: &Path,
-    protected_files: &mut Vec<PathBuf>,
+    protected_files: &mut BTreeSet<PathBuf>,
 ) {
     // Protect every flow file (and its referenced closure) tracked in `deja.walks.json` BEFORE
     // `prepare_safe_junit` runs so neither CLI `--junit` nor `config.junit` can ever unlink a flow!
@@ -377,39 +402,51 @@ fn collect_manifest_protected_paths(
     {
         for entry in &manifest.walks {
             let flow_abs = lexical_normalize(&workspace_root.join(&entry.flow));
-            protected_files.push(flow_abs.clone());
+            protected_files.insert(flow_abs.clone());
             if let Ok(canon_flow) = fs::canonicalize(&flow_abs)
                 && let Ok(closure) = deja_core::collect_flow_closure(workspace_root, &canon_flow)
             {
                 for file in &closure.files {
-                    protected_files.push(lexical_normalize(&workspace_root.join(&file.source)));
+                    protected_files.insert(lexical_normalize(&workspace_root.join(&file.source)));
                 }
             }
         }
     }
 }
 
-/// Full walk-state protection check for explicit `--report` / `--junit` (and `config.junit`)
-/// destinations once config (and optionally the active [`FlowClosure`]) have been resolved.
-pub fn validate_explicit_output_path(
+/// Collect all protected paths implied by `config.manifest` (the manifest file itself plus every
+/// entry's flow file and transitive closure files) ONCE so multi-goal batch runs never rescan
+/// every manifest closure per goal.
+#[must_use]
+pub fn collect_config_manifest_protected_paths(config: &LoadedConfig) -> BTreeSet<PathBuf> {
+    let mut protected = BTreeSet::new();
+    if let Some(ref manifest_rel) = config.manifest {
+        let manifest_abs = lexical_normalize(&config.workspace_root.join(manifest_rel));
+        protected.insert(manifest_abs.clone());
+        collect_manifest_protected_paths(&config.workspace_root, &manifest_abs, &mut protected);
+    }
+    protected
+}
+
+/// Full walk-state protection check reusing a precomputed set of manifest-protected paths
+/// (avoiding `O(N^2)` manifest/closure rescans across multi-goal batches).
+pub fn validate_explicit_output_path_with_precomputed_manifest(
     target: &Path,
     flag_label: &str,
     config: &LoadedConfig,
     closure: Option<&FlowClosure>,
+    precomputed_manifest_protected: &BTreeSet<PathBuf>,
     extra_protected: &[&Path],
 ) -> Result<(), String> {
     check_output_target_not_symlink_or_dir(target, flag_label)?;
 
-    let mut protected_files = vec![config.config_path.clone()];
-    if let Some(ref manifest_rel) = config.manifest {
-        let manifest_abs = lexical_normalize(&config.workspace_root.join(manifest_rel));
-        protected_files.push(manifest_abs.clone());
-        collect_manifest_protected_paths(
-            &config.workspace_root,
-            &manifest_abs,
-            &mut protected_files,
-        );
-    }
+    let mut protected_files = Vec::with_capacity(
+        1 + precomputed_manifest_protected.len()
+            + closure.map_or(0, |c| c.files.len())
+            + extra_protected.len(),
+    );
+    protected_files.push(config.config_path.clone());
+    protected_files.extend(precomputed_manifest_protected.iter().cloned());
     if let Some(c) = closure {
         for file in &c.files {
             protected_files.push(lexical_normalize(&config.workspace_root.join(&file.source)));
@@ -429,6 +466,26 @@ pub fn validate_explicit_output_path(
         flag_label,
         &config.workspace_root,
         &protected_files,
+    )
+}
+
+/// Full walk-state protection check for explicit `--report` / `--junit` (and `config.junit`)
+/// destinations once config (and optionally the active [`FlowClosure`]) have been resolved.
+pub fn validate_explicit_output_path(
+    target: &Path,
+    flag_label: &str,
+    config: &LoadedConfig,
+    closure: Option<&FlowClosure>,
+    extra_protected: &[&Path],
+) -> Result<(), String> {
+    let manifest_protected = collect_config_manifest_protected_paths(config);
+    validate_explicit_output_path_with_precomputed_manifest(
+        target,
+        flag_label,
+        config,
+        closure,
+        &manifest_protected,
+        extra_protected,
     )
 }
 
@@ -1202,4 +1259,172 @@ pub fn parse_goal_tokens(tokens: &[String]) -> Result<(String, Goal), String> {
     let raw = tokens.join(" ");
     let goal = normalize_goal(&raw).map_err(|err| err.to_string())?;
     Ok((raw, goal))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{CommandCapability, LoadConfigOptions, load_config};
+    use deja_core::{ManifestWalk, WalkManifest, collect_flow_closure, serialize_walk_manifest};
+
+    #[test]
+    fn precomputed_manifest_protection_never_rescans_manifest_per_goal() {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let root = std::env::temp_dir().join(format!(
+            "deja-exec-common-precomp-{}-{nanos:x}",
+            std::process::id()
+        ));
+        fs::create_dir_all(root.join("flows")).unwrap();
+        fs::write(root.join("build.bin"), b"build-v1").unwrap();
+        fs::write(
+            root.join("flows/sub.yaml"),
+            "appId: com.example.app\n---\n- assertVisible: Sub\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("flows/g1.yaml"),
+            "appId: com.example.app\n---\n- runFlow: sub.yaml\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("flows/g2.yaml"),
+            "appId: com.example.app\n---\n- assertVisible: G2\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("flows/active_only.yaml"),
+            "appId: com.example.app\n---\n- assertVisible: Active\n",
+        )
+        .unwrap();
+
+        let c1 = collect_flow_closure(&root, &root.join("flows/g1.yaml")).unwrap();
+        let c2 = collect_flow_closure(&root, &root.join("flows/g2.yaml")).unwrap();
+        let manifest = WalkManifest {
+            manifest_version: deja_core::WALK_MANIFEST_VERSION,
+            hash_version: deja_core::MANIFEST_HASH_VERSION,
+            walks: vec![
+                ManifestWalk {
+                    goal: "g1".to_string(),
+                    app_id: "com.example.app".to_string(),
+                    platform: "ios".to_string(),
+                    adapter: "maestro-ios/v1".to_string(),
+                    browser: None,
+                    flow: "flows/g1.yaml".to_string(),
+                    closure_sha256: c1.sha256.clone(),
+                    assertions_sha256: deja_core::assertions_sha256(&c1).unwrap(),
+                    owner_rules: None,
+                    profile: None,
+                },
+                ManifestWalk {
+                    goal: "g2".to_string(),
+                    app_id: "com.example.app".to_string(),
+                    platform: "ios".to_string(),
+                    adapter: "maestro-ios/v1".to_string(),
+                    browser: None,
+                    flow: "flows/g2.yaml".to_string(),
+                    closure_sha256: c2.sha256.clone(),
+                    assertions_sha256: deja_core::assertions_sha256(&c2).unwrap(),
+                    owner_rules: None,
+                    profile: None,
+                },
+            ],
+        };
+        let manifest_path = root.join("deja.walks.json");
+        fs::write(&manifest_path, serialize_walk_manifest(&manifest).unwrap()).unwrap();
+        fs::write(
+            root.join("deja.config.json"),
+            json!({
+                "workspaceRoot": ".",
+                "platform": "ios",
+                "appId": "com.example.app",
+                "adapter": "maestro-ios/v1",
+                "device": "00000000-0000-4000-8000-000000000001",
+                "buildPath": "build.bin",
+                "manifest": "deja.walks.json"
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let config = load_config(&LoadConfigOptions {
+            cwd: &root,
+            explicit_config: None,
+            capability: CommandCapability::Execute,
+            device_override: None,
+            build_override: None,
+            env: &BTreeMap::new(),
+        })
+        .unwrap();
+
+        let precomputed = collect_config_manifest_protected_paths(&config);
+        assert!(precomputed.contains(&lexical_normalize(
+            &config.workspace_root.join("flows/sub.yaml")
+        )));
+        assert!(precomputed.contains(&lexical_normalize(
+            &config.workspace_root.join("flows/g2.yaml")
+        )));
+
+        // Remove `deja.walks.json` from disk to prove per-goal validation reuses `precomputed`
+        // without re-reading or rescanning the manifest on disk!
+        fs::remove_file(&manifest_path).unwrap();
+
+        let active_closure = collect_flow_closure(
+            &config.workspace_root,
+            &config.workspace_root.join("flows/active_only.yaml"),
+        )
+        .unwrap();
+
+        // Still refuses overwriting manifest subflow (`flows/sub.yaml`) and sibling flow (`flows/g2.yaml`)!
+        assert!(
+            validate_explicit_output_path_with_precomputed_manifest(
+                &config.workspace_root.join("flows/sub.yaml"),
+                "--junit",
+                &config,
+                Some(&active_closure),
+                &precomputed,
+                &[],
+            )
+            .is_err()
+        );
+        assert!(
+            validate_explicit_output_path_with_precomputed_manifest(
+                &config.workspace_root.join("flows/g2.yaml"),
+                "--report",
+                &config,
+                Some(&active_closure),
+                &precomputed,
+                &[],
+            )
+            .is_err()
+        );
+        // Also refuses overwriting the active goal's closure file (`flows/active_only.yaml`)!
+        assert!(
+            validate_explicit_output_path_with_precomputed_manifest(
+                &config.workspace_root.join("flows/active_only.yaml"),
+                "--junit",
+                &config,
+                Some(&active_closure),
+                &precomputed,
+                &[],
+            )
+            .is_err()
+        );
+        // Safe output path outside protected files succeeds!
+        assert!(
+            validate_explicit_output_path_with_precomputed_manifest(
+                &config.workspace_root.join("out/junit.xml"),
+                "--junit",
+                &config,
+                Some(&active_closure),
+                &precomputed,
+                &[],
+            )
+            .is_ok()
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
 }
