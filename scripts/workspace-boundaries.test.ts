@@ -3,7 +3,7 @@ import { readFileSync, readdirSync, statSync } from 'node:fs'
 import { dirname, join, normalize, relative, resolve, sep } from 'node:path'
 
 /*
- * Workspace boundary guard. Packages must reach each other only through `@deja-qa/*` package
+ * Workspace boundary guard. Packages must reach each other only through `@deja-run/*` package
  * imports, and only through dependencies they declare. Hoisted links in the root node_modules
  * would otherwise let an undeclared import resolve locally and then break once published.
  */
@@ -44,10 +44,10 @@ function owningWorkspace(path: string) {
 }
 
 describe('workspace boundaries', () => {
-  test('every package and app has a private @deja-qa manifest', () => {
+  test('every package and app has a private @deja-run manifest', () => {
     expect(workspaces.length).toBeGreaterThan(0)
     for (const { directory, manifest } of workspaces) {
-      expect({ directory, name: manifest.name.startsWith('@deja-qa/') }).toEqual({ directory, name: true })
+      expect({ directory, name: manifest.name.startsWith('@deja-run/') }).toEqual({ directory, name: true })
     }
   })
 
@@ -74,7 +74,7 @@ describe('workspace boundaries', () => {
       for (const file of sourceFiles(directory)) {
         const isTest = file.split(sep).includes('test')
         for (const specifier of specifiers(file)) {
-          if (!specifier.startsWith('@deja-qa/')) continue
+          if (!specifier.startsWith('@deja-run/')) continue
           const name = specifier.split('/').slice(0, 2).join('/')
           if (name === manifest.name) {
             violations.push(`${file}: imports its own package ${name}`)
@@ -88,18 +88,18 @@ describe('workspace boundaries', () => {
   })
 
   test('core depends on no other Déjà package', () => {
-    const core = workspaces.find(workspace => workspace.manifest.name === '@deja-qa/core')!
+    const core = workspaces.find(workspace => workspace.manifest.name === '@deja-run/core')!
     const declared = Object.keys({ ...core.manifest.dependencies, ...core.manifest.devDependencies })
-    expect(declared.filter(name => name.startsWith('@deja-qa/'))).toEqual([])
+    expect(declared.filter(name => name.startsWith('@deja-run/'))).toEqual([])
     const imports = sourceFiles(core.directory).flatMap(file =>
-      specifiers(file).filter(specifier => specifier.startsWith('@deja-qa/')).map(specifier => `${file}: ${specifier}`))
+      specifiers(file).filter(specifier => specifier.startsWith('@deja-run/')).map(specifier => `${file}: ${specifier}`))
     expect(imports).toEqual([])
   })
 
   test('only the CLI and the store conformance suite depend on concrete stores at runtime', () => {
     // Plugins take a WalkStore; choosing LocalWalkStore or SQLiteWalkStore is the host's job.
-    const allowed = new Set(['@deja-qa/cli', '@deja-qa/store-conformance'])
-    const stores = new Set(['@deja-qa/store-local', '@deja-qa/store-sqlite'])
+    const allowed = new Set(['@deja-run/cli', '@deja-run/store-conformance'])
+    const stores = new Set(['@deja-run/store-local', '@deja-run/store-sqlite'])
     const violations = workspaces
       .filter(({ manifest }) => !allowed.has(manifest.name) && !stores.has(manifest.name))
       .flatMap(({ directory, manifest }) => Object.keys(manifest.dependencies ?? {})
@@ -108,11 +108,11 @@ describe('workspace boundaries', () => {
   })
 
   test('the explorer takes a runner and never constructs the concrete Maestro runner', () => {
-    const explorer = workspaces.find(workspace => workspace.manifest.name === '@deja-qa/explorer-openclaw')!
+    const explorer = workspaces.find(workspace => workspace.manifest.name === '@deja-run/explorer-openclaw')!
     const violations = sourceFiles(join(explorer.directory, 'src')).filter(file => {
       const contents = readFileSync(join(repo, file), 'utf8')
       return /new\s+MaestroWalkRunner\b/.test(contents) ||
-        /import\s*\{[^}]*(?<!type\s)\bMaestroWalkRunner\b[^}]*\}\s*from\s*'@deja-qa\/maestro'/.test(contents)
+        /import\s*\{[^}]*(?<!type\s)\bMaestroWalkRunner\b[^}]*\}\s*from\s*'@deja-run\/maestro'/.test(contents)
     })
     expect(violations).toEqual([])
   })

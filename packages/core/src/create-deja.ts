@@ -19,7 +19,7 @@ export const DEFAULT_FLOW_SCHEMA_VERSION = 'maestro/v1'
 
 /**
  * What core needs from a platform adapter. Core imports no runner code, so this is structural:
- * the adapters in `@deja-qa/maestro` satisfy it as they are.
+ * the adapters in `@deja-run/maestro` satisfy it as they are.
  */
 export interface DejaAdapter {
   readonly id: string

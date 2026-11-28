@@ -4,7 +4,7 @@ import type {
   ExecutionResult,
   RunnerRequest,
   WalkRunner,
-} from '@deja-qa/core'
+} from '@deja-run/core'
 import {
   classifyMaestroFailure,
   defaultCrashReportDirectory,

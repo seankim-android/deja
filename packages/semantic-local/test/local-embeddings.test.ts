@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { cosineSimilarity } from '@deja-qa/core'
+import { cosineSimilarity } from '@deja-run/core'
 import {
   LOCAL_LEXICAL_EMBEDDING_DIMENSIONS,
   LOCAL_LEXICAL_EMBEDDING_PROVIDER,

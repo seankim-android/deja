@@ -1,6 +1,6 @@
 import { readFile, rename } from 'node:fs/promises'
 import { resolve } from 'node:path'
-import type { WalkStore } from '@deja-qa/core'
+import type { WalkStore } from '@deja-run/core'
 import {
   openSqlite,
   SQLITE_MEMORY_PATH,
@@ -8,7 +8,7 @@ import {
   sqliteRuntime,
   storeMetadataPath,
   type SqliteConnection,
-} from '@deja-qa/store-sqlite'
+} from '@deja-run/store-sqlite'
 import type {
   MetadataTamper,
   StoreFailureInjection,

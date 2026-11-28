@@ -4,7 +4,7 @@ import { existsSync } from 'node:fs'
 import { mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises'
 import { hostname, tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
-import { InvalidStoreIdError, StoreLockedError } from '@deja-qa/store-local'
+import { InvalidStoreIdError, StoreLockedError } from '@deja-run/store-local'
 import { contractIdentity, initialValidation, type WalkStoreContractImplementation } from './walk-store-contract.ts'
 
 async function temporaryFilesUnder(root: string): Promise<string[]> {

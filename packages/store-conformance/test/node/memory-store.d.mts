@@ -1,5 +1,5 @@
-import type { WalkStore } from '@deja-qa/core'
-import type { PortableStoreImplementation } from '@deja-qa/store-conformance'
+import type { WalkStore } from '@deja-run/core'
+import type { PortableStoreImplementation } from '@deja-run/store-conformance'
 
 export class MemoryWalkStore implements WalkStore {
   constructor(workspaceRoot: string)

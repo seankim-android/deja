@@ -13,8 +13,8 @@ import {
   type PersistVerifiedOptions,
   type WalkIdentity,
   type WalkStore,
-} from '@deja-qa/core'
-import { ConsumerFlowError } from '@deja-qa/store-local'
+} from '@deja-run/core'
+import { ConsumerFlowError } from '@deja-run/store-local'
 import { initialValidation, laterValidation, type WalkStoreContractImplementation } from './walk-store-contract.ts'
 
 const MANIFEST = 'deja.walks.json'

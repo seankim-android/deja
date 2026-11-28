@@ -1,4 +1,4 @@
-import type { Segment } from '@deja-qa/core'
+import type { Segment } from '@deja-run/core'
 
 /** Escape every regular expression metacharacter. Maestro's `id:` is a full-match regular expression. */
 export function escapeRegex(text: string): string {

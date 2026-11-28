@@ -1,7 +1,7 @@
 import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { evaluateGate, gatePassed, type GateGoalResult, type GateIdentity, type WalkStore } from '@deja-qa/core'
+import { evaluateGate, gatePassed, type GateGoalResult, type GateIdentity, type WalkStore } from '@deja-run/core'
 import { resolveHarness, type ContractHarness } from './harness.ts'
 import type { PortableStoreImplementation } from './portable-contract.ts'
 import {

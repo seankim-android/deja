@@ -3,8 +3,8 @@ import { lstat, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, symlink
 import { tmpdir } from 'node:os'
 import { spawn } from 'node:child_process'
 import { join, resolve } from 'node:path'
-import { iosMaestroAdapter } from '@deja-qa/maestro'
-import { LocalWalkStore } from '@deja-qa/store-local'
+import { iosMaestroAdapter } from '@deja-run/maestro'
+import { LocalWalkStore } from '@deja-run/store-local'
 import { runCli } from '../src/main.ts'
 import { atomicWrite, parseGoals, removeChecked, renderGateTable, type GateEvidence } from '../src/gate.ts'
 

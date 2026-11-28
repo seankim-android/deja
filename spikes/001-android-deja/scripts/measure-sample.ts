@@ -3,12 +3,12 @@ import { spawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
-import { loadExploreConfiguration } from '@deja-qa/explorer-openclaw'
+import { loadExploreConfiguration } from '@deja-run/explorer-openclaw'
 import {
   LocalWalkStore,
   MAESTRO_FLOW_SCHEMA_VERSION,
-} from '@deja-qa/store-local'
-import type { MetricSample, SampleMode } from '@deja-qa/metrics'
+} from '@deja-run/store-local'
+import type { MetricSample, SampleMode } from '@deja-run/metrics'
 
 const root = process.cwd()
 const args = Bun.argv.slice(2)

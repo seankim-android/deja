@@ -40,7 +40,7 @@ source text, and evidence-linked rehearsal results are curated intentionally.
 ## Reproduce a clean checkout
 
 ```sh
-git clone https://github.com/seankim-android/deja.git
+git clone https://github.com/deja-run/deja.git
 cd deja
 bun install --frozen-lockfile
 bun run lint

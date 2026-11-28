@@ -621,7 +621,7 @@ validation, when it is still in `.deja/reports`). It goes through the same redac
 
 `deja mcp [--config <file>] [--store <id>]` (DEJA-9) is a stdio MCP server, so a coding agent in a
 worktree can run the loop: edit the app, build, call `deja_run`, read a structured result. It is
-part of the CLI (`@deja-qa/cli`) rather than a separate `@deja-qa/mcp` package. It reuses the CLI's
+part of the CLI (`@deja-run/cli`) rather than a separate `@deja-run/mcp` package. It reuses the CLI's
 config loader, engine pick, store and runner assembly and report redaction, and a subcommand avoids
 widening the CLI's public exports. A separate package with its own `deja-mcp` bin stays possible.
 Stdout carries the protocol and nothing else; warnings go to stderr. It exits when the host closes stdin.
@@ -700,7 +700,7 @@ command = "bun"
 args = ["/path/to/deja/apps/cli/deja.ts", "mcp", "--config", "/path/to/project/deja.config.json"]
 ```
 
-After the packages are published, use `bunx @deja-qa/cli mcp --config deja.config.json` instead. The
+After the packages are published, use `bunx @deja-run/cli mcp --config deja.config.json` instead. The
 agent then sees `mcp__deja__deja_run` and its siblings. The server starts in the client's working
 directory, so give an absolute `--config` path unless the client starts in the project.
 

@@ -20,7 +20,7 @@ import {
   type WalkIdentity,
   type WalkStore,
   type WalkValidation,
-} from '@deja-qa/core'
+} from '@deja-run/core'
 import {
   ConsumerFlows,
   readConsumerWalkFields,
@@ -48,7 +48,7 @@ export {
   type StoredWalk,
   type WalkIdentity,
   type WalkValidation,
-} from '@deja-qa/core'
+} from '@deja-run/core'
 
 export const LOCAL_MEMORY_SCHEMA_VERSION = 3
 /** Written only when a walk replays the consumer's own file (manifest mode). */
@@ -756,7 +756,7 @@ export {
   type VerifiedSubflow,
   type VerifiedSubflowLookup,
   type VerifiedSubflowStore,
-} from '@deja-qa/core'
+} from '@deja-run/core'
 
 export { FlowClosureError } from './flow-closure.ts'
 export {

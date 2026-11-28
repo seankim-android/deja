@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { readFile } from 'node:fs/promises'
-import { type MaestroEnginePin } from '@deja-qa/maestro'
+import { type MaestroEnginePin } from '@deja-run/maestro'
 import { runCli } from '../src/main.ts'
 import { renderDoctor, runDoctor, type DoctorProbe } from '../src/doctor.ts'
 

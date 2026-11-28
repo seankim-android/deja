@@ -5,7 +5,7 @@ import {
   compareColdWarm,
   renderColdWarmMarkdown,
   type MetricSample,
-} from '@deja-qa/metrics'
+} from '@deja-run/metrics'
 
 const root = process.cwd()
 const inputDirectory = resolve(root, '.deja/metrics/walk005/samples')

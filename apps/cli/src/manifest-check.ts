@@ -1,4 +1,4 @@
-import { ConsumerFlows, type ManifestCheck, type ManifestCheckEntry } from '@deja-qa/store-local'
+import { ConsumerFlows, type ManifestCheck, type ManifestCheckEntry } from '@deja-run/store-local'
 import { CliConfigurationError, type ProductionConfiguration } from './config.ts'
 import type { CliIo } from './main.ts'
 import { createExecutionAdapter } from './orchestration.ts'

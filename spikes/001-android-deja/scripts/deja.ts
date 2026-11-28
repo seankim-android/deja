@@ -8,20 +8,20 @@ import {
   resolveFlowPath,
   runMaestro,
   type MaestroRunResult,
-} from '@deja-qa/maestro'
-import type { PersistenceDetails, VerificationDetails } from '@deja-qa/explorer-openclaw'
+} from '@deja-run/maestro'
+import type { PersistenceDetails, VerificationDetails } from '@deja-run/explorer-openclaw'
 import {
   InvalidWalkMemoryError,
   LOCAL_MEMORY_PATH,
   LocalWalkStore,
   MAESTRO_FLOW_SCHEMA_VERSION,
   type ExplorationDetails,
-} from '@deja-qa/store-local'
+} from '@deja-run/store-local'
 import {
   BoundedCheckoutRepairer,
   CHECKOUT_AFFECTED_FILES,
   runCheckoutBuildAndInstall,
-} from '@deja-qa/repair'
+} from '@deja-run/repair'
 import { exploreGoal } from './explore.ts'
 
 const root = process.cwd()

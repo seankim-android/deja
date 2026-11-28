@@ -1,7 +1,7 @@
 // A separate process that opens one store, takes the writer lock with a real write, and holds it.
 // Usage: bun|node writer-process.mjs <local|sqlite> <workspace> <storeId or -> [exit-now]
 // Prints ACQUIRED or LOCKED:<code>, then (if it holds the lock) waits for a line on stdin.
-import { localStoreContract, sqliteStoreContract, contractIdentity } from '@deja-qa/store-conformance'
+import { localStoreContract, sqliteStoreContract, contractIdentity } from '@deja-run/store-conformance'
 
 const [kind, workspaceRoot, storeArgument, mode] = process.argv.slice(2)
 const implementation = kind === 'sqlite' ? sqliteStoreContract : localStoreContract

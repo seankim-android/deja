@@ -3,7 +3,7 @@ import { existsSync } from 'node:fs'
 import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { fingerprintScreenV2 } from '@deja-qa/core'
+import { fingerprintScreenV2 } from '@deja-run/core'
 import {
   McpMaestroTransport,
   ProcessMaestroTransport,

@@ -14,7 +14,7 @@ if ! printf '%s' "$DEJA_VERSION" | grep -Eq '^[0-9][0-9A-Za-z.+-]*$'; then
   exit 1
 fi
 DEJA_SHA256="$(printf '%s' "$DEJA_SHA256" | tr 'A-F' 'a-f')"
-repo="${DEJA_REPO:-seankim-android/deja}"
+repo="${DEJA_REPO:-deja-run/deja}"
 cache="${DEJA_BIN_CACHE:-$HOME/.cache/deja-bin}"
 
 case "$(uname -s)-$(uname -m)" in

@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import type { RunResult } from '@deja-qa/core'
+import type { RunResult } from '@deja-run/core'
 import { encodeSummaryGoal, renderSummary } from '../src/output.ts'
 import { redactJunit } from '../src/junit.ts'
 

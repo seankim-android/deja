@@ -1,16 +1,16 @@
 {
-  "name": "@deja-qa/store-sqlite",
+  "name": "@deja-run/store-sqlite",
   "version": "0.1.0",
   "description": "SQLite WalkStore (bun:sqlite on Bun, node:sqlite on Node)",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/seankim-android/deja.git",
+    "url": "git+https://github.com/deja-run/deja.git",
     "directory": "packages/store-sqlite"
   },
-  "homepage": "https://github.com/seankim-android/deja#readme",
+  "homepage": "https://github.com/deja-run/deja#readme",
   "bugs": {
-    "url": "https://github.com/seankim-android/deja/issues"
+    "url": "https://github.com/deja-run/deja/issues"
   },
   "type": "module",
   "main": "./dist/index.js",
@@ -40,7 +40,7 @@
     "prepublishOnly": "bun ../../scripts/publish-guard.ts"
   },
   "dependencies": {
-    "@deja-qa/core": "workspace:*",
-    "@deja-qa/store-local": "workspace:*"
+    "@deja-run/core": "workspace:*",
+    "@deja-run/store-local": "workspace:*"
   }
 }

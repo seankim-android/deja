@@ -12,7 +12,7 @@ import {
   type VerifiedSubflow,
   type VerifiedSubflowLookup,
   type VerifiedSubflowStore,
-} from '@deja-qa/core'
+} from '@deja-run/core'
 
 export const VERIFIED_SUBFLOW_INDEX_PATH = '.deja/segments/index.json'
 

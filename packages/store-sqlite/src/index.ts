@@ -22,7 +22,7 @@ import {
   type WalkIdentity,
   type WalkStore,
   type WalkValidation,
-} from '@deja-qa/core'
+} from '@deja-run/core'
 import {
   checkStoredSubflows,
   ConsumerFlows,
@@ -34,7 +34,7 @@ import {
   snapshotFlowClosure,
   storeMetadataPath,
   WriterLock,
-} from '@deja-qa/store-local'
+} from '@deja-run/store-local'
 
 export {
   type CandidateSnapshot,
@@ -49,7 +49,7 @@ export {
   type StoredWalk,
   type WalkIdentity,
   type WalkValidation,
-} from '@deja-qa/core'
+} from '@deja-run/core'
 
 export {
   InvalidStoreIdError,
@@ -57,7 +57,7 @@ export {
   StoreLockUnavailableError,
   StoreLockedError,
   storeMetadataPath,
-} from '@deja-qa/store-local'
+} from '@deja-run/store-local'
 
 export {
   openSqlite,

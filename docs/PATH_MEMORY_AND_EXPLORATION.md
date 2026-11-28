@@ -972,13 +972,13 @@ factories after, so a warm hit builds no explorer, driver or chooser.
 
 | Package | Adds |
 | --- | --- |
-| `@deja-qa/core` | Driver, chooser, path and proposal types; `PathStore`; pure planner and `stitch`; fingerprint v2; canonical YAML v1; assertion-hash and target-gate checks |
-| `@deja-qa/maestro` | `iosExplorationDriver`, `androidExplorationDriver`, flow sectioning, runner `env` |
-| `@deja-qa/explorer-graph` (new) | `GraphExplorer implements WalkExplorer`, `scriptedChooser`, `openAiCompatibleChooser` |
-| `@deja-qa/store-local`, `@deja-qa/store-sqlite` | `LocalPathStore`, `SQLitePathStore` |
-| `@deja-qa/store-conformance` | `runPathStoreContractTests` |
-| `@deja-qa/repair` | `GraphStepRepairer implements SelectorRepairer` |
-| `@deja-qa/explorer-openclaw` | Unchanged, the existing Android option |
+| `@deja-run/core` | Driver, chooser, path and proposal types; `PathStore`; pure planner and `stitch`; fingerprint v2; canonical YAML v1; assertion-hash and target-gate checks |
+| `@deja-run/maestro` | `iosExplorationDriver`, `androidExplorationDriver`, flow sectioning, runner `env` |
+| `@deja-run/explorer-graph` (new) | `GraphExplorer implements WalkExplorer`, `scriptedChooser`, `openAiCompatibleChooser` |
+| `@deja-run/store-local`, `@deja-run/store-sqlite` | `LocalPathStore`, `SQLitePathStore` |
+| `@deja-run/store-conformance` | `runPathStoreContractTests` |
+| `@deja-run/repair` | `GraphStepRepairer implements SelectorRepairer` |
+| `@deja-run/explorer-openclaw` | Unchanged, the existing Android option |
 
 ### 13.1 What DEJA-18 must measure before DEJA-19 starts
 

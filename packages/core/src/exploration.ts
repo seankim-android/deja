@@ -1,7 +1,7 @@
 /*
  * Platform-neutral explorer contract and screen fingerprints v2 (docs/PATH_MEMORY_AND_EXPLORATION.md
  * sections 3, 4.3, 4.4). Core does no IO and imports nothing from a platform package: a driver
- * (for example `iosExplorationDriver` in `@deja-qa/maestro`) supplies hierarchy capture, fingerprint
+ * (for example `iosExplorationDriver` in `@deja-run/maestro`) supplies hierarchy capture, fingerprint
  * rules and action execution. Nothing here calls a model.
  */
 import { createHash } from 'node:crypto'

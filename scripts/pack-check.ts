@@ -84,7 +84,7 @@ try {
   }
   console.log(`manifests: ${failures.length ? 'FAILED' : 'workspace: ranges rewritten, sibling ranges match packed versions'}`)
 
-  // `overrides` makes npm resolve `@deja-qa/*` dependencies to the tarballs, never the registry.
+  // `overrides` makes npm resolve `@deja-run/*` dependencies to the tarballs, never the registry.
   const overrides = Object.fromEntries(packages.map(({ manifest, tarball }) => [manifest.name, `file:${tarball}`]))
   await writeFile(join(project, 'package.json'), JSON.stringify({
     name: 'deja-pack-check-consumer',
@@ -97,7 +97,7 @@ try {
   // the repo is locked to, prefer the cache and retry, so a registry blip or a new release does not
   // fail an unrelated PR. skipLibCheck stays false so a broken import inside our own packed
   // `.d.ts` cannot silently become `any`. If a third-party type ever breaks it, add a pass that
-  // fails only on errors under node_modules/@deja-qa/.
+  // fails only on errors under node_modules/@deja-run/.
   const consumer = JSON.parse(await readFile(join(project, 'package.json'), 'utf8'))
   const registryDependencies = ['@modelcontextprotocol/sdk', 'yaml']
   for (const name of registryDependencies) {
@@ -118,14 +118,14 @@ try {
   if (!installed.ok) throw new Error(`npm install failed:\n${installed.output}`)
 
   // `yaml` is a real dependency of the packed core: a registry install, not a workspace link or an override to a tarball.
-  const corePacked = JSON.parse(must('tar', ['-xzOf', packages.find(({ manifest }) => manifest.name === '@deja-qa/core')!.tarball, 'package/package.json'], work)) as Manifest
-  if (!corePacked.dependencies?.yaml) failures.push('packed @deja-qa/core does not declare yaml')
+  const corePacked = JSON.parse(must('tar', ['-xzOf', packages.find(({ manifest }) => manifest.name === '@deja-run/core')!.tarball, 'package/package.json'], work)) as Manifest
+  if (!corePacked.dependencies?.yaml) failures.push('packed @deja-run/core does not declare yaml')
   const yamlFolder = join(project, 'node_modules/yaml')
   const yamlStat = await lstat(yamlFolder).catch(() => null)
-  const coreStat = await lstat(join(project, 'node_modules/@deja-qa/core')).catch(() => null)
+  const coreStat = await lstat(join(project, 'node_modules/@deja-run/core')).catch(() => null)
   if (!yamlStat || yamlStat.isSymbolicLink()) failures.push('yaml is missing or a link, not a registry install')
   if (!coreStat || coreStat.isSymbolicLink()) failures.push('core is missing or a link, not a packed install')
-  const resolved = createRequire(join(project, 'node_modules/@deja-qa/core/package.json')).resolve('yaml/package.json')
+  const resolved = createRequire(join(project, 'node_modules/@deja-run/core/package.json')).resolve('yaml/package.json')
   const yamlVersion = (JSON.parse(await readFile(resolved, 'utf8')) as { version: string }).version
   console.log(`yaml: ${yamlStat && !yamlStat.isSymbolicLink() ? `registry install ${yamlVersion}, resolved from the packed core` : 'FAILED'}`)
 
@@ -180,7 +180,7 @@ try {
     "import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'",
     "import { tmpdir } from 'node:os'",
     "import { join } from 'node:path'",
-    "import { SQLiteWalkStore, sqliteRuntime } from '@deja-qa/store-sqlite'",
+    "import { SQLiteWalkStore, sqliteRuntime } from '@deja-run/store-sqlite'",
     "const root = await mkdtemp(join(tmpdir(), 'deja-pack-sqlite-'))",
     "try {",
     "  await mkdir(join(root, 'flows'))",

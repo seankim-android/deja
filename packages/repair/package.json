@@ -1,16 +1,16 @@
 {
-  "name": "@deja-qa/repair",
+  "name": "@deja-run/repair",
   "version": "0.1.0",
   "description": "Bounded selector repair",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/seankim-android/deja.git",
+    "url": "git+https://github.com/deja-run/deja.git",
     "directory": "packages/repair"
   },
-  "homepage": "https://github.com/seankim-android/deja#readme",
+  "homepage": "https://github.com/deja-run/deja#readme",
   "bugs": {
-    "url": "https://github.com/seankim-android/deja/issues"
+    "url": "https://github.com/deja-run/deja/issues"
   },
   "type": "module",
   "main": "./dist/index.js",
@@ -40,10 +40,10 @@
     "prepublishOnly": "bun ../../scripts/publish-guard.ts"
   },
   "dependencies": {
-    "@deja-qa/core": "workspace:*",
-    "@deja-qa/maestro": "workspace:*"
+    "@deja-run/core": "workspace:*",
+    "@deja-run/maestro": "workspace:*"
   },
   "devDependencies": {
-    "@deja-qa/store-local": "workspace:*"
+    "@deja-run/store-local": "workspace:*"
   }
 }

@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { mkdir, readFile, realpath, stat, writeFile } from 'node:fs/promises'
 import { dirname, isAbsolute, relative, resolve, sep } from 'node:path'
-import { ClosureRefusedError, findFlowReferences, FlowFileCommandError, FlowReferenceError, type StoredFlowFile } from '@deja-qa/core'
+import { ClosureRefusedError, findFlowReferences, FlowFileCommandError, FlowReferenceError, type StoredFlowFile } from '@deja-run/core'
 
 /** A flow's references cannot be stored safely, so the flow is not remembered. */
 export class FlowClosureError extends ClosureRefusedError {

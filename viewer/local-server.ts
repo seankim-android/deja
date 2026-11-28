@@ -1,7 +1,7 @@
 import { createServer as createHttpServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import { readdir, readFile, realpath, stat } from 'node:fs/promises'
 import { extname, isAbsolute, resolve, sep } from 'node:path'
-import type { StoredValidation } from '@deja-qa/core'
+import type { StoredValidation } from '@deja-run/core'
 import type {
   ViewerArtifact,
   ViewerHistory,

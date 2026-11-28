@@ -1,7 +1,7 @@
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
-import { ExpectedFlowChecksumMismatchError, type WalkStore } from '@deja-qa/core'
+import { ExpectedFlowChecksumMismatchError, type WalkStore } from '@deja-run/core'
 import { resolveHarness, type ContractHarness } from './harness.ts'
 import { contractIdentity, initialValidation, laterValidation } from './walk-store-contract.ts'
 

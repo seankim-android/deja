@@ -6,8 +6,8 @@ import {
   ExactFirstWalkRetriever,
   type GoalEmbeddingProvider,
   type WalkIdentity,
-} from '@deja-qa/core'
-import { LocalLexicalEmbeddingProvider } from '@deja-qa/semantic-local'
+} from '@deja-run/core'
+import { LocalLexicalEmbeddingProvider } from '@deja-run/semantic-local'
 import {
   InvalidWalkMemoryError,
   LocalWalkStore,

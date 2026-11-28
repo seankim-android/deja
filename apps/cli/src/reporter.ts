@@ -1,6 +1,6 @@
 import { mkdir, readFile, realpath, rename, stat, writeFile } from 'node:fs/promises'
 import { dirname, resolve, sep } from 'node:path'
-import type { ReportReceipt, RunReporter, RunResult } from '@deja-qa/core'
+import type { ReportReceipt, RunReporter, RunResult } from '@deja-run/core'
 import { CliConfigurationError } from './config.ts'
 import { redactJson, type Redactor } from './redaction.ts'
 

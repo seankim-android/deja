@@ -3,7 +3,7 @@ import { resolve } from 'node:path'
 import {
   InvalidWalkManifestError,
   type RunResult,
-} from '@deja-qa/core'
+} from '@deja-run/core'
 import {
   ConsumerFlowError,
   InvalidWalkMemoryError,
@@ -11,8 +11,8 @@ import {
   ManifestLockedError,
   StoreLockedError,
   StoreLockUnavailableError,
-} from '@deja-qa/store-local'
-import { dejaHome, type InstallEngineOptions } from '@deja-qa/maestro'
+} from '@deja-run/store-local'
+import { dejaHome, type InstallEngineOptions } from '@deja-run/maestro'
 import {
   CliConfigurationError,
   defaultConfigPath,

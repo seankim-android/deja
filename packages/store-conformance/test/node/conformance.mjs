@@ -10,8 +10,8 @@ import {
   runWalkStoreContractTests,
   runWriterLockContractTests,
   sqliteStoreContract,
-} from '@deja-qa/store-conformance'
-import { nodeHarness } from '@deja-qa/store-conformance/node'
+} from '@deja-run/store-conformance'
+import { nodeHarness } from '@deja-run/store-conformance/node'
 import { memoryStoreContract } from './memory-store.mjs'
 
 for (const implementation of [localStoreContract, sqliteStoreContract]) {
