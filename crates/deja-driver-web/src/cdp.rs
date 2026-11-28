@@ -2,7 +2,7 @@
 //! browser-level calls and flat `sessionId`-scoped page calls (`Target.attachToTarget` with
 //! `flatten: true`), RAII cancellation cleanup, event routing, and isolated `BrowserContext` setup.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -53,13 +53,32 @@ struct PendingEntry {
     tx: oneshot::Sender<Result<Value>>,
 }
 
+#[derive(Debug)]
+struct NetworkTracker {
+    in_flight: HashSet<String>,
+    last_activity: Instant,
+}
+
+impl NetworkTracker {
+    fn new() -> Self {
+        Self {
+            in_flight: HashSet::new(),
+            last_activity: Instant::now(),
+        }
+    }
+}
+
 /// Shared CDP event & crash tracking state updated by the WebSocket reader task.
 #[derive(Debug)]
 pub(crate) struct CdpEventState {
     active_target_id: StdMutex<Option<String>>,
     active_session_id: StdMutex<Option<String>>,
+    nav_seq: AtomicU64,
+    nav_notify: Notify,
     load_seq: AtomicU64,
     load_notify: Notify,
+    network: StdMutex<NetworkTracker>,
+    network_notify: Notify,
     detached: AtomicBool,
     detached_notify: Notify,
     crash_sink: Arc<StdMutex<Option<RecordedCrash>>>,
@@ -70,8 +89,12 @@ impl CdpEventState {
         Self {
             active_target_id: StdMutex::new(None),
             active_session_id: StdMutex::new(None),
+            nav_seq: AtomicU64::new(0),
+            nav_notify: Notify::new(),
             load_seq: AtomicU64::new(0),
             load_notify: Notify::new(),
+            network: StdMutex::new(NetworkTracker::new()),
+            network_notify: Notify::new(),
             detached: AtomicBool::new(false),
             detached_notify: Notify::new(),
             crash_sink,
@@ -94,6 +117,28 @@ impl CdpEventState {
             *guard = session_id;
         }
         self.detached.store(false, Ordering::SeqCst);
+        self.reset_network_state();
+    }
+
+    pub(crate) fn reset_network_state(&self) {
+        {
+            let mut guard = self.network.lock().unwrap_or_else(|p| p.into_inner());
+            guard.in_flight.clear();
+            guard.last_activity = Instant::now();
+        }
+        self.network_notify.notify_waiters();
+    }
+
+    pub(crate) fn network_snapshot(&self) -> (usize, Instant) {
+        let guard = self.network.lock().unwrap_or_else(|p| p.into_inner());
+        (guard.in_flight.len(), guard.last_activity)
+    }
+
+    fn wake_all_waiters(&self) {
+        self.detached_notify.notify_waiters();
+        self.nav_notify.notify_waiters();
+        self.load_notify.notify_waiters();
+        self.network_notify.notify_waiters();
     }
 
     fn matches_active_session(&self, session_id: Option<&str>) -> bool {
@@ -138,8 +183,7 @@ impl CdpEventState {
                         "Chromium renderer target crashed (Inspector.targetCrashed)",
                     );
                     self.detached.store(true, Ordering::SeqCst);
-                    self.detached_notify.notify_waiters();
-                    self.load_notify.notify_waiters();
+                    self.wake_all_waiters();
                 }
             }
             "Target.targetCrashed" => {
@@ -163,8 +207,7 @@ impl CdpEventState {
                         ),
                     );
                     self.detached.store(true, Ordering::SeqCst);
-                    self.detached_notify.notify_waiters();
-                    self.load_notify.notify_waiters();
+                    self.wake_all_waiters();
                 }
             }
             "Target.detachedFromTarget" => {
@@ -175,9 +218,25 @@ impl CdpEventState {
                 if self.matches_active_session(detached_sid) {
                     debug!(session_id = ?detached_sid, "received CDP Target.detachedFromTarget");
                     self.detached.store(true, Ordering::SeqCst);
-                    self.detached_notify.notify_waiters();
-                    self.load_notify.notify_waiters();
+                    self.wake_all_waiters();
                 }
+            }
+            "Page.frameNavigated" if self.matches_active_session(session_id) => {
+                // Only main-frame navigations (`frame.parentId` absent or null) advance `nav_seq`.
+                let is_main_frame = params
+                    .get("frame")
+                    .and_then(|f| f.get("parentId"))
+                    .is_none_or(Value::is_null);
+                if is_main_frame {
+                    trace!(session_id = ?session_id, "received main-frame Page.frameNavigated");
+                    self.nav_seq.fetch_add(1, Ordering::SeqCst);
+                    self.nav_notify.notify_waiters();
+                }
+            }
+            "Page.navigatedWithinDocument" if self.matches_active_session(session_id) => {
+                trace!(session_id = ?session_id, "received Page.navigatedWithinDocument");
+                self.nav_seq.fetch_add(1, Ordering::SeqCst);
+                self.nav_notify.notify_waiters();
             }
             "Page.loadEventFired" | "Page.frameStoppedLoading"
                 if self.matches_active_session(session_id) =>
@@ -185,6 +244,35 @@ impl CdpEventState {
                 trace!(method, session_id = ?session_id, "received page load event");
                 self.load_seq.fetch_add(1, Ordering::SeqCst);
                 self.load_notify.notify_waiters();
+            }
+            "Network.requestWillBeSent" if self.matches_active_session(session_id) => {
+                let is_data_url = params
+                    .get("request")
+                    .and_then(|r| r.get("url"))
+                    .and_then(Value::as_str)
+                    .is_some_and(|u| u.starts_with("data:"));
+                if !is_data_url
+                    && let Some(req_id) = params.get("requestId").and_then(Value::as_str)
+                {
+                    {
+                        let mut net = self.network.lock().unwrap_or_else(|p| p.into_inner());
+                        net.in_flight.insert(req_id.to_string());
+                        net.last_activity = Instant::now();
+                    }
+                    self.network_notify.notify_waiters();
+                }
+            }
+            "Network.loadingFinished" | "Network.loadingFailed"
+                if self.matches_active_session(session_id) =>
+            {
+                if let Some(req_id) = params.get("requestId").and_then(Value::as_str) {
+                    {
+                        let mut net = self.network.lock().unwrap_or_else(|p| p.into_inner());
+                        net.in_flight.remove(req_id);
+                        net.last_activity = Instant::now();
+                    }
+                    self.network_notify.notify_waiters();
+                }
             }
             _ => {}
         }
@@ -488,8 +576,14 @@ impl CdpClient {
             _ = cancel.cancelled() => return Err(WebDriverError::Cancelled),
             timed = tokio::time::timeout_at(deadline, resp_rx) => {
                 match timed {
-                    Ok(Ok(res)) => res,
-                    Ok(Err(_)) => Err(WebDriverError::CdpClosed(self.closed_message())),
+                    Ok(Ok(res)) => {
+                        guard.armed = false;
+                        res
+                    }
+                    Ok(Err(_)) => {
+                        guard.armed = false;
+                        Err(WebDriverError::CdpClosed(self.closed_message()))
+                    }
                     Err(_) => Err(WebDriverError::Timeout {
                         operation: format!("cdp:{method}"),
                         elapsed_ms: started.elapsed().as_millis() as u64,
@@ -499,12 +593,23 @@ impl CdpClient {
             }
         };
 
-        guard.armed = false;
         response
     }
 
     pub(crate) fn set_active_target(&self, target_id: Option<String>, session_id: Option<String>) {
         self.inner.events.set_active_target(target_id, session_id);
+    }
+
+    pub(crate) fn reset_network_state(&self) {
+        self.inner.events.reset_network_state();
+    }
+
+    pub(crate) fn nav_seq(&self) -> u64 {
+        self.inner.events.nav_seq.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn nav_notify(&self) -> &Notify {
+        &self.inner.events.nav_notify
     }
 
     pub(crate) fn load_seq(&self) -> u64 {
@@ -513,6 +618,14 @@ impl CdpClient {
 
     pub(crate) fn load_notify(&self) -> &Notify {
         &self.inner.events.load_notify
+    }
+
+    pub(crate) fn network_snapshot(&self) -> (usize, Instant) {
+        self.inner.events.network_snapshot()
+    }
+
+    pub(crate) fn network_notify(&self) -> &Notify {
+        &self.inner.events.network_notify
     }
 
     pub(crate) fn is_closed(&self) -> bool {
@@ -632,8 +745,7 @@ fn mark_closed_and_drain(
             .tx
             .send(Err(WebDriverError::CdpClosed(reason.clone())));
     }
-    events.load_notify.notify_waiters();
-    events.detached_notify.notify_waiters();
+    events.wake_all_waiters();
 }
 
 /// Active Chromium BrowserContext + attached flat Target session identifiers.
@@ -783,6 +895,9 @@ async fn configure_page_session(
         .await?;
     let _ = cdp
         .call_session(session_id, "Runtime.enable", json!({}), timeout, cancel)
+        .await?;
+    let _ = cdp
+        .call_session(session_id, "Network.enable", json!({}), timeout, cancel)
         .await?;
     let _ = cdp
         .call_session(

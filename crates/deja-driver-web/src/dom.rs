@@ -135,7 +135,15 @@ pub const AX_DOM_SCRIPT: &str = r#"(() => {
       if (SKIP_TAGS.has(tag)) return;
       if (node.hasAttribute('hidden') || node.getAttribute('aria-hidden') === 'true' || node.inert) return;
       const st = window.getComputedStyle(node);
-      if (st.display === 'none' || st.visibility === 'hidden' || st.visibility === 'collapse') return;
+      const op = parseFloat(st.opacity);
+      if (
+        st.display === 'none' ||
+        st.visibility === 'hidden' ||
+        st.visibility === 'collapse' ||
+        (Number.isFinite(op) && op <= 0)
+      ) {
+        return;
+      }
       if (node.shadowRoot) {
         for (let i = 0; i < node.shadowRoot.childNodes.length; i++) {
           collect(node.shadowRoot.childNodes[i]);
@@ -382,7 +390,7 @@ pub const AX_DOM_SCRIPT: &str = r#"(() => {
     return Array.from(el.children);
   }
 
-  function walk(el, parentIdx, depth, inheritedClip) {
+  function walk(el, parentIdx, depth, inheritedClip, ancestorOpaque) {
     if (!el || el.nodeType !== Node.ELEMENT_NODE) return;
     if (seen.has(el)) return;
     seen.add(el);
@@ -398,6 +406,10 @@ pub const AX_DOM_SCRIPT: &str = r#"(() => {
     if (style.display === 'none') {
       return;
     }
+
+    const rawOpacity = parseFloat(style.opacity);
+    const selfOpaque = !(Number.isFinite(rawOpacity) && rawOpacity <= 0);
+    const effectiveOpaque = ancestorOpaque && selfOpaque;
 
     const effectiveClip = style.position === 'fixed' ? vpClip : inheritedClip;
     const rect = el.getBoundingClientRect();
@@ -442,11 +454,10 @@ pub const AX_DOM_SCRIPT: &str = r#"(() => {
       const visBottom = Math.min(rect.bottom, effectiveClip.bottom);
       const visW = Math.max(0, visRight - visLeft);
       const visH = Math.max(0, visBottom - visTop);
-      const opacity = parseFloat(style.opacity || '1');
       const visuallyHidden =
+        !effectiveOpaque ||
         style.visibility === 'hidden' ||
-        style.visibility === 'collapse' ||
-        !(opacity > 0);
+        style.visibility === 'collapse';
       const isOnScreen =
         !visuallyHidden &&
         rect.width > 0 &&
@@ -506,6 +517,14 @@ pub const AX_DOM_SCRIPT: &str = r#"(() => {
           width: Number.isFinite(rect.width) ? rect.width : 0,
           height: Number.isFinite(rect.height) ? rect.height : 0,
         },
+        visibleFrame: isOnScreen
+          ? {
+              x: Number.isFinite(visLeft) ? visLeft : 0,
+              y: Number.isFinite(visTop) ? visTop : 0,
+              width: Number.isFinite(visW) ? visW : 0,
+              height: Number.isFinite(visH) ? visH : 0,
+            }
+          : null,
       });
       nextParent = idx;
       nextDepth = depth + 1;
@@ -520,13 +539,13 @@ pub const AX_DOM_SCRIPT: &str = r#"(() => {
     const children = childElementsOf(el);
     for (let i = 0; i < children.length; i++) {
       if (truncated) return;
-      walk(children[i], nextParent, nextDepth, childClip);
+      walk(children[i], nextParent, nextDepth, childClip, effectiveOpaque);
     }
   }
 
   const root = document.body || document.documentElement;
   if (root) {
-    walk(root, null, 0, vpClip);
+    walk(root, null, 0, vpClip, true);
   }
 
   return {
@@ -591,6 +610,8 @@ struct RawDomNode {
     is_on_screen: bool,
     #[serde(default)]
     frame: RawRect,
+    #[serde(default)]
+    visible_frame: Option<RawRect>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -648,6 +669,10 @@ pub(crate) fn dom_snapshot_to_hierarchy(
             hittable: n.hittable,
             is_on_screen: n.is_on_screen,
             frame: UiRect::new(n.frame.x, n.frame.y, n.frame.width, n.frame.height),
+            visible_frame: n
+                .visible_frame
+                .map(|vf| UiRect::new(vf.x, vf.y, vf.width, vf.height))
+                .filter(|r| !r.is_empty()),
         })
         .collect();
 

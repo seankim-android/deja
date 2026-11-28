@@ -2354,6 +2354,7 @@ pub fn hierarchy_node_to_ui_node(node: &HierarchyNode) -> UiNode {
             node.frame.width,
             node.frame.height,
         ),
+        visible_frame: None,
     }
 }
 

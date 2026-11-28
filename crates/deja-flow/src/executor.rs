@@ -1834,7 +1834,7 @@ impl FlowExecutor {
                 let offset = rel_point.resolve(UiSize::new(node.frame.width, node.frame.height));
                 UiPoint::new(node.frame.x + offset.x, node.frame.y + offset.y)
             } else {
-                node.frame.center()
+                node.tap_point()
             }
         } else if let Some(pt_spec) = selector.point {
             let viewport = if !pt_spec.uses_percent() {

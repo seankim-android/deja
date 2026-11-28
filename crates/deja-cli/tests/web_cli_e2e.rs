@@ -481,3 +481,153 @@ fn live_web_cli_end_to_end_lifecycle_without_maestro_node_or_playwright() {
         );
     }
 }
+
+#[tokio::test]
+#[ignore = "requires live local Chromium / Google Chrome binary"]
+async fn live_web_dom_ancestor_opacity_and_clipped_visible_frame_in_chromium() {
+    use deja_driver_web::{ScreenSize, WebDriver, WebDriverConfig};
+    use deja_flow::{OpenLinkOptions, PlatformDriver};
+    use std::collections::BTreeMap;
+    use tokio_util::sync::CancellationToken;
+
+    let ws = TempDirGuard::new("dom-edge");
+    let public = ws.path().join("public");
+    fs::create_dir_all(&public).unwrap();
+    fs::write(
+        public.join("index.html"),
+        r#"<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      body { margin: 0; padding: 16px; }
+      #opacity_parent { opacity: 0; width: 200px; height: 60px; }
+      #opacity_child { opacity: 1; width: 160px; height: 40px; }
+      #clip_box { width: 120px; height: 60px; overflow: hidden; margin-top: 20px; }
+      #clipped_btn { width: 320px; height: 60px; border: 0; }
+    </style>
+  </head>
+  <body>
+    <div id="opacity_parent">
+      <button id="opacity_child" type="button">Ghost button</button>
+    </div>
+    <div id="clip_box">
+      <button id="clipped_btn" type="button">Wide clipped button</button>
+    </div>
+    <p id="click_status">idle</p>
+    <script>
+      document.getElementById('clipped_btn').addEventListener('click', () => {
+        document.getElementById('click_status').textContent = 'clicked';
+      });
+    </script>
+  </body>
+</html>
+"#,
+    )
+    .unwrap();
+
+    // Serve without strict CSP so the inline test click handler runs.
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let html_bytes = fs::read(public.join("index.html")).unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_c = Arc::clone(&stop);
+    let srv_handle = thread::spawn(move || {
+        while !stop_c.load(Ordering::SeqCst) {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    let _ = stream.set_nonblocking(false);
+                    let mut buf = [0u8; 4096];
+                    let _ = stream.read(&mut buf);
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        html_bytes.len()
+                    );
+                    let _ = stream.write_all(resp.as_bytes());
+                    let _ = stream.write_all(&html_bytes);
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    let mut env = BTreeMap::new();
+    env.insert("PATH".to_string(), SANITIZED_SYSTEM_PATH.to_string());
+    if let Ok(c) = std::env::var("DEJA_CHROME") {
+        env.insert("DEJA_CHROME".to_string(), c);
+    }
+    if let Ok(c) = std::env::var("CHROME_PATH") {
+        env.insert("CHROME_PATH".to_string(), c);
+    }
+    let driver = WebDriver::new(
+        WebDriverConfig::new()
+            .with_headless(true)
+            .with_screen_size(ScreenSize::new(1280, 720).unwrap())
+            .with_env(env),
+    );
+    let cancel = CancellationToken::new();
+    let url = format!("http://127.0.0.1:{port}/");
+
+    driver.ensure_session(&cancel).await.unwrap();
+    driver
+        .open_link(None, &url, &OpenLinkOptions::default(), &cancel)
+        .await
+        .unwrap();
+
+    let h = driver.hierarchy(&url, false, None, &cancel).await.unwrap();
+
+    // Finding 7: child inside `opacity: 0` ancestor must be invisible and non-hittable.
+    let ghost = h
+        .nodes
+        .iter()
+        .find(|n| n.identifier == "opacity_child")
+        .expect("opacity_child node present");
+    assert!(
+        !ghost.is_on_screen && !ghost.hittable && ghost.visible_frame.is_none(),
+        "descendant of opacity:0 ancestor must not be on-screen or hittable: {ghost:#?}"
+    );
+
+    // Finding 2: overflow-clipped wide button keeps full unclipped `frame` (~320px wide) while
+    // `visible_frame` matches the ~120px visible slice, and tapping `tap_point()` triggers click!
+    let clipped = h
+        .nodes
+        .iter()
+        .find(|n| n.identifier == "clipped_btn")
+        .expect("clipped_btn node present");
+    assert!(clipped.is_on_screen && clipped.hittable);
+    assert!(
+        clipped.frame.width >= 300.0,
+        "full frame width should remain unclipped (~320px), got {}",
+        clipped.frame.width
+    );
+    let vf = clipped
+        .visible_frame
+        .expect("clipped button must populate visible_frame");
+    assert!(
+        vf.width <= 125.0 && vf.width >= 100.0,
+        "visible_frame width should reflect 120px overflow clip, got {vf:#?}"
+    );
+    let tap = clipped.tap_point();
+    assert!(
+        tap.x < clipped.frame.x + 120.0,
+        "tap_point ({tap:?}) must lie inside clipped visible region, not unclipped center ({:?})",
+        clipped.frame.center()
+    );
+
+    driver.tap_point(&url, tap, &cancel).await.unwrap();
+    let after = driver.hierarchy(&url, false, None, &cancel).await.unwrap();
+    let status = after
+        .nodes
+        .iter()
+        .find(|n| n.identifier == "click_status")
+        .expect("click_status node");
+    assert_eq!(status.label, "clicked");
+
+    driver.shutdown().await.unwrap();
+    stop.store(true, Ordering::SeqCst);
+    let _ = srv_handle.join();
+}

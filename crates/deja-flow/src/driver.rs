@@ -171,6 +171,12 @@ pub struct UiNode {
     pub hittable: bool,
     pub is_on_screen: bool,
     pub frame: UiRect,
+    /// Optional clipped visible hit rectangle when the node is partially clipped by the viewport
+    /// or an overflow scroll container. When present and non-empty, [`UiNode::tap_point`] targets
+    /// this rect's center while [`Self::frame`] retains the full unclipped bounds for visibility
+    /// fraction checks (such as `scrollUntilVisible`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visible_frame: Option<UiRect>,
 }
 
 #[derive(Deserialize)]
@@ -210,6 +216,8 @@ struct UiNodeWire {
     #[serde(default)]
     is_on_screen: Option<bool>,
     frame: UiRect,
+    #[serde(default)]
+    visible_frame: Option<UiRect>,
 }
 
 impl From<UiNodeWire> for UiNode {
@@ -236,6 +244,7 @@ impl From<UiNodeWire> for UiNode {
             // that omit `isOnScreen` fall back to `hittable` instead of blindly defaulting `true`.
             is_on_screen: wire.is_on_screen.unwrap_or(wire.hittable),
             frame: wire.frame,
+            visible_frame: wire.visible_frame,
         }
     }
 }
@@ -261,11 +270,22 @@ impl Default for UiNode {
             hittable: false,
             is_on_screen: true,
             frame: UiRect::default(),
+            visible_frame: None,
         }
     }
 }
 
 impl UiNode {
+    /// Returns the preferred tap point for this node: the center of its clipped visible hit
+    /// region (`visible_frame`) when present and non-empty, otherwise `frame.center()`.
+    #[must_use]
+    pub fn tap_point(&self) -> UiPoint {
+        self.visible_frame
+            .filter(|r| !r.is_empty())
+            .unwrap_or(self.frame)
+            .center()
+    }
+
     /// Projects this node into a [`HashableNode`] matching Swift↔Rust FNV-1a parity.
     pub fn as_hashable(&self) -> HashableNode<'_> {
         HashableNode {

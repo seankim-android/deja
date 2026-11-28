@@ -3,7 +3,7 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
@@ -33,6 +33,8 @@ use crate::input::{
 const DEFAULT_STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_NAVIGATION_TIMEOUT: Duration = Duration::from_secs(30);
+const DEFAULT_NETWORK_QUIET_WINDOW: Duration = Duration::from_millis(150);
+const DEFAULT_NETWORK_SETTLE_CAP: Duration = Duration::from_millis(2_000);
 const BROWSER_CLOSE_TIMEOUT: Duration = Duration::from_millis(1_500);
 const DEFAULT_LONG_PRESS_MS: u64 = 600;
 const MAX_LONG_PRESS_MS: u64 = 10_000;
@@ -55,12 +57,16 @@ pub struct WebDriverConfig {
     pub startup_timeout: Duration,
     /// Per-RPC timeout for CDP requests.
     pub request_timeout: Duration,
-    /// Timeout for page navigation + load event + rAF settle.
+    /// Timeout for page navigation + load event + network + rAF settle.
     pub navigation_timeout: Duration,
     /// Environment map used for Chromium binary discovery (`DEJA_CHROME`, `CHROME_PATH`, `PATH`).
     pub env: BTreeMap<String, String>,
     #[cfg(test)]
     pub(crate) cdp_ws_url_override: Option<String>,
+    #[cfg(test)]
+    pub(crate) network_quiet_window: Duration,
+    #[cfg(test)]
+    pub(crate) network_settle_cap: Duration,
 }
 
 impl Default for WebDriverConfig {
@@ -84,6 +90,10 @@ impl WebDriverConfig {
             env: BTreeMap::new(),
             #[cfg(test)]
             cdp_ws_url_override: None,
+            #[cfg(test)]
+            network_quiet_window: DEFAULT_NETWORK_QUIET_WINDOW,
+            #[cfg(test)]
+            network_settle_cap: DEFAULT_NETWORK_SETTLE_CAP,
         }
     }
 
@@ -146,6 +156,10 @@ pub struct WebDriver {
     lifecycle: AsyncMutex<()>,
     crashes: Arc<StdMutex<Option<RecordedCrash>>>,
     attach_count: AtomicU64,
+    /// `true` once the active `BrowserContext` has performed navigation or mutating UI actions;
+    /// triggers fresh `BrowserContext` rotation on the next [`PlatformDriver::ensure_session`]
+    /// while keeping Chromium warm.
+    context_dirty: AtomicBool,
 }
 
 impl WebDriver {
@@ -162,7 +176,34 @@ impl WebDriver {
             lifecycle: AsyncMutex::new(()),
             crashes: Arc::new(StdMutex::new(None)),
             attach_count: AtomicU64::new(0),
+            context_dirty: AtomicBool::new(false),
         }
+    }
+
+    fn network_quiet_window(&self) -> Duration {
+        #[cfg(test)]
+        {
+            self.config.network_quiet_window
+        }
+        #[cfg(not(test))]
+        {
+            DEFAULT_NETWORK_QUIET_WINDOW
+        }
+    }
+
+    fn network_settle_cap(&self) -> Duration {
+        #[cfg(test)]
+        {
+            self.config.network_settle_cap
+        }
+        #[cfg(not(test))]
+        {
+            DEFAULT_NETWORK_SETTLE_CAP
+        }
+    }
+
+    fn mark_context_dirty(&self) {
+        self.context_dirty.store(true, Ordering::SeqCst);
     }
 
     #[cfg(test)]
@@ -282,6 +323,7 @@ impl WebDriver {
                     *b_guard = managed_browser;
                 }
                 self.set_handle(Some(handle.clone()));
+                self.context_dirty.store(false, Ordering::SeqCst);
                 self.attach_count.fetch_add(1, Ordering::SeqCst);
                 debug!(
                     attach_count = self.attach_count(),
@@ -322,6 +364,7 @@ impl WebDriver {
     }
 
     async fn teardown_locked(&self) {
+        self.context_dirty.store(false, Ordering::SeqCst);
         let old_handle = {
             let mut guard = self.active.lock().unwrap_or_else(|p| p.into_inner());
             guard.take()
@@ -355,14 +398,20 @@ impl WebDriver {
 
     /// Disposes the current isolated `BrowserContext` and creates a brand-new `BrowserContext` +
     /// page target on the SAME warm browser process (zero Chromium respawn).
+    ///
+    /// Invalidates the cached [`ActiveHandle`] BEFORE disposing so any failure or cancellation
+    /// mid-replacement can never leave callers reusing a disposed context/target.
     async fn reset_browser_context_locked(
         &self,
         handle: &ActiveHandle,
         cancel: &CancellationToken,
     ) -> Result<ActiveHandle> {
+        self.set_handle(None);
+        self.context_dirty.store(false, Ordering::SeqCst);
         // Clear active target before disposing so intentional detach is never misclassified.
         handle.cdp.set_active_target(None, None);
-        let _ = handle
+        handle.cdp.reset_network_state();
+        if let Err(WebDriverError::Cancelled) = handle
             .cdp
             .call_browser(
                 "Target.disposeBrowserContext",
@@ -370,7 +419,10 @@ impl WebDriver {
                 self.config.request_timeout,
                 cancel,
             )
-            .await;
+            .await
+        {
+            return Err(WebDriverError::Cancelled);
+        }
 
         let new_ids = create_isolated_context_and_page(
             &handle.cdp,
@@ -385,18 +437,24 @@ impl WebDriver {
             ids: new_ids,
         };
         self.set_handle(Some(new_handle.clone()));
+        self.context_dirty.store(false, Ordering::SeqCst);
         Ok(new_handle)
     }
 
     /// Closes the current page target and opens a fresh `about:blank` target inside the SAME
     /// `BrowserContext`, preserving cookies / `localStorage` / `IndexedDB` when `clear_state: false`.
+    ///
+    /// Invalidates the cached [`ActiveHandle`] BEFORE closing the old target so any failure or
+    /// cancellation mid-replacement forces clean recovery rather than reusing a closed target.
     async fn replace_target_same_context_locked(
         &self,
         handle: &ActiveHandle,
         cancel: &CancellationToken,
     ) -> Result<ActiveHandle> {
+        self.set_handle(None);
         handle.cdp.set_active_target(None, None);
-        let _ = handle
+        handle.cdp.reset_network_state();
+        if let Err(WebDriverError::Cancelled) = handle
             .cdp
             .call_browser(
                 "Target.closeTarget",
@@ -404,7 +462,10 @@ impl WebDriver {
                 self.config.request_timeout,
                 cancel,
             )
-            .await;
+            .await
+        {
+            return Err(WebDriverError::Cancelled);
+        }
 
         let (target_id, session_id) = create_and_attach_page_in_context(
             &handle.cdp,
@@ -433,6 +494,7 @@ impl WebDriver {
         url: &str,
         cancel: &CancellationToken,
     ) -> Result<()> {
+        self.mark_context_dirty();
         let started = Instant::now();
         let deadline = tokio::time::Instant::now() + self.config.navigation_timeout;
         let seq_before = handle.cdp.load_seq();
@@ -471,8 +533,78 @@ impl WebDriver {
                 .await?;
         }
 
-        self.wait_ready_state_and_raf(handle, deadline, started, cancel)
+        self.wait_ready_state_network_and_raf(handle, deadline, started, cancel)
             .await
+    }
+
+    async fn wait_for_history_commit(
+        &self,
+        handle: &ActiveHandle,
+        nav_before: u64,
+        load_before: u64,
+        deadline: tokio::time::Instant,
+        started: Instant,
+        cancel: &CancellationToken,
+    ) -> Result<()> {
+        loop {
+            if cancel.is_cancelled() {
+                return Err(WebDriverError::Cancelled);
+            }
+            if handle.cdp.nav_seq() > nav_before || handle.cdp.load_seq() > load_before {
+                return Ok(());
+            }
+            if handle.cdp.is_closed() {
+                return Err(WebDriverError::CdpClosed(
+                    "CDP closed while waiting for history navigation commit".to_string(),
+                ));
+            }
+            if handle.cdp.is_detached() {
+                return Err(WebDriverError::TargetCrashed {
+                    detail: "target detached while waiting for history navigation commit"
+                        .to_string(),
+                });
+            }
+
+            let nav_notified = handle.cdp.nav_notify().notified();
+            let load_notified = handle.cdp.load_notify().notified();
+            tokio::pin!(nav_notified);
+            tokio::pin!(load_notified);
+            nav_notified.as_mut().enable();
+            load_notified.as_mut().enable();
+
+            if handle.cdp.nav_seq() > nav_before || handle.cdp.load_seq() > load_before {
+                return Ok(());
+            }
+
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(WebDriverError::Timeout {
+                    operation: "history_commit".to_string(),
+                    elapsed_ms: started.elapsed().as_millis() as u64,
+                    detail: format!(
+                        "timed out waiting for history traversal commit after {}ms",
+                        self.config.navigation_timeout.as_millis()
+                    ),
+                });
+            }
+
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => return Err(WebDriverError::Cancelled),
+                _ = nav_notified => {}
+                _ = load_notified => {}
+                _ = tokio::time::sleep(remaining) => {
+                    return Err(WebDriverError::Timeout {
+                        operation: "history_commit".to_string(),
+                        elapsed_ms: started.elapsed().as_millis() as u64,
+                        detail: format!(
+                            "timed out waiting for history traversal commit after {}ms",
+                            self.config.navigation_timeout.as_millis()
+                        ),
+                    });
+                }
+            }
+        }
     }
 
     async fn wait_for_load_event(
@@ -538,7 +670,80 @@ impl WebDriver {
         }
     }
 
-    async fn wait_ready_state_and_raf(
+    /// Waits for `in_flight == 0` for `network_quiet_window`, hard-capped at `network_settle_cap`
+    /// (and outer navigation `deadline`) so SSE/long-polling connections never hang navigation.
+    async fn wait_network_quiet(
+        &self,
+        handle: &ActiveHandle,
+        nav_deadline: tokio::time::Instant,
+        cancel: &CancellationToken,
+    ) -> Result<()> {
+        let quiet_window = self.network_quiet_window();
+        let cap = self.network_settle_cap();
+        if cap.is_zero() {
+            return Ok(());
+        }
+        let settle_start = Instant::now();
+        let cap_deadline = (tokio::time::Instant::now() + cap).min(nav_deadline);
+
+        loop {
+            if cancel.is_cancelled() {
+                return Err(WebDriverError::Cancelled);
+            }
+            if handle.cdp.is_closed() || handle.cdp.is_detached() {
+                return Ok(());
+            }
+
+            let (in_flight, last_activity) = handle.cdp.network_snapshot();
+            let remaining_cap = cap_deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining_cap.is_zero() {
+                return Ok(());
+            }
+
+            if in_flight == 0 {
+                let effective_last = last_activity.max(settle_start);
+                let quiet_elapsed = Instant::now().saturating_duration_since(effective_last);
+                if quiet_elapsed >= quiet_window {
+                    return Ok(());
+                }
+                let wait_for = quiet_window
+                    .saturating_sub(quiet_elapsed)
+                    .min(remaining_cap);
+
+                let notified = handle.cdp.network_notify().notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
+                let (in_flight2, _) = handle.cdp.network_snapshot();
+                if in_flight2 > 0 {
+                    continue;
+                }
+
+                tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => return Err(WebDriverError::Cancelled),
+                    _ = notified => {}
+                    _ = tokio::time::sleep(wait_for) => {}
+                }
+            } else {
+                let notified = handle.cdp.network_notify().notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
+                let (in_flight2, _) = handle.cdp.network_snapshot();
+                if in_flight2 == 0 {
+                    continue;
+                }
+
+                tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => return Err(WebDriverError::Cancelled),
+                    _ = notified => {}
+                    _ = tokio::time::sleep(remaining_cap) => return Ok(()),
+                }
+            }
+        }
+    }
+
+    async fn wait_ready_state_network_and_raf(
         &self,
         handle: &ActiveHandle,
         deadline: tokio::time::Instant,
@@ -571,7 +776,10 @@ impl WebDriver {
             }
         }
 
-        // 2x requestAnimationFrame settle so initial layout/paint has completed.
+        // Bounded network quiet settle so post-load fetches complete before returning.
+        self.wait_network_quiet(handle, deadline, cancel).await?;
+
+        // 2x requestAnimationFrame settle so layout/paint following network updates has completed.
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
             return Ok(());
@@ -734,6 +942,7 @@ impl WebDriver {
         cancel: &CancellationToken,
     ) -> Result<()> {
         validate_finite_point(point, "tap")?;
+        self.mark_context_dirty();
         self.dispatch_mouse_event(
             handle,
             json!({ "type": "mouseMoved", "x": point.x, "y": point.y, "button": "none", "buttons": 0 }),
@@ -761,6 +970,7 @@ impl WebDriver {
         cancel: &CancellationToken,
     ) -> Result<()> {
         validate_finite_point(point, "doubleTap")?;
+        self.mark_context_dirty();
         self.dispatch_mouse_event(
             handle,
             json!({ "type": "mouseMoved", "x": point.x, "y": point.y, "button": "none", "buttons": 0 }),
@@ -792,6 +1002,7 @@ impl WebDriver {
         cancel: &CancellationToken,
     ) -> Result<()> {
         validate_finite_point(point, "longPress")?;
+        self.mark_context_dirty();
         let hold_ms = duration_ms
             .unwrap_or(DEFAULT_LONG_PRESS_MS)
             .min(MAX_LONG_PRESS_MS);
@@ -830,6 +1041,7 @@ impl WebDriver {
     ) -> Result<()> {
         validate_finite_point(params.start, "swipe.start")?;
         validate_finite_point(params.end, "swipe.end")?;
+        self.mark_context_dirty();
 
         // Sign convention: dragging finger UP (`start.y > end.y`) scrolls content DOWN (`deltaY > 0`).
         let total_dx = params.start.x - params.end.x;
@@ -886,6 +1098,7 @@ impl WebDriver {
         text: &str,
         cancel: &CancellationToken,
     ) -> Result<()> {
+        self.mark_context_dirty();
         let _ = handle
             .cdp
             .call_session(
@@ -910,6 +1123,7 @@ impl WebDriver {
                 "eraseText count {count} exceeds maximum {MAX_KEY_REPEAT_COUNT}"
             )));
         }
+        self.mark_context_dirty();
         let spec = backspace_key_spec();
         self.dispatch_key_spec(handle, &spec, count, cancel).await
     }
@@ -928,6 +1142,7 @@ impl WebDriver {
                 Ok(())
             }
             ResolvedKeyAction::Dispatch { spec, count } => {
+                self.mark_context_dirty();
                 self.dispatch_key_spec(handle, &spec, count, cancel).await
             }
         }
@@ -974,8 +1189,12 @@ impl WebDriver {
             return Ok(());
         };
 
+        self.mark_context_dirty();
         let started = Instant::now();
         let deadline = tokio::time::Instant::now() + self.config.navigation_timeout;
+        let nav_before = handle.cdp.nav_seq();
+        let load_before = handle.cdp.load_seq();
+
         let _ = handle
             .cdp
             .call_session(
@@ -987,7 +1206,13 @@ impl WebDriver {
             )
             .await?;
 
-        self.wait_ready_state_and_raf(handle, deadline, started, cancel)
+        // Wait for history traversal commit (`Page.frameNavigated` on main frame,
+        // `Page.navigatedWithinDocument`, or `Page.loadEventFired`) BEFORE evaluating
+        // `document.readyState` so we never settle on the outgoing page!
+        self.wait_for_history_commit(handle, nav_before, load_before, deadline, started, cancel)
+            .await?;
+
+        self.wait_ready_state_network_and_raf(handle, deadline, started, cancel)
             .await
     }
 }
@@ -1037,6 +1262,29 @@ impl PlatformDriver for WebDriver {
     fn ensure_session<'a>(&'a self, cancel: &'a CancellationToken) -> DriverFuture<'a, ()> {
         Box::pin(async move {
             let _ = self.ensure_active_handle(cancel).await?;
+            if self.context_dirty.load(Ordering::SeqCst) {
+                let _lifecycle = tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => return Err(DriverError::Cancelled),
+                    guard = self.lifecycle.lock() => guard,
+                };
+                if cancel.is_cancelled() {
+                    return Err(DriverError::Cancelled);
+                }
+                if self.context_dirty.load(Ordering::SeqCst)
+                    && let Some(current) = self.current_handle()
+                    && !current.cdp.is_closed()
+                    && !current.cdp.is_detached()
+                {
+                    let _ = self
+                        .reset_browser_context_locked(&current, cancel)
+                        .await
+                        .map_err(|err| map_web_err("ensure_session.rotate_context", err))?;
+                } else if self.current_handle().is_none() {
+                    drop(_lifecycle);
+                    let _ = self.ensure_active_handle(cancel).await?;
+                }
+            }
             Ok(())
         })
     }

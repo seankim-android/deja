@@ -72,6 +72,7 @@ fn node(index: usize, parent: Option<usize>, id: &str, label: &str, frame: UiRec
         hittable: true,
         is_on_screen: true,
         frame,
+        visible_frame: None,
     }
 }
 
@@ -4429,5 +4430,64 @@ appId: dev.deja.checkout
     assert_eq!(
         out.failure.as_ref().map(|f| f.category),
         Some(FailureCategory::Runner)
+    );
+}
+
+#[tokio::test]
+async fn codex_r1_f2_clipped_node_taps_visible_frame_center_and_preserves_full_frame_fraction() {
+    let ws = TempDir::new("codex-r1-f2-visible-frame");
+    let driver = MockDriver::full();
+
+    // Button extends below the 390x844 viewport: full frame (0, 740, 200, 200) has center (100, 840)
+    // and only 104/200 = 52% visible inside the viewport; clipped visible_frame is (0, 740, 200, 104)
+    // with center (100, 792).
+    let mut clipped = node(
+        0,
+        None,
+        "clipped_btn",
+        "Continue",
+        UiRect::new(0.0, 740.0, 200.0, 200.0),
+    );
+    clipped.visible_frame = Some(UiRect::new(0.0, 740.0, 200.0, 104.0));
+    let viewport = UiSize::new(390.0, 844.0);
+    let vis_frac = clipped.frame.visible_fraction_in(viewport);
+    assert!(
+        (vis_frac - 0.52).abs() < 1e-6,
+        "full frame must preserve true 52% visibility fraction for scrollUntilVisible (got {vis_frac})"
+    );
+    assert_eq!(clipped.tap_point(), UiPoint::new(100.0, 792.0));
+
+    driver.set_screen(hierarchy_of(vec![clipped]));
+    let yaml = r#"
+appId: dev.deja.checkout
+---
+- tapOn:
+    id: clipped_btn
+- doubleTapOn:
+    id: clipped_btn
+- longPressOn:
+    id: clipped_btn
+"#;
+    let out = FlowExecutor::new(FlowExecutionConfig::new(ws.path().to_path_buf()))
+        .execute_yaml(&driver, yaml, &CancellationToken::new())
+        .await;
+    assert!(
+        out.passed,
+        "expected clipped taps to succeed: {:#?}",
+        out.failed_step
+    );
+
+    let events = driver.events();
+    assert!(
+        events.contains(&DriverEvent::Tap(100.0, 792.0)),
+        "tapOn must target visible_frame.center() (100,792), got events: {events:#?}"
+    );
+    assert!(
+        events.contains(&DriverEvent::DoubleTap(100.0, 792.0)),
+        "doubleTapOn must target visible_frame.center() (100,792), got events: {events:#?}"
+    );
+    assert!(
+        events.contains(&DriverEvent::LongPress(100.0, 792.0, None)),
+        "longPressOn must target visible_frame.center() (100,792), got events: {events:#?}"
     );
 }

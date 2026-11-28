@@ -473,6 +473,7 @@ fn standard_mock_handler(
                 | "Target.closeTarget"
                 | "Page.enable"
                 | "Runtime.enable"
+                | "Network.enable"
                 | "Emulation.setDeviceMetricsOverride"
                 | "Emulation.setEmulatedMedia"
                 | "Input.dispatchMouseEvent"
@@ -514,7 +515,16 @@ fn standard_mock_handler(
                         { "id": 12, "url": "http://127.0.0.1:4174/page2" }
                     ]
                 }),
-                "Page.navigateToHistoryEntry" => json!({}),
+                "Page.navigateToHistoryEntry" => {
+                    if let Some(sid) = call.session_id.clone() {
+                        let _ = out_tx.send(json!({
+                            "method": "Page.frameNavigated",
+                            "sessionId": sid,
+                            "params": { "frame": { "id": "f1", "url": "http://127.0.0.1:4174/page1" } }
+                        }));
+                    }
+                    json!({})
+                }
                 "Page.captureScreenshot" => {
                     // Valid 8-byte PNG magic header + IHDR bytes encoded in RFC 4648 base64:
                     // \x89PNG\r\n\x1a\n\x00\x00\x00\x0dIHDR
@@ -689,6 +699,19 @@ async fn cdp_multiplexing_out_of_order_and_cancellation_cleanup() {
     .await;
     assert!(dropped.is_err());
     assert_eq!(client.pending_len(), 0);
+
+    // Internal response timeout (Codex R1 Finding 4) MUST remove the timed-out entry from
+    // `pending` immediately so warm connections never leak map entries.
+    let timed_out = client
+        .call_browser("Slow.hang", json!({}), Duration::from_millis(40), &cancel)
+        .await
+        .expect_err("hung RPC must hit internal response timeout");
+    assert!(matches!(timed_out, WebDriverError::Timeout { .. }));
+    assert_eq!(
+        client.pending_len(),
+        0,
+        "timed-out CDP request must be removed from pending map"
+    );
 
     // Follow-up RPC succeeds cleanly.
     let ok = client
@@ -1332,4 +1355,523 @@ fn recorded_crash_struct_roundtrip_fields() {
         detail: "unexpected exit".to_string(),
     };
     assert_eq!(crash.process, "chromium");
+}
+
+// ===========================================================================
+// Codex Round 1 Regression Tests (Findings 1 through 7)
+// ===========================================================================
+
+#[tokio::test]
+async fn codex_r1_f1_ensure_session_rotates_dirty_context_while_keeping_browser_warm() {
+    let server = MockCdpServer::start(standard_mock_handler(
+        Arc::new(StdMutex::new(sample_dom_snapshot(false))),
+        Arc::new(StdMutex::new(None)),
+    ))
+    .await;
+    let mut cfg = WebDriverConfig::new();
+    cfg.network_quiet_window = Duration::from_millis(10);
+    let driver = WebDriver::with_cdp_url_for_tests(cfg, server.ws_url.clone());
+    let cancel = CancellationToken::new();
+
+    // Pre-run `ensure_session` followed by attempt-1 `ensure_session` incurs 0 extra rotation.
+    driver.ensure_session(&cancel).await.unwrap();
+    driver.ensure_session(&cancel).await.unwrap();
+    assert_eq!(driver.attach_count(), 1);
+    assert_eq!(
+        server
+            .calls()
+            .iter()
+            .filter(|c| c.method == "Target.createBrowserContext")
+            .count(),
+        1
+    );
+    assert_eq!(
+        server
+            .calls()
+            .iter()
+            .filter(|c| c.method == "Target.disposeBrowserContext")
+            .count(),
+        0
+    );
+
+    // Attempt 1 runs an `openLink`-only flow, marking the BrowserContext dirty.
+    driver
+        .open_link(
+            None,
+            "http://127.0.0.1:4174/",
+            &OpenLinkOptions::default(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+
+    // Attempt 2 / sequential Flow #2 calls `ensure_session`: rotates to a fresh isolated
+    // BrowserContext (`ctx-2`) while keeping the warm browser connection alive (`attach_count == 1`).
+    driver.ensure_session(&cancel).await.unwrap();
+    assert_eq!(
+        driver.attach_count(),
+        1,
+        "context rotation must keep warm browser alive"
+    );
+    let calls = server.calls();
+    assert!(calls.iter().any(|c| {
+        c.method == "Target.disposeBrowserContext" && c.params["browserContextId"] == "ctx-1"
+    }));
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|c| c.method == "Target.createBrowserContext")
+            .count(),
+        2
+    );
+
+    // Calling `ensure_session` again before mutating the fresh context does NOT rotate again.
+    driver.ensure_session(&cancel).await.unwrap();
+    assert_eq!(
+        server
+            .calls()
+            .iter()
+            .filter(|c| c.method == "Target.createBrowserContext")
+            .count(),
+        2
+    );
+    driver.shutdown().await.unwrap();
+}
+
+#[test]
+fn codex_r1_f2_and_f7_dom_visible_frame_and_ancestor_opacity_script() {
+    let snap = json!({
+        "url": "http://127.0.0.1:4174/",
+        "viewport": { "width": 1280, "height": 720 },
+        "truncated": false,
+        "nodes": [
+            {
+                "index": 0,
+                "parentIndex": null,
+                "depth": 0,
+                "elementType": "Button",
+                "identifier": "clipped_btn",
+                "label": "Pay now",
+                "title": "",
+                "value": null,
+                "placeholderValue": null,
+                "enabled": true,
+                "checked": false,
+                "selected": false,
+                "hasFocus": false,
+                "hittable": true,
+                "isOnScreen": true,
+                "frame": { "x": 100, "y": 660, "width": 200, "height": 120 },
+                "visibleFrame": { "x": 100, "y": 660, "width": 200, "height": 60 }
+            },
+            {
+                "index": 1,
+                "parentIndex": null,
+                "depth": 0,
+                "elementType": "Button",
+                "identifier": "hidden_by_ancestor_opacity",
+                "label": "Ghost",
+                "title": "",
+                "value": null,
+                "placeholderValue": null,
+                "enabled": true,
+                "checked": false,
+                "selected": false,
+                "hasFocus": false,
+                "hittable": false,
+                "isOnScreen": false,
+                "frame": { "x": 10, "y": 10, "width": 100, "height": 40 },
+                "visibleFrame": null
+            }
+        ]
+    });
+
+    let h = dom_snapshot_to_hierarchy(snap, "http://127.0.0.1:4174", None).unwrap();
+    let clipped = &h.nodes[0];
+    assert_eq!(
+        clipped.frame,
+        deja_flow::UiRect::new(100.0, 660.0, 200.0, 120.0)
+    );
+    assert_eq!(
+        clipped.visible_frame,
+        Some(deja_flow::UiRect::new(100.0, 660.0, 200.0, 60.0))
+    );
+    assert_eq!(clipped.tap_point(), UiPoint::new(200.0, 690.0));
+    assert!(
+        (clipped
+            .frame
+            .visible_fraction_in(deja_flow::UiSize::new(1280.0, 720.0))
+            - 0.5)
+            .abs()
+            < 1e-6
+    );
+    assert!(h.nodes[1].visible_frame.is_none());
+    assert!(!h.nodes[1].is_on_screen && !h.nodes[1].hittable);
+
+    // Ensure `AX_DOM_SCRIPT` carries `ancestorOpaque` and emits `visibleFrame`.
+    assert!(crate::dom::AX_DOM_SCRIPT.contains("ancestorOpaque"));
+    assert!(crate::dom::AX_DOM_SCRIPT.contains("effectiveOpaque"));
+    assert!(crate::dom::AX_DOM_SCRIPT.contains("visibleFrame"));
+}
+
+#[tokio::test]
+async fn codex_r1_f3_back_waits_for_cross_document_and_same_document_history_commit() {
+    use std::sync::atomic::AtomicBool;
+
+    // 1. Cross-document back: subframe `Page.frameNavigated` is ignored; `document.readyState`
+    // MUST NOT be evaluated until after main-frame `Page.frameNavigated` commits.
+    let main_committed = Arc::new(AtomicBool::new(false));
+    let saw_premature_ready_state = Arc::new(AtomicBool::new(false));
+    let main_committed_c = Arc::clone(&main_committed);
+    let premature_c = Arc::clone(&saw_premature_ready_state);
+    let server = MockCdpServer::start(Arc::new(move |call, out_tx| {
+        let id = call.id;
+        let res = match call.method.as_str() {
+            "Target.setDiscoverTargets"
+            | "Page.enable"
+            | "Runtime.enable"
+            | "Network.enable"
+            | "Emulation.setDeviceMetricsOverride"
+            | "Emulation.setEmulatedMedia" => json!({}),
+            "Target.createBrowserContext" => json!({ "browserContextId": "ctx-1" }),
+            "Target.createTarget" => json!({ "targetId": "target-1" }),
+            "Target.attachToTarget" => json!({ "sessionId": "sess-1" }),
+            "Page.getNavigationHistory" => json!({
+                "currentIndex": 1,
+                "entries": [
+                    { "id": 1, "url": "http://127.0.0.1:4174/first" },
+                    { "id": 2, "url": "http://127.0.0.1:4174/second" }
+                ]
+            }),
+            "Page.navigateToHistoryEntry" => {
+                let sid = call.session_id.clone().unwrap();
+                let flag = Arc::clone(&main_committed_c);
+                tokio::spawn(async move {
+                    // Subframe navigation arrives first and MUST be ignored.
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                    let _ = out_tx.send(json!({
+                        "method": "Page.frameNavigated",
+                        "sessionId": sid,
+                        "params": { "frame": { "id": "sub", "parentId": "main", "url": "http://127.0.0.1:4174/iframe" } }
+                    }));
+                    // Main-frame commit arrives later.
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    flag.store(true, Ordering::SeqCst);
+                    let _ = out_tx.send(json!({
+                        "method": "Page.frameNavigated",
+                        "sessionId": sid,
+                        "params": { "frame": { "id": "main", "url": "http://127.0.0.1:4174/first" } }
+                    }));
+                });
+                json!({})
+            }
+            "Runtime.evaluate" => {
+                let expr = call
+                    .params
+                    .get("expression")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                if expr == "document.readyState" {
+                    if !main_committed_c.load(Ordering::SeqCst) {
+                        premature_c.store(true, Ordering::SeqCst);
+                    }
+                    json!({ "result": { "type": "string", "value": "complete" } })
+                } else {
+                    json!({ "result": { "type": "boolean", "value": true } })
+                }
+            }
+            _ => json!({}),
+        };
+        Some(json!({ "id": id, "result": res }))
+    }))
+    .await;
+
+    let mut cfg = WebDriverConfig::new();
+    cfg.network_quiet_window = Duration::from_millis(10);
+    let driver = WebDriver::with_cdp_url_for_tests(cfg, server.ws_url.clone());
+    let cancel = CancellationToken::new();
+    driver.ensure_session(&cancel).await.unwrap();
+    driver.back("http://127.0.0.1:4174", &cancel).await.unwrap();
+    assert!(main_committed.load(Ordering::SeqCst));
+    assert!(
+        !saw_premature_ready_state.load(Ordering::SeqCst),
+        "back() must wait for main-frame commit before checking document.readyState"
+    );
+    driver.shutdown().await.unwrap();
+
+    // 2. Same-document SPA/hash back: waits for `Page.navigatedWithinDocument`.
+    let spa_committed = Arc::new(AtomicBool::new(false));
+    let spa_premature = Arc::new(AtomicBool::new(false));
+    let spa_committed_c = Arc::clone(&spa_committed);
+    let spa_premature_c = Arc::clone(&spa_premature);
+    let spa_server = MockCdpServer::start(Arc::new(move |call, out_tx| {
+        let id = call.id;
+        let res = match call.method.as_str() {
+            "Target.createBrowserContext" => json!({ "browserContextId": "ctx-1" }),
+            "Target.createTarget" => json!({ "targetId": "target-1" }),
+            "Target.attachToTarget" => json!({ "sessionId": "sess-1" }),
+            "Page.getNavigationHistory" => json!({
+                "currentIndex": 1,
+                "entries": [
+                    { "id": 1, "url": "http://127.0.0.1:4174/#a" },
+                    { "id": 2, "url": "http://127.0.0.1:4174/#b" }
+                ]
+            }),
+            "Page.navigateToHistoryEntry" => {
+                let sid = call.session_id.clone().unwrap();
+                let flag = Arc::clone(&spa_committed_c);
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(45)).await;
+                    flag.store(true, Ordering::SeqCst);
+                    let _ = out_tx.send(json!({
+                        "method": "Page.navigatedWithinDocument",
+                        "sessionId": sid,
+                        "params": { "frameId": "main", "url": "http://127.0.0.1:4174/#a" }
+                    }));
+                });
+                json!({})
+            }
+            "Runtime.evaluate" => {
+                let expr = call
+                    .params
+                    .get("expression")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                if expr == "document.readyState" {
+                    if !spa_committed_c.load(Ordering::SeqCst) {
+                        spa_premature_c.store(true, Ordering::SeqCst);
+                    }
+                    json!({ "result": { "type": "string", "value": "complete" } })
+                } else {
+                    json!({ "result": { "type": "boolean", "value": true } })
+                }
+            }
+            _ => json!({}),
+        };
+        Some(json!({ "id": id, "result": res }))
+    }))
+    .await;
+
+    let mut spa_cfg = WebDriverConfig::new();
+    spa_cfg.network_quiet_window = Duration::from_millis(10);
+    let spa_driver = WebDriver::with_cdp_url_for_tests(spa_cfg, spa_server.ws_url.clone());
+    spa_driver.ensure_session(&cancel).await.unwrap();
+    spa_driver
+        .back("http://127.0.0.1:4174", &cancel)
+        .await
+        .unwrap();
+    assert!(spa_committed.load(Ordering::SeqCst));
+    assert!(
+        !spa_premature.load(Ordering::SeqCst),
+        "back() must wait for Page.navigatedWithinDocument before settling"
+    );
+    spa_driver.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn codex_r1_f5_failed_context_or_target_replacement_invalidates_old_handle_and_recovers() {
+    let create_target_calls = Arc::new(AtomicUsize::new(0));
+    let fail_on_target_call = Arc::new(AtomicUsize::new(2));
+    let ctx_seq = Arc::new(AtomicUsize::new(0));
+    let sess_seq = Arc::new(AtomicUsize::new(0));
+    let snap = sample_dom_snapshot(false);
+
+    let ct_c = Arc::clone(&create_target_calls);
+    let fail_c = Arc::clone(&fail_on_target_call);
+    let ctx_c = Arc::clone(&ctx_seq);
+    let sess_c = Arc::clone(&sess_seq);
+    let server = MockCdpServer::start(Arc::new(move |call, _out_tx| {
+        let id = call.id;
+        match call.method.as_str() {
+            "Target.createBrowserContext" => {
+                let n = ctx_c.fetch_add(1, Ordering::SeqCst) + 1;
+                Some(json!({ "id": id, "result": { "browserContextId": format!("ctx-{n}") } }))
+            }
+            "Target.createTarget" => {
+                let n = ct_c.fetch_add(1, Ordering::SeqCst) + 1;
+                if n == fail_c.load(Ordering::SeqCst) {
+                    return Some(json!({
+                        "id": id,
+                        "error": { "code": -32000, "message": "simulated Target.createTarget failure" }
+                    }));
+                }
+                Some(json!({ "id": id, "result": { "targetId": format!("target-{n}") } }))
+            }
+            "Target.attachToTarget" => {
+                let n = sess_c.fetch_add(1, Ordering::SeqCst) + 1;
+                Some(json!({ "id": id, "result": { "sessionId": format!("sess-{n}") } }))
+            }
+            "Runtime.evaluate" => Some(json!({
+                "id": id,
+                "result": { "result": { "type": "object", "value": snap } }
+            })),
+            _ => Some(json!({ "id": id, "result": {} })),
+        }
+    }))
+    .await;
+
+    let driver = WebDriver::with_cdp_url_for_tests(WebDriverConfig::new(), server.ws_url.clone());
+    let cancel = CancellationToken::new();
+
+    // 1. Initial session attaches `sess-1`.
+    driver.ensure_session(&cancel).await.unwrap();
+    assert_eq!(driver.attach_count(), 1);
+
+    // 2. `clear_state` disposes `ctx-1` and fails on the 2nd `Target.createTarget`.
+    let err = driver
+        .clear_state("http://127.0.0.1:4174", &cancel)
+        .await
+        .expect_err("simulated createTarget failure must surface");
+    assert!(matches!(err, DriverError::Transport { .. }));
+
+    // 3. Because the old handle was invalidated BEFORE disposal, `ensure_session` MUST NOT reuse
+    // `sess-1` and instead cleanly recovers a brand-new session (`sess-2`, `attach_count == 2`).
+    driver.ensure_session(&cancel).await.unwrap();
+    assert_eq!(driver.attach_count(), 2);
+    let h = driver
+        .hierarchy("http://127.0.0.1:4174", false, None, &cancel)
+        .await
+        .unwrap();
+    assert_eq!(h.nodes.len(), 3);
+    let last_eval = server
+        .calls()
+        .into_iter()
+        .rev()
+        .find(|c| c.method == "Runtime.evaluate")
+        .unwrap();
+    assert_eq!(last_eval.session_id.as_deref(), Some("sess-2"));
+
+    // 4. Same check for `stop_app` failing on the 4th `Target.createTarget` after `Target.closeTarget`.
+    fail_on_target_call.store(4, Ordering::SeqCst);
+    assert!(
+        driver
+            .stop_app("http://127.0.0.1:4174", &cancel)
+            .await
+            .is_err()
+    );
+    driver.ensure_session(&cancel).await.unwrap();
+    assert_eq!(driver.attach_count(), 3);
+    driver.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn codex_r1_f6_open_link_waits_for_post_load_network_settle_and_caps_streaming() {
+    use std::sync::atomic::AtomicBool;
+
+    // 1. Post-load fetch stays in-flight for 100ms after `Page.loadEventFired`; `open_link`
+    // MUST wait until `Network.loadingFinished` arrives before completing!
+    let fetch_finished = Arc::new(AtomicBool::new(false));
+    let fetch_finished_c = Arc::clone(&fetch_finished);
+    let server = MockCdpServer::start(Arc::new(move |call, out_tx| {
+        let id = call.id;
+        let res = match call.method.as_str() {
+            "Target.createBrowserContext" => json!({ "browserContextId": "ctx-1" }),
+            "Target.createTarget" => json!({ "targetId": "target-1" }),
+            "Target.attachToTarget" => json!({ "sessionId": "sess-1" }),
+            "Page.navigate" => {
+                let sid = call.session_id.clone().unwrap();
+                let url = call.params.get("url").and_then(Value::as_str).unwrap_or("");
+                if url.contains("sse") {
+                    let _ = out_tx.send(json!({
+                        "method": "Page.loadEventFired",
+                        "sessionId": sid,
+                        "params": { "timestamp": 1.0 }
+                    }));
+                    let _ = out_tx.send(json!({
+                        "method": "Network.requestWillBeSent",
+                        "sessionId": sid,
+                        "params": { "requestId": "req-sse", "request": { "url": "http://127.0.0.1:4174/events" } }
+                    }));
+                } else {
+                    let flag = Arc::clone(&fetch_finished_c);
+                    let _ = out_tx.send(json!({
+                        "method": "Page.loadEventFired",
+                        "sessionId": sid,
+                        "params": { "timestamp": 1.0 }
+                    }));
+                    let _ = out_tx.send(json!({
+                        "method": "Network.requestWillBeSent",
+                        "sessionId": sid,
+                        "params": { "requestId": "req-1", "request": { "url": "http://127.0.0.1:4174/api/init" } }
+                    }));
+                    tokio::spawn(async move {
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        flag.store(true, Ordering::SeqCst);
+                        let _ = out_tx.send(json!({
+                            "method": "Network.loadingFinished",
+                            "sessionId": sid,
+                            "params": { "requestId": "req-1" }
+                        }));
+                    });
+                }
+                json!({ "frameId": "f1", "loaderId": "loader-1" })
+            }
+            "Runtime.evaluate" => {
+                let expr = call
+                    .params
+                    .get("expression")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                if expr == "document.readyState" {
+                    json!({ "result": { "type": "string", "value": "complete" } })
+                } else {
+                    json!({ "result": { "type": "boolean", "value": true } })
+                }
+            }
+            _ => json!({}),
+        };
+        Some(json!({ "id": id, "result": res }))
+    }))
+    .await;
+
+    let mut cfg = WebDriverConfig::new();
+    cfg.network_quiet_window = Duration::from_millis(25);
+    cfg.network_settle_cap = Duration::from_millis(120);
+    let driver = WebDriver::with_cdp_url_for_tests(cfg, server.ws_url.clone());
+    let cancel = CancellationToken::new();
+
+    driver.ensure_session(&cancel).await.unwrap();
+    assert!(
+        server.calls().iter().any(|c| c.method == "Network.enable"),
+        "target setup must enable Network domain"
+    );
+
+    let started = std::time::Instant::now();
+    driver
+        .open_link(
+            None,
+            "http://127.0.0.1:4174/app",
+            &OpenLinkOptions::default(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    assert!(
+        fetch_finished.load(Ordering::SeqCst),
+        "open_link must wait for post-load fetch req-1 to finish"
+    );
+    assert!(
+        started.elapsed() >= Duration::from_millis(95),
+        "open_link returned too early before post-load fetch completed: {:?}",
+        started.elapsed()
+    );
+
+    // 2. Perpetual SSE/long-polling request hits `network_settle_cap` cleanly without hanging.
+    let sse_started = std::time::Instant::now();
+    driver
+        .open_link(
+            None,
+            "http://127.0.0.1:4174/sse",
+            &OpenLinkOptions::default(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    assert!(
+        sse_started.elapsed() >= Duration::from_millis(100)
+            && sse_started.elapsed() < Duration::from_secs(2),
+        "SSE page must exit cleanly at network_settle_cap, took {:?}",
+        sse_started.elapsed()
+    );
+    driver.shutdown().await.unwrap();
 }
