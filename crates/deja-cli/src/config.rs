@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 
 use deja_core::{StaleBuildPolicy, validate_forbidden_values};
 use deja_driver_ios::validate_udid;
+use deja_driver_web::{ScreenSize, validate_loopback_http_url};
 use deja_store::{check_flows_dir, check_manifest_path};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -250,9 +251,11 @@ pub fn load_config(opts: &LoadConfigOptions<'_>) -> Result<LoadedConfig, ConfigE
 
     // `appId`
     let app_id = req_non_empty_string(obj, "appId")?;
-    if platform == "web" && !is_loopback_url(&app_id) {
+    if platform == "web"
+        && let Err(err) = validate_loopback_http_url(&app_id)
+    {
         return Err(ConfigError(format!(
-            "web `appId` must be a loopback http:// or https:// URL (got {app_id:?})"
+            "web `appId` must be a loopback http:// or https:// URL (got {app_id:?}): {err}"
         )));
     }
 
@@ -564,6 +567,11 @@ pub fn load_config(opts: &LoadConfigOptions<'_>) -> Result<LoadedConfig, ConfigE
         Some(_) => return Err(ConfigError("`headless` must be a boolean".to_string())),
     };
     let screen_size = obj.get("screenSize").filter(|v| !v.is_null()).cloned();
+    if platform == "web"
+        && let Some(ref sz) = screen_size
+    {
+        ScreenSize::parse(sz).map_err(|err| ConfigError(format!("invalid `screenSize`: {err}")))?;
+    }
     let semantic = match obj.get("semantic") {
         None | Some(Value::Null) => None,
         Some(val) => Some(
@@ -637,6 +645,15 @@ pub fn load_config(opts: &LoadConfigOptions<'_>) -> Result<LoadedConfig, ConfigE
                     ConfigError(format!("invalid iOS simulator UDID {udid:?}: {err}"))
                 })?;
             }
+            if opts.capability == CommandCapability::Doctor
+                && platform == "web"
+                && let Some(ref dev) = device
+                && dev != "chromium"
+            {
+                return Err(ConfigError(format!(
+                    "web `device` must be \"chromium\" (got {dev:?})"
+                )));
+            }
         }
         CommandCapability::Gate => {
             // Requires a build path (either `--build` or `config.buildPath`); never requires `device`.
@@ -672,6 +689,10 @@ pub fn load_config(opts: &LoadConfigOptions<'_>) -> Result<LoadedConfig, ConfigE
                         "iOS `device` must be an explicit simulator UDID (got {dev:?}): {err}"
                     ))
                 })?;
+            } else if platform == "web" && dev != "chromium" {
+                return Err(ConfigError(format!(
+                    "web `device` must be \"chromium\" (got {dev:?})"
+                )));
             }
         }
     }
@@ -791,26 +812,6 @@ fn parse_positive_u64(val: &Value, field: &str) -> Result<u64, ConfigError> {
         return Err(ConfigError(format!("`{field}` must be greater than 0")));
     }
     Ok(n)
-}
-
-fn is_loopback_url(url: &str) -> bool {
-    let lower = url.to_ascii_lowercase();
-    let rest = lower
-        .strip_prefix("http://")
-        .or_else(|| lower.strip_prefix("https://"));
-    let Some(authority_and_path) = rest else {
-        return false;
-    };
-    let authority = authority_and_path
-        .split(['/', '?', '#'])
-        .next()
-        .unwrap_or("");
-    let host = if let Some(bracketed) = authority.strip_prefix('[') {
-        bracketed.split(']').next().unwrap_or("")
-    } else {
-        authority.split(':').next().unwrap_or("")
-    };
-    matches!(host, "localhost" | "127.0.0.1" | "::1")
 }
 
 /// Detect duplicate keys inside any JSON object (assumes syntactically valid JSON).
@@ -1076,6 +1077,92 @@ mod tests {
         })
         .expect_err("maestro.executable must fail closed");
         assert!(err.to_string().contains("no longer supported"));
+
+        let _ = fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn web_config_validates_screen_size_device_and_loopback_app_id() {
+        let ws = temp_ws("web-cfg");
+        fs::create_dir_all(ws.join("public")).unwrap();
+        let cfg = ws.join("deja.config.json");
+        let empty = BTreeMap::new();
+
+        // Valid string and object `screenSize` forms succeed.
+        for sz in [r#""1280x800""#, r#"{"width": 1024, "height": 768}"#] {
+            fs::write(
+                &cfg,
+                format!(
+                    r#"{{"workspaceRoot":".","platform":"web","appId":"http://127.0.0.1:4174","adapter":"maestro-web@2.12.0","browser":"chromium","device":"chromium","buildPath":"public","headless":true,"screenSize":{sz}}}"#
+                ),
+            )
+            .unwrap();
+            let loaded = load_config(&LoadConfigOptions {
+                cwd: &ws,
+                explicit_config: Some(&cfg),
+                capability: CommandCapability::Execute,
+                device_override: None,
+                build_override: None,
+                env: &empty,
+            })
+            .expect("valid web config should load");
+            assert_eq!(loaded.headless, Some(true));
+            assert!(loaded.screen_size.is_some());
+        }
+
+        // Invalid `screenSize` fails closed.
+        fs::write(
+            &cfg,
+            r#"{"workspaceRoot":".","platform":"web","appId":"http://127.0.0.1:4174","adapter":"maestro-web@2.12.0","browser":"chromium","device":"chromium","buildPath":"public","screenSize":"50x50"}"#,
+        )
+        .unwrap();
+        let err = load_config(&LoadConfigOptions {
+            cwd: &ws,
+            explicit_config: Some(&cfg),
+            capability: CommandCapability::Static,
+            device_override: None,
+            build_override: None,
+            env: &empty,
+        })
+        .expect_err("out-of-bounds screenSize must fail closed");
+        assert!(err.to_string().contains("screenSize"));
+
+        // Non-`chromium` device fails closed on Execute and Doctor.
+        fs::write(
+            &cfg,
+            r#"{"workspaceRoot":".","platform":"web","appId":"http://127.0.0.1:4174","adapter":"maestro-web@2.12.0","browser":"chromium","device":"firefox","buildPath":"public"}"#,
+        )
+        .unwrap();
+        for cap in [CommandCapability::Execute, CommandCapability::Doctor] {
+            let err = load_config(&LoadConfigOptions {
+                cwd: &ws,
+                explicit_config: Some(&cfg),
+                capability: cap,
+                device_override: None,
+                build_override: None,
+                env: &empty,
+            })
+            .expect_err("non-chromium web device must fail closed");
+            assert!(err.to_string().contains("chromium"));
+        }
+
+        // Userinfo `@` bypass in web `appId` fails closed.
+        fs::write(
+            &cfg,
+            r#"{"workspaceRoot":".","platform":"web","appId":"http://localhost@evil.com:4174","adapter":"maestro-web@2.12.0","browser":"chromium"}"#,
+        )
+        .unwrap();
+        assert!(
+            load_config(&LoadConfigOptions {
+                cwd: &ws,
+                explicit_config: Some(&cfg),
+                capability: CommandCapability::Static,
+                device_override: None,
+                build_override: None,
+                env: &empty,
+            })
+            .is_err()
+        );
 
         let _ = fs::remove_dir_all(&ws);
     }
