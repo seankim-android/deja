@@ -12,7 +12,9 @@ use deja_store::{check_flows_dir, check_manifest_path};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::commands::manifest::has_unsafe_control_or_bidi_char;
 use crate::fs_safe::{lexical_normalize, read_to_string_nofollow_bounded};
+use crate::glob::compile_glob;
 
 /// Maximum `deja.config.json` file size (1 MiB).
 const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
@@ -129,6 +131,8 @@ pub struct LoadedConfig {
     pub semantic: Option<SemanticConfig>,
     /// Optional MCP settings.
     pub mcp: Option<McpConfig>,
+    /// Source-to-goal / flow / tag glob mappings used by `--changed-from` (`DEJA-80`).
+    pub affected_sources: BTreeMap<String, Vec<String>>,
     /// Non-fatal deprecation warnings to emit to stderr.
     pub warnings: Vec<String>,
 }
@@ -586,6 +590,7 @@ pub fn load_config(opts: &LoadConfigOptions<'_>) -> Result<LoadedConfig, ConfigE
                 .map_err(|err| ConfigError(format!("invalid `mcp` config: {err}")))?,
         ),
     };
+    let affected_sources = parse_affected_sources(obj.get("affectedSources"))?;
 
     // `buildPath` (capability-scoped!)
     let config_build_raw = match obj.get("buildPath") {
@@ -732,6 +737,7 @@ pub fn load_config(opts: &LoadConfigOptions<'_>) -> Result<LoadedConfig, ConfigE
         screen_size,
         semantic,
         mcp,
+        affected_sources,
         warnings,
     })
 }
@@ -762,6 +768,89 @@ pub fn resolve_device(
         return Ok(Some(trimmed.to_string()));
     }
     Ok(config_device.map(ToString::to_string))
+}
+
+fn parse_affected_sources(
+    raw: Option<&Value>,
+) -> Result<BTreeMap<String, Vec<String>>, ConfigError> {
+    let mut out = BTreeMap::new();
+    let Some(val) = raw else {
+        return Ok(out);
+    };
+    if val.is_null() {
+        return Ok(out);
+    }
+    let Some(map) = val.as_object() else {
+        return Err(ConfigError(
+            "`affectedSources` must be a JSON object mapping goal/flow/tag keys to glob arrays"
+                .to_string(),
+        ));
+    };
+    for (key, value) in map {
+        if key.trim().is_empty() {
+            return Err(ConfigError(
+                "`affectedSources` keys must be non-empty strings".to_string(),
+            ));
+        }
+        if key.contains('\0') || has_unsafe_control_or_bidi_char(key) {
+            return Err(ConfigError(format!(
+                "`affectedSources` key {key:?} contains unsafe control, line-break, bidi, or zero-width characters"
+            )));
+        }
+        if let Some(tag) = key.strip_prefix("tag:") {
+            if tag.trim().is_empty() {
+                return Err(ConfigError(
+                    "`affectedSources` `tag:` key must include a non-empty tag name".to_string(),
+                ));
+            }
+        } else if key_looks_like_glob_or_path(key) {
+            compile_glob(key).map_err(|err| {
+                ConfigError(format!("invalid `affectedSources` key {key:?}: {err}"))
+            })?;
+        }
+        let Some(arr) = value.as_array() else {
+            return Err(ConfigError(format!(
+                "`affectedSources.{key}` must be an array of glob strings"
+            )));
+        };
+        let mut globs = Vec::with_capacity(arr.len());
+        for item in arr {
+            let Some(pattern) = item.as_str() else {
+                return Err(ConfigError(format!(
+                    "each entry in `affectedSources.{key}` must be a glob string"
+                )));
+            };
+            compile_glob(pattern).map_err(|err| {
+                ConfigError(format!(
+                    "invalid glob {pattern:?} in `affectedSources.{key}`: {err}"
+                ))
+            })?;
+            globs.push(pattern.to_string());
+        }
+        out.insert(key.clone(), globs);
+    }
+    Ok(out)
+}
+
+fn key_looks_like_glob_or_path(key: &str) -> bool {
+    if key == ".." {
+        return true;
+    }
+    let bytes = key.as_bytes();
+    if bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'/' | b'\\')
+    {
+        return true;
+    }
+    key.contains('/')
+        || key.contains('\\')
+        || key.contains('*')
+        || key.contains('?')
+        || key.contains('[')
+        || key.contains('{')
+        || key.contains('}')
 }
 
 fn req_non_empty_string(
@@ -1163,6 +1252,69 @@ mod tests {
             })
             .is_err()
         );
+
+        let _ = fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn affected_sources_validates_keys_tags_and_globs() {
+        let ws = temp_ws("affected-sources");
+        let cfg = ws.join("deja.config.json");
+        let empty = BTreeMap::new();
+
+        fs::write(
+            &cfg,
+            r#"{
+                "workspaceRoot": ".",
+                "platform": "ios",
+                "appId": "dev.deja.app",
+                "affectedSources": {
+                    "checkout": ["src/checkout/**", "src/shared/{cart,pay}.swift"],
+                    "flows/auth/*.yaml": ["ios/Auth/**"],
+                    "tag:payments": ["src/billing/**"]
+                }
+            }"#,
+        )
+        .unwrap();
+        let loaded = load_config(&LoadConfigOptions {
+            cwd: &ws,
+            explicit_config: Some(&cfg),
+            capability: CommandCapability::Static,
+            device_override: None,
+            build_override: None,
+            env: &empty,
+        })
+        .expect("valid affectedSources must load");
+        assert_eq!(loaded.affected_sources.len(), 3);
+        assert_eq!(
+            loaded.affected_sources.get("tag:payments").unwrap(),
+            &vec!["src/billing/**".to_string()]
+        );
+
+        // Invalid shapes / globs must fail closed.
+        for bad_json in [
+            r#"{"workspaceRoot":".","platform":"ios","appId":"dev.deja.app","affectedSources":[]}"#,
+            r#"{"workspaceRoot":".","platform":"ios","appId":"dev.deja.app","affectedSources":{"":"src/**"}}"#,
+            r#"{"workspaceRoot":".","platform":"ios","appId":"dev.deja.app","affectedSources":{"checkout":"src/**"}}"#,
+            r#"{"workspaceRoot":".","platform":"ios","appId":"dev.deja.app","affectedSources":{"checkout":["../escape/**"]}}"#,
+            r#"{"workspaceRoot":".","platform":"ios","appId":"dev.deja.app","affectedSources":{"flows/[unclosed":["src/**"]}}"#,
+            r#"{"workspaceRoot":".","platform":"ios","appId":"dev.deja.app","affectedSources":{"tag:":["src/**"]}}"#,
+            r#"{"workspaceRoot":".","platform":"ios","appId":"dev.deja.app","affectedSources":{"../bad/flow.yaml":["src/**"]}}"#,
+        ] {
+            fs::write(&cfg, bad_json).unwrap();
+            assert!(
+                load_config(&LoadConfigOptions {
+                    cwd: &ws,
+                    explicit_config: Some(&cfg),
+                    capability: CommandCapability::Static,
+                    device_override: None,
+                    build_override: None,
+                    env: &empty,
+                })
+                .is_err(),
+                "expected invalid affectedSources config to fail: {bad_json}"
+            );
+        }
 
         let _ = fs::remove_dir_all(&ws);
     }

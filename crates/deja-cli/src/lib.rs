@@ -6,6 +6,7 @@ pub mod config;
 pub mod driver_factory;
 pub mod exit_codes;
 pub mod fs_safe;
+pub mod glob;
 pub mod output;
 pub mod repo_check;
 

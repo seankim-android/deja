@@ -21,6 +21,7 @@ use deja_store::{
 
 use crate::CliDeps;
 use crate::cli::RunArgs;
+use crate::commands::changed_from::validate_git_ref_syntax;
 use crate::commands::exec_common::{
     ExecutedAttempt, allocate_report_rel_path, build_base_report, build_consumer_flows,
     build_driver_context, check_closure_forbidden_values, emit_early_exec_error,
@@ -32,6 +33,7 @@ use crate::commands::manifest::has_unsafe_control_or_bidi_char;
 use crate::config::{CommandCapability, LoadConfigOptions, LoadedConfig, load_config};
 use crate::exit_codes::{EXIT_USAGE_OR_CONFIG, exit_code_for_store_error};
 use crate::fs_safe::lexical_normalize;
+use crate::glob::compile_glob;
 use crate::output::{
     RedactionContext, failure_category_wire, prepare_safe_junit, workspace_relative_display,
 };
@@ -300,6 +302,87 @@ pub async fn run(
                     &early_redaction,
                     "USAGE_ERROR",
                     "`--devices` must not contain control, line-break, bidi, or zero-width characters",
+                    EXIT_USAGE_OR_CONFIG,
+                );
+            }
+        }
+    }
+
+    // Early fail-closed flag hygiene for `--changed-from`, `--always-include`, and
+    // `--fallback-all-on` BEFORE `load_config` or invoking `git` (`DEJA-80`).
+    if args.changed_from.is_some() && !is_batch {
+        return emit_early_exec_error(
+            deps,
+            "run",
+            &raw_goal_fallback,
+            cli_junit.as_deref(),
+            json_mode,
+            args.summary,
+            &early_redaction,
+            "USAGE_ERROR",
+            "`--changed-from` is only valid with `--goals <FILE>` or `--all`",
+            EXIT_USAGE_OR_CONFIG,
+        );
+    }
+    if (!args.always_include.is_empty() || !args.fallback_all_on.is_empty())
+        && args.changed_from.is_none()
+    {
+        return emit_early_exec_error(
+            deps,
+            "run",
+            &raw_goal_fallback,
+            cli_junit.as_deref(),
+            json_mode,
+            args.summary,
+            &early_redaction,
+            "USAGE_ERROR",
+            "`--always-include` and `--fallback-all-on` require `--changed-from <GIT_REF>`",
+            EXIT_USAGE_OR_CONFIG,
+        );
+    }
+    if let Some(ref git_ref) = args.changed_from {
+        if let Err(msg) = validate_git_ref_syntax(git_ref) {
+            return emit_early_exec_error(
+                deps,
+                "run",
+                &raw_goal_fallback,
+                cli_junit.as_deref(),
+                json_mode,
+                args.summary,
+                &early_redaction,
+                "USAGE_ERROR",
+                &msg,
+                EXIT_USAGE_OR_CONFIG,
+            );
+        }
+        for pattern in &args.fallback_all_on {
+            if let Err(msg) = compile_glob(pattern) {
+                return emit_early_exec_error(
+                    deps,
+                    "run",
+                    &raw_goal_fallback,
+                    cli_junit.as_deref(),
+                    json_mode,
+                    args.summary,
+                    &early_redaction,
+                    "USAGE_ERROR",
+                    &format!("invalid `--fallback-all-on` glob {pattern:?}: {msg}"),
+                    EXIT_USAGE_OR_CONFIG,
+                );
+            }
+        }
+        for pattern in &args.always_include {
+            if let Err(msg) = compile_glob(pattern) {
+                return emit_early_exec_error(
+                    deps,
+                    "run",
+                    &raw_goal_fallback,
+                    cli_junit.as_deref(),
+                    json_mode,
+                    args.summary,
+                    &early_redaction,
+                    "USAGE_ERROR",
+                    &format!("invalid `--always-include` pattern {pattern:?}: {msg}"),
                     EXIT_USAGE_OR_CONFIG,
                 );
             }

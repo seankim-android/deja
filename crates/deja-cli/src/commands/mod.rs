@@ -1,5 +1,6 @@
 //! Déjà CLI subcommand implementations.
 
+pub mod changed_from;
 pub mod doctor;
 pub mod engine;
 pub mod exec_common;

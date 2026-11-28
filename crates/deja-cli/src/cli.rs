@@ -80,6 +80,18 @@ pub struct RunArgs {
     #[arg(long, value_delimiter = ',', value_name = "IDS")]
     pub devices: Vec<String>,
 
+    /// Select only goals affected by changes since this git ref (requires `--goals` or `--all`).
+    #[arg(long, value_name = "GIT_REF")]
+    pub changed_from: Option<String>,
+
+    /// Always include matching goal names or flow path globs when `--changed-from` is active (repeatable).
+    #[arg(long, value_name = "GLOB_OR_GOAL")]
+    pub always_include: Vec<String>,
+
+    /// Fall back to running the full suite if any changed file matches this glob (repeatable, requires `--changed-from`).
+    #[arg(long, value_name = "GLOB")]
+    pub fallback_all_on: Vec<String>,
+
     /// Re-verify a changed or unvalidated consumer flow in manifest mode.
     #[arg(long)]
     pub verify: bool,
@@ -340,6 +352,41 @@ mod tests {
             Cli::try_parse_from(["deja", "run", "--all", "--devices", "d1,,d2"]).unwrap();
         match cli_gap_dev.command {
             Some(Commands::Run(args)) => assert_eq!(args.devices, vec!["d1", "", "d2"]),
+            other => panic!("expected Run, got {other:?}"),
+        }
+
+        let cli_changed = Cli::try_parse_from([
+            "deja",
+            "run",
+            "--all",
+            "--changed-from",
+            "origin/main",
+            "--always-include",
+            "login",
+            "--always-include",
+            "flows/smoke/**",
+            "--fallback-all-on",
+            "Package.swift",
+            "--fallback-all-on",
+            "ci/**",
+        ])
+        .unwrap();
+        match cli_changed.command {
+            Some(Commands::Run(args)) => {
+                assert_eq!(args.changed_from.as_deref(), Some("origin/main"));
+                assert_eq!(args.always_include, vec!["login", "flows/smoke/**"]);
+                assert_eq!(args.fallback_all_on, vec!["Package.swift", "ci/**"]);
+            }
+            other => panic!("expected Run, got {other:?}"),
+        }
+
+        // `--changed-from=--exec=evil` parses into `changed_from` so early flag hygiene rejects it cleanly (exit 2).
+        let cli_inject =
+            Cli::try_parse_from(["deja", "run", "--all", "--changed-from=--exec=evil"]).unwrap();
+        match cli_inject.command {
+            Some(Commands::Run(args)) => {
+                assert_eq!(args.changed_from.as_deref(), Some("--exec=evil"));
+            }
             other => panic!("expected Run, got {other:?}"),
         }
     }

@@ -30,6 +30,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::CliDeps;
 use crate::cli::RunArgs;
+use crate::commands::changed_from::{ChangedFromError, resolve_and_select_goals};
 use crate::commands::exec_common::{
     ExecutedAttempt, GoalTargetFilter, allocate_batch_id, allocate_batch_report_rel_path_for_id,
     allocate_report_rel_path, build_base_report, build_consumer_flows, build_driver_context,
@@ -52,10 +53,10 @@ use crate::exit_codes::{
 };
 use crate::fs_safe::write_atomic_nofollow_excl;
 use crate::output::{
-    BatchCounts, BatchGoalResult, BatchShardSummary, CliBatchRunReport, CliRunReport,
-    RedactionContext, emit_summary, failure_category_wire, format_batch_status_summary_line,
-    format_summary_line, outcome_wire_name, prepare_safe_junit, print_human_batch_report,
-    workspace_relative_display, write_batch_junit,
+    BatchCounts, BatchGoalResult, BatchSelectionSummary, BatchShardSummary, CliBatchRunReport,
+    CliRunReport, RedactionContext, SelectionReason, emit_summary, failure_category_wire,
+    format_batch_status_summary_line_with_selection, format_cli_summary_line, outcome_wire_name,
+    prepare_safe_junit, print_human_batch_report, workspace_relative_display, write_batch_junit,
 };
 
 #[derive(Debug, Clone)]
@@ -80,6 +81,8 @@ struct BatchGoal {
     index: usize,
     goal: Goal,
     historical_median_ms: Option<u64>,
+    /// Selection reason when `--changed-from` is active (`None` for full unselected batches).
+    selection_reason: Option<SelectionReason>,
     /// Strict non-empty subset of shard indices eligible to execute this goal (`None` means all
     /// shards are eligible, or no shard is eligible so any shard may emit the refusal/error).
     eligible_shards: Option<BTreeSet<usize>>,
@@ -769,11 +772,55 @@ async fn run_batch_inner(
     };
     let build_fingerprint_ms = fp_t0.elapsed().as_millis() as u64;
 
+    // Affected-flow closure selection (`--changed-from <git-ref>`, `DEJA-80`).
+    // Runs BEFORE duration scanning, runtime lookup, build staging, and driver attach so a
+    // zero-selected batch closes shard stores immediately and performs zero device/driver work.
+    let mut selection_summary: Option<BatchSelectionSummary> = None;
+    let selected_goals_with_reasons: Vec<(Goal, Option<SelectionReason>)> =
+        if !cancelled_during_setup && let Some(ref base_ref) = args.changed_from {
+            match resolve_and_select_goals(
+                base_ref,
+                &args.always_include,
+                &args.fallback_all_on,
+                &config,
+                consumer.as_deref(),
+                &opened_stores,
+                &build_fingerprint,
+                &normalized_goals,
+                &deps.env,
+                &deps.cancel,
+            )
+            .await
+            {
+                Ok(outcome) => {
+                    selection_summary = Some(outcome.summary);
+                    outcome
+                        .selected
+                        .into_iter()
+                        .map(|(g, reason)| (g, Some(reason)))
+                        .collect()
+                }
+                Err(ChangedFromError::Cancelled) => {
+                    cancelled_during_setup = true;
+                    normalized_goals.into_iter().map(|g| (g, None)).collect()
+                }
+            }
+        } else {
+            normalized_goals.into_iter().map(|g| (g, None)).collect()
+        };
+
+    let zero_selected = !cancelled_during_setup
+        && selection_summary.is_some()
+        && selected_goals_with_reasons.is_empty();
+    if zero_selected {
+        close_all_stores(&opened_stores);
+    }
+
     // Pool all integrity-verified historical `duration_ms` samples across EVERY shard store inside
     // a cancellable `spawn_blocking` task so LPT uses the exact pooled median while remaining
     // promptly interruptible on cancellation.
     let mut aggregated_medians: BTreeMap<String, u64> = BTreeMap::new();
-    if !cancelled_during_setup {
+    if !cancelled_during_setup && !zero_selected {
         match scan_duration_medians_cancellable(&opened_stores, &deps.cancel).await {
             Ok(medians) => aggregated_medians = medians,
             Err(None) => {
@@ -799,15 +846,16 @@ async fn run_batch_inner(
     }
 
     // Build ordered input goals + LPT work queue: `(Reverse(historical_median_ms), index)`.
-    let mut input_goals: Vec<BatchGoal> = normalized_goals
+    let mut input_goals: Vec<BatchGoal> = selected_goals_with_reasons
         .into_iter()
         .enumerate()
-        .map(|(index, goal)| {
+        .map(|(index, (goal, selection_reason))| {
             let historical_median_ms = aggregated_medians.get(&goal.key).copied();
             BatchGoal {
                 index,
                 goal,
                 historical_median_ms,
+                selection_reason,
                 eligible_shards: None,
             }
         })
@@ -822,7 +870,7 @@ async fn run_batch_inner(
     // close its store, exclude it from eligible shards, and continue running on healthy shards.
     let mut opened_shards: Vec<OpenedShard> = Vec::with_capacity(shard_specs.len());
     let mut shard_runtime_errors: BTreeMap<usize, (u8, String)> = BTreeMap::new();
-    if !cancelled_during_setup {
+    if !cancelled_during_setup && !zero_selected {
         for (orig_idx, (spec, store)) in shard_specs.iter().zip(opened_stores.iter()).enumerate() {
             let mut base_ctx = build_driver_context(
                 &config,
@@ -874,7 +922,7 @@ async fn run_batch_inner(
     // In multi-device sharding, probe read-only replay eligibility per `(goal, shard)` ONLY across
     // healthy resolved shards (NEVER treating an unresolved/failed shard as eligible) BEFORE
     // spawning workers so each goal runs only on shards whose store/runtime can execute it.
-    if !cancelled_during_setup && opened_shards.len() > 1 {
+    if !cancelled_during_setup && !zero_selected && opened_shards.len() > 1 {
         for bg in &mut lpt_sorted {
             if deps.cancel.is_cancelled() {
                 cancelled_during_setup = true;
@@ -910,7 +958,7 @@ async fn run_batch_inner(
     let shard_attach_errors: Arc<AsyncMutex<BTreeMap<usize, (u8, String)>>> =
         Arc::new(AsyncMutex::new(BTreeMap::new()));
 
-    if cancelled_during_setup || opened_shards.is_empty() {
+    if cancelled_during_setup || zero_selected || opened_shards.is_empty() {
         close_all_stores(&opened_stores);
     } else {
         let queue_state = Arc::new(AsyncMutex::new(SharedQueueState {
@@ -1065,6 +1113,7 @@ async fn run_batch_inner(
 
     let mut counts = BatchCounts {
         total: final_records.len(),
+        skipped_by_selection: selection_summary.as_ref().map(|s| s.skipped_count),
         ..BatchCounts::default()
     };
     let mut goal_exit_codes: Vec<u8> = Vec::with_capacity(final_records.len());
@@ -1160,6 +1209,7 @@ async fn run_batch_inner(
         devices: shard_specs.iter().map(|s| s.device.clone()).collect(),
         shards: shard_summaries,
         scheduled_order,
+        selection: selection_summary,
         counts,
         goals: goal_results,
         artifacts: batch_artifacts,
@@ -1241,16 +1291,17 @@ async fn run_batch_inner(
     if args.summary {
         for entry in &batch_report.goals {
             let line = if let Some(ref rep) = entry.report {
-                format_summary_line(&rep.core, &redaction)
+                format_cli_summary_line(rep, &redaction)
             } else {
                 // Keep `deja-summary v=1` strictly compatible with the v1 summary grammar
                 // (`outcome=error`, `failure=error`) while preserving `"cancelled"`/`"skipped"`
                 // in `CliBatchRunReport` JSON and merged JUnit XML.
-                format_batch_status_summary_line(
+                format_batch_status_summary_line_with_selection(
                     &entry.goal,
                     "error",
                     "error",
                     &batch_report.build_fingerprint,
+                    entry.selection_reason,
                     &redaction,
                 )
             };
@@ -1544,6 +1595,7 @@ async fn run_shard_worker(shard: WorkerShard, ctx: WorkerSharedContext) {
                     total_ms,
                     ..RunTimingBreakdown::default()
                 });
+                report.selection_reason = bg.selection_reason;
                 persist_per_goal_internal_report(
                     &ctx.config.workspace_root,
                     shard.store_id.as_deref(),
@@ -1999,6 +2051,7 @@ async fn run_shard_worker(shard: WorkerShard, ctx: WorkerSharedContext) {
                 steps: attempts_raw[0].timing.steps.clone(),
                 ..RunTimingBreakdown::default()
             });
+            report.selection_reason = bg.selection_reason;
             persist_per_goal_internal_report(
                 &ctx.config.workspace_root,
                 shard.store_id.as_deref(),
@@ -2263,6 +2316,7 @@ async fn run_shard_worker(shard: WorkerShard, ctx: WorkerSharedContext) {
                 .errors
                 .push(ctx.redaction.redact_str(&err.to_string()));
             report.timing = Some(timing);
+            report.selection_reason = bg.selection_reason;
             persist_per_goal_internal_report(
                 &ctx.config.workspace_root,
                 shard.store_id.as_deref(),
@@ -2351,6 +2405,7 @@ async fn run_shard_worker(shard: WorkerShard, ctx: WorkerSharedContext) {
         } else {
             first.visible_context.clone()
         };
+        report.selection_reason = bg.selection_reason;
 
         persist_per_goal_internal_report(
             &ctx.config.workspace_root,
@@ -2478,6 +2533,7 @@ fn make_report_goal_record(
             runtime: runtime.map(ToString::to_string),
             report_path,
             historical_median_ms: bg.historical_median_ms,
+            selection_reason: bg.selection_reason,
             report: Some(report),
             errors,
         },
@@ -2510,6 +2566,7 @@ fn make_cancelled_goal_record(
             runtime: runtime.map(ToString::to_string),
             report_path: None,
             historical_median_ms: bg.historical_median_ms,
+            selection_reason: bg.selection_reason,
             report: None,
             errors: vec![safe_detail.clone()],
         },
@@ -2546,6 +2603,7 @@ fn make_skipped_goal_record(
             runtime: None,
             report_path: None,
             historical_median_ms: bg.historical_median_ms,
+            selection_reason: bg.selection_reason,
             report: None,
             errors: vec![reason.clone()],
         },
@@ -2589,6 +2647,7 @@ fn make_error_goal_record(
             runtime,
             report_path: None,
             historical_median_ms: bg.historical_median_ms,
+            selection_reason: bg.selection_reason,
             report: None,
             errors: vec![safe_detail.clone()],
         },
@@ -3028,6 +3087,9 @@ mod tests {
             goals: None,
             all: true,
             devices: Vec::new(),
+            changed_from: None,
+            always_include: Vec::new(),
+            fallback_all_on: Vec::new(),
             verify: true,
             flow: None,
             device: None,
