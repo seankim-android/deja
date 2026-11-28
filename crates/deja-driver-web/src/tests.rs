@@ -1223,12 +1223,17 @@ async fn cdp_target_crash_signals_surface_via_check_app_crash() {
         "method": "Target.targetCrashed",
         "params": { "targetId": "target-1", "status": "killed", "errorCode": 9 }
     }));
-    tokio::time::sleep(Duration::from_millis(30)).await;
-    let sig = driver
-        .check_app_crash(app, before, &cancel)
-        .await
-        .unwrap()
-        .expect("crash signal must be reported");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    let sig = loop {
+        if let Some(s) = driver.check_app_crash(app, before, &cancel).await.unwrap() {
+            break s;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "crash signal must be reported within 2s"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    };
     assert_eq!(sig.source, CrashSignalSource::CrashReport);
     assert_eq!(sig.process.as_deref(), Some("chromium-renderer"));
     assert!(sig.detail.as_deref().unwrap().contains("errorCode=9"));
@@ -1249,12 +1254,24 @@ async fn cdp_target_crash_signals_surface_via_check_app_crash() {
         "sessionId": "sess-1",
         "params": {}
     }));
-    tokio::time::sleep(Duration::from_millis(30)).await;
-    let insp_sig = driver
-        .check_app_crash(app, before_insp, &cancel)
-        .await
-        .unwrap()
-        .expect("Inspector.targetCrashed must be reported");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    let insp_sig = loop {
+        if let Some(s) = driver
+            .check_app_crash(app, before_insp, &cancel)
+            .await
+            .unwrap()
+            && s.detail
+                .as_deref()
+                .is_some_and(|d| d.contains("Inspector.targetCrashed"))
+        {
+            break s;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "Inspector.targetCrashed must be reported within 2s"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    };
     assert!(
         insp_sig
             .detail
@@ -2312,7 +2329,14 @@ async fn codex_r3_f1_crash_and_disconnect_fail_active_flow_and_defer_recovery_to
         "sessionId": "sess-1",
         "params": {}
     }));
-    tokio::time::sleep(Duration::from_millis(30)).await;
+    let crash_deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    while !driver.has_session_crash_for_tests() {
+        assert!(
+            tokio::time::Instant::now() < crash_deadline,
+            "driver must observe pushed Inspector.targetCrashed within 2s"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
 
     let h_err = driver
         .hierarchy(app, false, None, &cancel)
@@ -2356,7 +2380,14 @@ async fn codex_r3_f1_crash_and_disconnect_fail_active_flow_and_defer_recovery_to
     // 2. Unexpected WebSocket disconnect MUST fail the active flow cleanly (no silent respawn)
     // and recover only on the next explicit `ensure_session`.
     server.drop_active_connection();
-    tokio::time::sleep(Duration::from_millis(30)).await;
+    let close_deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    while !driver.is_cdp_closed_for_tests() {
+        assert!(
+            tokio::time::Instant::now() < close_deadline,
+            "driver must observe dropped CDP connection within 2s"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
 
     let drop_err = driver
         .hierarchy(app, false, None, &cancel)

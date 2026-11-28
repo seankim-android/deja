@@ -226,6 +226,18 @@ impl WebDriver {
         Self::new(config)
     }
 
+    #[cfg(test)]
+    pub(crate) fn has_session_crash_for_tests(&self) -> bool {
+        self.current_session_crash(self.current_handle().as_ref())
+            .is_some()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_cdp_closed_for_tests(&self) -> bool {
+        self.current_handle()
+            .is_none_or(|h| h.cdp.is_closed() || h.cdp.is_detached())
+    }
+
     /// Number of times this driver attached/launched a Chromium CDP session.
     #[must_use]
     pub fn attach_count(&self) -> u64 {
