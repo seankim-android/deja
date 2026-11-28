@@ -965,13 +965,11 @@ final class XcuiActions {
                 node.placeholderValue ?? "",
             ]
             for raw in rawCandidates {
-                let normalized = raw
-                    .components(separatedBy: .whitespacesAndNewlines)
-                    .filter { !$0.isEmpty }
-                    .joined(separator: " ")
-                if normalized.isEmpty { continue }
-                if seen.insert(normalized).inserted {
-                    result.append(normalized)
+                // Preserve exact raw whitespace/newlines so Rust exact-value redactors match
+                // secrets containing repeated spaces or newlines BEFORE whitespace normalization.
+                if raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { continue }
+                if seen.insert(raw).inserted {
+                    result.append(raw)
                     if result.count >= Self.maxVisibleSampleItems {
                         return result
                     }

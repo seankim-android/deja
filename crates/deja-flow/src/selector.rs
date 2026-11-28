@@ -1261,3 +1261,39 @@ pub async fn wait_local<D: PlatformDriver + ?Sized>(
         },
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::build_visible_context;
+    use crate::driver::UiNode;
+    use deja_core::{create_redactor, provider_key_redactor};
+
+    #[test]
+    fn build_visible_context_redacts_raw_whitespace_and_newline_secrets_before_normalizing() {
+        let secret = "my  secret\npayload";
+        let redactor = create_redactor("/tmp/ws", None, &[secret.to_string()]);
+        let provider = provider_key_redactor(std::iter::empty::<(&str, &str)>());
+
+        let node = UiNode {
+            index: 1,
+            parent_index: Some(0),
+            depth: 1,
+            label: format!("Greeting {secret} end"),
+            is_on_screen: true,
+            ..UiNode::default()
+        };
+
+        let ctx = build_visible_context(&[node], Some(&redactor), Some(&provider), 10);
+        let summary = ctx.format_summary();
+        assert!(
+            !summary.contains("secret") && !summary.contains("payload"),
+            "secret with repeated spaces and newline leaked into VisibleContext: {summary}"
+        );
+        assert!(
+            summary.contains("<redacted-fixture-value>")
+                && summary.contains("Greeting")
+                && summary.contains("end"),
+            "expected redacted placeholder with surrounding text: {summary}"
+        );
+    }
+}

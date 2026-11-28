@@ -458,6 +458,25 @@ impl Simctl {
         Ok(())
     }
 
+    /// Enables or disables iOS Simulator Reduce Motion (`com.apple.Accessibility ReduceMotionEnabled`)
+    /// so UIKit and SwiftUI respect reduced motion without breaking animation completion callbacks.
+    pub async fn set_reduce_motion(&self, udid: &str, enabled: bool) -> Result<()> {
+        let canonical = validate_udid(udid)?;
+        let value = if enabled { "1" } else { "0" };
+        self.run_simctl(&[
+            "spawn",
+            &canonical,
+            "defaults",
+            "write",
+            "com.apple.Accessibility",
+            "ReduceMotionEnabled",
+            "-int",
+            value,
+        ])
+        .await?;
+        Ok(())
+    }
+
     pub async fn ensure_booted(&self, udid: &str) -> Result<()> {
         let canonical = validate_udid(udid)?;
         // `simctl bootstatus <udid> -b` boots the simulator if Shutdown and waits cleanly
@@ -619,17 +638,15 @@ impl Simctl {
         self.clear_state_cancellable(udid, bundle_id, &cancel).await
     }
 
-    /// Terminates `bundle_id` and wipes both its confined CoreSimulator private `data` container
-    /// (`Documents/`, `Library/`, `tmp/`) AND any App Group containers reported by
-    /// `xcrun simctl get_app_container <udid> <bundle_id> groups`, cooperatively cancelling any
-    /// in-progress directory wipe and awaiting the blocking worker to finish BEFORE returning
-    /// `IosDriverError::Cancelled` so no background deletion can race a subsequent app launch.
-    pub async fn clear_state_cancellable(
+    /// Terminates `bundle_id` and resolves its private `data` container plus any App Group
+    /// containers so callers can execute and supervise the blocking wipe with their own ownership
+    /// lifecycle.
+    pub(crate) async fn prepare_clear_state_targets(
         &self,
         udid: &str,
         bundle_id: &str,
         cancel: &CancellationToken,
-    ) -> Result<()> {
+    ) -> Result<ClearStateTargets> {
         let canonical = validate_udid(udid)?;
         let bundle = validate_bundle_id(bundle_id)?;
         if cancel.is_cancelled() {
@@ -655,7 +672,7 @@ impl Simctl {
             ));
         }
 
-        let group_paths = self
+        let group_containers = self
             .list_app_group_containers(&canonical, &bundle, cancel)
             .await?;
 
@@ -663,16 +680,33 @@ impl Simctl {
             return Err(IosDriverError::Cancelled);
         }
 
-        let container_path = PathBuf::from(container_raw);
-        let udid_clone = canonical.clone();
+        Ok(ClearStateTargets {
+            canonical_udid: canonical,
+            data_container: PathBuf::from(container_raw),
+            group_containers,
+        })
+    }
+
+    /// Terminates `bundle_id` and wipes both its confined CoreSimulator private `data` container
+    /// (`Documents/`, `Library/`, `tmp/`) AND any App Group containers reported by
+    /// `xcrun simctl get_app_container <udid> <bundle_id> groups`, cooperatively cancelling any
+    /// in-progress directory wipe and awaiting the blocking worker to finish BEFORE returning
+    /// `IosDriverError::Cancelled` so no background deletion can race a subsequent app launch.
+    pub async fn clear_state_cancellable(
+        &self,
+        udid: &str,
+        bundle_id: &str,
+        cancel: &CancellationToken,
+    ) -> Result<()> {
+        let targets = self
+            .prepare_clear_state_targets(udid, bundle_id, cancel)
+            .await?;
+
         let cancel_flag = Arc::new(AtomicBool::new(false));
+        let mut cancel_on_drop = WipeCancelOnDrop::new(Arc::clone(&cancel_flag));
         let flag_for_worker = Arc::clone(&cancel_flag);
         let mut handle = tokio::task::spawn_blocking(move || {
-            clear_app_data_container_cancellable(&container_path, &udid_clone, &flag_for_worker)?;
-            for group_path in &group_paths {
-                clear_app_group_container_cancellable(group_path, &udid_clone, &flag_for_worker)?;
-            }
-            Ok(())
+            clear_state_targets_sync(&targets, &flag_for_worker)
         });
 
         tokio::select! {
@@ -680,9 +714,11 @@ impl Simctl {
             _ = cancel.cancelled() => {
                 cancel_flag.store(true, Ordering::SeqCst);
                 let _ = handle.await;
+                cancel_on_drop.disarm();
                 Err(IosDriverError::Cancelled)
             }
             res = &mut handle => {
+                cancel_on_drop.disarm();
                 res.map_err(|err| {
                     IosDriverError::InvalidPath(format!("clear_state task failed: {err}"))
                 })??;
@@ -729,6 +765,57 @@ impl Simctl {
             });
         }
         parse_app_group_containers(&String::from_utf8_lossy(&output.stdout))
+    }
+}
+
+/// Resolved private `data` and App Group containers ready for confined state wiping.
+#[derive(Debug, Clone)]
+pub(crate) struct ClearStateTargets {
+    pub canonical_udid: String,
+    pub data_container: PathBuf,
+    pub group_containers: Vec<PathBuf>,
+}
+
+/// Synchronously wipes the private `data` container and every App Group container in `targets`
+/// while observing cooperative cancellation via `cancelled`.
+pub(crate) fn clear_state_targets_sync(
+    targets: &ClearStateTargets,
+    cancelled: &AtomicBool,
+) -> Result<()> {
+    clear_app_data_container_cancellable(
+        &targets.data_container,
+        &targets.canonical_udid,
+        cancelled,
+    )?;
+    for group_path in &targets.group_containers {
+        clear_app_group_container_cancellable(group_path, &targets.canonical_udid, cancelled)?;
+    }
+    Ok(())
+}
+
+struct WipeCancelOnDrop {
+    flag: Arc<AtomicBool>,
+    disarmed: bool,
+}
+
+impl WipeCancelOnDrop {
+    fn new(flag: Arc<AtomicBool>) -> Self {
+        Self {
+            flag,
+            disarmed: false,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.disarmed = true;
+    }
+}
+
+impl Drop for WipeCancelOnDrop {
+    fn drop(&mut self) {
+        if !self.disarmed {
+            self.flag.store(true, Ordering::SeqCst);
+        }
     }
 }
 
@@ -840,68 +927,29 @@ pub fn clear_app_data_container_cancellable(
             return Err(IosDriverError::Cancelled);
         }
         let subdir = canonical_container.join(subdir_name);
-        let sub_meta = match std::fs::symlink_metadata(&subdir) {
-            Ok(meta) => meta,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(source) => {
-                return Err(IosDriverError::Io {
-                    context: format!("stat container subdir {}", subdir.display()),
-                    source,
-                });
-            }
-        };
-
-        if sub_meta.file_type().is_symlink() {
-            return Err(IosDriverError::InvalidPath(format!(
-                "refusing symlink subdir {}",
-                subdir.display()
-            )));
-        }
-        if !sub_meta.is_dir() {
-            return Err(IosDriverError::InvalidPath(format!(
-                "expected directory for container subdir {}",
-                subdir.display()
-            )));
-        }
-
-        let canonical_sub =
-            std::fs::canonicalize(&subdir).map_err(|source| IosDriverError::Io {
-                context: format!("canonicalize container subdir {}", subdir.display()),
-                source,
-            })?;
-        if !canonical_sub.starts_with(&canonical_container) {
-            return Err(IosDriverError::InvalidPath(format!(
-                "container subdir escaped confinement: {}",
-                canonical_sub.display()
-            )));
-        }
-
-        let entries = std::fs::read_dir(&canonical_sub).map_err(|source| IosDriverError::Io {
-            context: format!("read container subdir {}", canonical_sub.display()),
-            source,
-        })?;
-
-        for entry_res in entries {
-            if cancelled.load(Ordering::SeqCst) {
-                return Err(IosDriverError::Cancelled);
-            }
-            let entry = entry_res.map_err(|source| IosDriverError::Io {
-                context: format!("iterate container subdir {}", canonical_sub.display()),
-                source,
-            })?;
-            remove_entry_cancellable(&entry.path(), cancelled)?;
-        }
+        clear_confined_subdir_children(&canonical_container, &subdir, cancelled)?;
     }
 
     Ok(())
 }
 
-fn remove_entry_cancellable(path: &Path, cancelled: &AtomicBool) -> Result<()> {
+/// Removes a single top-level entry from a verified container directory without manual path-based
+/// recursion:
+/// - Symlinks and non-directory files are unlinked directly via `std::fs::remove_file` (never
+///   following the symlink target).
+/// - Directories are removed via `std::fs::remove_dir_all`, which uses OS directory-handle
+///   traversal (`O_NOFOLLOW` + `openat`/`unlinkat` on Unix) so replaced subdirectories/symlinks
+///   cannot redirect deletion outside the container.
+fn remove_top_level_entry_cancellable(
+    entry: &std::fs::DirEntry,
+    cancelled: &AtomicBool,
+) -> Result<()> {
     if cancelled.load(Ordering::SeqCst) {
         return Err(IosDriverError::Cancelled);
     }
-    let meta = match std::fs::symlink_metadata(path) {
-        Ok(m) => m,
+    let path = entry.path();
+    let file_type = match entry.file_type() {
+        Ok(ft) => ft,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(source) => {
             return Err(IosDriverError::Io {
@@ -911,37 +959,25 @@ fn remove_entry_cancellable(path: &Path, cancelled: &AtomicBool) -> Result<()> {
         }
     };
 
-    if meta.file_type().is_symlink() || !meta.is_dir() {
-        std::fs::remove_file(path).map_err(|source| IosDriverError::Io {
-            context: format!("remove container file {}", path.display()),
-            source,
-        })?;
-        return Ok(());
-    }
-
-    let entries = std::fs::read_dir(path).map_err(|source| IosDriverError::Io {
-        context: format!("read container directory {}", path.display()),
-        source,
-    })?;
-    for entry_res in entries {
-        if cancelled.load(Ordering::SeqCst) {
-            return Err(IosDriverError::Cancelled);
+    if file_type.is_symlink() || !file_type.is_dir() {
+        match std::fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(source) => Err(IosDriverError::Io {
+                context: format!("remove container file {}", path.display()),
+                source,
+            }),
         }
-        let entry = entry_res.map_err(|source| IosDriverError::Io {
-            context: format!("iterate container directory {}", path.display()),
-            source,
-        })?;
-        remove_entry_cancellable(&entry.path(), cancelled)?;
+    } else {
+        match std::fs::remove_dir_all(&path) {
+            Ok(()) => Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(source) => Err(IosDriverError::Io {
+                context: format!("remove container directory {}", path.display()),
+                source,
+            }),
+        }
     }
-
-    if cancelled.load(Ordering::SeqCst) {
-        return Err(IosDriverError::Cancelled);
-    }
-    std::fs::remove_dir(path).map_err(|source| IosDriverError::Io {
-        context: format!("remove container directory {}", path.display()),
-        source,
-    })?;
-    Ok(())
 }
 
 /// Parses `xcrun simctl get_app_container <udid> <bundle_id> groups` output (`<group_id>\t<path>`
@@ -1042,7 +1078,7 @@ pub fn clear_app_group_container_cancellable(
         if matches!(name_str.as_ref(), "Documents" | "Library" | "tmp") {
             clear_confined_subdir_children(&canonical_container, &child_path, cancelled)?;
         } else {
-            remove_entry_cancellable(&child_path, cancelled)?;
+            remove_top_level_entry_cancellable(&entry, cancelled)?;
         }
     }
 
@@ -1105,7 +1141,7 @@ fn clear_confined_subdir_children(
             context: format!("iterate container subdir {}", canonical_sub.display()),
             source,
         })?;
-        remove_entry_cancellable(&entry.path(), cancelled)?;
+        remove_top_level_entry_cancellable(&entry, cancelled)?;
     }
     Ok(())
 }
@@ -1717,6 +1753,119 @@ exit 0
                 .exists()
         );
         assert!(!group_container.join("shared.db").exists());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn clear_containers_handles_nested_dirs_and_external_symlinks_without_following() {
+        use super::{clear_app_data_container_cancellable, clear_app_group_container_cancellable};
+        use std::os::unix::fs::symlink;
+        use std::sync::atomic::AtomicBool;
+
+        let root =
+            std::env::temp_dir().join(format!("deja-simctl-symlink-safe-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+
+        let outside_dir = root.join("outside_secret_dir");
+        let outside_nested_file = outside_dir.join("keep.txt");
+        let outside_single_file = root.join("outside_keep.txt");
+        std::fs::create_dir_all(&outside_dir).unwrap();
+        std::fs::write(&outside_nested_file, b"must-survive-dir").unwrap();
+        std::fs::write(&outside_single_file, b"must-survive-file").unwrap();
+
+        let data_container = root
+            .join("CoreSimulator/Devices")
+            .join(TEST_UDID)
+            .join("data/Containers/Data/Application/77777777-2222-3333-4444-555555555555");
+        let docs = data_container.join("Documents");
+        std::fs::create_dir_all(docs.join("nested/sub/deep")).unwrap();
+        std::fs::write(docs.join("nested/sub/deep/item.txt"), b"wipe-me").unwrap();
+        symlink(&outside_dir, docs.join("nested/escape_dir_link")).unwrap();
+        symlink(&outside_dir, docs.join("top_escape_dir_link")).unwrap();
+        symlink(&outside_single_file, docs.join("top_escape_file_link")).unwrap();
+
+        let group_container = root
+            .join("CoreSimulator/Devices")
+            .join(TEST_UDID)
+            .join("data/Containers/Shared/AppGroup/88888888-2222-3333-4444-555555555555");
+        std::fs::create_dir_all(group_container.join("custom/deep")).unwrap();
+        std::fs::write(group_container.join("custom/deep/a.txt"), b"wipe").unwrap();
+        symlink(&outside_dir, group_container.join("custom/escape_link")).unwrap();
+        symlink(&outside_dir, group_container.join("root_escape_link")).unwrap();
+
+        let flag = AtomicBool::new(false);
+        clear_app_data_container_cancellable(&data_container, TEST_UDID, &flag)
+            .expect("wipe data container");
+        clear_app_group_container_cancellable(&group_container, TEST_UDID, &flag)
+            .expect("wipe app group container");
+
+        // All container entries & symlinks must be removed.
+        assert!(!docs.join("nested").exists());
+        assert!(std::fs::symlink_metadata(docs.join("top_escape_dir_link")).is_err());
+        assert!(std::fs::symlink_metadata(docs.join("top_escape_file_link")).is_err());
+        assert!(!group_container.join("custom").exists());
+        assert!(std::fs::symlink_metadata(group_container.join("root_escape_link")).is_err());
+
+        // External symlink targets MUST remain completely untouched.
+        assert_eq!(
+            std::fs::read(&outside_nested_file).unwrap(),
+            b"must-survive-dir"
+        );
+        assert_eq!(
+            std::fs::read(&outside_single_file).unwrap(),
+            b"must-survive-file"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn set_reduce_motion_invokes_simctl_spawn_defaults_write() {
+        use super::{Simctl, SimctlEnv};
+        use std::ffi::OsString;
+        use std::os::unix::fs::PermissionsExt;
+
+        let root =
+            std::env::temp_dir().join(format!("deja-simctl-reduce-motion-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let bin_dir = root.join("bin");
+        let log_file = root.join("simctl.log");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+
+        let xcrun_path = bin_dir.join("xcrun");
+        std::fs::write(
+            &xcrun_path,
+            format!(
+                "#!/bin/sh\necho \"$@\" >> \"{}\"\nexit 0\n",
+                log_file.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&xcrun_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let simctl = Simctl::with_env(SimctlEnv {
+            env_path: Some(OsString::from(bin_dir.as_os_str())),
+            developer_dir: None,
+        });
+        simctl
+            .set_reduce_motion(TEST_UDID, true)
+            .await
+            .expect("enable reduce motion");
+        simctl
+            .set_reduce_motion(TEST_UDID, false)
+            .await
+            .expect("disable reduce motion");
+
+        let logged = std::fs::read_to_string(&log_file).unwrap();
+        assert!(logged.contains(&format!(
+            "simctl spawn {TEST_UDID} defaults write com.apple.Accessibility ReduceMotionEnabled -int 1"
+        )));
+        assert!(logged.contains(&format!(
+            "simctl spawn {TEST_UDID} defaults write com.apple.Accessibility ReduceMotionEnabled -int 0"
+        )));
 
         let _ = std::fs::remove_dir_all(&root);
     }

@@ -7,11 +7,8 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::future::Future;
 use std::path::{Path, PathBuf};
-#[cfg(test)]
 use std::sync::Arc;
-#[cfg(test)]
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Mutex as StdMutex, MutexGuard as StdMutexGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -40,8 +37,8 @@ use crate::process::acquire_simulator_lock_in_dir;
 use crate::process::{SimulatorLockGuard, acquire_simulator_lock, validate_udid};
 use crate::runner::{IosRunnerConfig, IosRunnerSession};
 use crate::simctl::{
-    Simctl, SimctlEnv, map_privacy_action, map_privacy_service, validate_launch_inputs,
-    validate_open_link_url,
+    Simctl, SimctlEnv, clear_state_targets_sync, map_privacy_action, map_privacy_service,
+    validate_launch_inputs, validate_open_link_url,
 };
 
 const MAX_KEY_BATCH: u32 = 100;
@@ -67,6 +64,9 @@ pub struct IosDriverConfig {
     pub crash_report_dir: Option<PathBuf>,
     pub crash_report_grace: Duration,
     pub auto_boot_simulator: bool,
+    /// When `true` (default), configures simulator `ReduceMotionEnabled = 1` on attach and
+    /// advertises [`DriverCapability::DisableAnimations`]. Set to `false` to opt out.
+    pub disable_animations: bool,
 }
 
 impl IosDriverConfig {
@@ -81,6 +81,61 @@ impl IosDriverConfig {
             crash_report_dir: default_crash_report_dir(),
             crash_report_grace: Duration::from_secs(2),
             auto_boot_simulator: true,
+            disable_animations: true,
+        }
+    }
+
+    /// Configures whether simulator Reduce Motion (`ReduceMotionEnabled`) is enabled on attach.
+    #[must_use]
+    pub fn with_disable_animations(mut self, enabled: bool) -> Self {
+        self.disable_animations = enabled;
+        self
+    }
+}
+
+#[derive(Debug, Clone)]
+struct SessionHandle {
+    client: AgentClient,
+    /// Set synchronously if an in-flight RPC on this session is dropped/aborted (e.g., via an
+    /// outer `tokio::time::timeout`), forcing teardown before the runner can ever be reused.
+    dirty: Arc<AtomicBool>,
+}
+
+impl SessionHandle {
+    fn is_dirty(&self) -> bool {
+        self.dirty.load(Ordering::SeqCst)
+    }
+
+    fn mark_dirty(&self) {
+        self.dirty.store(true, Ordering::SeqCst);
+    }
+}
+
+/// RAII guard for an in-flight `busyLock`-acquiring XCTest HTTP RPC.
+///
+/// Disarmed only when the RPC completes cleanly; if the future is dropped early (for example when
+/// `deja-flow`'s local selector loop drops `driver.hierarchy(...)` on timeout), `Drop`
+/// synchronously marks the session dirty so the next driver call tears down and recycles the
+/// runner instead of hitting a stale `409 Conflict`.
+struct InFlightRpcGuard {
+    dirty: Arc<AtomicBool>,
+    armed: bool,
+}
+
+impl InFlightRpcGuard {
+    fn new(dirty: Arc<AtomicBool>) -> Self {
+        Self { dirty, armed: true }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for InFlightRpcGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            self.dirty.store(true, Ordering::SeqCst);
         }
     }
 }
@@ -89,22 +144,32 @@ impl IosDriverConfig {
 enum SessionState {
     Detached,
     Stopping,
-    Runner(Box<IosRunnerSession>),
+    Runner {
+        session: Box<IosRunnerSession>,
+        dirty: Arc<AtomicBool>,
+    },
     #[cfg(test)]
     Mock {
         client: AgentClient,
+        dirty: Arc<AtomicBool>,
         teardown_delay: Duration,
         teardown_done: Option<Arc<AtomicBool>>,
     },
 }
 
 impl SessionState {
-    fn client(&self) -> Option<AgentClient> {
+    fn handle(&self) -> Option<SessionHandle> {
         match self {
             Self::Detached | Self::Stopping => None,
-            Self::Runner(s) => Some(s.client().clone()),
+            Self::Runner { session, dirty } => Some(SessionHandle {
+                client: session.client().clone(),
+                dirty: Arc::clone(dirty),
+            }),
             #[cfg(test)]
-            Self::Mock { client, .. } => Some(client.clone()),
+            Self::Mock { client, dirty, .. } => Some(SessionHandle {
+                client: client.clone(),
+                dirty: Arc::clone(dirty),
+            }),
         }
     }
 }
@@ -130,7 +195,7 @@ impl Drop for ResetStoppingGuard<'_> {
 
 async fn teardown_session(taken: SessionState) -> Result<()> {
     match taken {
-        SessionState::Runner(sess) => sess.shutdown().await,
+        SessionState::Runner { session, .. } => session.shutdown().await,
         SessionState::Detached | SessionState::Stopping => Ok(()),
         #[cfg(test)]
         SessionState::Mock {
@@ -146,6 +211,61 @@ async fn teardown_session(taken: SessionState) -> Result<()> {
             }
             Ok(())
         }
+    }
+}
+
+/// RAII guard for a blocking state-wipe worker launched by [`IosDriver`].
+///
+/// If the async future is dropped before the worker exits (for example by an outer timeout),
+/// `Drop` synchronously signals cooperative cancellation AND stores the live `JoinHandle` in
+/// `IosDriver::pending_wipe` so subsequent driver operations and `shutdown` wait for the worker
+/// to finish before mutating state or releasing simulator ownership.
+struct ActiveWipeGuard<'a> {
+    cancel_flag: Arc<AtomicBool>,
+    slot: &'a StdMutex<Option<tokio::task::JoinHandle<()>>>,
+    handle: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl Drop for ActiveWipeGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            self.cancel_flag.store(true, Ordering::SeqCst);
+            let mut guard = self
+                .slot
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            *guard = Some(handle);
+        }
+    }
+}
+
+/// Restores a taken `pending_wipe` handle back into `IosDriver::pending_wipe` if the caller
+/// awaiting it is itself dropped before the worker exits.
+struct RestorePendingWipeGuard<'a> {
+    slot: &'a StdMutex<Option<tokio::task::JoinHandle<()>>>,
+    handle: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl Drop for RestorePendingWipeGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            let mut guard = self
+                .slot
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            *guard = Some(handle);
+        }
+    }
+}
+
+#[cfg(test)]
+#[derive(Clone)]
+struct ClearStateTestHook(Arc<dyn Fn(&AtomicBool) + Send + Sync>);
+
+#[cfg(test)]
+impl std::fmt::Debug for ClearStateTestHook {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ClearStateTestHook(..)")
     }
 }
 
@@ -184,8 +304,9 @@ impl Drop for TempFileGuard {
 /// [`SimulatorLockGuard`] when detached.
 struct SimulatorOwnershipLease<'a> {
     // Dropped before `_lifecycle` so the temporary simulator lock is released before any waiting
-    // `ensure_session` or `shutdown` acquires `lifecycle`.
-    _temp_lock: Option<SimulatorLockGuard>,
+    // `ensure_session` or `shutdown` acquires `lifecycle`. Shared via `Arc` with any spawned
+    // blocking state-wipe worker so an aborted future cannot release the OS lock early.
+    temp_lock: Option<Arc<SimulatorLockGuard>>,
     _lifecycle: tokio::sync::MutexGuard<'a, ()>,
 }
 
@@ -196,8 +317,11 @@ pub struct IosDriver {
     config: IosDriverConfig,
     simctl: Simctl,
     capabilities: DriverCapabilities,
-    /// Short-held synchronous slot for fast-path `AgentClient` cloning (never held across `.await`).
+    /// Short-held synchronous slot for fast-path `SessionHandle` cloning (never held across `.await`).
     session: StdMutex<SessionState>,
+    /// Unfinished blocking state-wipe worker handed off on future drop so subsequent operations
+    /// and shutdown await its exit before proceeding or releasing simulator ownership.
+    pending_wipe: StdMutex<Option<tokio::task::JoinHandle<()>>>,
     /// Serializes runner startup, dead-session invalidation teardown, detached simulator ownership
     /// leases, and explicit `shutdown` so a replacement runner never races teardown or lock release.
     lifecycle: AsyncMutex<()>,
@@ -209,6 +333,8 @@ pub struct IosDriver {
     simulator_locks_dir: Option<PathBuf>,
     #[cfg(test)]
     keyboard_dismiss_verify_timeout: Duration,
+    #[cfg(test)]
+    on_clear_state_worker: Option<ClearStateTestHook>,
 }
 
 impl IosDriver {
@@ -219,12 +345,14 @@ impl IosDriver {
     pub fn new(config: IosDriverConfig) -> Result<Self> {
         let udid = validate_udid(&config.udid)?;
         let simctl = Simctl::with_env(config.env.clone());
+        let capabilities = ios_capabilities(config.disable_animations);
         Ok(Self {
             udid,
             config,
             simctl,
-            capabilities: ios_capabilities(),
+            capabilities,
             session: StdMutex::new(SessionState::Detached),
+            pending_wipe: StdMutex::new(None),
             lifecycle: AsyncMutex::new(()),
             attach_count: AtomicU64::new(0),
             runner_pid: AtomicU32::new(0),
@@ -234,6 +362,8 @@ impl IosDriver {
             simulator_locks_dir: None,
             #[cfg(test)]
             keyboard_dismiss_verify_timeout: KEYBOARD_DISMISS_VERIFY_TIMEOUT,
+            #[cfg(test)]
+            on_clear_state_worker: None,
         })
     }
 
@@ -257,6 +387,7 @@ impl IosDriver {
         let mut guard = driver.lock_session();
         *guard = SessionState::Mock {
             client,
+            dirty: Arc::new(AtomicBool::new(false)),
             teardown_delay,
             teardown_done,
         };
@@ -285,13 +416,20 @@ impl IosDriver {
     pub(crate) fn has_active_session(&self) -> bool {
         matches!(
             *self.lock_session(),
-            SessionState::Runner(_) | SessionState::Mock { .. }
+            SessionState::Runner { .. } | SessionState::Mock { .. }
         )
     }
 
     #[cfg(test)]
     pub(crate) fn is_detached(&self) -> bool {
         matches!(*self.lock_session(), SessionState::Detached)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn session_needs_quiesce(&self) -> bool {
+        self.lock_session()
+            .handle()
+            .is_some_and(|handle| handle.is_dirty())
     }
 
     /// Canonical uppercase simulator UDID.
@@ -321,27 +459,52 @@ impl IosDriver {
         self.simctl.device_runtime_version(&self.udid).await
     }
 
-    async fn ensure_session_client(
+    async fn await_pending_wipe_locked(&self) {
+        let pending = {
+            let mut guard = self
+                .pending_wipe
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            guard.take()
+        };
+        if let Some(handle) = pending {
+            let mut restore = RestorePendingWipeGuard {
+                slot: &self.pending_wipe,
+                handle: Some(handle),
+            };
+            if let Some(h) = restore.handle.as_mut() {
+                let _ = h.await;
+            }
+            restore.handle = None;
+        }
+    }
+
+    async fn ensure_session_handle(
         &self,
         cancel: &CancellationToken,
-    ) -> std::result::Result<AgentClient, DriverError> {
+    ) -> std::result::Result<SessionHandle, DriverError> {
         if cancel.is_cancelled() {
             return Err(DriverError::Cancelled);
         }
 
-        // Fast path: clone existing client under the short synchronous lock and probe `/health`
-        // without blocking on `lifecycle`.
-        let existing_client = self.lock_session().client();
-        if let Some(ref client) = existing_client {
+        // Fast path: clone existing clean session handle under the short synchronous lock and
+        // probe `/health` without blocking on `lifecycle`. If an earlier RPC future was dropped
+        // mid-flight (`is_dirty()`), fall through to tear down and recycle the runner.
+        let existing_handle = self.lock_session().handle();
+        if let Some(ref handle) = existing_handle
+            && !handle.is_dirty()
+        {
             let health_res = tokio::select! {
                 biased;
                 _ = cancel.cancelled() => return Err(DriverError::Cancelled),
-                res = client.health() => res,
+                res = handle.client.health() => res,
             };
             match health_res {
                 Ok(h) if h.status == "ok" => {
-                    self.runner_pid.store(h.pid, Ordering::SeqCst);
-                    return Ok(client.clone());
+                    if !handle.is_dirty() {
+                        self.runner_pid.store(h.pid, Ordering::SeqCst);
+                        return Ok(handle.clone());
+                    }
                 }
                 Ok(h) => {
                     debug!(
@@ -361,7 +524,8 @@ impl IosDriver {
         }
 
         // Slow path: serialize teardown and startup behind `lifecycle` so concurrent callers wait
-        // for any in-progress runner shutdown and simulator-lock release before starting a replacement.
+        // for any in-progress runner shutdown, aborted state wipe, and simulator-lock release
+        // before starting a replacement.
         let _lifecycle = tokio::select! {
             biased;
             _ = cancel.cancelled() => return Err(DriverError::Cancelled),
@@ -371,94 +535,187 @@ impl IosDriver {
             return Err(DriverError::Cancelled);
         }
 
-        // Re-check under `lifecycle` in case a sibling caller already started a healthy session
+        self.await_pending_wipe_locked().await;
+        if cancel.is_cancelled() {
+            return Err(DriverError::Cancelled);
+        }
+
+        let startup_started = Instant::now();
+        let startup_deadline = tokio::time::Instant::now() + self.config.startup_timeout;
+
+        // Re-check under `lifecycle` in case a sibling caller already started a clean session
         // or recycled the unhealthy one.
-        let current_client = self.lock_session().client();
-        if let Some(client) = current_client {
-            let same_unhealthy = existing_client
+        let current_handle = self.lock_session().handle();
+        if let Some(handle) = current_handle {
+            let same_unhealthy = existing_handle
                 .as_ref()
-                .is_some_and(|prev| prev.base_url() == client.base_url());
-            if !same_unhealthy {
+                .is_some_and(|prev| prev.client.base_url() == handle.client.base_url());
+            if !same_unhealthy && !handle.is_dirty() {
                 let health_res = tokio::select! {
                     biased;
                     _ = cancel.cancelled() => return Err(DriverError::Cancelled),
-                    res = client.health() => res,
+                    res = handle.client.health() => res,
                 };
                 if let Ok(h) = health_res
                     && h.status == "ok"
+                    && !handle.is_dirty()
                 {
                     self.runner_pid.store(h.pid, Ordering::SeqCst);
-                    return Ok(client);
+                    return Ok(handle);
                 }
             }
-            self.invalidate_session_locked(client.base_url()).await;
+            self.invalidate_session_locked(handle.client.base_url())
+                .await;
         }
 
-        if self.config.auto_boot_simulator {
-            let boot_lock = self
+        if self.config.auto_boot_simulator || self.config.disable_animations {
+            let setup_lock = self
                 .acquire_temp_simulator_lock()
                 .map_err(|err| map_ios_err("ensure_session", err))?;
-            let boot_res = tokio::select! {
-                biased;
-                _ = cancel.cancelled() => {
-                    drop(boot_lock);
-                    return Err(DriverError::Cancelled);
+
+            if self.config.auto_boot_simulator {
+                let boot_outcome = tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => {
+                        drop(setup_lock);
+                        return Err(DriverError::Cancelled);
+                    }
+                    timed = tokio::time::timeout_at(
+                        startup_deadline,
+                        self.simctl.ensure_booted(&self.udid),
+                    ) => timed,
+                };
+                match boot_outcome {
+                    Ok(Ok(())) => {}
+                    Ok(Err(err)) => {
+                        drop(setup_lock);
+                        return Err(map_ios_err("ensure_booted", err));
+                    }
+                    Err(_) => {
+                        drop(setup_lock);
+                        return Err(DriverError::Timeout {
+                            operation: "ensure_booted".to_string(),
+                            elapsed_ms: startup_started.elapsed().as_millis() as u64,
+                            detail: format!(
+                                "timed out after {}ms waiting for simulator boot (`xcrun simctl bootstatus -b`)",
+                                self.config.startup_timeout.as_millis()
+                            ),
+                        });
+                    }
                 }
-                res = self.simctl.ensure_booted(&self.udid) => res,
-            };
-            drop(boot_lock);
-            boot_res.map_err(|err| map_ios_err("ensure_booted", err))?;
+            }
+
+            if self.config.disable_animations {
+                let motion_outcome = tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => {
+                        drop(setup_lock);
+                        return Err(DriverError::Cancelled);
+                    }
+                    timed = tokio::time::timeout_at(
+                        startup_deadline,
+                        self.simctl.set_reduce_motion(&self.udid, true),
+                    ) => timed,
+                };
+                match motion_outcome {
+                    Ok(Ok(())) => {}
+                    Ok(Err(err)) => {
+                        drop(setup_lock);
+                        return Err(map_ios_err("set_reduce_motion", err));
+                    }
+                    Err(_) => {
+                        drop(setup_lock);
+                        return Err(DriverError::Timeout {
+                            operation: "set_reduce_motion".to_string(),
+                            elapsed_ms: startup_started.elapsed().as_millis() as u64,
+                            detail: format!(
+                                "timed out after {}ms configuring simulator ReduceMotionEnabled",
+                                self.config.startup_timeout.as_millis()
+                            ),
+                        });
+                    }
+                }
+            }
+
+            drop(setup_lock);
+        }
+
+        let remaining_startup =
+            startup_deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining_startup.is_zero() {
+            return Err(DriverError::Timeout {
+                operation: "ensure_session".to_string(),
+                elapsed_ms: startup_started.elapsed().as_millis() as u64,
+                detail: format!(
+                    "startup timeout ({}ms) exhausted before launching DejaXCTestRunner",
+                    self.config.startup_timeout.as_millis()
+                ),
+            });
         }
 
         let runner_cfg = IosRunnerConfig {
             udid: self.udid.clone(),
             deja_home: self.config.deja_home.clone(),
             env: self.config.env.clone(),
-            startup_timeout: self.config.startup_timeout,
+            startup_timeout: remaining_startup,
             request_timeout: self.config.request_timeout,
         };
         let session = IosRunnerSession::start(runner_cfg, cancel.clone())
             .await
             .map_err(|err| map_ios_err("ensure_session", err))?;
 
-        let client = session.client().clone();
+        let dirty = Arc::new(AtomicBool::new(false));
+        let handle = SessionHandle {
+            client: session.client().clone(),
+            dirty: Arc::clone(&dirty),
+        };
         let pid = session.agent_pid().unwrap_or(0);
         self.runner_pid.store(pid, Ordering::SeqCst);
         self.attach_count.fetch_add(1, Ordering::SeqCst);
 
         let previous = {
             let mut guard = self.lock_session();
-            std::mem::replace(&mut *guard, SessionState::Runner(Box::new(session)))
+            std::mem::replace(
+                &mut *guard,
+                SessionState::Runner {
+                    session: Box::new(session),
+                    dirty,
+                },
+            )
         };
         let _ = teardown_session(previous).await;
 
-        Ok(client)
+        Ok(handle)
     }
 
-    async fn get_client_or_start(
+    async fn get_handle_or_start(
         &self,
         cancel: &CancellationToken,
-    ) -> std::result::Result<AgentClient, DriverError> {
+    ) -> std::result::Result<SessionHandle, DriverError> {
         if cancel.is_cancelled() {
             return Err(DriverError::Cancelled);
         }
-        if let Some(client) = self.lock_session().client() {
-            return Ok(client);
+        if let Some(handle) = self.lock_session().handle()
+            && !handle.is_dirty()
+        {
+            return Ok(handle);
         }
-        self.ensure_session_client(cancel).await
+        self.ensure_session_handle(cancel).await
     }
 
     async fn invalidate_session_if_matching(&self, base_url: &str) {
         let _lifecycle = self.lifecycle.lock().await;
+        self.await_pending_wipe_locked().await;
         self.invalidate_session_locked(base_url).await;
     }
 
     async fn invalidate_session_locked(&self, base_url: &str) {
+        self.await_pending_wipe_locked().await;
         let taken = {
             let mut guard = self.lock_session();
             let matches = guard
-                .client()
-                .is_some_and(|client| client.base_url() == base_url);
+                .handle()
+                .is_some_and(|handle| handle.client.base_url() == base_url);
             if matches {
                 self.runner_pid.store(0, Ordering::SeqCst);
                 Some(std::mem::replace(&mut *guard, SessionState::Stopping))
@@ -498,19 +755,108 @@ impl IosDriver {
         if cancel.is_cancelled() {
             return Err(DriverError::Cancelled);
         }
-        let already_owned = self.lock_session().client().is_some();
+
+        // Never start a mutating simulator operation while an earlier aborted state wipe is still
+        // winding down.
+        self.await_pending_wipe_locked().await;
+        if cancel.is_cancelled() {
+            return Err(DriverError::Cancelled);
+        }
+
+        // If an active session was marked dirty by a dropped in-flight RPC, tear it down first so
+        // we never treat a dirty runner as healthy ownership.
+        let existing_handle = self.lock_session().handle();
+        if let Some(handle) = existing_handle
+            && handle.is_dirty()
+        {
+            self.invalidate_session_locked(handle.client.base_url())
+                .await;
+            if cancel.is_cancelled() {
+                return Err(DriverError::Cancelled);
+            }
+        }
+
+        let already_owned = self.lock_session().handle().is_some();
         let temp_lock = if already_owned {
             None
         } else {
-            Some(
+            Some(Arc::new(
                 self.acquire_temp_simulator_lock()
                     .map_err(|err| map_ios_err(operation, err))?,
-            )
+            ))
         };
         Ok(SimulatorOwnershipLease {
-            _temp_lock: temp_lock,
+            temp_lock,
             _lifecycle: lifecycle_guard,
         })
+    }
+
+    /// Executes a path-confined `clear_state` wipe while holding `lease`, keeping simulator
+    /// ownership alive across the blocking worker thread even if the async future is dropped
+    /// mid-wipe (e.g., by an outer timeout).
+    async fn run_clear_state_with_lease(
+        &self,
+        bundle_id: &str,
+        lease: &SimulatorOwnershipLease<'_>,
+        cancel: &CancellationToken,
+    ) -> std::result::Result<(), DriverError> {
+        let targets = self
+            .simctl
+            .prepare_clear_state_targets(&self.udid, bundle_id, cancel)
+            .await
+            .map_err(|err| map_ios_err("clear_state", err))?;
+
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        let flag_for_worker = Arc::clone(&cancel_flag);
+        // Keep the temporary OS simulator lock alive inside the blocking worker thread until the
+        // wipe actually exits, even if the async future is dropped mid-wipe.
+        let worker_lock = lease.temp_lock.clone();
+        #[cfg(test)]
+        let test_hook = self.on_clear_state_worker.clone();
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let handle = tokio::task::spawn_blocking(move || {
+            let _lock_guard = worker_lock;
+            #[cfg(test)]
+            if let Some(hook) = test_hook {
+                (hook.0)(&flag_for_worker);
+            }
+            let res = clear_state_targets_sync(&targets, &flag_for_worker);
+            let _ = tx.send(res);
+        });
+
+        let mut wipe_guard = ActiveWipeGuard {
+            cancel_flag,
+            slot: &self.pending_wipe,
+            handle: Some(handle),
+        };
+
+        let cancelled = {
+            let handle_ref = wipe_guard.handle.as_mut().expect("active wipe handle");
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => true,
+                res = handle_ref => {
+                    wipe_guard.handle = None;
+                    res.map_err(|err| DriverError::Io(std::io::Error::other(err.to_string())))?;
+                    false
+                }
+            }
+        };
+
+        if cancelled {
+            wipe_guard.cancel_flag.store(true, Ordering::SeqCst);
+            if let Some(h) = wipe_guard.handle.as_mut() {
+                let _ = h.await;
+            }
+            wipe_guard.handle = None;
+            return Err(DriverError::Cancelled);
+        }
+
+        let worker_res = rx
+            .await
+            .map_err(|_| DriverError::Io(std::io::Error::other("clear_state worker dropped")))?;
+        worker_res.map_err(|err| map_ios_err("clear_state", err))
     }
 
     fn keyboard_dismiss_verify_timeout(&self) -> Duration {
@@ -526,7 +872,7 @@ impl IosDriver {
 
     async fn call_agent<T, Fut>(
         &self,
-        client: &AgentClient,
+        handle: &SessionHandle,
         operation: &str,
         fut: Fut,
         cancel: &CancellationToken,
@@ -534,13 +880,13 @@ impl IosDriver {
     where
         Fut: Future<Output = Result<T>>,
     {
-        self.call_agent_with_timeout(client, operation, fut, None, cancel)
+        self.call_agent_with_timeout(handle, operation, fut, None, cancel)
             .await
     }
 
     async fn call_agent_with_timeout<T, Fut>(
         &self,
-        client: &AgentClient,
+        handle: &SessionHandle,
         operation: &str,
         fut: Fut,
         local_timeout: Option<Duration>,
@@ -553,6 +899,7 @@ impl IosDriver {
             return Err(DriverError::Cancelled);
         }
         let started = Instant::now();
+        let mut rpc_guard = InFlightRpcGuard::new(Arc::clone(&handle.dirty));
         let outcome = match local_timeout {
             None => tokio::select! {
                 biased;
@@ -567,15 +914,19 @@ impl IosDriver {
         };
 
         // If cancellation or a local deadline interrupted an in-flight XCTest RPC, immediately
-        // quiesce/invalidate the runner before returning so the next caller never hits a stale
-        // `busyLock` 409 or suffers late UI mutations from the interrupted request.
+        // mark dirty and quiesce/invalidate the runner before returning so the next caller never
+        // hits a stale `busyLock` 409 or suffers late UI mutations from the interrupted request.
         let res = match outcome {
             None => {
-                self.invalidate_session_if_matching(client.base_url()).await;
+                handle.mark_dirty();
+                self.invalidate_session_if_matching(handle.client.base_url())
+                    .await;
                 return Err(DriverError::Cancelled);
             }
             Some(Err(_)) => {
-                self.invalidate_session_if_matching(client.base_url()).await;
+                handle.mark_dirty();
+                self.invalidate_session_if_matching(handle.client.base_url())
+                    .await;
                 return Err(DriverError::Transport {
                     operation: operation.to_string(),
                     detail: format!(
@@ -589,10 +940,15 @@ impl IosDriver {
         };
 
         match res {
-            Ok(val) => Ok(val),
+            Ok(val) => {
+                rpc_guard.disarm();
+                Ok(val)
+            }
             Err(err) => {
                 if is_dead_session_error(&err) {
-                    self.invalidate_session_if_matching(client.base_url()).await;
+                    handle.mark_dirty();
+                    self.invalidate_session_if_matching(handle.client.base_url())
+                        .await;
                     return Err(DriverError::Transport {
                         operation: operation.to_string(),
                         detail: err.to_string(),
@@ -600,7 +956,11 @@ impl IosDriver {
                     });
                 }
                 if is_reqwest_timeout_error(&err) {
-                    self.invalidate_session_if_matching(client.base_url()).await;
+                    handle.mark_dirty();
+                    self.invalidate_session_if_matching(handle.client.base_url())
+                        .await;
+                } else {
+                    rpc_guard.disarm();
                 }
                 Err(map_agent_err(
                     operation,
@@ -613,7 +973,7 @@ impl IosDriver {
 
     async fn send_key_batches(
         &self,
-        client: &AgentClient,
+        handle: &SessionHandle,
         app_id: &str,
         key: &str,
         total_count: u32,
@@ -629,7 +989,7 @@ impl IosDriver {
                 count: Some(batch),
             };
             let resp = self
-                .call_agent(client, "press_key", client.press_key(&req), cancel)
+                .call_agent(handle, "press_key", handle.client.press_key(&req), cancel)
                 .await?;
             if !resp.ok {
                 return Err(DriverError::Transport {
@@ -735,7 +1095,7 @@ impl IosDriver {
         req: &WaitSelectorRequest,
         cancel: &CancellationToken,
     ) -> std::result::Result<WaitSelectorOutcome, DriverError> {
-        let client = self.get_client_or_start(cancel).await?;
+        let handle = self.get_handle_or_start(cancel).await?;
         let timeout_ms = u64::try_from(req.timeout.as_millis()).unwrap_or(60_000);
         let wire_req = WaitForSelectorRequest {
             app_id: req.app_id.clone(),
@@ -760,9 +1120,9 @@ impl IosDriver {
 
         let resp = self
             .call_agent_with_timeout(
-                &client,
+                &handle,
                 "wait_for_selector",
-                client.wait_for_selector(&wire_req),
+                handle.client.wait_for_selector(&wire_req),
                 Some(rpc_timeout),
                 cancel,
             )
@@ -770,20 +1130,24 @@ impl IosDriver {
 
         let ui_hierarchy = resp.hierarchy.as_ref().map(hierarchy_response_to_ui);
         let matched_node = resp.node.as_ref().map(hierarchy_node_to_ui_node);
+        // Prefer building VisibleContext from the raw `ui_hierarchy` whenever present so exact
+        // redaction always runs on raw node strings before whitespace collapsing; fall back to
+        // `resp.visible_sample` (which Swift also sends raw/uncollapsed) only when no hierarchy
+        // was returned.
         let visible_context = if resp.matched {
             VisibleContext::default()
-        } else if !resp.visible_sample.is_empty() {
-            scrub_visible_sample(
-                &resp.visible_sample,
-                req.redactor.as_ref(),
-                req.provider_redactor.as_ref(),
-            )
         } else if let Some(ref h) = ui_hierarchy {
             build_visible_context(
                 &h.nodes,
                 req.redactor.as_ref(),
                 req.provider_redactor.as_ref(),
                 VisibleContext::DEFAULT_LIMIT,
+            )
+        } else if !resp.visible_sample.is_empty() {
+            scrub_visible_sample(
+                &resp.visible_sample,
+                req.redactor.as_ref(),
+                req.provider_redactor.as_ref(),
             )
         } else {
             VisibleContext::default()
@@ -834,7 +1198,7 @@ impl PlatformDriver for IosDriver {
 
     fn ensure_session<'a>(&'a self, cancel: &'a CancellationToken) -> DriverFuture<'a, ()> {
         Box::pin(async move {
-            let _ = self.ensure_session_client(cancel).await?;
+            let _ = self.ensure_session_handle(cancel).await?;
             Ok(())
         })
     }
@@ -850,9 +1214,21 @@ impl PlatformDriver for IosDriver {
                 return Err(DriverError::Cancelled);
             }
 
+            // Preserve Maestro's default `all: allow` permission grant when `permissions` is
+            // omitted (`None`); an explicit empty map (`Some({})`) applies no permission changes.
+            let default_permissions: BTreeMap<String, String>;
+            let effective_permissions: &BTreeMap<String, String> = match &opts.permissions {
+                None => {
+                    default_permissions =
+                        BTreeMap::from([("all".to_string(), "allow".to_string())]);
+                    &default_permissions
+                }
+                Some(explicit) => explicit,
+            };
+
             // Validate the entire launch specification (permissions, bundle ID, argument keys/values,
             // and env keys/values) BEFORE touching runner/simulator state.
-            for (service, action) in &opts.permissions {
+            for (service, action) in effective_permissions {
                 map_privacy_service(service)
                     .map_err(|err| DriverError::InvalidArgument(err.to_string()))?;
                 map_privacy_action(action)
@@ -867,7 +1243,7 @@ impl PlatformDriver for IosDriver {
             let bundle_id = validate_launch_inputs(app_id, &formatted_args, &opts.env)
                 .map_err(|err| DriverError::InvalidArgument(err.to_string()))?;
 
-            let client = self.ensure_session_client(cancel).await?;
+            let handle = self.ensure_session_handle(cancel).await?;
 
             // Hold simulator ownership across all pre-launch and `simctl launch` mutations so a
             // concurrent `shutdown()` cannot release the simulator lock mid-launch.
@@ -876,13 +1252,10 @@ impl PlatformDriver for IosDriver {
                 .await?;
 
             if opts.clear_state {
-                // Call `clear_state_cancellable` directly without wrapping in an outer `select!`
-                // so cancellation cooperatively stops AND awaits the blocking directory wipe
-                // before returning `DriverError::Cancelled`.
-                self.simctl
-                    .clear_state_cancellable(&self.udid, &bundle_id, cancel)
-                    .await
-                    .map_err(|err| map_ios_err("clear_state", err))?;
+                // Keep simulator ownership bound to the blocking wipe worker even if the caller
+                // drops this future mid-wipe.
+                self.run_clear_state_with_lease(&bundle_id, &ownership_lease, cancel)
+                    .await?;
             } else if opts.stop_app {
                 tokio::select! {
                     biased;
@@ -903,11 +1276,11 @@ impl PlatformDriver for IosDriver {
                 }
             }
 
-            if !opts.permissions.is_empty() {
+            if !effective_permissions.is_empty() {
                 tokio::select! {
                     biased;
                     _ = cancel.cancelled() => return Err(DriverError::Cancelled),
-                    res = self.simctl.set_permissions(&self.udid, &bundle_id, &opts.permissions) => {
+                    res = self.simctl.set_permissions(&self.udid, &bundle_id, effective_permissions) => {
                         res.map_err(|err| map_ios_err("set_permissions", err))?;
                     }
                 }
@@ -989,19 +1362,24 @@ impl PlatformDriver for IosDriver {
                     return_hierarchy: Some(false),
                 };
 
+                let mut rpc_guard = InFlightRpcGuard::new(Arc::clone(&handle.dirty));
                 let outcome = tokio::select! {
                     biased;
                     _ = cancel.cancelled() => None,
-                    timed = tokio::time::timeout(remaining, client.warmup(&warmup_req)) => Some(timed),
+                    timed = tokio::time::timeout(remaining, handle.client.warmup(&warmup_req)) => Some(timed),
                 };
 
                 let res = match outcome {
                     None => {
-                        self.invalidate_session_if_matching(client.base_url()).await;
+                        handle.mark_dirty();
+                        self.invalidate_session_if_matching(handle.client.base_url())
+                            .await;
                         return Err(DriverError::Cancelled);
                     }
                     Some(Err(_)) => {
-                        self.invalidate_session_if_matching(client.base_url()).await;
+                        handle.mark_dirty();
+                        self.invalidate_session_if_matching(handle.client.base_url())
+                            .await;
                         last_detail = format!(
                             "warmup HTTP request exceeded remaining launch budget ({}ms)",
                             remaining.as_millis()
@@ -1012,8 +1390,12 @@ impl PlatformDriver for IosDriver {
                 };
 
                 match res {
-                    Ok(resp) if resp.ok && resp.state == "running_foreground" => return Ok(()),
+                    Ok(resp) if resp.ok && resp.state == "running_foreground" => {
+                        rpc_guard.disarm();
+                        return Ok(());
+                    }
                     Ok(resp) if resp.state == "not_running" => {
+                        rpc_guard.disarm();
                         if let Some(sig) = self
                             .scan_crash_with_grace(
                                 &bundle_id,
@@ -1035,9 +1417,21 @@ impl PlatformDriver for IosDriver {
                         });
                     }
                     Ok(resp) => {
+                        rpc_guard.disarm();
                         last_detail = format!("app state was `{}` (ok={})", resp.state, resp.ok);
+                        let sleep_for = Duration::from_millis(50)
+                            .min(deadline.saturating_duration_since(tokio::time::Instant::now()));
+                        if sleep_for.is_zero() {
+                            break;
+                        }
+                        tokio::select! {
+                            biased;
+                            _ = cancel.cancelled() => return Err(DriverError::Cancelled),
+                            _ = tokio::time::sleep(sleep_for) => {}
+                        }
                     }
                     Err(IosDriverError::AgentHttpStatus { status: 409, .. }) => {
+                        rpc_guard.disarm();
                         let sleep_for = Duration::from_millis(50)
                             .min(deadline.saturating_duration_since(tokio::time::Instant::now()));
                         if !sleep_for.is_zero() {
@@ -1052,6 +1446,7 @@ impl PlatformDriver for IosDriver {
                     Err(IosDriverError::AgentHttpStatus {
                         status: 500, body, ..
                     }) => {
+                        rpc_guard.disarm();
                         if body.contains("not_running")
                             && let Some(sig) = self
                                 .scan_crash_immediate(
@@ -1064,16 +1459,29 @@ impl PlatformDriver for IosDriver {
                             return Err(DriverError::AppCrashed(sig));
                         }
                         last_detail = body;
+                        let sleep_for = Duration::from_millis(50)
+                            .min(deadline.saturating_duration_since(tokio::time::Instant::now()));
+                        if sleep_for.is_zero() {
+                            break;
+                        }
+                        tokio::select! {
+                            biased;
+                            _ = cancel.cancelled() => return Err(DriverError::Cancelled),
+                            _ = tokio::time::sleep(sleep_for) => {}
+                        }
                     }
                     Err(err) => {
                         if is_dead_session_error(&err) || is_reqwest_timeout_error(&err) {
-                            self.invalidate_session_if_matching(client.base_url()).await;
+                            handle.mark_dirty();
+                            self.invalidate_session_if_matching(handle.client.base_url())
+                                .await;
                             return Err(DriverError::Transport {
                                 operation: "launch_app_warmup".to_string(),
                                 detail: err.to_string(),
                                 transient: false,
                             });
                         }
+                        rpc_guard.disarm();
                         return Err(DriverError::LaunchFailed {
                             app_id: bundle_id,
                             detail: err.to_string(),
@@ -1154,15 +1562,13 @@ impl PlatformDriver for IosDriver {
             if cancel.is_cancelled() {
                 return Err(DriverError::Cancelled);
             }
-            let _lease = self
+            let lease = self
                 .acquire_simulator_ownership("clear_state", cancel)
                 .await?;
-            // Call `clear_state_cancellable` directly so cancellation cooperatively stops AND
-            // awaits any in-progress container wipe before returning (while `_lease` stays held).
-            self.simctl
-                .clear_state_cancellable(&self.udid, app_id, cancel)
+            // Keep simulator ownership bound to the blocking worker until it exits, even if this
+            // future is dropped early by an outer timeout.
+            self.run_clear_state_with_lease(app_id, &lease, cancel)
                 .await
-                .map_err(|err| map_ios_err("clear_state", err))
         })
     }
 
@@ -1266,12 +1672,14 @@ impl PlatformDriver for IosDriver {
         cancel: &'a CancellationToken,
     ) -> DriverFuture<'a, UiHierarchy> {
         Box::pin(async move {
-            let client = self.get_client_or_start(cancel).await?;
+            let handle = self.get_handle_or_start(cancel).await?;
             let resp = self
                 .call_agent(
-                    &client,
+                    &handle,
                     "hierarchy",
-                    client.hierarchy_with_known_hash(app_id, include_system_ui, known_hash),
+                    handle
+                        .client
+                        .hierarchy_with_known_hash(app_id, include_system_ui, known_hash),
                     cancel,
                 )
                 .await?;
@@ -1287,7 +1695,7 @@ impl PlatformDriver for IosDriver {
     ) -> DriverFuture<'a, ()> {
         Box::pin(async move {
             validate_point(point)?;
-            let client = self.get_client_or_start(cancel).await?;
+            let handle = self.get_handle_or_start(cancel).await?;
             let req = TapRequest {
                 app_id: app_id.to_string(),
                 x: point.x,
@@ -1296,7 +1704,7 @@ impl PlatformDriver for IosDriver {
                 duration_ms: None,
             };
             let resp = self
-                .call_agent(&client, "tap_point", client.tap(&req), cancel)
+                .call_agent(&handle, "tap_point", handle.client.tap(&req), cancel)
                 .await?;
             if !resp.ok {
                 return Err(DriverError::Transport {
@@ -1318,7 +1726,7 @@ impl PlatformDriver for IosDriver {
     ) -> DriverFuture<'a, ()> {
         Box::pin(async move {
             validate_point(point)?;
-            let client = self.get_client_or_start(cancel).await?;
+            let handle = self.get_handle_or_start(cancel).await?;
             let req = TapRequest {
                 app_id: app_id.to_string(),
                 x: point.x,
@@ -1327,7 +1735,7 @@ impl PlatformDriver for IosDriver {
                 duration_ms: Some(duration_ms.unwrap_or(DEFAULT_LONG_PRESS_MS).max(1)),
             };
             let resp = self
-                .call_agent(&client, "long_press_point", client.tap(&req), cancel)
+                .call_agent(&handle, "long_press_point", handle.client.tap(&req), cancel)
                 .await?;
             if !resp.ok {
                 return Err(DriverError::Transport {
@@ -1348,7 +1756,7 @@ impl PlatformDriver for IosDriver {
     ) -> DriverFuture<'a, ()> {
         Box::pin(async move {
             validate_point(point)?;
-            let client = self.get_client_or_start(cancel).await?;
+            let handle = self.get_handle_or_start(cancel).await?;
             let req = TapRequest {
                 app_id: app_id.to_string(),
                 x: point.x,
@@ -1357,7 +1765,7 @@ impl PlatformDriver for IosDriver {
                 duration_ms: None,
             };
             let resp = self
-                .call_agent(&client, "double_tap_point", client.tap(&req), cancel)
+                .call_agent(&handle, "double_tap_point", handle.client.tap(&req), cancel)
                 .await?;
             if !resp.ok {
                 return Err(DriverError::Transport {
@@ -1378,7 +1786,7 @@ impl PlatformDriver for IosDriver {
         Box::pin(async move {
             validate_point(params.start)?;
             validate_point(params.end)?;
-            let client = self.get_client_or_start(cancel).await?;
+            let handle = self.get_handle_or_start(cancel).await?;
             let req = SwipeRequest {
                 app_id: params.app_id.clone(),
                 start_x: params.start.x,
@@ -1389,7 +1797,7 @@ impl PlatformDriver for IosDriver {
                 hold_duration_ms: params.hold_duration_ms,
             };
             let resp = self
-                .call_agent(&client, "swipe", client.swipe(&req), cancel)
+                .call_agent(&handle, "swipe", handle.client.swipe(&req), cancel)
                 .await?;
             if !resp.ok {
                 return Err(DriverError::Transport {
@@ -1409,14 +1817,14 @@ impl PlatformDriver for IosDriver {
         cancel: &'a CancellationToken,
     ) -> DriverFuture<'a, ()> {
         Box::pin(async move {
-            let client = self.get_client_or_start(cancel).await?;
+            let handle = self.get_handle_or_start(cancel).await?;
             let req = TypeRequest {
                 app_id: app_id.to_string(),
                 text: text.to_string(),
                 settle_keyboard: Some(true),
             };
             let resp = self
-                .call_agent(&client, "input_text", client.type_text(&req), cancel)
+                .call_agent(&handle, "input_text", handle.client.type_text(&req), cancel)
                 .await?;
             if !resp.ok {
                 return Err(DriverError::Transport {
@@ -1442,8 +1850,8 @@ impl PlatformDriver for IosDriver {
             if count == 0 {
                 return Ok(());
             }
-            let client = self.get_client_or_start(cancel).await?;
-            self.send_key_batches(&client, app_id, "delete", count, cancel)
+            let handle = self.get_handle_or_start(cancel).await?;
+            self.send_key_batches(&handle, app_id, "delete", count, cancel)
                 .await
         })
     }
@@ -1462,8 +1870,8 @@ impl PlatformDriver for IosDriver {
             if key.count == 0 {
                 return Ok(());
             }
-            let client = self.get_client_or_start(cancel).await?;
-            self.send_key_batches(&client, app_id, &normalized, key.count, cancel)
+            let handle = self.get_handle_or_start(cancel).await?;
+            self.send_key_batches(&handle, app_id, &normalized, key.count, cancel)
                 .await
         })
     }
@@ -1563,33 +1971,49 @@ impl PlatformDriver for IosDriver {
                 return Ok(Some(sig));
             }
 
-            // 2. If a runner session is live, probe `/appState`: when the app is still alive,
-            //    skip the grace window completely (0 ms penalty on normal assertion failures).
-            let existing_client = self.lock_session().client();
-            if let Some(client) = existing_client {
-                let probe_timeout = Duration::from_secs(2).min(self.config.request_timeout);
-                let probe_outcome = tokio::select! {
-                    biased;
-                    _ = cancel.cancelled() => None,
-                    timed = tokio::time::timeout(probe_timeout, client.app_state(app_id)) => Some(timed),
-                };
-                match probe_outcome {
-                    None => {
-                        self.invalidate_session_if_matching(client.base_url()).await;
-                        return Err(DriverError::Cancelled);
+            // 2. If a clean runner session is live, probe `/appState`: when the app is still
+            //    alive, skip the grace window completely (0 ms penalty on normal assertion
+            //    failures). If the runner was marked dirty by a dropped RPC, tear it down first.
+            let existing_handle = self.lock_session().handle();
+            if let Some(handle) = existing_handle {
+                if handle.is_dirty() {
+                    self.invalidate_session_if_matching(handle.client.base_url())
+                        .await;
+                } else {
+                    let probe_timeout = Duration::from_secs(2).min(self.config.request_timeout);
+                    let mut rpc_guard = InFlightRpcGuard::new(Arc::clone(&handle.dirty));
+                    let probe_outcome = tokio::select! {
+                        biased;
+                        _ = cancel.cancelled() => None,
+                        timed = tokio::time::timeout(probe_timeout, handle.client.app_state(app_id)) => Some(timed),
+                    };
+                    match probe_outcome {
+                        None => {
+                            handle.mark_dirty();
+                            self.invalidate_session_if_matching(handle.client.base_url())
+                                .await;
+                            return Err(DriverError::Cancelled);
+                        }
+                        Some(Err(_)) => {
+                            handle.mark_dirty();
+                            self.invalidate_session_if_matching(handle.client.base_url())
+                                .await;
+                        }
+                        Some(Ok(Ok(state))) if is_app_alive_state(&state.state) => {
+                            rpc_guard.disarm();
+                            return Ok(None);
+                        }
+                        Some(Ok(Err(ref err)))
+                            if is_dead_session_error(err) || is_reqwest_timeout_error(err) =>
+                        {
+                            handle.mark_dirty();
+                            self.invalidate_session_if_matching(handle.client.base_url())
+                                .await;
+                        }
+                        Some(Ok(_)) => {
+                            rpc_guard.disarm();
+                        }
                     }
-                    Some(Err(_)) => {
-                        self.invalidate_session_if_matching(client.base_url()).await;
-                    }
-                    Some(Ok(Ok(state))) if is_app_alive_state(&state.state) => {
-                        return Ok(None);
-                    }
-                    Some(Ok(Err(ref err)))
-                        if is_dead_session_error(err) || is_reqwest_timeout_error(err) =>
-                    {
-                        self.invalidate_session_if_matching(client.base_url()).await;
-                    }
-                    Some(Ok(_)) => {}
                 }
             }
 
@@ -1611,6 +2035,9 @@ impl PlatformDriver for IosDriver {
     fn shutdown<'a>(&'a self) -> DriverFuture<'a, ()> {
         Box::pin(async move {
             let _lifecycle = self.lifecycle.lock().await;
+            // Wait for any aborted blocking state-wipe worker to exit BEFORE tearing down the
+            // runner session and releasing the simulator advisory lock.
+            self.await_pending_wipe_locked().await;
             let taken = {
                 let mut guard = self.lock_session();
                 self.runner_pid.store(0, Ordering::SeqCst);
@@ -1764,11 +2191,11 @@ impl PlatformDriver for IosDriver {
                     if *count == 0 {
                         return self.observe_post_action(req, started, cancel).await;
                     }
-                    let client = self.get_client_or_start(cancel).await?;
+                    let handle = self.get_handle_or_start(cancel).await?;
                     let mut remaining = *count;
                     if remaining > MAX_KEY_BATCH {
                         let pre_count = remaining - ((remaining - 1) % MAX_KEY_BATCH + 1);
-                        self.send_key_batches(&client, &req.app_id, "delete", pre_count, cancel)
+                        self.send_key_batches(&handle, &req.app_id, "delete", pre_count, cancel)
                             .await?;
                         remaining -= pre_count;
                     }
@@ -1787,11 +2214,11 @@ impl PlatformDriver for IosDriver {
                     if *count == 0 {
                         return self.observe_post_action(req, started, cancel).await;
                     }
-                    let client = self.get_client_or_start(cancel).await?;
+                    let handle = self.get_handle_or_start(cancel).await?;
                     let mut remaining = *count;
                     if remaining > MAX_KEY_BATCH {
                         let pre_count = remaining - ((remaining - 1) % MAX_KEY_BATCH + 1);
-                        self.send_key_batches(&client, &req.app_id, &normalized, pre_count, cancel)
+                        self.send_key_batches(&handle, &req.app_id, &normalized, pre_count, cancel)
                             .await?;
                         remaining -= pre_count;
                     }
@@ -1803,7 +2230,7 @@ impl PlatformDriver for IosDriver {
                 }
             };
 
-            let client = self.get_client_or_start(cancel).await?;
+            let handle = self.get_handle_or_start(cancel).await?;
             let wire_req = ActRequest {
                 app_id: req.app_id.clone(),
                 kind: act_kind,
@@ -1813,7 +2240,12 @@ impl PlatformDriver for IosDriver {
                 known_hash: req.known_hash.clone(),
             };
             let resp = self
-                .call_agent(&client, "act_and_observe", client.act(&wire_req), cancel)
+                .call_agent(
+                    &handle,
+                    "act_and_observe",
+                    handle.client.act(&wire_req),
+                    cancel,
+                )
                 .await?;
             Ok(ActOutcome {
                 action_ok: resp.ok,
@@ -1850,9 +2282,10 @@ impl PlatformDriver for IosDriver {
 
 /// Capabilities genuinely supported by [`IosDriver`].
 ///
-/// Explicitly omits [`DriverCapability::SystemBack`] and [`DriverCapability::DisableAnimations`].
-fn ios_capabilities() -> DriverCapabilities {
-    DriverCapabilities::with([
+/// Always omits [`DriverCapability::SystemBack`]. Advertises [`DriverCapability::DisableAnimations`]
+/// when `disable_animations` is enabled (the default).
+fn ios_capabilities(disable_animations: bool) -> DriverCapabilities {
+    let mut caps = vec![
         DriverCapability::AccessibilityTree,
         DriverCapability::ClearState,
         DriverCapability::ClearKeychain,
@@ -1861,7 +2294,11 @@ fn ios_capabilities() -> DriverCapabilities {
         DriverCapability::HierarchyHashShortCircuit,
         DriverCapability::HoldScroll,
         DriverCapability::AppCrashReports,
-    ])
+    ];
+    if disable_animations {
+        caps.push(DriverCapability::DisableAnimations);
+    }
+    DriverCapabilities::with(caps)
 }
 
 /// Derives platform-neutral `checked` state for XCTest checkable controls (`Switch`, `CheckBox`,
@@ -2034,13 +2471,22 @@ fn find_keyboard_dismiss_target(nodes: &[UiNode]) -> Option<UiPoint> {
     let matches_dismiss_label = |raw: &str| -> bool {
         matches!(
             raw.trim().to_ascii_lowercase().as_str(),
-            "hide keyboard" | "dismiss keyboard" | "dismiss" | "hide" | "done"
+            "hide keyboard" | "dismiss keyboard" | "keyboard dismiss" | "dismiss"
         )
     };
     let is_submitting_label = |raw: &str| -> bool {
         matches!(
             raw.trim().to_ascii_lowercase().as_str(),
-            "return" | "enter" | "search" | "go" | "send" | "join" | "route" | "next" | "continue"
+            "return"
+                | "enter"
+                | "done"
+                | "search"
+                | "go"
+                | "send"
+                | "join"
+                | "route"
+                | "next"
+                | "continue"
         )
     };
 
@@ -2464,11 +2910,25 @@ mod tests {
             DriverCapability::HierarchyHashShortCircuit,
             DriverCapability::HoldScroll,
             DriverCapability::AppCrashReports,
+            DriverCapability::DisableAnimations,
         ] {
             assert!(caps.supports(expected), "missing capability {expected}");
         }
         assert!(!caps.supports(DriverCapability::SystemBack));
-        assert!(!caps.supports(DriverCapability::DisableAnimations));
+
+        let opt_out =
+            IosDriver::new(IosDriverConfig::new(TEST_UDID).with_disable_animations(false))
+                .expect("opt-out driver");
+        assert!(
+            !opt_out
+                .capabilities()
+                .supports(DriverCapability::DisableAnimations)
+        );
+        assert!(
+            !opt_out
+                .capabilities()
+                .supports(DriverCapability::SystemBack)
+        );
     }
 
     #[test]
@@ -2814,8 +3274,10 @@ mod tests {
                         make_keyboard(),
                         make_key(2, "Return", "Return", 320.0),
                         make_key(3, "Return", "Done", 250.0),
-                        make_key(4, "Search", "Search", 180.0),
-                        make_key(5, "Send", "Send", 110.0),
+                        make_key(4, "Done", "Done", 210.0),
+                        make_key(5, "Hide", "Hide", 170.0),
+                        make_key(6, "Search", "Search", 130.0),
+                        make_key(7, "Send", "Send", 90.0),
                     ],
                 };
                 let resp = HierarchyResponse {
@@ -3285,7 +3747,7 @@ exit 0
             clear_state: false,
             clear_keychain: true,
             stop_app: true,
-            permissions: perms,
+            permissions: Some(perms),
             arguments: args,
             env: BTreeMap::new(),
         };
@@ -3548,7 +4010,7 @@ exit 0
             clear_state: true,
             clear_keychain: true,
             stop_app: true,
-            permissions: BTreeMap::new(),
+            permissions: Some(BTreeMap::new()),
             arguments: BTreeMap::new(),
             env: BTreeMap::new(),
         };
@@ -3864,20 +4326,21 @@ exit 0
         let mock = MockAgent::start(Arc::new(|_| (200, r#"{"ok":true}"#.to_string()))).await;
         let mut cfg = IosDriverConfig::new(TEST_UDID);
         cfg.auto_boot_simulator = false;
+        cfg.disable_animations = false;
         // Point PATH to an empty directory so replacement startup cannot spawn real xcodebuild.
         let empty_bin = unique_temp_dir("empty-bin-serialize");
         cfg.env.env_path = Some(empty_bin.as_os_str().to_os_string());
 
         let teardown_done = Arc::new(AtomicBool::new(false));
-        let driver = Arc::new(
-            IosDriver::with_mock_client_and_teardown_for_tests(
-                cfg,
-                mock.client(),
-                Duration::from_millis(180),
-                Some(Arc::clone(&teardown_done)),
-            )
-            .expect("driver"),
-        );
+        let mut raw_driver = IosDriver::with_mock_client_and_teardown_for_tests(
+            cfg,
+            mock.client(),
+            Duration::from_millis(180),
+            Some(Arc::clone(&teardown_done)),
+        )
+        .expect("driver");
+        raw_driver.simulator_locks_dir = Some(empty_bin.join("locks"));
+        let driver = Arc::new(raw_driver);
 
         let driver_a = Arc::clone(&driver);
         let shutdown_task = tokio::spawn(async move { driver_a.shutdown().await });
@@ -4038,18 +4501,19 @@ exit 0
         .await;
 
         let empty_bin = unique_temp_dir("empty-bin-quiesce");
-        let mut cfg = IosDriverConfig::new(TEST_UDID);
+        let mut cfg = IosDriverConfig::new(TEST_UDID).with_disable_animations(false);
         cfg.auto_boot_simulator = false;
         cfg.env.env_path = Some(empty_bin.as_os_str().to_os_string());
 
         let teardown_done = Arc::new(AtomicBool::new(false));
-        let driver = IosDriver::with_mock_client_and_teardown_for_tests(
+        let mut driver = IosDriver::with_mock_client_and_teardown_for_tests(
             cfg,
             mock.client(),
             Duration::from_millis(120),
             Some(Arc::clone(&teardown_done)),
         )
         .expect("driver");
+        driver.simulator_locks_dir = Some(empty_bin.join("locks"));
 
         let cancel = CancellationToken::new();
         let cancel_trigger = cancel.clone();
@@ -4482,5 +4946,599 @@ exit 0
             .find(|r| r.target == "/waitForSelector")
             .expect("recorded /waitForSelector");
         assert_eq!(sent.body.as_ref().unwrap()["timeoutMs"], json!(0));
+    }
+
+    #[tokio::test]
+    async fn redacts_raw_whitespace_and_newline_secrets_before_normalizing_across_hierarchy_and_sample_paths()
+     {
+        use deja_flow::{FlowExecutionConfig, FlowExecutor};
+
+        let secret = "my  secret\npayload";
+        let secret_for_mock = secret.to_string();
+        let mode = Arc::new(StdMutex::new(0u8));
+        let mode_clone = Arc::clone(&mode);
+
+        let mock = MockAgent::start(Arc::new(move |req| {
+            if req.target == "/waitForSelector" {
+                let m = *mode_clone.lock().unwrap();
+                match m {
+                    0 => {
+                        // Both raw `hierarchy` AND a pre-collapsed `visibleSample` are present:
+                        // `server_wait_for_selector` MUST prefer raw `hierarchy` so the secret
+                        // containing repeated spaces + newline is redacted BEFORE normalization.
+                        (
+                            200,
+                            json!({
+                                "matched": false,
+                                "elapsedMs": 20,
+                                "polls": 2,
+                                "hierarchyHash": "0123456789abcdef",
+                                "visibleSample": ["Token my secret payload ok"],
+                                "hierarchy": {
+                                    "appId": "dev.deja.ios.checkout",
+                                    "state": "running_foreground",
+                                    "stateCode": 4,
+                                    "truncated": false,
+                                    "hierarchyHash": "0123456789abcdef",
+                                    "unchanged": false,
+                                    "nodeCount": 1,
+                                    "nodes": [sample_hierarchy_node(0, "StaticText", "tok", &format!("Token {secret_for_mock} ok"))]
+                                }
+                            })
+                            .to_string(),
+                        )
+                    }
+                    _ => {
+                        // Fallback path: no `hierarchy`, only raw uncollapsed `visibleSample`
+                        // matching Swift's updated `extractVisibleSample`.
+                        (
+                            200,
+                            json!({
+                                "matched": false,
+                                "elapsedMs": 20,
+                                "polls": 2,
+                                "hierarchyHash": "0123456789abcdef",
+                                "visibleSample": [format!("Banner {secret_for_mock} footer")]
+                            })
+                            .to_string(),
+                        )
+                    }
+                }
+            } else if req.target == "/health" {
+                (
+                    200,
+                    json!({
+                        "status": "ok",
+                        "agent": "DejaXCTestRunner",
+                        "version": "1",
+                        "pid": 88
+                    })
+                    .to_string(),
+                )
+            } else if req.target.starts_with("/appState") {
+                (
+                    200,
+                    json!({
+                        "appId": "dev.deja.ios.checkout",
+                        "state": "running_foreground",
+                        "stateCode": 4
+                    })
+                    .to_string(),
+                )
+            } else {
+                (200, r#"{"ok":true}"#.to_string())
+            }
+        }))
+        .await;
+
+        let driver =
+            IosDriver::with_mock_client_for_tests(IosDriverConfig::new(TEST_UDID), mock.client())
+                .expect("driver");
+        let cancel = CancellationToken::new();
+
+        // Subcase A: raw hierarchy preferred over pre-collapsed visibleSample.
+        let mut req_a = WaitSelectorRequest::visible(
+            "dev.deja.ios.checkout",
+            Selector::by_text("Missing"),
+            Duration::from_millis(200),
+        );
+        req_a.redactor = Some(create_redactor("/tmp/ws", None, &[secret.to_string()]));
+        req_a.provider_redactor = Some(provider_key_redactor(std::iter::empty::<(&str, &str)>()));
+        let out_a = driver.wait_for_selector(&req_a, &cancel).await.unwrap();
+        let sum_a = out_a.visible_context.format_summary();
+        assert!(
+            !sum_a.contains("secret") && !sum_a.contains("payload"),
+            "raw hierarchy path leaked multi-space/newline secret: {sum_a}"
+        );
+        assert!(
+            sum_a.contains("<redacted-fixture-value>")
+                && sum_a.contains("Token")
+                && sum_a.contains("ok"),
+            "unexpected raw hierarchy summary: {sum_a}"
+        );
+
+        // Subcase B: fallback `visibleSample` path redacts raw text before normalization.
+        *mode.lock().unwrap() = 1;
+        let out_b = driver.wait_for_selector(&req_a, &cancel).await.unwrap();
+        let sum_b = out_b.visible_context.format_summary();
+        assert!(
+            !sum_b.contains("secret") && !sum_b.contains("payload"),
+            "visibleSample fallback leaked multi-space/newline secret: {sum_b}"
+        );
+        assert!(
+            sum_b.contains("<redacted-fixture-value>")
+                && sum_b.contains("Banner")
+                && sum_b.contains("footer"),
+            "unexpected visibleSample summary: {sum_b}"
+        );
+
+        // Subcase C: end-to-end FlowExecutor assertion failure message + VisibleContext redaction.
+        let ws = unique_temp_dir("redact-flow");
+        let mut exec_cfg = FlowExecutionConfig::new(ws.clone());
+        exec_cfg.default_step_timeout = Duration::from_millis(120);
+        exec_cfg.redactor =
+            create_redactor(ws.to_string_lossy().as_ref(), None, &[secret.to_string()]);
+        let executor = FlowExecutor::new(exec_cfg);
+        let outcome = executor
+            .execute_yaml(
+                &driver,
+                "appId: dev.deja.ios.checkout\n---\n- assertVisible: Not present\n",
+                &cancel,
+            )
+            .await;
+        assert!(!outcome.passed);
+        let failed = outcome.failed_step.expect("failed step");
+        assert!(
+            !failed.message.contains("secret") && !failed.message.contains("payload"),
+            "assertion failure message leaked secret: {}",
+            failed.message
+        );
+        let vis = failed
+            .visible_context
+            .expect("visible context")
+            .format_summary();
+        assert!(
+            !vis.contains("secret") && !vis.contains("payload"),
+            "assertion VisibleContext leaked secret: {vis}"
+        );
+        assert!(vis.contains("<redacted-fixture-value>"));
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[tokio::test]
+    async fn dropped_hierarchy_rpc_marks_session_dirty_and_quiesces_runner_on_next_call() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let mock = MockAgent::start_async(Arc::new(|req| {
+            Box::pin(async move {
+                if req.target == "/health" {
+                    // XCTest still answers `/health` 200 OK while `busyLock` is stuck on a
+                    // dropped `/hierarchy` request.
+                    (
+                        200,
+                        json!({"status": "ok", "agent": "DejaXCTestRunner", "version": "1", "pid": 88})
+                            .to_string(),
+                    )
+                } else if req.target.starts_with("/hierarchy") {
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    (409, r#"{"error":"runner busy"}"#.to_string())
+                } else {
+                    (200, r#"{"ok":true}"#.to_string())
+                }
+            })
+        }))
+        .await;
+
+        let empty_bin = unique_temp_dir("empty-bin-drop-quiesce");
+        let mut cfg = IosDriverConfig::new(TEST_UDID).with_disable_animations(false);
+        cfg.auto_boot_simulator = false;
+        cfg.env.env_path = Some(empty_bin.as_os_str().to_os_string());
+
+        let teardown_done = Arc::new(AtomicBool::new(false));
+        let mut driver = IosDriver::with_mock_client_and_teardown_for_tests(
+            cfg,
+            mock.client(),
+            Duration::from_millis(50),
+            Some(Arc::clone(&teardown_done)),
+        )
+        .expect("driver");
+        driver.simulator_locks_dir = Some(empty_bin.join("locks"));
+        let cancel = CancellationToken::new();
+
+        // Simulate `deja-flow`'s local selector timeout dropping `driver.hierarchy(...)` directly
+        // without signalling `cancel`.
+        let timed = tokio::time::timeout(
+            Duration::from_millis(60),
+            driver.hierarchy("dev.deja.ios.checkout", false, None, &cancel),
+        )
+        .await;
+        assert!(
+            timed.is_err(),
+            "outer timeout should drop /hierarchy future"
+        );
+        assert!(
+            driver.session_needs_quiesce(),
+            "dropping an in-flight RPC future must synchronously mark the session dirty"
+        );
+        assert!(
+            !teardown_done.load(Ordering::SeqCst),
+            "teardown runs asynchronously on the next lifecycle entry"
+        );
+
+        let hierarchies_before = mock
+            .recorded()
+            .iter()
+            .filter(|r| r.target.starts_with("/hierarchy"))
+            .count();
+
+        // Next call must tear down the dirty runner rather than reusing it via `/health` 200.
+        let next_res = driver
+            .hierarchy("dev.deja.ios.checkout", false, None, &cancel)
+            .await;
+        assert!(
+            next_res.is_err(),
+            "replacement startup with empty PATH should fail after tearing down dirty runner"
+        );
+        assert!(
+            teardown_done.load(Ordering::SeqCst),
+            "next driver call must tear down dirty runner before attempting reuse"
+        );
+        assert!(driver.is_detached());
+        assert_eq!(
+            mock.recorded()
+                .iter()
+                .filter(|r| r.target.starts_with("/hierarchy"))
+                .count(),
+            hierarchies_before,
+            "dirty runner must NOT receive another /hierarchy request"
+        );
+
+        let _ = std::fs::remove_dir_all(&empty_bin);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn aborted_clear_state_signals_cancel_retains_simulator_lock_and_blocks_subsequent_ops() {
+        use super::ClearStateTestHook;
+        use crate::error::IosDriverError;
+        use crate::process::acquire_simulator_lock_in_dir;
+        use std::ffi::OsString;
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let root = unique_temp_dir("aborted-wipe-ownership");
+        let locks_dir = root.join("locks");
+        let bin_dir = root.join("bin");
+        let log_file = root.join("simctl.log");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+
+        let container = root
+            .join("CoreSimulator/Devices")
+            .join(TEST_UDID)
+            .join("data/Containers/Data/Application/99999999-2222-3333-4444-555555555555");
+        std::fs::create_dir_all(container.join("Documents")).unwrap();
+        std::fs::write(container.join("Documents/keep_if_cancelled.txt"), b"data").unwrap();
+
+        let xcrun_path = bin_dir.join("xcrun");
+        std::fs::write(
+            &xcrun_path,
+            format!(
+                r#"#!/bin/sh
+echo "$@" >> "{log}"
+if [ "$2" = "get_app_container" ] && [ "$5" = "data" ]; then
+  echo "{container}"
+  exit 0
+fi
+exit 0
+"#,
+                log = log_file.display(),
+                container = container.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&xcrun_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let worker_entered = Arc::new(AtomicBool::new(false));
+        let worker_entered_notify = Arc::new(tokio::sync::Notify::new());
+        let release_worker = Arc::new(AtomicBool::new(false));
+        let worker_saw_cancel = Arc::new(AtomicBool::new(false));
+
+        let entered_clone = Arc::clone(&worker_entered);
+        let notify_clone = Arc::clone(&worker_entered_notify);
+        let release_clone = Arc::clone(&release_worker);
+        let saw_cancel_clone = Arc::clone(&worker_saw_cancel);
+
+        let mut cfg = IosDriverConfig::new(TEST_UDID);
+        cfg.env.env_path = Some(OsString::from(bin_dir.as_os_str()));
+        let mut driver = IosDriver::new(cfg).expect("driver");
+        driver.simulator_locks_dir = Some(locks_dir.clone());
+        driver.on_clear_state_worker = Some(ClearStateTestHook(Arc::new(move |cancel_flag| {
+            entered_clone.store(true, Ordering::SeqCst);
+            notify_clone.notify_one();
+            while !release_clone.load(Ordering::SeqCst) {
+                if cancel_flag.load(Ordering::SeqCst) {
+                    saw_cancel_clone.store(true, Ordering::SeqCst);
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            if cancel_flag.load(Ordering::SeqCst) {
+                saw_cancel_clone.store(true, Ordering::SeqCst);
+            }
+        })));
+        let driver = Arc::new(driver);
+        let cancel = CancellationToken::new();
+
+        // Deterministically drop the `clear_state` future mid-wipe right after the blocking worker
+        // has entered (simulating an outer `tokio::time::timeout` dropping the future).
+        tokio::select! {
+            biased;
+            _ = worker_entered_notify.notified() => {}
+            res = driver.clear_state("dev.deja.ios.checkout", &cancel) => {
+                panic!("clear_state unexpectedly completed before abort: {res:?}");
+            }
+        }
+        assert!(
+            worker_entered.load(Ordering::SeqCst),
+            "blocking wipe worker should have entered before outer drop"
+        );
+
+        // Give the spinning worker 20ms to observe `cancel_flag == true` written by Drop.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(
+            worker_saw_cancel.load(Ordering::SeqCst),
+            "dropping clear_state future must synchronously signal cancel_flag"
+        );
+
+        // 1. OS simulator advisory lock MUST still be held by the running wipe worker.
+        assert!(
+            matches!(
+                acquire_simulator_lock_in_dir(&locks_dir, TEST_UDID),
+                Err(IosDriverError::SimulatorBusy { .. })
+            ),
+            "simulator lock must remain held until the aborted wipe worker exits"
+        );
+
+        // 2. A subsequent operation on the same IosDriver MUST wait for the aborted wipe worker.
+        let log_before_stop = std::fs::read_to_string(&log_file).unwrap_or_default();
+        let driver_for_stop = Arc::clone(&driver);
+        let cancel_for_stop = cancel.clone();
+        let stop_task = tokio::spawn(async move {
+            driver_for_stop
+                .stop_app("dev.deja.ios.checkout", &cancel_for_stop)
+                .await
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let log_while_blocked = std::fs::read_to_string(&log_file).unwrap_or_default();
+        assert_eq!(
+            log_before_stop, log_while_blocked,
+            "subsequent stop_app must not execute while aborted wipe worker is still active"
+        );
+
+        // 3. Let the aborted wipe worker finish; stop_app completes and lock releases cleanly.
+        release_worker.store(true, Ordering::SeqCst);
+        stop_task
+            .await
+            .unwrap()
+            .expect("stop_app succeeds after aborted wipe exits");
+        assert!(
+            container.join("Documents/keep_if_cancelled.txt").exists(),
+            "cancelled wipe should not have deleted files after cancel_flag was signaled"
+        );
+        let reacquired = acquire_simulator_lock_in_dir(&locks_dir, TEST_UDID)
+            .expect("simulator lock must be released once aborted wipe and stop_app finish");
+        drop(reacquired);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stalled_simulator_boot_respects_startup_timeout_and_releases_lock() {
+        use crate::process::acquire_simulator_lock_in_dir;
+        use std::ffi::OsString;
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = unique_temp_dir("stalled-boot-timeout");
+        let locks_dir = root.join("locks");
+        let bin_dir = root.join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+
+        let xcrun_path = bin_dir.join("xcrun");
+        std::fs::write(
+            &xcrun_path,
+            "#!/bin/sh\nif [ \"$2\" = \"bootstatus\" ]; then exec /bin/sleep 5; fi\nexit 0\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&xcrun_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let mut cfg = IosDriverConfig::new(TEST_UDID);
+        cfg.env.env_path = Some(OsString::from(bin_dir.as_os_str()));
+        cfg.startup_timeout = Duration::from_millis(180);
+        cfg.auto_boot_simulator = true;
+        let mut driver = IosDriver::new(cfg).expect("driver");
+        driver.simulator_locks_dir = Some(locks_dir.clone());
+        let cancel = CancellationToken::new();
+
+        let t0 = Instant::now();
+        let err = driver
+            .ensure_session(&cancel)
+            .await
+            .expect_err("stalled simulator boot must time out");
+        match err {
+            DriverError::Timeout { operation, .. } => assert_eq!(operation, "ensure_booted"),
+            other => panic!("expected Timeout(ensure_booted), got {other:?}"),
+        }
+        assert!(
+            t0.elapsed() < Duration::from_millis(1_000),
+            "stalled simulator boot overshot startup_timeout: {:?}",
+            t0.elapsed()
+        );
+        let lock = acquire_simulator_lock_in_dir(&locks_dir, TEST_UDID)
+            .expect("simulator lock must be released after boot timeout");
+        drop(lock);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn launch_app_applies_default_all_allow_when_permissions_omitted_and_skips_when_empty() {
+        use deja_flow::LaunchOptions;
+        use std::collections::BTreeMap;
+        use std::ffi::OsString;
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = unique_temp_dir("launch-default-perms");
+        let bin_dir = root.join("bin");
+        let log_file = root.join("simctl.log");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+
+        let xcrun_path = bin_dir.join("xcrun");
+        std::fs::write(
+            &xcrun_path,
+            format!(
+                r#"#!/bin/sh
+echo "$@" >> "{log}"
+if [ "$2" = "launch" ]; then echo "dev.deja.ios.checkout: 555"; fi
+exit 0
+"#,
+                log = log_file.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&xcrun_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let mock = MockAgent::start(Arc::new(|req| {
+            if req.target == "/health" {
+                (
+                    200,
+                    json!({"status": "ok", "agent": "DejaXCTestRunner", "version": "1", "pid": 88})
+                        .to_string(),
+                )
+            } else if req.target == "/warmup" {
+                (
+                    200,
+                    json!({
+                        "ok": true,
+                        "appId": "dev.deja.ios.checkout",
+                        "state": "running_foreground",
+                        "stateCode": 4,
+                        "elapsedMs": 10,
+                        "nodeCount": 2
+                    })
+                    .to_string(),
+                )
+            } else {
+                (200, r#"{"ok":true}"#.to_string())
+            }
+        }))
+        .await;
+
+        let mut cfg = IosDriverConfig::new(TEST_UDID);
+        cfg.env.env_path = Some(OsString::from(bin_dir.as_os_str()));
+        let driver = IosDriver::with_mock_client_for_tests(cfg, mock.client()).expect("driver");
+        let cancel = CancellationToken::new();
+
+        // 1. Omitted (`permissions: None`) -> grants Maestro's default `all: allow`.
+        driver
+            .launch_app("dev.deja.ios.checkout", &LaunchOptions::default(), &cancel)
+            .await
+            .expect("launch with default permissions");
+        let log_a = std::fs::read_to_string(&log_file).unwrap();
+        assert!(
+            log_a.contains(&format!(
+                "simctl privacy {TEST_UDID} grant all dev.deja.ios.checkout"
+            )),
+            "omitted permissions must apply Maestro default `grant all`, log:\n{log_a}"
+        );
+
+        // 2. Explicitly empty (`permissions: Some({})`) -> zero `privacy` calls.
+        std::fs::write(&log_file, "").unwrap();
+        let explicit_empty = LaunchOptions {
+            permissions: Some(BTreeMap::new()),
+            ..LaunchOptions::default()
+        };
+        driver
+            .launch_app("dev.deja.ios.checkout", &explicit_empty, &cancel)
+            .await
+            .expect("launch with explicit empty permissions");
+        let log_b = std::fs::read_to_string(&log_file).unwrap();
+        assert!(
+            !log_b.contains("privacy"),
+            "explicit empty `permissions: {{}}` must make zero privacy calls, log:\n{log_b}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn disable_animations_sets_reduce_motion_by_default_and_supports_opt_out() {
+        use std::ffi::OsString;
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = unique_temp_dir("disable-animations-attach");
+        let locks_dir = root.join("locks");
+        let bin_dir = root.join("bin");
+        let log_file = root.join("simctl.log");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+
+        // Stub `xcrun` records all simctl invocations and succeeds; `xcodebuild` is absent so
+        // `ensure_session` stops cleanly right after simulator boot + ReduceMotionEnabled setup.
+        let xcrun_path = bin_dir.join("xcrun");
+        std::fs::write(
+            &xcrun_path,
+            format!(
+                "#!/bin/sh\necho \"$@\" >> \"{}\"\nexit 0\n",
+                log_file.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&xcrun_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let cancel = CancellationToken::new();
+
+        // 1. Default (`disable_animations: true`): advertises DisableAnimations and writes
+        //    `ReduceMotionEnabled -int 1` on attach.
+        let mut default_cfg = IosDriverConfig::new(TEST_UDID);
+        default_cfg.env.env_path = Some(OsString::from(bin_dir.as_os_str()));
+        default_cfg.deja_home = Some(root.join("deja-home-default"));
+        let mut default_driver = IosDriver::new(default_cfg).expect("default driver");
+        default_driver.simulator_locks_dir = Some(locks_dir.clone());
+        assert!(
+            default_driver
+                .capabilities()
+                .supports(DriverCapability::DisableAnimations)
+        );
+        let _ = default_driver.ensure_session(&cancel).await;
+        let log_default = std::fs::read_to_string(&log_file).unwrap_or_default();
+        assert!(
+            log_default.contains(&format!(
+                "simctl spawn {TEST_UDID} defaults write com.apple.Accessibility ReduceMotionEnabled -int 1"
+            )),
+            "expected ReduceMotionEnabled=1 on default attach, got:\n{log_default}"
+        );
+
+        // 2. Opt-out (`disable_animations: false`): omits DisableAnimations and makes ZERO
+        //    `defaults write` / `ReduceMotionEnabled` calls.
+        std::fs::write(&log_file, "").unwrap();
+        let mut opt_out_cfg = IosDriverConfig::new(TEST_UDID).with_disable_animations(false);
+        opt_out_cfg.env.env_path = Some(OsString::from(bin_dir.as_os_str()));
+        opt_out_cfg.deja_home = Some(root.join("deja-home-optout"));
+        let mut opt_out_driver = IosDriver::new(opt_out_cfg).expect("opt-out driver");
+        opt_out_driver.simulator_locks_dir = Some(locks_dir);
+        assert!(
+            !opt_out_driver
+                .capabilities()
+                .supports(DriverCapability::DisableAnimations)
+        );
+        let _ = opt_out_driver.ensure_session(&cancel).await;
+        let log_opt_out = std::fs::read_to_string(&log_file).unwrap_or_default();
+        assert!(
+            !log_opt_out.contains("ReduceMotionEnabled") && !log_opt_out.contains("defaults write"),
+            "opt-out must not write ReduceMotionEnabled, got:\n{log_opt_out}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

@@ -423,8 +423,10 @@ pub struct LaunchOptions {
     pub clear_state: bool,
     pub clear_keychain: bool,
     pub stop_app: bool,
-    #[serde(default)]
-    pub permissions: BTreeMap<String, String>,
+    /// `None` when omitted in flow YAML (preserving platform default permissions); `Some(empty)`
+    /// when explicitly set to `{}`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permissions: Option<BTreeMap<String, String>>,
     #[serde(default)]
     pub arguments: BTreeMap<String, LaunchArgumentValue>,
     #[serde(default)]
@@ -437,7 +439,7 @@ impl Default for LaunchOptions {
             clear_state: false,
             clear_keychain: false,
             stop_app: true,
-            permissions: BTreeMap::new(),
+            permissions: None,
             arguments: BTreeMap::new(),
             env: BTreeMap::new(),
         }
