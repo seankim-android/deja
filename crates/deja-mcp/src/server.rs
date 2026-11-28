@@ -8,6 +8,7 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use tokio::io::{AsyncRead, AsyncWrite, BufReader};
 use tokio::sync::Mutex as AsyncMutex;
+use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
@@ -24,9 +25,11 @@ use crate::tools::{
     is_known_tool, tool_definitions,
 };
 
-const SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &["2025-03-26", "2024-11-05"];
-const DEFAULT_PROTOCOL_VERSION: &str = "2025-03-26";
+const SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &["2025-06-18", "2024-11-05"];
+const DEFAULT_PROTOCOL_VERSION: &str = "2024-11-05";
 const SHUTDOWN_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
+const WRITER_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(500);
+const WRITER_QUEUE_CAPACITY: usize = 128;
 
 struct InFlightGuard {
     map: Arc<StdMutex<HashMap<RequestIdKey, CancellationToken>>>,
@@ -71,17 +74,49 @@ where
     });
 
     let server_cancel = cancel.child_token();
+    let writer_cancel = cancel.child_token();
+    let stdin_closed = server_cancel.child_token();
     let in_flight: Arc<StdMutex<HashMap<RequestIdKey, CancellationToken>>> =
         Arc::new(StdMutex::new(HashMap::new()));
-    let writer = Arc::new(AsyncMutex::new(FramedWriter::new(output)));
     let mut tasks: JoinSet<()> = JoinSet::new();
+
+    // Dedicated writer task owns `FramedWriter` so a stalled stdout pipe can never block the
+    // request loop from reading `$/cancelRequest` / stdin EOF or prevent warm driver teardown.
+    let (write_tx, mut write_rx) = mpsc::channel::<(Value, FramingMode)>(WRITER_QUEUE_CAPACITY);
+    let writer_stop = writer_cancel.clone();
+    let writer_err_cancel = server_cancel.clone();
+    let mut writer_handle = tokio::spawn(async move {
+        let mut writer = FramedWriter::new(output);
+        loop {
+            let maybe_msg = tokio::select! {
+                biased;
+                _ = writer_stop.cancelled() => break,
+                msg = write_rx.recv() => msg,
+            };
+            let Some((value, mode)) = maybe_msg else {
+                break;
+            };
+            writer.set_mode(mode);
+            let write_res = tokio::select! {
+                biased;
+                _ = writer_stop.cancelled() => break,
+                res = writer.write_json(&value, Some(mode)) => res,
+            };
+            if let Err(io_err) = write_res {
+                warn!(error = %io_err, "deja-mcp stdout write error");
+                writer_err_cancel.cancel();
+                break;
+            }
+        }
+    });
 
     // Dedicated reader task owns `FramedReader` so `read_frame()` is NEVER dropped mid-frame
     // when a tool task finishes in the main `tokio::select!` loop (`mpsc::Receiver::recv` is
     // strictly cancel-safe).
     let (frame_tx, mut frame_rx) =
-        tokio::sync::mpsc::channel::<Result<(FramingMode, Vec<u8>), ReadFrameError>>(64);
+        mpsc::channel::<Result<(FramingMode, Vec<u8>), ReadFrameError>>(64);
     let reader_cancel = server_cancel.clone();
+    let reader_eof = stdin_closed.clone();
     let reader_handle = tokio::spawn(async move {
         let mut reader = FramedReader::new(BufReader::new(input));
         loop {
@@ -99,7 +134,16 @@ where
                         ..
                     })
             );
-            if frame_tx.send(item).await.is_err() || terminal {
+            let send_res = tokio::select! {
+                biased;
+                _ = reader_cancel.cancelled() => break,
+                res = frame_tx.send(item) => res,
+            };
+            if terminal {
+                reader_eof.cancel();
+                break;
+            }
+            if send_res.is_err() {
                 break;
             }
         }
@@ -142,10 +186,10 @@ where
                     ERR_INVALID_REQUEST,
                     &format!("Frame exceeds maximum size of {limit} bytes"),
                 );
-                let mut w = writer.lock().await;
-                w.set_mode(mode);
-                if let Err(io_err) = w.write_json(&err_resp, Some(mode)).await {
-                    warn!(error = %io_err, "failed to write oversized-frame error");
+                if enqueue_response(&write_tx, err_resp, mode, &server_cancel, &stdin_closed)
+                    .await
+                    .is_err()
+                {
                     break;
                 }
                 if !recoverable {
@@ -156,10 +200,10 @@ where
             Err(ReadFrameError::InvalidHeader { mode, detail }) => {
                 let msg = redaction.redact_str(&format!("Invalid frame header: {detail}"));
                 let err_resp = jsonrpc_error(Value::Null, ERR_INVALID_REQUEST, &msg);
-                let mut w = writer.lock().await;
-                w.set_mode(mode);
-                if let Err(io_err) = w.write_json(&err_resp, Some(mode)).await {
-                    warn!(error = %io_err, "failed to write header error");
+                if enqueue_response(&write_tx, err_resp, mode, &server_cancel, &stdin_closed)
+                    .await
+                    .is_err()
+                {
                     break;
                 }
                 continue;
@@ -170,17 +214,15 @@ where
             }
         };
 
-        {
-            let mut w = writer.lock().await;
-            w.set_mode(mode);
-        }
-
         let msg: Value = match serde_json::from_slice(&raw_bytes) {
             Ok(v) => v,
             Err(err) => {
                 let detail = redaction.redact_str(&format!("Parse error: {err}"));
                 let resp = jsonrpc_error(Value::Null, ERR_PARSE_ERROR, &detail);
-                if write_response(&writer, &resp, mode).await.is_err() {
+                if enqueue_response(&write_tx, resp, mode, &server_cancel, &stdin_closed)
+                    .await
+                    .is_err()
+                {
                     break;
                 }
                 continue;
@@ -193,7 +235,10 @@ where
                 ERR_INVALID_REQUEST,
                 "Invalid Request: expected JSON object",
             );
-            if write_response(&writer, &resp, mode).await.is_err() {
+            if enqueue_response(&write_tx, resp, mode, &server_cancel, &stdin_closed)
+                .await
+                .is_err()
+            {
                 break;
             }
             continue;
@@ -206,7 +251,10 @@ where
                 Ok(key) => Some((id_val.clone(), key)),
                 Err(reason) => {
                     let resp = jsonrpc_error(Value::Null, ERR_INVALID_REQUEST, reason);
-                    if write_response(&writer, &resp, mode).await.is_err() {
+                    if enqueue_response(&write_tx, resp, mode, &server_cancel, &stdin_closed)
+                        .await
+                        .is_err()
+                    {
                         break;
                     }
                     continue;
@@ -224,7 +272,10 @@ where
                 ERR_INVALID_REQUEST,
                 "Invalid Request: `jsonrpc` must be \"2.0\"",
             );
-            if write_response(&writer, &resp, mode).await.is_err() {
+            if enqueue_response(&write_tx, resp, mode, &server_cancel, &stdin_closed)
+                .await
+                .is_err()
+            {
                 break;
             }
             continue;
@@ -240,7 +291,10 @@ where
                 ERR_INVALID_REQUEST,
                 "Invalid Request: missing string `method`",
             );
-            if write_response(&writer, &resp, mode).await.is_err() {
+            if enqueue_response(&write_tx, resp, mode, &server_cancel, &stdin_closed)
+                .await
+                .is_err()
+            {
                 break;
             }
             continue;
@@ -268,7 +322,10 @@ where
                 // Standard MCP notification: no response required.
                 if let Some((id_val, _)) = parsed_id {
                     let resp = jsonrpc_result(id_val, json!({}));
-                    if write_response(&writer, &resp, mode).await.is_err() {
+                    if enqueue_response(&write_tx, resp, mode, &server_cancel, &stdin_closed)
+                        .await
+                        .is_err()
+                    {
                         break;
                     }
                 }
@@ -278,7 +335,10 @@ where
                     continue;
                 };
                 let resp = handle_initialize(id_val, &params);
-                if write_response(&writer, &resp, mode).await.is_err() {
+                if enqueue_response(&write_tx, resp, mode, &server_cancel, &stdin_closed)
+                    .await
+                    .is_err()
+                {
                     break;
                 }
             }
@@ -287,7 +347,10 @@ where
                     continue;
                 };
                 let resp = jsonrpc_result(id_val, json!({}));
-                if write_response(&writer, &resp, mode).await.is_err() {
+                if enqueue_response(&write_tx, resp, mode, &server_cancel, &stdin_closed)
+                    .await
+                    .is_err()
+                {
                     break;
                 }
             }
@@ -301,7 +364,10 @@ where
                         ERR_INVALID_PARAMS,
                         "Invalid params: expected object",
                     );
-                    if write_response(&writer, &resp, mode).await.is_err() {
+                    if enqueue_response(&write_tx, resp, mode, &server_cancel, &stdin_closed)
+                        .await
+                        .is_err()
+                    {
                         break;
                     }
                     continue;
@@ -315,7 +381,10 @@ where
                         )
                     }),
                 );
-                if write_response(&writer, &resp, mode).await.is_err() {
+                if enqueue_response(&write_tx, resp, mode, &server_cancel, &stdin_closed)
+                    .await
+                    .is_err()
+                {
                     break;
                 }
             }
@@ -329,7 +398,10 @@ where
                         ERR_INVALID_PARAMS,
                         "Invalid params: `tools/call` requires a JSON object",
                     );
-                    if write_response(&writer, &resp, mode).await.is_err() {
+                    if enqueue_response(&write_tx, resp, mode, &server_cancel, &stdin_closed)
+                        .await
+                        .is_err()
+                    {
                         break;
                     }
                     continue;
@@ -340,7 +412,10 @@ where
                         ERR_INVALID_PARAMS,
                         "Invalid params: `tools/call` requires string `name`",
                     );
-                    if write_response(&writer, &resp, mode).await.is_err() {
+                    if enqueue_response(&write_tx, resp, mode, &server_cancel, &stdin_closed)
+                        .await
+                        .is_err()
+                    {
                         break;
                     }
                     continue;
@@ -348,7 +423,10 @@ where
                 if !is_known_tool(tool_name) {
                     let detail = redaction.redact_str(&format!("Unknown tool: {tool_name}"));
                     let resp = jsonrpc_error(id_val, ERR_INVALID_PARAMS, &detail);
-                    if write_response(&writer, &resp, mode).await.is_err() {
+                    if enqueue_response(&write_tx, resp, mode, &server_cancel, &stdin_closed)
+                        .await
+                        .is_err()
+                    {
                         break;
                     }
                     continue;
@@ -374,7 +452,10 @@ where
                         ERR_INVALID_REQUEST,
                         "Duplicate in-flight request id",
                     );
-                    if write_response(&writer, &resp, mode).await.is_err() {
+                    if enqueue_response(&write_tx, resp, mode, &server_cancel, &stdin_closed)
+                        .await
+                        .is_err()
+                    {
                         break;
                     }
                     continue;
@@ -385,8 +466,9 @@ where
                     key: id_key,
                 };
                 let task_ctx = Arc::clone(&tool_ctx);
-                let task_writer = Arc::clone(&writer);
+                let task_write_tx = write_tx.clone();
                 let task_server_cancel = server_cancel.clone();
+                let task_stdin_closed = stdin_closed.clone();
                 let tool_name_owned = tool_name.to_string();
 
                 tasks.spawn(async move {
@@ -415,14 +497,24 @@ where
                             jsonrpc_result(id_val, tool_result)
                         }
                     };
-                    let _ = write_response(&task_writer, &response, mode).await;
+                    let _ = enqueue_response(
+                        &task_write_tx,
+                        response,
+                        mode,
+                        &task_server_cancel,
+                        &task_stdin_closed,
+                    )
+                    .await;
                 });
             }
             other => {
                 if let Some((id_val, _)) = parsed_id {
                     let detail = redaction.redact_str(&format!("Method not found: {other}"));
                     let resp = jsonrpc_error(id_val, ERR_METHOD_NOT_FOUND, &detail);
-                    if write_response(&writer, &resp, mode).await.is_err() {
+                    if enqueue_response(&write_tx, resp, mode, &server_cancel, &stdin_closed)
+                        .await
+                        .is_err()
+                    {
                         break;
                     }
                 }
@@ -431,9 +523,11 @@ where
     }
 
     // Graceful shutdown: cancel every in-flight task, abort the dedicated reader task, drain
-    // bounded, and shut down any idle warm driver so zero processes or locks leak.
+    // tool tasks bounded, drain the dedicated writer task bounded (never hanging on a stalled
+    // stdout pipe), and shut down any idle warm driver so zero processes or locks leak.
     server_cancel.cancel();
     reader_handle.abort();
+    drop(write_tx);
 
     let drain_res = tokio::time::timeout(SHUTDOWN_JOIN_TIMEOUT, async {
         while tasks.join_next().await.is_some() {}
@@ -443,6 +537,16 @@ where
         warn!("deja-mcp shutdown grace elapsed; aborting remaining tasks");
         tasks.abort_all();
         while tasks.join_next().await.is_some() {}
+    }
+
+    if tokio::time::timeout(WRITER_SHUTDOWN_TIMEOUT, &mut writer_handle)
+        .await
+        .is_err()
+    {
+        warn!("deja-mcp stdout writer drain timed out; cancelling stalled writer");
+        writer_cancel.cancel();
+        writer_handle.abort();
+        let _ = writer_handle.await;
     }
 
     if let Ok(mut session) =
@@ -501,11 +605,26 @@ fn cancel_in_flight(
     }
 }
 
-async fn write_response<W: AsyncWrite + Unpin>(
-    writer: &Arc<AsyncMutex<FramedWriter<W>>>,
-    response: &Value,
+async fn enqueue_response(
+    tx: &mpsc::Sender<(Value, FramingMode)>,
+    response: Value,
     mode: FramingMode,
-) -> std::io::Result<()> {
-    let mut guard = writer.lock().await;
-    guard.write_json(response, Some(mode)).await
+    server_cancel: &CancellationToken,
+    stdin_closed: &CancellationToken,
+) -> Result<(), ()> {
+    if server_cancel.is_cancelled() {
+        return Err(());
+    }
+    match tx.try_send((response, mode)) {
+        Ok(()) => Ok(()),
+        Err(mpsc::error::TrySendError::Closed(_)) => Err(()),
+        Err(mpsc::error::TrySendError::Full(msg)) => {
+            tokio::select! {
+                biased;
+                _ = server_cancel.cancelled() => Err(()),
+                _ = stdin_closed.cancelled() => Err(()),
+                res = tx.send(msg) => res.map_err(|_| ()),
+            }
+        }
+    }
 }

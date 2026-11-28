@@ -270,7 +270,7 @@ pub fn read_confined_report_file(
             if segments.len() < 3
                 || segments[0] != ".deja"
                 || segments[1] != "reports"
-                || segments[2] == "stores"
+                || segments[2].eq_ignore_ascii_case("stores")
             {
                 return Err((
                     "PATH_CONFINEMENT",
@@ -316,6 +316,18 @@ pub fn read_confined_report_file(
             format!("report path `{report_rel}` escapes store reports directory"),
         ));
     }
+    if store_id.is_none()
+        && let Ok(canonical_stores_dir) = fs::canonicalize(canonical_reports.join("stores"))
+        && (canonical_target == canonical_stores_dir
+            || path_inside(&canonical_stores_dir, &canonical_target))
+    {
+        return Err((
+            "PATH_CONFINEMENT",
+            format!(
+                "report path `{report_rel}` must stay strictly inside `.deja/reports/` (outside per-store directories)"
+            ),
+        ));
+    }
 
     let bytes = read_bytes_nofollow_bounded(&candidate, MAX_REPORT_BYTES, true).map_err(|err| {
         let code = match err.kind() {
@@ -348,7 +360,10 @@ pub fn validate_remember_flow_path(
     let segments =
         parse_safe_relative_segments(flow_rel).map_err(|msg| ("PATH_CONFINEMENT", msg))?;
 
-    if segments.first().map(String::as_str) == Some(".deja") {
+    if segments
+        .first()
+        .is_some_and(|s| s.eq_ignore_ascii_case(".deja"))
+    {
         return Err((
             "PATH_CONFINEMENT",
             format!("candidate flow `{flow_rel}` must be outside `.deja/`"),
@@ -543,6 +558,49 @@ fn ensure_confined_parent_dir(canonical_root: &Path, target: &Path) -> io::Resul
         ));
     }
     Ok(canonical_parent)
+}
+
+/// Verify that the confined reports directory for `immutable_rel_path` (and its sibling
+/// `latest.json`) is writable without creating any report file or modifying `latest.json`.
+pub fn probe_confined_report_targets(
+    canonical_workspace: &Path,
+    store_id: Option<&str>,
+    immutable_rel_path: &str,
+) -> io::Result<()> {
+    let immutable_abs = canonical_workspace.join(immutable_rel_path);
+    let canonical_parent = ensure_confined_parent_dir(canonical_workspace, &immutable_abs)?;
+
+    let latest_rel = match store_id {
+        Some(id) => format!(".deja/reports/stores/{id}/latest.json"),
+        None => ".deja/reports/latest.json".to_string(),
+    };
+    let latest_abs = canonical_workspace.join(latest_rel);
+    if let Ok(lmeta) = fs::symlink_metadata(&latest_abs) {
+        if lmeta.file_type().is_symlink() {
+            return Err(io::Error::new(
+                ErrorKind::PermissionDenied,
+                format!(
+                    "refusing to overwrite symbolic link: {}",
+                    latest_abs.display()
+                ),
+            ));
+        }
+        if !lmeta.file_type().is_file() {
+            return Err(io::Error::new(
+                ErrorKind::InvalidInput,
+                format!(
+                    "refusing to overwrite non-regular file: {}",
+                    latest_abs.display()
+                ),
+            ));
+        }
+    }
+
+    let probe_path = canonical_parent.join(format!(".deja-report-probe-{}.tmp", temp_nonce()));
+    let file = create_new_nofollow(&probe_path)?;
+    drop(file);
+    let _ = fs::remove_file(&probe_path);
+    Ok(())
 }
 
 /// Atomically write `bytes` to `target` strictly inside `canonical_root` with ancestor symlink

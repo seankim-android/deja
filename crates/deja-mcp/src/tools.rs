@@ -2,9 +2,9 @@
 //! structured responses for `deja_list`, `deja_inspect`, `deja_run`, `deja_remember`,
 //! `deja_exec_batch` (`deja_run_steps` alias), and gated `deja_explore`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -20,9 +20,10 @@ use deja_core::{
 };
 use deja_flow::{
     ClassificationInput, DriverCapability, DriverError, EnvStack, FailureClassifier,
-    FlowExecutionConfig, FlowExecutionOutcome, FlowExecutor, FlowStep, ParsedFlow, PlatformDriver,
-    RunFlowTarget, RunTimingBreakdown, VisibleContext, count_assertions_in_closure, parse_flow,
-    validate_closure_app_id_confinement, validate_flow_app_id_confinement,
+    FlowExecutionConfig, FlowExecutionOutcome, FlowExecutor, FlowStep, MAX_PREFLIGHT_VISITS,
+    ParsedFlow, PlatformDriver, RunFlowTarget, RunTimingBreakdown, VisibleContext,
+    count_assertions_in_closure, parse_flow, validate_closure_app_id_confinement,
+    validate_flow_app_id_confinement,
 };
 use deja_store::{
     ConsumerFlows, ConsumerFlowsOptions, ConsumerRunPlan, ConsumerRunRequest,
@@ -30,14 +31,16 @@ use deja_store::{
     RecordValidationInput, SaveManifestWalkOptions, SqliteStoreOptions, SqliteWalkStore,
     StoreError, UpsertWalkInput, now_iso8601,
 };
+use serde::Serialize;
 use serde_json::{Map, Value, json};
 use tokio::sync::Mutex as AsyncMutex;
 use tokio_util::sync::CancellationToken;
 
 use crate::backend::{McpDriverContext, McpDriverFactory, McpServerConfig};
 use crate::fs_safe::{
-    parse_safe_relative_segments, read_confined_report_file, validate_remember_flow_path,
-    verify_closure_files_nofollow, workspace_relative_display, write_atomic_confined,
+    parse_safe_relative_segments, probe_confined_report_targets, read_confined_report_file,
+    validate_remember_flow_path, verify_closure_files_nofollow, workspace_relative_display,
+    write_atomic_confined,
 };
 use crate::redaction::RedactionContext;
 
@@ -69,6 +72,7 @@ const MAX_OUTPUT_TAIL_ITEMS: usize = 20;
 pub(crate) const DRIVER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
 static MCP_REPORT_SEQ: AtomicU64 = AtomicU64::new(1);
+static MCP_ATTEMPT_SEQ: AtomicU64 = AtomicU64::new(1);
 
 /// Warm device/driver and build-fingerprint state serialized behind `exec_mutex`.
 pub struct WarmSessionState {
@@ -535,6 +539,18 @@ fn mcp_screenshots_dir(config: &McpServerConfig) -> PathBuf {
     }
 }
 
+/// Allocate a unique per-attempt screenshot artifact directory strictly inside
+/// `<workspace>/.deja/reports/[stores/<id>/]mcp-screenshots/` so replays, retries, and separate
+/// batches never collide while duplicate writes inside the same attempt remain fail-closed.
+fn allocate_mcp_attempt_screenshots_dir(config: &McpServerConfig) -> PathBuf {
+    let ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let seq = MCP_ATTEMPT_SEQ.fetch_add(1, Ordering::Relaxed);
+    mcp_screenshots_dir(config).join(format!("attempt-{ms}-{}-{seq}", std::process::id()))
+}
+
 fn allocate_report_rel_path(command: RunCommand, store_id: Option<&str>) -> String {
     let cmd = match command {
         RunCommand::Run => "run",
@@ -587,34 +603,6 @@ const fn failure_category_wire(cat: FailureCategory) -> &'static str {
         FailureCategory::Timeout => "timeout",
         FailureCategory::Unknown => "unknown",
         FailureCategory::AppCrash => "app_crash",
-    }
-}
-
-const fn outcome_wire_name(outcome: RunOutcome) -> &'static str {
-    match outcome {
-        RunOutcome::Passed => "passed",
-        RunOutcome::Remembered => "remembered",
-        RunOutcome::ColdRecorded => "cold-recorded",
-        RunOutcome::Repaired => "repaired",
-        RunOutcome::Rejected => "rejected",
-        RunOutcome::ExplorationRejected => "exploration-rejected",
-        RunOutcome::ProductRegression => "product-regression",
-        RunOutcome::RepairRejected => "repair-rejected",
-        RunOutcome::Failed => "failed",
-        RunOutcome::FlowChanged => "flow-changed",
-        RunOutcome::NotValidated => "not-validated",
-        RunOutcome::NeedsMigration => "needs-migration",
-        RunOutcome::AssertionsChanged => "assertions-changed",
-        RunOutcome::Flaky => "flaky",
-        RunOutcome::ClosureError => "closure-error",
-    }
-}
-
-const fn cache_status_wire(status: CacheStatus) -> &'static str {
-    match status {
-        CacheStatus::Hit => "hit",
-        CacheStatus::Miss => "miss",
-        CacheStatus::NotChecked => "not-checked",
     }
 }
 
@@ -819,7 +807,7 @@ async fn execute_single_closure_attempt(
     exec_cfg.flow_timeout = Some(Duration::from_millis(timeout_ms));
     exec_cfg.redactor = redaction.redactor.clone();
     exec_cfg.provider_redactor = redaction.provider.clone();
-    exec_cfg.screenshot_dir = Some(mcp_screenshots_dir(config));
+    exec_cfg.screenshot_dir = Some(allocate_mcp_attempt_screenshots_dir(config));
     exec_cfg.screenshot_confine_to_dir = true;
     exec_cfg.screenshot_no_clobber = true;
 
@@ -1383,7 +1371,6 @@ async fn handle_deja_run(
                 ctx,
                 RunCommand::Run,
                 &identity,
-                &goal,
                 cache_status,
                 Some(miss_reason),
                 outcome,
@@ -1426,6 +1413,8 @@ async fn handle_deja_run(
     }
     if let Err((code, msg)) = validate_closure_mcp_policy(
         &closure,
+        &ctx.config.platform,
+        &ctx.config.app_id,
         &mcp_screenshots_dir(&ctx.config),
         &ctx.config.canonical_workspace_root,
         &ctx.config.env,
@@ -1576,7 +1565,6 @@ async fn handle_deja_run(
             ctx,
             RunCommand::Run,
             &identity,
-            &goal,
             exec_plan.cache_status,
             Some(CacheMissReason::FlowChanged),
             RunOutcome::FlowChanged,
@@ -1654,43 +1642,30 @@ async fn handle_deja_run(
         first.visible_context.clone()
     };
 
-    // Write the immutable report BEFORE recording `report_path` in SQLite so we NEVER
-    // record or advertise a report path that failed to persist on disk.
-    let pre_ended_at = now_iso8601();
-    let (written_report_path, report_write_warning) = write_run_report(
-        ctx,
-        RunCommand::Run,
-        &identity,
-        exec_plan.cache_status,
-        exec_plan.miss_reason,
-        final_outcome,
-        final_passed,
-        cmd_started_at.clone(),
-        pre_ended_at,
-        runtime.clone(),
-        Some(exec_plan.display_flow_path.clone()),
-        Some(main_sha256.clone()),
-        assertion_count,
-        if final_passed {
-            None
-        } else {
-            first.failure.clone()
-        },
-        visible_context.clone(),
-        Some(to_execution_result(first, Some(&closure))),
-        attempts_report.clone(),
-        first.errors.clone(),
-        &timing,
+    // Probe report-directory writability BEFORE persistence without publishing any report or
+    // touching `latest.json`, so SQLite never records an unwritable `report_path` AND `latest.json`
+    // is never published unless persistence actually succeeds.
+    let (candidate_report_path, mut report_write_warning) = match probe_confined_report_targets(
+        &ctx.config.canonical_workspace_root,
+        ctx.config.store_id.as_deref(),
         &immutable_report_rel,
-        exec_plan.new_build_replay.clone(),
-    );
+    ) {
+        Ok(()) => (Some(immutable_report_rel.clone()), None),
+        Err(err) => (
+            None,
+            Some(
+                ctx.redaction
+                    .redact_str(&format!("failed to write run report artifact: {err}")),
+            ),
+        ),
+    };
 
     let store_t0 = Instant::now();
     let validation_at = first.ended_at.clone();
     let mut validation_input = RecordValidationInput::new(final_passed, validation_at)
         .with_flaky(is_flaky)
         .with_duration_ms(cmd_t0.elapsed().as_millis() as u64);
-    if let Some(ref rep_path) = written_report_path {
+    if let Some(ref rep_path) = candidate_report_path {
         validation_input = validation_input.with_report_path(rep_path.clone());
     }
     if let Some(ref rt) = runtime {
@@ -1826,7 +1801,6 @@ async fn handle_deja_run(
             ctx,
             RunCommand::Run,
             &identity,
-            &goal,
             exec_plan.cache_status,
             miss,
             outcome,
@@ -1854,49 +1828,16 @@ async fn handle_deja_run(
         nb
     });
 
-    // Refresh the already-created report with final `store_ms` and `recorded_for_new_build`.
-    let final_report_path = if written_report_path.is_some() {
-        let (refreshed, _) = write_run_report(
-            ctx,
-            RunCommand::Run,
-            &identity,
-            exec_plan.cache_status,
-            exec_plan.miss_reason,
-            final_outcome,
-            final_passed,
-            cmd_started_at,
-            now_iso8601(),
-            runtime.clone(),
-            Some(exec_plan.display_flow_path.clone()),
-            Some(main_sha256.clone()),
-            assertion_count,
-            if final_passed {
-                None
-            } else {
-                first.failure.clone()
-            },
-            visible_context.clone(),
-            Some(to_execution_result(first, Some(&closure))),
-            attempts_report.clone(),
-            first.errors.clone(),
-            &timing,
-            &immutable_report_rel,
-            new_build_replay.clone(),
-        );
-        refreshed.or(written_report_path)
-    } else {
-        None
-    };
-
-    let payload = assemble_run_tool_payload(
+    let core_result = build_core_run_result(
         ctx,
+        RunCommand::Run,
         &identity,
-        &goal,
         exec_plan.cache_status,
         exec_plan.miss_reason,
         final_outcome,
         final_passed,
-        runtime,
+        cmd_started_at,
+        now_iso8601(),
         Some(exec_plan.display_flow_path),
         Some(main_sha256),
         assertion_count,
@@ -1905,13 +1846,37 @@ async fn handle_deja_run(
         } else {
             first.failure.clone()
         },
-        visible_context,
+        Some(to_execution_result(first, Some(&closure))),
         attempts_report,
         first.errors.clone(),
+        &timing,
+        new_build_replay,
+    );
+
+    let final_report_path = if candidate_report_path.is_some() {
+        let (written, warn) = write_run_report(
+            ctx,
+            &core_result,
+            runtime.as_deref(),
+            visible_context.as_ref(),
+            &timing,
+            &immutable_report_rel,
+        );
+        if let Some(w) = warn {
+            report_write_warning = Some(w);
+        }
+        written
+    } else {
+        None
+    };
+
+    let payload = assemble_run_tool_payload(
+        core_result,
+        runtime,
+        visible_context,
         report_write_warning.into_iter().collect(),
         timing,
-        final_report_path.as_deref(),
-        new_build_replay,
+        final_report_path,
     );
 
     ToolDispatchResult::Response(tool_response(&ctx.redaction, payload, !final_passed))
@@ -2253,8 +2218,28 @@ fn collect_and_verify_classic_closure(
     Ok(closure)
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct McpRunPayload {
+    #[serde(flatten)]
+    result: RunResult,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    runtime: Option<String>,
+    timing: RunTimingBreakdown,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    visible_elements: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    visible_elements_truncated: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    report_path: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    warnings: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    remembered: Option<bool>,
+}
+
 #[allow(clippy::too_many_arguments)]
-fn write_run_report(
+fn build_core_run_result(
     ctx: &ToolContext,
     command: RunCommand,
     identity: &WalkIdentity,
@@ -2264,22 +2249,29 @@ fn write_run_report(
     passed: bool,
     started_at: String,
     ended_at: String,
-    runtime: Option<String>,
     yaml_path: Option<String>,
     yaml_sha256: Option<String>,
     assertions: Option<u64>,
     failure: Option<WalkFailure>,
-    visible_context: Option<VisibleContext>,
     execution: Option<ExecutionResult>,
     attempts: Option<Vec<RunAttempt>>,
     errors: Vec<String>,
     timing: &RunTimingBreakdown,
-    immutable_report_rel: &str,
     replayed_on_new_build: Option<NewBuildReplayReport>,
-) -> (Option<String>, Option<String>) {
+) -> RunResult {
     let safe_goal_key = ctx.redaction.redact_goal_key(&identity.goal);
+    let artifacts = yaml_path
+        .as_ref()
+        .map(|p| {
+            vec![RunArtifact {
+                kind: ArtifactKind::Yaml,
+                path: p.clone(),
+                sha256: yaml_sha256.clone(),
+            }]
+        })
+        .unwrap_or_default();
 
-    let core_report = RunResult {
+    RunResult {
         schema_version: WALK_RESULT_SCHEMA_VERSION,
         command,
         identity: identity.clone(),
@@ -2296,19 +2288,10 @@ fn write_run_report(
         model_call_basis: "native-rust-direct".to_string(),
         assertions,
         repair_count: 0,
-        yaml_path: yaml_path.clone(),
-        yaml_sha256: yaml_sha256.clone(),
+        yaml_path,
+        yaml_sha256,
         failure,
-        artifacts: yaml_path
-            .as_ref()
-            .map(|p| {
-                vec![RunArtifact {
-                    kind: ArtifactKind::Yaml,
-                    path: p.clone(),
-                    sha256: yaml_sha256.clone(),
-                }]
-            })
-            .unwrap_or_default(),
+        artifacts,
         diffs: Vec::new(),
         errors,
         execution,
@@ -2317,9 +2300,18 @@ fn write_run_report(
         replayed_on_new_build,
         engine: Some(native_engine_report()),
         attempts,
-    };
+    }
+}
 
-    let mut report_val = match serde_json::to_value(&core_report) {
+fn write_run_report(
+    ctx: &ToolContext,
+    core_report: &RunResult,
+    runtime: Option<&str>,
+    visible_context: Option<&VisibleContext>,
+    timing: &RunTimingBreakdown,
+    immutable_report_rel: &str,
+) -> (Option<String>, Option<String>) {
+    let mut report_val = match serde_json::to_value(core_report) {
         Ok(val) => val,
         Err(err) => {
             return (
@@ -2332,13 +2324,13 @@ fn write_run_report(
         }
     };
     if let Some(obj) = report_val.as_object_mut() {
-        if let Some(ref rt) = runtime {
-            obj.insert("runtime".to_string(), Value::String(rt.clone()));
+        if let Some(rt) = runtime {
+            obj.insert("runtime".to_string(), Value::String(rt.to_string()));
         }
         if let Ok(timing_val) = serde_json::to_value(timing) {
             obj.insert("timing".to_string(), timing_val);
         }
-        if let Some(ref vc) = visible_context
+        if let Some(vc) = visible_context
             && let Ok(vc_val) = serde_json::to_value(vc)
         {
             obj.insert("visibleContext".to_string(), vc_val);
@@ -2362,96 +2354,35 @@ fn write_run_report(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn assemble_run_tool_payload(
-    ctx: &ToolContext,
-    identity: &WalkIdentity,
-    goal: &Goal,
-    cache_status: CacheStatus,
-    cache_miss_reason: Option<CacheMissReason>,
-    outcome: RunOutcome,
-    passed: bool,
+    core_result: RunResult,
     runtime: Option<String>,
-    yaml_path: Option<String>,
-    yaml_sha256: Option<String>,
-    assertions: Option<u64>,
-    failure: Option<WalkFailure>,
     visible_context: Option<VisibleContext>,
-    attempts: Option<Vec<RunAttempt>>,
-    errors: Vec<String>,
     warnings: Vec<String>,
     timing: RunTimingBreakdown,
-    written_report_path: Option<&str>,
-    replayed_on_new_build: Option<NewBuildReplayReport>,
+    written_report_path: Option<String>,
 ) -> Value {
-    let safe_goal_key = ctx.redaction.redact_goal_key(&identity.goal);
     let (visible_elements, visible_elements_truncated) = match visible_context {
-        Some(ref vc) => (Some(vc.items().to_vec()), vc.is_truncated()),
-        None => (None, false),
+        Some(ref vc) => (Some(vc.items().to_vec()), Some(vc.is_truncated())),
+        None => (None, None),
+    };
+    let remembered = if core_result.command == RunCommand::Remember {
+        Some(core_result.outcome == RunOutcome::Remembered && core_result.passed)
+    } else {
+        None
     };
 
-    let mut out = Map::new();
-    out.insert("passed".to_string(), Value::Bool(passed));
-    out.insert(
-        "outcome".to_string(),
-        Value::String(outcome_wire_name(outcome).to_string()),
-    );
-    out.insert("goal".to_string(), Value::String(goal.text.clone()));
-    out.insert("goalKey".to_string(), Value::String(safe_goal_key));
-    out.insert(
-        "buildFingerprint".to_string(),
-        Value::String(identity.build_fingerprint.clone()),
-    );
-    out.insert(
-        "cacheStatus".to_string(),
-        Value::String(cache_status_wire(cache_status).to_string()),
-    );
-    if let Some(reason) = cache_miss_reason {
-        out.insert(
-            "cacheMissReason".to_string(),
-            Value::String(reason.as_str().to_string()),
-        );
-    }
-    if let Some(rt) = runtime {
-        out.insert("runtime".to_string(), Value::String(rt));
-    }
-    if let Some(yp) = yaml_path {
-        out.insert("yamlPath".to_string(), Value::String(yp));
-    }
-    if let Some(ysha) = yaml_sha256 {
-        out.insert("yamlSha256".to_string(), Value::String(ysha));
-    }
-    if let Some(count) = assertions {
-        out.insert("assertions".to_string(), json!(count));
-    }
-    if let Some(fail) = failure {
-        out.insert("failure".to_string(), json!(fail));
-    }
-    if let Some(elems) = visible_elements {
-        out.insert("visibleElements".to_string(), json!(elems));
-        out.insert(
-            "visibleElementsTruncated".to_string(),
-            Value::Bool(visible_elements_truncated),
-        );
-    }
-    if let Some(att) = attempts {
-        out.insert("attempts".to_string(), json!(att));
-    }
-    if let Some(nb) = replayed_on_new_build {
-        out.insert("replayedOnNewBuild".to_string(), json!(nb));
-    }
-    if !errors.is_empty() {
-        out.insert("errors".to_string(), json!(errors));
-    }
-    if !warnings.is_empty() {
-        out.insert("warnings".to_string(), json!(warnings));
-    }
-    out.insert("timing".to_string(), json!(timing));
-    if let Some(path) = written_report_path {
-        out.insert("reportPath".to_string(), Value::String(path.to_string()));
-    }
-
-    Value::Object(out)
+    let payload = McpRunPayload {
+        result: core_result,
+        runtime,
+        timing,
+        visible_elements,
+        visible_elements_truncated,
+        report_path: written_report_path,
+        warnings,
+        remembered,
+    };
+    serde_json::to_value(&payload).unwrap_or_else(|_| json!({}))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2459,7 +2390,6 @@ fn build_run_tool_payload(
     ctx: &ToolContext,
     command: RunCommand,
     identity: &WalkIdentity,
-    goal: &Goal,
     cache_status: CacheStatus,
     cache_miss_reason: Option<CacheMissReason>,
     outcome: RunOutcome,
@@ -2479,7 +2409,7 @@ fn build_run_tool_payload(
     immutable_report_rel: &str,
     replayed_on_new_build: Option<NewBuildReplayReport>,
 ) -> Value {
-    let (written_report_path, report_write_warning) = write_run_report(
+    let core_result = build_core_run_result(
         ctx,
         command,
         identity,
@@ -2489,40 +2419,33 @@ fn build_run_tool_payload(
         passed,
         started_at,
         ended_at,
-        runtime.clone(),
-        yaml_path.clone(),
-        yaml_sha256.clone(),
-        assertions,
-        failure.clone(),
-        visible_context.clone(),
-        execution,
-        attempts.clone(),
-        errors.clone(),
-        &timing,
-        immutable_report_rel,
-        replayed_on_new_build.clone(),
-    );
-
-    assemble_run_tool_payload(
-        ctx,
-        identity,
-        goal,
-        cache_status,
-        cache_miss_reason,
-        outcome,
-        passed,
-        runtime,
         yaml_path,
         yaml_sha256,
         assertions,
         failure,
-        visible_context,
+        execution,
         attempts,
         errors,
+        &timing,
+        replayed_on_new_build,
+    );
+
+    let (written_report_path, report_write_warning) = write_run_report(
+        ctx,
+        &core_result,
+        runtime.as_deref(),
+        visible_context.as_ref(),
+        &timing,
+        immutable_report_rel,
+    );
+
+    assemble_run_tool_payload(
+        core_result,
+        runtime,
+        visible_context,
         report_write_warning.into_iter().collect(),
         timing,
-        written_report_path.as_deref(),
-        replayed_on_new_build,
+        written_report_path,
     )
 }
 
@@ -2660,6 +2583,8 @@ async fn handle_deja_remember(
 
     if let Err((code, msg)) = validate_closure_mcp_policy(
         &closure,
+        &ctx.config.platform,
+        &ctx.config.app_id,
         &mcp_screenshots_dir(&ctx.config),
         &ctx.config.canonical_workspace_root,
         &ctx.config.env,
@@ -2806,7 +2731,6 @@ async fn handle_deja_remember(
                 ctx,
                 RunCommand::Remember,
                 &identity,
-                &goal,
                 CacheStatus::NotChecked,
                 Some(CacheMissReason::FlowChanged),
                 RunOutcome::AssertionsChanged,
@@ -2961,7 +2885,6 @@ async fn handle_deja_remember(
             ctx,
             RunCommand::Remember,
             &identity,
-            &goal,
             CacheStatus::NotChecked,
             Some(CacheMissReason::FlowChanged),
             RunOutcome::FlowChanged,
@@ -3011,7 +2934,6 @@ async fn handle_deja_remember(
             ctx,
             RunCommand::Remember,
             &identity,
-            &goal,
             CacheStatus::NotChecked,
             None,
             outcome,
@@ -3051,7 +2973,6 @@ async fn handle_deja_remember(
             ctx,
             RunCommand::Remember,
             &identity,
-            &goal,
             CacheStatus::NotChecked,
             Some(CacheMissReason::FlowChanged),
             RunOutcome::FlowChanged,
@@ -3074,37 +2995,29 @@ async fn handle_deja_remember(
         return ToolDispatchResult::Response(tool_response(&ctx.redaction, payload, true));
     }
 
-    // Write the immutable report BEFORE recording `report_path` in SQLite so we never record
-    // or advertise a report path that failed to persist on disk.
-    let (written_report_path, report_write_warning) = write_run_report(
-        ctx,
-        RunCommand::Remember,
-        &identity,
-        CacheStatus::NotChecked,
-        None,
-        RunOutcome::Remembered,
-        true,
-        cmd_started_at.clone(),
-        now_iso8601(),
-        runtime.clone(),
-        Some(candidate_rel.clone()),
-        Some(main_sha256.clone()),
-        assertion_count,
-        None,
-        None,
-        Some(to_execution_result(last_attempt, Some(&closure))),
-        None,
-        Vec::new(),
-        &timing,
+    // Probe report-directory writability BEFORE persistence without writing any report or
+    // touching `latest.json`, so SQLite never records an unwritable `report_path` AND we NEVER
+    // publish `outcome: remembered` / `passed: true` unless walk/manifest persistence succeeds!
+    let (candidate_report_path, mut report_write_warning) = match probe_confined_report_targets(
+        &ctx.config.canonical_workspace_root,
+        ctx.config.store_id.as_deref(),
         &immutable_report_rel,
-        None,
-    );
+    ) {
+        Ok(()) => (Some(immutable_report_rel.clone()), None),
+        Err(err) => (
+            None,
+            Some(
+                ctx.redaction
+                    .redact_str(&format!("failed to write run report artifact: {err}")),
+            ),
+        ),
+    };
 
     let phase_timings_json = serde_json::to_string(&timing).ok();
     let mut validation = RecordValidationInput::new(true, last_attempt.ended_at.clone())
         .with_origin(WalkOrigin::Remember)
         .with_duration_ms(cmd_t0.elapsed().as_millis() as u64);
-    if let Some(ref rep_path) = written_report_path {
+    if let Some(ref rep_path) = candidate_report_path {
         validation = validation.with_report_path(rep_path.clone());
     }
     if let Some(ref rt) = runtime {
@@ -3170,7 +3083,6 @@ async fn handle_deja_remember(
                     ctx,
                     RunCommand::Remember,
                     &identity,
-                    &goal,
                     CacheStatus::NotChecked,
                     Some(CacheMissReason::FlowChanged),
                     outcome,
@@ -3200,55 +3112,51 @@ async fn handle_deja_remember(
         }
     };
 
-    let final_report_path = if written_report_path.is_some() {
-        let (refreshed, _) = write_run_report(
+    let core_result = build_core_run_result(
+        ctx,
+        RunCommand::Remember,
+        &identity,
+        CacheStatus::NotChecked,
+        None,
+        RunOutcome::Remembered,
+        true,
+        cmd_started_at,
+        now_iso8601(),
+        Some(stored_flow_path),
+        Some(stored_flow_sha256),
+        assertion_count,
+        None,
+        Some(to_execution_result(last_attempt, Some(&closure))),
+        None,
+        Vec::new(),
+        &timing,
+        None,
+    );
+
+    let final_report_path = if candidate_report_path.is_some() {
+        let (written, warn) = write_run_report(
             ctx,
-            RunCommand::Remember,
-            &identity,
-            CacheStatus::NotChecked,
+            &core_result,
+            runtime.as_deref(),
             None,
-            RunOutcome::Remembered,
-            true,
-            cmd_started_at,
-            now_iso8601(),
-            runtime.clone(),
-            Some(stored_flow_path.clone()),
-            Some(stored_flow_sha256.clone()),
-            assertion_count,
-            None,
-            None,
-            Some(to_execution_result(last_attempt, Some(&closure))),
-            None,
-            Vec::new(),
             &timing,
             &immutable_report_rel,
-            None,
         );
-        refreshed.or(written_report_path)
+        if let Some(w) = warn {
+            report_write_warning = Some(w);
+        }
+        written
     } else {
         None
     };
 
     let payload = assemble_run_tool_payload(
-        ctx,
-        &identity,
-        &goal,
-        CacheStatus::NotChecked,
-        None,
-        RunOutcome::Remembered,
-        true,
+        core_result,
         runtime,
-        Some(stored_flow_path),
-        Some(stored_flow_sha256),
-        assertion_count,
         None,
-        None,
-        None,
-        Vec::new(),
         report_write_warning.into_iter().collect(),
         timing,
-        final_report_path.as_deref(),
-        None,
+        final_report_path,
     );
 
     ToolDispatchResult::Response(tool_response(&ctx.redaction, payload, false))
@@ -3387,9 +3295,10 @@ async fn handle_deja_exec_batch(
     let mut total_ast_steps = 0usize;
     if let Err((code, msg)) = validate_batch_steps_confinement(
         &parsed,
+        &ctx.config.platform,
+        &ctx.config.app_id,
         &screenshots_dir,
         &ctx.config.canonical_workspace_root,
-        &ctx.config.app_id,
         &ctx.config.env,
         &mut total_ast_steps,
     ) {
@@ -3490,7 +3399,7 @@ async fn handle_deja_exec_batch(
     exec_cfg.flow_timeout = Some(Duration::from_millis(timeout_ms));
     exec_cfg.redactor = ctx.redaction.redactor.clone();
     exec_cfg.provider_redactor = ctx.redaction.provider.clone();
-    exec_cfg.screenshot_dir = Some(screenshots_dir);
+    exec_cfg.screenshot_dir = Some(allocate_mcp_attempt_screenshots_dir(&ctx.config));
     exec_cfg.screenshot_confine_to_dir = true;
     exec_cfg.screenshot_no_clobber = true;
     exec_cfg.capture_final_visible_context = observe_final;
@@ -3599,10 +3508,13 @@ async fn handle_deja_exec_batch(
 
 fn validate_closure_mcp_policy(
     closure: &FlowClosure,
+    platform: &str,
+    expected_app_id: &str,
     screenshots_dir: &Path,
     canonical_workspace: &Path,
     base_env: &BTreeMap<String, String>,
 ) -> Result<(), (&'static str, String)> {
+    let mut parsed_by_path: BTreeMap<&str, ParsedFlow> = BTreeMap::new();
     for file in &closure.files {
         if file.kind != FlowReferenceKind::Flow {
             continue;
@@ -3619,23 +3531,311 @@ fn validate_closure_mcp_policy(
                 format!("flow `{}` failed to parse: {err}", file.source),
             )
         })?;
-        validate_mcp_flow_policy(
-            &parsed,
+        parsed_by_path.insert(file.path.as_str(), parsed);
+    }
+
+    let mut validated: HashSet<String> = HashSet::new();
+    let mut visited_states: HashSet<(String, BTreeMap<String, String>)> = HashSet::new();
+    let mut visits: usize = 0;
+    let mut call_stack: Vec<String> = Vec::new();
+
+    if parsed_by_path.contains_key(closure.main.as_str()) {
+        validate_closure_mcp_tree(
+            closure.main.as_str(),
+            &parsed_by_path,
+            platform,
+            expected_app_id,
             screenshots_dir,
             canonical_workspace,
             base_env,
-            true,
-            None,
+            &mut validated,
+            &mut visited_states,
+            &mut visits,
+            &mut call_stack,
         )?;
+    }
+
+    // Belt-and-suspenders: ensure every YAML flow file in the closure was checked even if
+    // unreached through static `runFlow`/`retry` edges.
+    for (path, parsed) in &parsed_by_path {
+        if !validated.contains(*path) {
+            validate_mcp_flow_policy(
+                parsed,
+                platform,
+                expected_app_id,
+                screenshots_dir,
+                canonical_workspace,
+                base_env,
+                true,
+                None,
+            )?;
+        }
     }
     Ok(())
 }
 
-fn validate_batch_steps_confinement(
-    parsed: &ParsedFlow,
+#[allow(clippy::too_many_arguments)]
+fn validate_closure_mcp_tree(
+    rel_path: &str,
+    parsed_by_path: &BTreeMap<&str, ParsedFlow>,
+    platform: &str,
+    expected_app_id: &str,
     screenshots_dir: &Path,
     canonical_workspace: &Path,
+    env: &BTreeMap<String, String>,
+    validated: &mut HashSet<String>,
+    visited_states: &mut HashSet<(String, BTreeMap<String, String>)>,
+    visits: &mut usize,
+    call_stack: &mut Vec<String>,
+) -> Result<(), (&'static str, String)> {
+    if call_stack.iter().any(|p| p == rel_path) {
+        return Ok(());
+    }
+    let state_key = (rel_path.to_string(), env.clone());
+    if !visited_states.insert(state_key) {
+        return Ok(());
+    }
+    *visits = visits.saturating_add(1);
+    if *visits > MAX_PREFLIGHT_VISITS {
+        return Err((
+            "CONFINEMENT_ERROR",
+            format!(
+                "MCP flow policy preflight exceeded maximum visit budget ({MAX_PREFLIGHT_VISITS}); simplify subflow fan-out"
+            ),
+        ));
+    }
+    let Some(parsed) = parsed_by_path.get(rel_path) else {
+        return Ok(());
+    };
+    validate_mcp_flow_policy(
+        parsed,
+        platform,
+        expected_app_id,
+        screenshots_dir,
+        canonical_workspace,
+        env,
+        true,
+        None,
+    )?;
+    validated.insert(rel_path.to_string());
+
+    let mut env_stack = EnvStack::new(env.clone());
+    let mut header_frame = BTreeMap::new();
+    for (k, v) in &parsed.header.env {
+        let interp = env_stack.interpolate(v).map_err(|err| {
+            (
+                "CONFINEMENT_ERROR",
+                format!("flow `{rel_path}` header env `{k}` interpolation failed: {err}"),
+            )
+        })?;
+        header_frame.insert(k.clone(), interp);
+    }
+    if !header_frame.is_empty() {
+        env_stack.push(header_frame);
+    }
+
+    call_stack.push(rel_path.to_string());
+    let dir = Path::new(rel_path)
+        .parent()
+        .unwrap_or_else(|| Path::new(""));
+    for steps in [
+        &parsed.header.on_flow_start,
+        &parsed.steps,
+        &parsed.header.on_flow_complete,
+    ] {
+        validate_closure_mcp_subflows(
+            dir,
+            steps,
+            parsed_by_path,
+            platform,
+            expected_app_id,
+            screenshots_dir,
+            canonical_workspace,
+            &mut env_stack,
+            validated,
+            visited_states,
+            visits,
+            call_stack,
+        )?;
+    }
+    call_stack.pop();
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_closure_mcp_subflows(
+    current_dir: &Path,
+    steps: &[FlowStep],
+    parsed_by_path: &BTreeMap<&str, ParsedFlow>,
+    platform: &str,
     expected_app_id: &str,
+    screenshots_dir: &Path,
+    canonical_workspace: &Path,
+    env_stack: &mut EnvStack,
+    validated: &mut HashSet<String>,
+    visited_states: &mut HashSet<(String, BTreeMap<String, String>)>,
+    visits: &mut usize,
+    call_stack: &mut Vec<String>,
+) -> Result<(), (&'static str, String)> {
+    for step in steps {
+        match step {
+            FlowStep::RunFlow(rf) => {
+                let mut child_frame = BTreeMap::new();
+                for (k, v) in &rf.env {
+                    let interp = env_stack.interpolate(v).map_err(|err| {
+                        (
+                            "CONFINEMENT_ERROR",
+                            format!("runFlow env `{k}` interpolation failed: {err}"),
+                        )
+                    })?;
+                    child_frame.insert(k.clone(), interp);
+                }
+                let pushed = !child_frame.is_empty();
+                if pushed {
+                    env_stack.push(child_frame);
+                }
+                let res = match &rf.target {
+                    RunFlowTarget::File(sub) => {
+                        let resolved = resolve_closure_rel_path(current_dir, sub);
+                        let merged = env_stack.merged();
+                        validate_closure_mcp_tree(
+                            &resolved,
+                            parsed_by_path,
+                            platform,
+                            expected_app_id,
+                            screenshots_dir,
+                            canonical_workspace,
+                            &merged,
+                            validated,
+                            visited_states,
+                            visits,
+                            call_stack,
+                        )
+                    }
+                    RunFlowTarget::Commands(cmds) => validate_closure_mcp_subflows(
+                        current_dir,
+                        cmds,
+                        parsed_by_path,
+                        platform,
+                        expected_app_id,
+                        screenshots_dir,
+                        canonical_workspace,
+                        env_stack,
+                        validated,
+                        visited_states,
+                        visits,
+                        call_stack,
+                    ),
+                };
+                if pushed {
+                    env_stack.pop();
+                }
+                res?;
+            }
+            FlowStep::Retry(rt) => {
+                let mut child_frame = BTreeMap::new();
+                for (k, v) in &rt.env {
+                    let interp = env_stack.interpolate(v).map_err(|err| {
+                        (
+                            "CONFINEMENT_ERROR",
+                            format!("retry env `{k}` interpolation failed: {err}"),
+                        )
+                    })?;
+                    child_frame.insert(k.clone(), interp);
+                }
+                let pushed = !child_frame.is_empty();
+                if pushed {
+                    env_stack.push(child_frame);
+                }
+                let res = match &rt.target {
+                    RunFlowTarget::File(sub) => {
+                        let resolved = resolve_closure_rel_path(current_dir, sub);
+                        let merged = env_stack.merged();
+                        validate_closure_mcp_tree(
+                            &resolved,
+                            parsed_by_path,
+                            platform,
+                            expected_app_id,
+                            screenshots_dir,
+                            canonical_workspace,
+                            &merged,
+                            validated,
+                            visited_states,
+                            visits,
+                            call_stack,
+                        )
+                    }
+                    RunFlowTarget::Commands(cmds) => validate_closure_mcp_subflows(
+                        current_dir,
+                        cmds,
+                        parsed_by_path,
+                        platform,
+                        expected_app_id,
+                        screenshots_dir,
+                        canonical_workspace,
+                        env_stack,
+                        validated,
+                        visited_states,
+                        visits,
+                        call_stack,
+                    ),
+                };
+                if pushed {
+                    env_stack.pop();
+                }
+                res?;
+            }
+            FlowStep::Repeat(rep) => {
+                validate_closure_mcp_subflows(
+                    current_dir,
+                    &rep.commands,
+                    parsed_by_path,
+                    platform,
+                    expected_app_id,
+                    screenshots_dir,
+                    canonical_workspace,
+                    env_stack,
+                    validated,
+                    visited_states,
+                    visits,
+                    call_stack,
+                )?;
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn resolve_closure_rel_path(current_dir: &Path, target: &str) -> String {
+    let joined = if current_dir.as_os_str().is_empty() {
+        PathBuf::from(target)
+    } else {
+        current_dir.join(target)
+    };
+    let mut out = PathBuf::new();
+    for component in joined.components() {
+        match component {
+            Component::Prefix(prefix) => out.push(prefix.as_os_str()),
+            Component::RootDir => out.push(component.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !out.pop() && !out.has_root() {
+                    out.push("..");
+                }
+            }
+            Component::Normal(part) => out.push(part),
+        }
+    }
+    out.to_string_lossy().replace('\\', "/")
+}
+
+fn validate_batch_steps_confinement(
+    parsed: &ParsedFlow,
+    platform: &str,
+    expected_app_id: &str,
+    screenshots_dir: &Path,
+    canonical_workspace: &Path,
     base_env: &BTreeMap<String, String>,
     total_ast_steps: &mut usize,
 ) -> Result<(), (&'static str, String)> {
@@ -3644,6 +3844,8 @@ fn validate_batch_steps_confinement(
 
     validate_mcp_flow_policy(
         parsed,
+        platform,
+        expected_app_id,
         screenshots_dir,
         canonical_workspace,
         base_env,
@@ -3652,8 +3854,11 @@ fn validate_batch_steps_confinement(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn validate_mcp_flow_policy(
     parsed: &ParsedFlow,
+    platform: &str,
+    expected_app_id: &str,
     screenshots_dir: &Path,
     canonical_workspace: &Path,
     base_env: &BTreeMap<String, String>,
@@ -3682,6 +3887,8 @@ fn validate_mcp_flow_policy(
     ] {
         check_mcp_steps_recursive(
             steps,
+            platform,
+            expected_app_id,
             screenshots_dir,
             canonical_workspace,
             &mut env_stack,
@@ -3693,8 +3900,11 @@ fn validate_mcp_flow_policy(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn check_mcp_steps_recursive(
     steps: &[FlowStep],
+    platform: &str,
+    expected_app_id: &str,
     screenshots_dir: &Path,
     canonical_workspace: &Path,
     env_stack: &mut EnvStack,
@@ -3728,6 +3938,17 @@ fn check_mcp_steps_recursive(
                         .to_string(),
                 ));
             }
+            FlowStep::OpenLink(ol) => {
+                if platform != "web" {
+                    return Err((
+                        "DEVICE_WIDE_COMMAND_FORBIDDEN",
+                        format!(
+                            "`openLink` is forbidden in app-confined MCP flows on `{platform}` because it can open external apps outside `{expected_app_id}`"
+                        ),
+                    ));
+                }
+                validate_web_open_link_origin(&ol.link, expected_app_id, env_stack)?;
+            }
             FlowStep::RunFlow(rf) => {
                 let mut child_frame = BTreeMap::new();
                 for (k, v) in &rf.env {
@@ -3752,6 +3973,8 @@ fn check_mcp_steps_recursive(
                     RunFlowTarget::File(_) => Ok(()),
                     RunFlowTarget::Commands(cmds) => check_mcp_steps_recursive(
                         cmds,
+                        platform,
+                        expected_app_id,
                         screenshots_dir,
                         canonical_workspace,
                         env_stack,
@@ -3788,6 +4011,8 @@ fn check_mcp_steps_recursive(
                     RunFlowTarget::File(_) => Ok(()),
                     RunFlowTarget::Commands(cmds) => check_mcp_steps_recursive(
                         cmds,
+                        platform,
+                        expected_app_id,
                         screenshots_dir,
                         canonical_workspace,
                         env_stack,
@@ -3803,6 +4028,8 @@ fn check_mcp_steps_recursive(
             FlowStep::Repeat(rep) => {
                 check_mcp_steps_recursive(
                     &rep.commands,
+                    platform,
+                    expected_app_id,
                     screenshots_dir,
                     canonical_workspace,
                     env_stack,
@@ -3833,9 +4060,9 @@ fn check_mcp_steps_recursive(
                             ),
                         ));
                     }
-                    // For file-backed subflows receiving env vars from parent `runFlow.env`,
-                    // runtime `exec_take_screenshot` enforces strict confinement and no-clobber
-                    // on the fully interpolated path.
+                    // For file-backed subflows receiving dynamic env vars, runtime
+                    // `exec_take_screenshot` enforces strict confinement and no-clobber on the
+                    // fully interpolated path inside the isolated per-attempt directory.
                     continue;
                 }
                 let with_ext = if Path::new(&resolved).extension().is_none() {
@@ -3857,16 +4084,13 @@ fn check_mcp_steps_recursive(
                         ),
                     ));
                 }
-                // Refuse any existing symlink from workspace root down to the dedicated
-                // `mcp-screenshots/` artifact target, and refuse overwriting existing files.
-                let mut target = screenshots_dir.to_path_buf();
-                for seg in &segments {
-                    target.push(seg);
-                }
-                if let Ok(rel_from_ws) = target.strip_prefix(canonical_workspace) {
+                // Refuse any existing symlink along the path from workspace root down to the
+                // dedicated `mcp-screenshots/` parent directory (actual writes go into a fresh
+                // per-attempt `attempt-<ms>-<pid>-<seq>/` subdirectory with `create_new(true)`).
+                if let Ok(rel_from_ws) = screenshots_dir.strip_prefix(canonical_workspace) {
                     let mut cursor = canonical_workspace.to_path_buf();
                     for comp in rel_from_ws.components() {
-                        if let std::path::Component::Normal(seg) = comp {
+                        if let Component::Normal(seg) = comp {
                             cursor.push(seg);
                             if let Ok(meta) = fs::symlink_metadata(&cursor)
                                 && meta.file_type().is_symlink()
@@ -3874,26 +4098,162 @@ fn check_mcp_steps_recursive(
                                 return Err((
                                     "PATH_CONFINEMENT",
                                     format!(
-                                        "takeScreenshot path `{resolved}` traverses or targets a symbolic link"
+                                        "takeScreenshot path `{resolved}` traverses a symbolic link"
                                     ),
                                 ));
                             }
                         }
                     }
                 }
-                if fs::symlink_metadata(&target).is_ok() {
-                    return Err((
-                        "PATH_CONFINEMENT",
-                        format!(
-                            "takeScreenshot path `{resolved}` refuses to overwrite existing artifact file"
-                        ),
-                    ));
-                }
             }
             _ => {}
         }
     }
     Ok(())
+}
+
+fn validate_web_open_link_origin(
+    raw_link: &str,
+    expected_app_id: &str,
+    env_stack: &EnvStack,
+) -> Result<(), (&'static str, String)> {
+    let resolved = resolve_static_template(raw_link, env_stack, "openLink")
+        .map_err(|msg| ("APP_ID_CONFINEMENT", msg))?;
+
+    let Some(expected_origin) = parse_loopback_origin(expected_app_id) else {
+        return Err((
+            "APP_ID_CONFINEMENT",
+            format!(
+                "configured web appId `{expected_app_id}` is not a valid loopback http/https origin"
+            ),
+        ));
+    };
+    let Some(link_origin) = parse_loopback_origin(&resolved) else {
+        return Err((
+            "APP_ID_CONFINEMENT",
+            format!(
+                "openLink target `{resolved}` must be a loopback http:// or https:// URL matching `{expected_app_id}`"
+            ),
+        ));
+    };
+    if link_origin != expected_origin {
+        return Err((
+            "APP_ID_CONFINEMENT",
+            format!(
+                "openLink target `{resolved}` escapes configured web origin `{expected_app_id}`"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn resolve_static_template(
+    raw: &str,
+    env_stack: &EnvStack,
+    location: &str,
+) -> Result<String, String> {
+    let bytes = raw.as_bytes();
+    let mut out = String::with_capacity(raw.len());
+    let mut i = 0;
+
+    while i < bytes.len() {
+        if i + 1 < bytes.len() && bytes[i] == b'$' && bytes[i + 1] == b'{' {
+            let name_start = i + 2;
+            let Some(rel_close) = raw[name_start..].find('}') else {
+                return Err(format!(
+                    "{location} contains unclosed variable expression `{raw}`"
+                ));
+            };
+            let var_name = &raw[name_start..name_start + rel_close];
+            let valid_ident = !var_name.is_empty() && {
+                let mut vb = var_name.bytes();
+                let first = vb.next().expect("non-empty");
+                (first.is_ascii_alphabetic() || first == b'_')
+                    && vb.all(|b| b.is_ascii_alphanumeric() || b == b'_')
+            };
+            if !valid_ident {
+                return Err(format!(
+                    "{location} uses dynamic or invalid variable expression `{raw}`"
+                ));
+            }
+            let Some(val) = env_stack.get(var_name) else {
+                return Err(format!(
+                    "{location} uses unresolvable variable `{raw}` (`{var_name}` is not defined)"
+                ));
+            };
+            if val.contains("${") {
+                return Err(format!(
+                    "{location} resolved `{var_name}` to nested variable expression `{val}`"
+                ));
+            }
+            out.push_str(val);
+            i = name_start + rel_close + 1;
+            continue;
+        }
+        let ch = raw[i..].chars().next().expect("valid UTF-8");
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+
+    if out.trim().is_empty() {
+        return Err(format!("{location} resolved to an empty value"));
+    }
+    Ok(out)
+}
+
+/// Parse an `http://` or `https://` loopback URL into its canonical `(scheme, host, port)` origin,
+/// rejecting non-loopback hosts, userinfo (`@`), backslashes, whitespace/control chars, and
+/// invalid ports.
+fn parse_loopback_origin(url: &str) -> Option<(&'static str, String, u16)> {
+    if url.is_empty() || url.bytes().any(|b| b <= 0x20 || b == 0x7f) {
+        return None;
+    }
+    let (scheme, default_port, rest) = if url.len() >= 7 && url[..7].eq_ignore_ascii_case("http://")
+    {
+        ("http", 80u16, &url[7..])
+    } else if url.len() >= 8 && url[..8].eq_ignore_ascii_case("https://") {
+        ("https", 443u16, &url[8..])
+    } else {
+        return None;
+    };
+
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    if authority.is_empty() || authority.contains('@') || authority.contains('\\') {
+        return None;
+    }
+
+    let (host, port) = if let Some(after_open) = authority.strip_prefix('[') {
+        let close = after_open.find(']')?;
+        let host = after_open[..close].to_ascii_lowercase();
+        let tail = &after_open[close + 1..];
+        let port = if tail.is_empty() {
+            default_port
+        } else {
+            let port_str = tail.strip_prefix(':')?;
+            parse_origin_port(port_str)?
+        };
+        (host, port)
+    } else if let Some((h, port_str)) = authority.split_once(':') {
+        if port_str.contains(':') {
+            return None;
+        }
+        (h.to_ascii_lowercase(), parse_origin_port(port_str)?)
+    } else {
+        (authority.to_ascii_lowercase(), default_port)
+    };
+
+    if !matches!(host.as_str(), "localhost" | "127.0.0.1" | "::1") {
+        return None;
+    }
+    Some((scheme, host, port))
+}
+
+fn parse_origin_port(raw: &str) -> Option<u16> {
+    if raw.is_empty() || !raw.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let port = raw.parse::<u16>().ok()?;
+    (port > 0).then_some(port)
 }
 
 // ---------------------------------------------------------------------------

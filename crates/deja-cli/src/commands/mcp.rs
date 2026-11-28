@@ -116,10 +116,11 @@ pub async fn run(
     }
 
     if let Some(ref store_id) = args.store
-        && let Err(err) = validate_store_id(store_id)
+        && validate_store_id(store_id).is_err()
     {
-        deps.output
-            .writeln_stderr(&format!("deja mcp error: invalid `--store`: {err}"));
+        deps.output.writeln_stderr(
+            "deja mcp error: invalid `--store` value (must be 1..=64 characters matching `[a-z0-9._-]`, starting with `[a-z0-9]`, without path separators or `..`)",
+        );
         return EXIT_USAGE_OR_CONFIG;
     }
 

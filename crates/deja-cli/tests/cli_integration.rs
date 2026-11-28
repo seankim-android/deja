@@ -4678,13 +4678,13 @@ fn mcp_subprocess_stdio_roundtrip_zero_stdout_leak_and_rejects_json_flag() {
     writeln!(
         stdin,
         "{}",
-        json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-03-26"}})
+        json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18"}})
     )
     .unwrap();
     stdin.flush().unwrap();
     let r1 = read_json_line(&mut stdout_reader);
     assert_eq!(r1["id"], 1);
-    assert_eq!(r1["result"]["protocolVersion"], "2025-03-26");
+    assert_eq!(r1["result"]["protocolVersion"], "2025-06-18");
     assert_eq!(r1["result"]["serverInfo"]["name"], "deja");
 
     writeln!(
@@ -4810,5 +4810,42 @@ fn regression_r1_f3_mcp_exits_promptly_on_sigterm_with_stdin_open() {
         exit_status.code(),
         Some(143),
         "expected exit code 143 on SIGTERM, got: {exit_status:?}"
+    );
+}
+
+#[test]
+fn regression_r2_f8_invalid_mcp_store_arg_not_echoed_to_stderr() {
+    let ws = TempWs::new("r2-f8-store-redact");
+    ws.write(
+        "deja.config.json",
+        &json!({
+            "workspaceRoot": ".",
+            "platform": "ios",
+            "appId": TEST_APP_ID,
+            "adapter": "maestro-ios/v1"
+        })
+        .to_string(),
+    );
+
+    let secret_store_path = ["/", "Users", "/secret-home/foo"].concat();
+    let out = deja_bin()
+        .current_dir(&ws.path)
+        .args(["mcp", "--store", &secret_store_path])
+        .output()
+        .expect("spawn deja mcp --store");
+
+    assert_eq!(out.status.code(), Some(2));
+    assert!(
+        out.stdout.is_empty(),
+        "invalid --store must not write to stdout"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("invalid `--store`"),
+        "expected invalid --store diagnostic, got: {stderr}"
+    );
+    assert!(
+        !stderr.contains(&secret_store_path) && !stderr.contains("secret-home"),
+        "raw rejected --store path must never be echoed to stderr: {stderr}"
     );
 }

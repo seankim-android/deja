@@ -705,16 +705,36 @@ async fn group2_handshake_tools_list_and_explore_gating() {
         CancellationToken::new(),
     );
 
-    let init = client
+    let init_2025 = client
         .request(
             json!(1),
+            "initialize",
+            json!({"protocolVersion": "2025-06-18", "capabilities": {}}),
+        )
+        .await;
+    assert_eq!(init_2025["result"]["protocolVersion"], "2025-06-18");
+    assert_eq!(init_2025["result"]["capabilities"], json!({"tools": {}}));
+    assert_eq!(init_2025["result"]["serverInfo"]["name"], "deja");
+
+    let init_2024 = client
+        .request(
+            json!("init-2024"),
+            "initialize",
+            json!({"protocolVersion": "2024-11-05", "capabilities": {}}),
+        )
+        .await;
+    assert_eq!(init_2024["result"]["protocolVersion"], "2024-11-05");
+
+    // 2025-03-26 allowed JSON-RPC batching, which our single-message server does not enable,
+    // so requesting 2025-03-26 negotiates cleanly down to 2024-11-05 per MCP spec.
+    let init_negotiate = client
+        .request(
+            json!("init-2025-03-26"),
             "initialize",
             json!({"protocolVersion": "2025-03-26", "capabilities": {}}),
         )
         .await;
-    assert_eq!(init["result"]["protocolVersion"], "2025-03-26");
-    assert_eq!(init["result"]["capabilities"], json!({"tools": {}}));
-    assert_eq!(init["result"]["serverInfo"]["name"], "deja");
+    assert_eq!(init_negotiate["result"]["protocolVersion"], "2024-11-05");
 
     // notifications/initialized produces no response; verified by subsequent ping.
     client
@@ -1529,8 +1549,8 @@ async fn group5_warm_cache_invalidation_pruned_visible_elements_and_redaction() 
         "changed build on disk must immediately trigger install_app"
     );
     assert_ne!(
-        run1["result"]["structuredContent"]["buildFingerprint"],
-        run2["result"]["structuredContent"]["buildFingerprint"]
+        run1["result"]["structuredContent"]["identity"]["buildFingerprint"],
+        run2["result"]["structuredContent"]["identity"]["buildFingerprint"]
     );
 
     // 4. Pruned visibleElements (<= 30 items, truncated: true) AND full redaction on batch pass & fail!
@@ -1809,7 +1829,7 @@ async fn regression_r1_f2_mcp_screenshots_confined_to_dedicated_dir_and_no_clobb
         CancellationToken::new(),
     );
 
-    // 1. Batch screenshot writes ONLY inside `.deja/reports/stores/sim-s/mcp-screenshots/`!
+    // 1. Batch screenshot writes ONLY inside `.deja/reports/stores/sim-s/mcp-screenshots/attempt-.../`!
     let batch_ok = client
         .call_tool(
             json!(1),
@@ -1818,29 +1838,33 @@ async fn regression_r1_f2_mcp_screenshots_confined_to_dedicated_dir_and_no_clobb
         )
         .await;
     assert_eq!(batch_ok["result"]["isError"], false, "batch_ok: {batch_ok}");
+    let batch_shots = batch_ok["result"]["structuredContent"]["screenshots"]
+        .as_array()
+        .expect("screenshots array");
+    assert_eq!(batch_shots.len(), 1);
+    let batch_shot_rel = batch_shots[0].as_str().unwrap();
     assert!(
-        ws.path
-            .join(".deja/reports/stores/sim-s/mcp-screenshots/batch-shot.png")
-            .is_file(),
-        "screenshot must be written in store-scoped mcp-screenshots/"
+        batch_shot_rel.starts_with(".deja/reports/stores/sim-s/mcp-screenshots/attempt-"),
+        "screenshot must live in isolated per-attempt store-scoped dir, got: {batch_shot_rel}"
     );
+    assert!(ws.path.join(batch_shot_rel).is_file());
     assert!(
         !ws.path.join("batch-shot.png").exists(),
         "screenshot must never write to workspace root"
     );
 
-    // 2. Batch refuses overwriting an existing screenshot file (no-clobber)!
+    // 2. Duplicate same-name screenshot within the SAME attempt refuses overwriting (no-clobber)!
     let batch_clobber = client
         .call_tool(
             json!(2),
             "deja_exec_batch",
-            json!({"steps": ["launchApp", {"takeScreenshot": "batch-shot"}]}),
+            json!({"steps": ["launchApp", {"takeScreenshot": "dup-shot"}, {"takeScreenshot": "dup-shot"}]}),
         )
         .await;
     assert_eq!(batch_clobber["result"]["isError"], true);
     assert_eq!(
-        batch_clobber["result"]["structuredContent"]["code"],
-        "PATH_CONFINEMENT"
+        batch_clobber["result"]["structuredContent"]["passed"],
+        false
     );
 
     // 3. Batch refuses relative traversal / absolute paths!
@@ -1857,7 +1881,7 @@ async fn regression_r1_f2_mcp_screenshots_confined_to_dedicated_dir_and_no_clobb
         "PATH_CONFINEMENT"
     );
 
-    // 4. File-backed `deja_remember` writes ONLY inside `mcp-screenshots/`!
+    // 4. File-backed `deja_remember` writes ONLY inside store-scoped per-attempt `mcp-screenshots/`!
     let rem_ok = client
         .call_tool(
             json!(4),
@@ -1866,14 +1890,19 @@ async fn regression_r1_f2_mcp_screenshots_confined_to_dedicated_dir_and_no_clobb
         )
         .await;
     assert_eq!(rem_ok["result"]["isError"], false, "rem_ok: {rem_ok}");
+    let exec_artifacts = rem_ok["result"]["structuredContent"]["execution"]["artifacts"]
+        .as_array()
+        .expect("execution artifacts");
+    assert_eq!(exec_artifacts.len(), 1);
+    let rem_shot_rel = exec_artifacts[0]["path"].as_str().unwrap();
     assert!(
-        ws.path
-            .join(".deja/reports/stores/sim-s/mcp-screenshots/flow-shot.png")
-            .is_file()
+        rem_shot_rel.starts_with(".deja/reports/stores/sim-s/mcp-screenshots/attempt-"),
+        "remember screenshot must be inside store-scoped per-attempt dir, got: {rem_shot_rel}"
     );
+    assert!(ws.path.join(rem_shot_rel).is_file());
     assert!(!ws.path.join("flow-shot.png").exists());
 
-    // 5. File-backed `deja_remember` refuses traversal AND refuses overwriting existing file!
+    // 5. File-backed `deja_remember` refuses traversal AND never overwrites pre-existing top-level file!
     let rem_escape = client
         .call_tool(
             json!(5),
@@ -1887,17 +1916,16 @@ async fn regression_r1_f2_mcp_screenshots_confined_to_dedicated_dir_and_no_clobb
         "PATH_CONFINEMENT"
     );
 
-    let rem_clobber = client
+    let rem_isolated = client
         .call_tool(
             json!(6),
             "deja_remember",
-            json!({"goal": "Snap Clobber", "flow": "flows/snap_existing.yaml"}),
+            json!({"goal": "Snap Isolated", "flow": "flows/snap_existing.yaml"}),
         )
         .await;
-    assert_eq!(rem_clobber["result"]["isError"], true);
     assert_eq!(
-        rem_clobber["result"]["structuredContent"]["code"],
-        "PATH_CONFINEMENT"
+        rem_isolated["result"]["isError"], false,
+        "isolated per-attempt dir must not collide with unrelated preexisting file: {rem_isolated}"
     );
     assert_eq!(
         fs::read_to_string(
@@ -2230,6 +2258,655 @@ async fn regression_r1_f8_unwritable_reports_omits_report_path_in_response_and_s
         runs[0].get("reportPath").is_none() || runs[0]["reportPath"].is_null(),
         "SQLite validation_runs must not record an unwritten reportPath: {runs:?}"
     );
+
+    client.close_and_join().await;
+}
+
+// ===========================================================================
+// Round 2 Codex cross-review regression tests (Findings #1, #2, #3, #4, #5, #6)
+// ===========================================================================
+
+#[tokio::test]
+async fn regression_r2_f1_stalled_stdout_still_shuts_down_on_eof_and_cancel() {
+    let ws = TempWs::new("r2-f1-stalled-stdout");
+    let build_file = ws.write_bytes("build/App.bin", b"v1");
+
+    // Case A: Stalled 64-byte stdout duplex + stdin EOF -> exits promptly and shuts down warm driver!
+    {
+        let launch_done = Arc::new(Notify::new());
+        let launch_done_hook = launch_done.clone();
+        let driver = MockDriver::new(vec![make_hierarchy(
+            TEST_APP_ID,
+            vec![make_node(0, "ok", "OK")],
+        )])
+        .with_on_launch(Arc::new(move |_| {
+            launch_done_hook.notify_waiters();
+        }));
+        let shutdowns = driver.shutdown_count.clone();
+        let factory = Arc::new(MockFactory::new(Some("ios-27.2"), driver));
+
+        let (mut client_w, server_r) = tokio::io::duplex(4096);
+        let (server_w, _stalled_reader) = tokio::io::duplex(64);
+        let cancel = CancellationToken::new();
+        let cfg = default_config(&ws, Some(build_file.clone()));
+        let handle =
+            tokio::spawn(async move { serve(server_r, server_w, cfg, factory, cancel).await });
+
+        // First send tools/list (> 64 bytes) so the writer task immediately blocks on the full
+        // 64-byte duplex because `_stalled_reader` never drains stdout!
+        let list_req = format!(
+            "{}\n",
+            json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}})
+        );
+        client_w.write_all(list_req.as_bytes()).await.unwrap();
+        // Next send a batch tool call so a warm driver is created while stdout is completely stalled!
+        let batch_req = format!(
+            "{}\n",
+            json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {"name": "deja_exec_batch", "arguments": {"steps": ["launchApp"]}}
+            })
+        );
+        client_w.write_all(batch_req.as_bytes()).await.unwrap();
+        client_w.flush().await.unwrap();
+
+        tokio::time::timeout(Duration::from_secs(3), launch_done.notified())
+            .await
+            .expect("batch must execute even while stdout is stalled");
+
+        // Close stdin (EOF) while `_stalled_reader` STILL holds stdout open and unread!
+        drop(client_w);
+        tokio::time::timeout(Duration::from_secs(3), handle)
+            .await
+            .expect("server must exit promptly on stdin EOF even when stdout is stalled")
+            .expect("server task should not panic")
+            .expect("server should return Ok(())");
+        assert_eq!(
+            shutdowns.load(Ordering::SeqCst),
+            1,
+            "warm driver must be shut down on EOF even when stdout stalled"
+        );
+    }
+
+    // Case B: Stalled 64-byte stdout duplex + external server cancellation -> exits immediately
+    // and shuts down warm driver while BOTH stdin and stdout remain open!
+    {
+        let launch_done = Arc::new(Notify::new());
+        let launch_done_hook = launch_done.clone();
+        let driver = MockDriver::new(vec![make_hierarchy(
+            TEST_APP_ID,
+            vec![make_node(0, "ok", "OK")],
+        )])
+        .with_on_launch(Arc::new(move |_| {
+            launch_done_hook.notify_waiters();
+        }));
+        let shutdowns = driver.shutdown_count.clone();
+        let factory = Arc::new(MockFactory::new(Some("ios-27.2"), driver));
+
+        let (mut _open_stdin, server_r) = tokio::io::duplex(4096);
+        let (server_w, _stalled_reader) = tokio::io::duplex(64);
+        let cancel = CancellationToken::new();
+        let cancel_clone = cancel.clone();
+        let cfg = default_config(&ws, Some(build_file));
+        let handle =
+            tokio::spawn(
+                async move { serve(server_r, server_w, cfg, factory, cancel_clone).await },
+            );
+
+        let list_req = format!(
+            "{}\n",
+            json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}})
+        );
+        let batch_req = format!(
+            "{}\n",
+            json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {"name": "deja_exec_batch", "arguments": {"steps": ["launchApp"]}}
+            })
+        );
+        _open_stdin.write_all(list_req.as_bytes()).await.unwrap();
+        _open_stdin.write_all(batch_req.as_bytes()).await.unwrap();
+        _open_stdin.flush().await.unwrap();
+
+        tokio::time::timeout(Duration::from_secs(3), launch_done.notified())
+            .await
+            .expect("batch must execute while stdout is stalled");
+
+        cancel.cancel();
+        tokio::time::timeout(Duration::from_secs(2), handle)
+            .await
+            .expect("server must exit promptly on cancel even when stdout is stalled")
+            .expect("server task should not panic")
+            .expect("server should return Ok(())");
+        assert_eq!(
+            shutdowns.load(Ordering::SeqCst),
+            1,
+            "warm driver must be shut down on cancel even when stdout stalled"
+        );
+    }
+}
+
+#[tokio::test]
+async fn regression_r2_f2_per_attempt_screenshot_isolation() {
+    let ws = TempWs::new("r2-f2-shot-iso");
+    let build_file = ws.write_bytes("build/App.bin", b"v1");
+    ws.write(
+        "flows/checkout.yaml",
+        "appId: dev.deja.mcp.test\n---\n- launchApp\n- takeScreenshot: checkout.png\n- assertVisible:\n    text: Done\n    timeout: 40\n",
+    );
+
+    let ok_tree = make_hierarchy(TEST_APP_ID, vec![make_node(0, "done", "Done")]);
+    let fail_tree = make_hierarchy(TEST_APP_ID, vec![make_node(0, "other", "Loading")]);
+    let shared_trees = Arc::new(Mutex::new(vec![ok_tree.clone()]));
+    let trees_hook = shared_trees.clone();
+    let ok_clone = ok_tree.clone();
+    let fail_clone = fail_tree.clone();
+    let mut driver = MockDriver::new(vec![]);
+    driver.hierarchies = shared_trees;
+    // Launch 1 (remember): ok; Launch 2 (run replay): ok; Launch 3 (flaky run attempt 1): fail;
+    // Launch 4 (flaky run attempt 2): ok!
+    driver = driver.with_on_launch(Arc::new(move |n| {
+        let mut g = trees_hook.lock().unwrap();
+        g.clear();
+        if n == 3 {
+            g.push(fail_clone.clone());
+        } else {
+            g.push(ok_clone.clone());
+        }
+    }));
+    let factory = Arc::new(MockFactory::new(Some("ios-27.2"), driver));
+
+    let mut client = McpTestClient::spawn(
+        default_config(&ws, Some(build_file)),
+        factory,
+        FramingMode::NewlineDelimited,
+        CancellationToken::new(),
+    );
+
+    // 1. `deja_remember` takes `checkout.png` and succeeds!
+    let rem = client
+        .call_tool(
+            json!(1),
+            "deja_remember",
+            json!({"goal": "Checkout Shot", "flow": "flows/checkout.yaml"}),
+        )
+        .await;
+    assert_eq!(rem["result"]["isError"], false, "remember failed: {rem}");
+    let rem_shot = rem["result"]["structuredContent"]["execution"]["artifacts"][0]["path"]
+        .as_str()
+        .expect("remember screenshot path")
+        .to_string();
+    assert!(rem_shot.starts_with(".deja/reports/mcp-screenshots/attempt-"));
+    assert!(ws.path.join(&rem_shot).is_file());
+
+    // 2. Immediate `deja_run` replays the SAME flow taking `checkout.png` -> succeeds with distinct attempt dir!
+    let run_ok = client
+        .call_tool(json!(2), "deja_run", json!({"goal": "Checkout Shot"}))
+        .await;
+    assert_eq!(
+        run_ok["result"]["isError"], false,
+        "replay failed: {run_ok}"
+    );
+    let run_shot = run_ok["result"]["structuredContent"]["execution"]["artifacts"][0]["path"]
+        .as_str()
+        .expect("run screenshot path")
+        .to_string();
+    assert!(run_shot.starts_with(".deja/reports/mcp-screenshots/attempt-"));
+    assert_ne!(
+        rem_shot, run_shot,
+        "remember and run must isolate screenshots in separate attempt directories"
+    );
+    assert!(ws.path.join(&run_shot).is_file());
+
+    // 3. Flaky retry (`rerunFailed: true`): attempt 1 takes `checkout.png` and fails on `Done`,
+    //    attempt 2 takes `checkout.png` and passes -> neither collides!
+    let run_retry = client
+        .call_tool(
+            json!(3),
+            "deja_run",
+            json!({"goal": "Checkout Shot", "rerunFailed": true}),
+        )
+        .await;
+    assert_eq!(
+        run_retry["result"]["structuredContent"]["outcome"], "flaky",
+        "retry run should detect flaky without screenshot collision: {run_retry}"
+    );
+    let attempts = run_retry["result"]["structuredContent"]["attempts"]
+        .as_array()
+        .unwrap();
+    assert_eq!(attempts.len(), 2);
+    assert_eq!(attempts[0]["passed"], false);
+    assert_eq!(attempts[1]["passed"], true);
+    let shot_a1 = attempts[0]["artifacts"][0]["path"].as_str().unwrap();
+    let shot_a2 = attempts[1]["artifacts"][0]["path"].as_str().unwrap();
+    assert_ne!(
+        shot_a1, shot_a2,
+        "retry attempts must write screenshots to distinct attempt directories"
+    );
+    assert!(ws.path.join(shot_a1).is_file());
+    assert!(ws.path.join(shot_a2).is_file());
+
+    // 4. Duplicate same-name screenshot inside the SAME attempt STILL fails closed (no-clobber)!
+    let dup = client
+        .call_tool(
+            json!(4),
+            "deja_exec_batch",
+            json!({"steps": ["launchApp", {"takeScreenshot": "same.png"}, {"takeScreenshot": "same.png"}]}),
+        )
+        .await;
+    assert_eq!(dup["result"]["isError"], true);
+    assert_eq!(dup["result"]["structuredContent"]["passed"], false);
+
+    // 5. Traversal path STILL fails closed with PATH_CONFINEMENT!
+    let escape = client
+        .call_tool(
+            json!(5),
+            "deja_exec_batch",
+            json!({"steps": ["launchApp", {"takeScreenshot": "../escape.png"}]}),
+        )
+        .await;
+    assert_eq!(escape["result"]["isError"], true);
+    assert_eq!(
+        escape["result"]["structuredContent"]["code"],
+        "PATH_CONFINEMENT"
+    );
+
+    client.close_and_join().await;
+}
+
+#[tokio::test]
+async fn regression_r2_f3_open_link_confinement_native_and_web() {
+    let ws = TempWs::new("r2-f3-openlink");
+    let build_file = ws.write_bytes("build/App.bin", b"v1");
+    ws.write(
+        "flows/ios_link.yaml",
+        "appId: dev.deja.mcp.test\n---\n- launchApp\n- openLink: https://example.com\n",
+    );
+    ws.write(
+        "flows/ios_sub_parent.yaml",
+        "appId: dev.deja.mcp.test\n---\n- runFlow: ios_link.yaml\n",
+    );
+
+    let driver = MockDriver::new(vec![make_hierarchy(
+        TEST_APP_ID,
+        vec![make_node(0, "ok", "OK")],
+    )]);
+    let factory = Arc::new(MockFactory::new(Some("ios-27.2"), driver));
+
+    // 1. Native iOS rejects `openLink` in batch, hooks, flow, and subflow!
+    let mut ios_client = McpTestClient::spawn(
+        default_config(&ws, Some(build_file.clone())),
+        factory.clone(),
+        FramingMode::NewlineDelimited,
+        CancellationToken::new(),
+    );
+
+    for (idx, steps) in [
+        json!([{"openLink": "https://example.com"}]),
+        json!("onFlowStart:\n  - openLink: myapp://deep\n---\n- launchApp\n"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let resp = ios_client
+            .call_tool(json!(10 + idx), "deja_exec_batch", json!({"steps": steps}))
+            .await;
+        assert_eq!(resp["result"]["isError"], true);
+        assert_eq!(
+            resp["result"]["structuredContent"]["code"], "DEVICE_WIDE_COMMAND_FORBIDDEN",
+            "iOS batch must reject openLink: {resp}"
+        );
+    }
+
+    for (idx, flow) in ["flows/ios_link.yaml", "flows/ios_sub_parent.yaml"]
+        .into_iter()
+        .enumerate()
+    {
+        let resp = ios_client
+            .call_tool(
+                json!(20 + idx),
+                "deja_remember",
+                json!({"goal": "ios link", "flow": flow}),
+            )
+            .await;
+        assert_eq!(resp["result"]["isError"], true);
+        assert_eq!(
+            resp["result"]["structuredContent"]["code"], "DEVICE_WIDE_COMMAND_FORBIDDEN",
+            "iOS remember must reject openLink in {flow}: {resp}"
+        );
+    }
+    ios_client.close_and_join().await;
+
+    // 2. Web platform allows same-origin loopback `openLink` and rejects cross-origin / unresolved!
+    let web_origin = "http://127.0.0.1:3000";
+    ws.write(
+        "flows/web_ok.yaml",
+        "url: http://127.0.0.1:3000\n---\n- openLink: http://127.0.0.1:3000/checkout?step=1\n- assertVisible: OK\n",
+    );
+    ws.write(
+        "flows/web_env_parent.yaml",
+        "url: http://127.0.0.1:3000\n---\n- runFlow:\n    file: web_env_child.yaml\n    env:\n      DEST_PATH: settings\n",
+    );
+    ws.write(
+        "flows/web_env_child.yaml",
+        "url: http://127.0.0.1:3000\n---\n- openLink: http://127.0.0.1:3000/${DEST_PATH}\n- assertVisible: OK\n",
+    );
+    ws.write(
+        "flows/web_cross_origin.yaml",
+        "url: http://127.0.0.1:3000\n---\n- openLink: https://evil.example/phish\n",
+    );
+
+    let mut web_cfg = default_config(&ws, Some(build_file));
+    web_cfg.platform = "web".to_string();
+    web_cfg.app_id = web_origin.to_string();
+    web_cfg.adapter = Some("playwright/v1".to_string());
+    web_cfg.browser = Some("chromium".to_string());
+    web_cfg
+        .env
+        .insert("SAFE_ROUTE".to_string(), "profile".to_string());
+
+    let mut web_client = McpTestClient::spawn(
+        web_cfg,
+        factory,
+        FramingMode::NewlineDelimited,
+        CancellationToken::new(),
+    );
+
+    // Same-origin loopback batch (literal and static env interpolation) -> allowed!
+    let web_batch_ok = web_client
+        .call_tool(
+            json!(30),
+            "deja_exec_batch",
+            json!({"steps": [{"openLink": "http://127.0.0.1:3000/cart"}, {"openLink": "http://127.0.0.1:3000/${SAFE_ROUTE}"}]}),
+        )
+        .await;
+    assert_eq!(
+        web_batch_ok["result"]["isError"], false,
+        "same-origin web openLink should succeed: {web_batch_ok}"
+    );
+
+    // Same-origin web flows (direct and env-propagated subflow) -> allowed!
+    for (idx, (goal, flow)) in [
+        ("Web Checkout", "flows/web_ok.yaml"),
+        ("Web Subflow", "flows/web_env_parent.yaml"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let resp = web_client
+            .call_tool(
+                json!(35 + idx),
+                "deja_remember",
+                json!({"goal": goal, "flow": flow}),
+            )
+            .await;
+        assert_eq!(
+            resp["result"]["isError"], false,
+            "same-origin web remember {flow} should succeed: {resp}"
+        );
+    }
+
+    // Off-origin, wrong port, wrong scheme, host mismatch, userinfo spoof, backslash, unresolved!
+    for (idx, bad_url) in [
+        "https://evil.example/phish",
+        "http://127.0.0.1:4000/admin",
+        "https://127.0.0.1:3000/tls",
+        "http://localhost:3000/diff-host",
+        "http://127.0.0.1:3000@evil.example/spoof",
+        "http://127.0.0.1:3000\\@evil.example/spoof",
+        "http://127.0.0.1:3000/${UNDEFINED_VAR}",
+        "javascript:alert(1)",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let resp = web_client
+            .call_tool(
+                json!(40 + idx),
+                "deja_exec_batch",
+                json!({"steps": [{"openLink": bad_url}]}),
+            )
+            .await;
+        assert_eq!(
+            resp["result"]["isError"], true,
+            "web batch must reject off-origin/unsafe openLink `{bad_url}`: {resp}"
+        );
+        assert_eq!(
+            resp["result"]["structuredContent"]["code"], "APP_ID_CONFINEMENT",
+            "expected APP_ID_CONFINEMENT for `{bad_url}`: {resp}"
+        );
+    }
+
+    let web_rem_bad = web_client
+        .call_tool(
+            json!(60),
+            "deja_remember",
+            json!({"goal": "Web Bad", "flow": "flows/web_cross_origin.yaml"}),
+        )
+        .await;
+    assert_eq!(web_rem_bad["result"]["isError"], true);
+    assert_eq!(
+        web_rem_bad["result"]["structuredContent"]["code"],
+        "APP_ID_CONFINEMENT"
+    );
+
+    web_client.close_and_join().await;
+}
+
+#[tokio::test]
+async fn regression_r2_f4_case_insensitive_stores_report_isolation() {
+    let ws = TempWs::new("r2-f4-case-stores");
+    ws.write(".deja/reports/latest.json", r#"{"store":"default"}"#);
+    ws.write(
+        ".deja/reports/stores/other/latest.json",
+        r#"{"store":"other"}"#,
+    );
+
+    let factory = Arc::new(MockFactory::new(Some("ios-27.2"), MockDriver::new(vec![])));
+    let mut client = McpTestClient::spawn(
+        default_config(&ws, None),
+        factory,
+        FramingMode::NewlineDelimited,
+        CancellationToken::new(),
+    );
+
+    for (idx, path) in [
+        ".deja/reports/STORES/other/latest.json",
+        ".deja/reports/Stores/other/latest.json",
+        ".deja/reports/sToReS/other/latest.json",
+        ".deja/reports/stores/other/latest.json",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let resp = client
+            .call_tool(json!(1 + idx), "deja_inspect", json!({"report": path}))
+            .await;
+        assert_eq!(
+            resp["result"]["isError"], true,
+            "default store must reject {path}: {resp}"
+        );
+        assert_eq!(
+            resp["result"]["structuredContent"]["code"], "PATH_CONFINEMENT",
+            "expected PATH_CONFINEMENT for {path}: {resp}"
+        );
+    }
+
+    client.close_and_join().await;
+}
+
+#[tokio::test]
+async fn regression_r2_f5_remember_does_not_publish_report_when_persistence_fails() {
+    let ws = TempWs::new("r2-f5-persist-fail");
+    let build_file = ws.write_bytes("build/App.bin", b"v1");
+    ws.write(
+        "flows/ok.yaml",
+        "appId: dev.deja.mcp.test\n---\n- launchApp\n- assertVisible: OK\n",
+    );
+    // Seed a sentinel `latest.json` AND block `.deja/flows` with a regular file so
+    // `persist_verified_candidate` fails cleanly AFTER the flow passes!
+    let prior_latest = r#"{"sentinel":"prior-report","passed":false}"#;
+    ws.write(".deja/reports/latest.json", prior_latest);
+    ws.write(".deja/flows", "blocking-file-not-a-dir");
+
+    let driver = MockDriver::new(vec![make_hierarchy(
+        TEST_APP_ID,
+        vec![make_node(0, "ok", "OK")],
+    )]);
+    let factory = Arc::new(MockFactory::new(Some("ios-27.2"), driver));
+
+    let mut client = McpTestClient::spawn(
+        default_config(&ws, Some(build_file)),
+        factory,
+        FramingMode::NewlineDelimited,
+        CancellationToken::new(),
+    );
+
+    let rem = client
+        .call_tool(
+            json!(1),
+            "deja_remember",
+            json!({"goal": "Unpersistable Goal", "flow": "flows/ok.yaml"}),
+        )
+        .await;
+    assert_eq!(
+        rem["result"]["isError"], true,
+        "remember must fail when .deja/flows cannot be persisted: {rem}"
+    );
+
+    // `latest.json` MUST remain untouched and NEVER claim `outcome: "remembered"` / `passed: true`!
+    let latest_after = fs::read_to_string(ws.path.join(".deja/reports/latest.json")).unwrap();
+    assert_eq!(
+        latest_after, prior_latest,
+        "failed remember persistence must never overwrite latest.json with remembered/passed"
+    );
+
+    // No `remember-*.json` artifact should have been published either!
+    let remember_files: Vec<_> = fs::read_dir(ws.path.join(".deja/reports"))
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().starts_with("remember-"))
+        .collect();
+    assert!(
+        remember_files.is_empty(),
+        "failed remember persistence must not publish an immutable remembered report: {remember_files:?}"
+    );
+
+    client.close_and_join().await;
+}
+
+#[tokio::test]
+async fn regression_r2_f6_run_and_remember_return_schema1_run_result() {
+    let ws = TempWs::new("r2-f6-run-result");
+    let build_file = ws.write_bytes("build/App.bin", b"v1");
+    ws.write(
+        "flows/home.yaml",
+        "appId: dev.deja.mcp.test\n---\n- launchApp\n- assertVisible:\n    text: Dashboard\n    timeout: 40\n",
+    );
+
+    let ok_tree = make_hierarchy(TEST_APP_ID, vec![make_node(0, "dash", "Dashboard")]);
+    let fail_tree = make_hierarchy(
+        TEST_APP_ID,
+        vec![
+            make_node(0, "login", "Sign In"),
+            make_node(1, "help", "Need Help"),
+        ],
+    );
+    let shared_trees = Arc::new(Mutex::new(vec![ok_tree.clone()]));
+    let trees_hook = shared_trees.clone();
+    let ok_clone = ok_tree.clone();
+    let fail_clone = fail_tree.clone();
+    let mut driver = MockDriver::new(vec![]);
+    driver.hierarchies = shared_trees;
+    // Launch 1 (remember): ok; Launch 2 (run hit pass): ok; Launch 3 (run hit fail): fail_tree!
+    driver = driver.with_on_launch(Arc::new(move |n| {
+        let mut g = trees_hook.lock().unwrap();
+        g.clear();
+        if n >= 3 {
+            g.push(fail_clone.clone());
+        } else {
+            g.push(ok_clone.clone());
+        }
+    }));
+    let factory = Arc::new(MockFactory::new(Some("ios-27.2"), driver));
+
+    let mut client = McpTestClient::spawn(
+        default_config(&ws, Some(build_file)),
+        factory,
+        FramingMode::NewlineDelimited,
+        CancellationToken::new(),
+    );
+
+    // 1. `deja_remember` structuredContent deserializes directly into `deja_core::RunResult`!
+    let rem = client
+        .call_tool(
+            json!(1),
+            "deja_remember",
+            json!({"goal": "Open Dashboard", "flow": "flows/home.yaml"}),
+        )
+        .await;
+    assert_eq!(rem["result"]["isError"], false, "remember: {rem}");
+    let rem_sc = &rem["result"]["structuredContent"];
+    let rem_core: deja_core::RunResult = serde_json::from_value(rem_sc.clone()).expect(
+        "deja_remember structuredContent must deserialize cleanly into deja_core::RunResult",
+    );
+    assert_eq!(rem_core.schema_version, 1);
+    assert_eq!(rem_core.command, deja_core::RunCommand::Remember);
+    assert_eq!(rem_core.identity.goal, "Open Dashboard");
+    assert_eq!(rem_core.identity.app_id, TEST_APP_ID);
+    assert_eq!(rem_core.outcome, deja_core::RunOutcome::Remembered);
+    assert!(rem_core.passed);
+    assert_eq!(rem_core.model_calls, Some(0));
+    assert!(rem_core.engine.is_some());
+    assert_eq!(rem_sc["remembered"], true);
+    assert!(rem_sc["timing"].is_object());
+    assert!(rem_sc["reportPath"].is_string());
+
+    // 2. Passing `deja_run` structuredContent deserializes directly into `deja_core::RunResult`!
+    let run_pass = client
+        .call_tool(json!(2), "deja_run", json!({"goal": "Open Dashboard"}))
+        .await;
+    assert_eq!(run_pass["result"]["isError"], false, "run pass: {run_pass}");
+    let pass_sc = &run_pass["result"]["structuredContent"];
+    let pass_core: deja_core::RunResult = serde_json::from_value(pass_sc.clone())
+        .expect("deja_run structuredContent must deserialize cleanly into deja_core::RunResult");
+    assert_eq!(pass_core.schema_version, 1);
+    assert_eq!(pass_core.command, deja_core::RunCommand::Run);
+    assert_eq!(pass_core.identity.goal, "Open Dashboard");
+    assert_eq!(pass_core.cache_status, deja_core::CacheStatus::Hit);
+    assert_eq!(pass_core.outcome, deja_core::RunOutcome::Passed);
+    assert!(pass_core.passed);
+    assert!(pass_sc["timing"].is_object());
+    assert!(pass_sc["reportPath"].is_string());
+    assert!(pass_sc.get("remembered").is_none());
+
+    // 3. Failing `deja_run` structuredContent ALSO deserializes into `deja_core::RunResult` AND
+    //    carries `visibleElements` + `visibleElementsTruncated` + `timing`!
+    let run_fail = client
+        .call_tool(json!(3), "deja_run", json!({"goal": "Open Dashboard"}))
+        .await;
+    assert_eq!(run_fail["result"]["isError"], true);
+    let fail_sc = &run_fail["result"]["structuredContent"];
+    let fail_core: deja_core::RunResult = serde_json::from_value(fail_sc.clone()).expect(
+        "failing deja_run structuredContent must deserialize cleanly into deja_core::RunResult",
+    );
+    assert_eq!(fail_core.schema_version, 1);
+    assert_eq!(fail_core.command, deja_core::RunCommand::Run);
+    assert!(!fail_core.passed);
+    assert!(fail_core.failure.is_some());
+    assert!(
+        fail_sc["visibleElements"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v == "Sign In")
+    );
+    assert_eq!(fail_sc["visibleElementsTruncated"], false);
+    assert!(fail_sc["timing"].is_object());
 
     client.close_and_join().await;
 }

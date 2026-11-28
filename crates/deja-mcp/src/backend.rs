@@ -114,9 +114,13 @@ pub struct McpServerConfig {
 impl McpServerConfig {
     /// Validate that the configured `store_id` (when set) and `canonical_workspace_root` are valid.
     pub fn validate(&self) -> Result<(), McpServerError> {
-        if let Some(ref store_id) = self.store_id {
-            deja_store::validate_store_id(store_id)
-                .map_err(|err| McpServerError::InvalidConfig(err.to_string()))?;
+        if let Some(ref store_id) = self.store_id
+            && deja_store::validate_store_id(store_id).is_err()
+        {
+            return Err(McpServerError::InvalidConfig(
+                "invalid store identifier (must be 1..=64 characters matching `[a-z0-9._-]`, starting with `[a-z0-9]`, without path separators or `..`)"
+                    .to_string(),
+            ));
         }
         if !self.canonical_workspace_root.is_dir() {
             return Err(McpServerError::InvalidConfig(format!(
