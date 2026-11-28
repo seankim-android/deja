@@ -46,6 +46,7 @@ final class XcuiActions {
                 "selected": selected,
                 "hasFocus": hasFocus,
                 "hittable": hittable,
+                "isOnScreen": isOnScreen,
                 "frame": [
                     "x": Double(frame.origin.x),
                     "y": Double(frame.origin.y),

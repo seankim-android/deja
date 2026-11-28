@@ -58,7 +58,22 @@ pub struct HierarchyNode {
     pub selected: bool,
     pub has_focus: bool,
     pub hittable: bool,
+    #[serde(default)]
+    pub is_on_screen: Option<bool>,
     pub frame: ElementFrame,
+}
+
+impl HierarchyNode {
+    /// Returns the effective on-screen visibility for this node.
+    ///
+    /// Current `DejaXCTestRunner` builds always emit `"isOnScreen"` explicitly (so disabled
+    /// on-screen controls report `Some(true)` while scroll-clipped off-screen controls report
+    /// `Some(false)`). When decoding legacy runner payloads that omit `"isOnScreen"`, falls back
+    /// to `self.hittable` rather than blindly assuming clipped nodes are visible.
+    #[must_use]
+    pub fn effective_is_on_screen(&self) -> bool {
+        self.is_on_screen.unwrap_or(self.hittable)
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -726,8 +741,77 @@ mod tests {
         assert!(resp.hierarchy_hash.is_empty());
         assert!(!resp.unchanged);
         assert_eq!(resp.find_by_id("login_button").unwrap().index, 1);
+        assert!(
+            resp.find_by_id("login_button")
+                .unwrap()
+                .is_on_screen
+                .is_none()
+        );
+        assert!(
+            resp.find_by_id("login_button")
+                .unwrap()
+                .effective_is_on_screen()
+        );
         assert!(resp.contains_text("Log in"));
         assert!(!resp.contains_text("Missing"));
+
+        // Explicit `isOnScreen: false` and omitted `isOnScreen` with `hittable: false` both
+        // resolve off-screen, while disabled on-screen (`isOnScreen: true, hittable: false`)
+        // resolves on-screen.
+        let screen_visibility_json = r#"[
+            {
+                "index": 0,
+                "depth": 1,
+                "source": "app",
+                "elementType": "Button",
+                "identifier": "clipped_offscreen",
+                "label": "Clipped",
+                "title": "",
+                "enabled": true,
+                "selected": false,
+                "hasFocus": false,
+                "hittable": false,
+                "isOnScreen": false,
+                "frame": {"x": 20.0, "y": 1400.0, "width": 120.0, "height": 44.0}
+            },
+            {
+                "index": 1,
+                "depth": 1,
+                "source": "app",
+                "elementType": "Button",
+                "identifier": "disabled_onscreen",
+                "label": "Disabled",
+                "title": "",
+                "enabled": false,
+                "selected": false,
+                "hasFocus": false,
+                "hittable": false,
+                "isOnScreen": true,
+                "frame": {"x": 20.0, "y": 200.0, "width": 120.0, "height": 44.0}
+            },
+            {
+                "index": 2,
+                "depth": 1,
+                "source": "app",
+                "elementType": "Button",
+                "identifier": "legacy_clipped",
+                "label": "Legacy Clipped",
+                "title": "",
+                "enabled": true,
+                "selected": false,
+                "hasFocus": false,
+                "hittable": false,
+                "frame": {"x": 20.0, "y": 1400.0, "width": 120.0, "height": 44.0}
+            }
+        ]"#;
+        let vis_nodes: Vec<HierarchyNode> =
+            serde_json::from_str(screen_visibility_json).expect("decode visibility nodes");
+        assert_eq!(vis_nodes[0].is_on_screen, Some(false));
+        assert!(!vis_nodes[0].effective_is_on_screen());
+        assert_eq!(vis_nodes[1].is_on_screen, Some(true));
+        assert!(vis_nodes[1].effective_is_on_screen());
+        assert_eq!(vis_nodes[2].is_on_screen, None);
+        assert!(!vis_nodes[2].effective_is_on_screen());
 
         let hash = compute_hierarchy_hash(&resp.nodes);
         assert_eq!(hash.len(), 16);
@@ -750,6 +834,7 @@ mod tests {
             selected: false,
             has_focus: false,
             hittable: true,
+            is_on_screen: Some(true),
             frame: ElementFrame {
                 x: 0.0,
                 y: 0.0,
@@ -772,6 +857,7 @@ mod tests {
             selected: false,
             has_focus: false,
             hittable: true,
+            is_on_screen: Some(true),
             frame: ElementFrame {
                 x: 20.0,
                 y: 12.0,

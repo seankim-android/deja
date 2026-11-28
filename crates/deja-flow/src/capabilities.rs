@@ -3,11 +3,13 @@
 //! Backends advertise only the capabilities they genuinely support and fail closed with
 //! [`UnsupportedCapability`] rather than silently emulating missing platform primitives.
 
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::fmt;
 
 /// Discrete platform driver capabilities that callers can query or require.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum DriverCapability {
     AccessibilityTree,
     SystemBack,
@@ -51,7 +53,8 @@ impl fmt::Display for DriverCapability {
 }
 
 /// Fail-closed error returned when a flow or caller requests an unsupported platform capability.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct UnsupportedCapability {
     pub platform: String,
     pub capability: DriverCapability,
@@ -121,9 +124,11 @@ impl DriverCapabilities {
 
 /// Provenance of observed UI text/elements so fuzzy OCR hits are never silently
 /// confused with exact accessibility tree nodes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum ObservationSource {
     /// Exact OS accessibility or DOM tree node.
+    #[default]
     Tree,
     /// Inferred from screenshot pixels via local OCR fallback (e.g. Canvas/Metal/game views).
     Pixels,
@@ -141,7 +146,8 @@ impl ObservationSource {
 /// Compact, bounded snapshot of what IS currently visible on screen, attached to
 /// selector-miss and assertion errors so exploration, repair, and MCP agents do not
 /// need a second round-trip to inspect why a step failed.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct VisibleContext {
     items: Vec<String>,
     truncated: bool,

@@ -63,8 +63,10 @@ pub(crate) fn is_js_whitespace(ch: char) -> bool {
     )
 }
 
+/// Trims leading and trailing ECMAScript whitespace (`WhiteSpace` and `LineTerminator`
+/// code points, including `\u{00A0}` and `\u{FEFF}`) matching TypeScript `String.prototype.trim`.
 #[must_use]
-pub(crate) fn trim_es_whitespace(s: &str) -> &str {
+pub fn trim_es_whitespace(s: &str) -> &str {
     s.trim_matches(is_js_whitespace)
 }
 
