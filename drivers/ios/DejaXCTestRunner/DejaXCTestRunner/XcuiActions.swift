@@ -466,18 +466,30 @@ final class XcuiActions {
         var consecutiveSameHash = 0
         var lastCapture: HierarchyCapture?
 
-        while true {
+        waitLoop: while true {
             if polls > 0 && Date() >= deadline {
                 break
             }
             polls += 1
-            if case .success(let capture) = captureHierarchy(appId: appId, includeSystemUi: includeSystemUi) {
+            switch captureHierarchy(appId: appId, includeSystemUi: includeSystemUi) {
+            case .success(let capture):
                 lastCapture = capture
-                if capture.hierarchyHash == lastHash && !lastHash.isEmpty {
+                if capture.truncated {
+                    // Truncated captures omit subtrees that may still be changing, so never
+                    // count them toward `waitStable` stability streaks.
+                    lastHash = ""
+                    consecutiveSameHash = 0
+                } else if capture.hierarchyHash == lastHash && !lastHash.isEmpty {
                     consecutiveSameHash += 1
                 } else {
                     lastHash = capture.hierarchyHash
                     consecutiveSameHash = 1
+                }
+
+                // Reject matches completed after a positive timeout budget expired, while
+                // preserving the single probe semantics for `timeoutMs == 0`.
+                if timeoutMs > 0 && Date() > deadline {
+                    break waitLoop
                 }
 
                 let (conditionMet, matchedNode) = evaluateWaitPredicate(
@@ -488,7 +500,7 @@ final class XcuiActions {
                     notVisible: notVisible
                 )
 
-                let stableMet = !waitStable || consecutiveSameHash >= stablePolls
+                let stableMet = !waitStable || (!capture.truncated && consecutiveSameHash >= stablePolls)
                 if conditionMet && stableMet {
                     var body: [String: Any] = [
                         "matched": true,
@@ -505,6 +517,9 @@ final class XcuiActions {
                     }
                     return HttpResponse.json(200, object: body)
                 }
+            case .failure:
+                lastHash = ""
+                consecutiveSameHash = 0
             }
 
             let remaining = deadline.timeIntervalSinceNow
@@ -552,7 +567,7 @@ final class XcuiActions {
         var delayMs = 15
         var lastError = "app did not reach running_foreground state with readable hierarchy"
 
-        while true {
+        warmupLoop: while true {
             if attempts > 0 && Date() >= deadline {
                 break
             }
@@ -561,6 +576,10 @@ final class XcuiActions {
             if app.state == .runningForeground {
                 switch captureHierarchy(appId: appId, includeSystemUi: includeSystemUi) {
                 case .success(let capture):
+                    if timeoutMs > 0 && Date() > deadline {
+                        lastError = "warmup snapshot finished after timeoutMs=\(timeoutMs)"
+                        break warmupLoop
+                    }
                     if capture.stateCode == 4 && capture.nodes.contains(where: { $0.source == "app" }) {
                         var body: [String: Any] = [
                             "ok": true,
@@ -813,7 +832,7 @@ final class XcuiActions {
                     retainedParentOrdinal: nil,
                     depth: 0,
                     source: "app",
-                    rootBounds: rootBounds,
+                    clipBounds: rootBounds,
                     parentInVolatileChrome: false,
                     nodes: &nodes,
                     truncated: &truncated,
@@ -836,7 +855,7 @@ final class XcuiActions {
                     retainedParentOrdinal: nil,
                     depth: 0,
                     source: "springboard",
-                    rootBounds: sbRootBounds,
+                    clipBounds: sbRootBounds,
                     parentInVolatileChrome: false,
                     nodes: &nodes,
                     truncated: &truncated,
@@ -1016,13 +1035,22 @@ final class XcuiActions {
         return false
     }
 
+    private func isClippingScrollContainer(_ elementType: XCUIElement.ElementType) -> Bool {
+        switch elementType {
+        case .scrollView, .table, .collectionView, .webView:
+            return true
+        default:
+            return false
+        }
+    }
+
     private func appendSnapshotTree(
         _ snapshot: XCUIElementSnapshot,
         parentIndex: Int?,
         retainedParentOrdinal: UInt64?,
         depth: Int,
         source: String,
-        rootBounds: CGRect,
+        clipBounds: CGRect,
         parentInVolatileChrome: Bool,
         nodes: inout [CapturedNode],
         truncated: inout Bool,
@@ -1038,10 +1066,20 @@ final class XcuiActions {
         let elementType = describeElementType(snapshot.elementType)
         let identifier = snapshot.identifier
         let rect = sanitizeRect(snapshot.frame)
+        let visibleIntersection = rect.intersection(clipBounds)
         let isOnScreen = rect.width > 0
             && rect.height > 0
-            && rect.intersects(rootBounds)
+            && !visibleIntersection.isNull
+            && visibleIntersection.width > 0
+            && visibleIntersection.height > 0
         let hittable = snapshot.isEnabled && isOnScreen
+
+        let childClipBounds: CGRect
+        if isClippingScrollContainer(snapshot.elementType) && rect.width > 0 && rect.height > 0 {
+            childClipBounds = visibleIntersection.isNull ? .zero : visibleIntersection
+        } else {
+            childClipBounds = clipBounds
+        }
 
         let inVolatileChrome = parentInVolatileChrome
             || isVolatileSystemChrome(source: source, elementType: elementType, identifier: identifier)
@@ -1102,7 +1140,7 @@ final class XcuiActions {
                 retainedParentOrdinal: myRetainedOrdinal,
                 depth: depth + 1,
                 source: source,
-                rootBounds: rootBounds,
+                clipBounds: childClipBounds,
                 parentInVolatileChrome: inVolatileChrome,
                 nodes: &nodes,
                 truncated: &truncated,
