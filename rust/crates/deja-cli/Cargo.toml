@@ -13,6 +13,10 @@ publish.workspace = true
 name = "deja"
 path = "src/main.rs"
 
+[[bin]]
+name = "deja-repo-check"
+path = "src/bin/deja_repo_check.rs"
+
 [lints]
 workspace = true
 
@@ -26,7 +30,6 @@ deja-explore.workspace = true
 deja-flow.workspace = true
 deja-mcp.workspace = true
 deja-store.workspace = true
-
-[dev-dependencies]
+regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
