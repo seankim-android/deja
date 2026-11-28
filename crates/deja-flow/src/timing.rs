@@ -1,7 +1,10 @@
 //! Phase and per-step latency telemetry primitives for flow execution and benchmarking.
 
+use serde::{Deserialize, Serialize};
+
 /// Timing record for a single executed flow step.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct StepTiming {
     pub step_index: usize,
     pub command: String,
@@ -11,7 +14,8 @@ pub struct StepTiming {
 }
 
 /// End-to-end phase timing breakdown for a single flow run.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RunTimingBreakdown {
     pub build_fingerprint_ms: u64,
     pub driver_attach_ms: u64,
@@ -38,7 +42,8 @@ impl RunTimingBreakdown {
 }
 
 /// Summary distribution statistics (`min`, `p50`, `p95`, `max`) in milliseconds.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct LatencyStats {
     pub count: usize,
     pub min_ms: f64,

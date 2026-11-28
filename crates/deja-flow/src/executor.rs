@@ -1,0 +1,3184 @@
+//! `maestro/v1` flow execution engine ([`FlowExecutor`]), scoped [`EnvStack`] interpolation,
+//! workspace-confined subflow/media/screenshot path resolution, lifecycle hooks, and telemetry.
+
+use std::collections::BTreeMap;
+use std::fs::{self, File};
+use std::future::Future;
+use std::io::Read;
+use std::path::{Component, Path, PathBuf};
+use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use deja_core::{
+    LaunchArgumentValue, MAX_DEPTH, MAX_FILE_BYTES, MAX_MEDIA_BYTES, ProviderKeyRedactor, Redactor,
+    WalkFailure, create_redactor, provider_key_redactor,
+};
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
+use tokio_util::sync::CancellationToken;
+use tracing::{debug, warn};
+
+use crate::backoff::{PollSchedule, SettleTracker};
+use crate::capabilities::{DriverCapability, VisibleContext};
+use crate::classifier::{
+    ClassificationInput, FailedStepContext, FailureClassifier, StepFailureKind,
+};
+use crate::driver::{
+    ActAction, ActPayload, DriverError, KeyPress, LaunchOptions, PlatformDriver, SwipeParams,
+    UiHierarchy, UiPoint, UiSize, WaitSelectorRequest, is_valid_hex_hash,
+};
+use crate::parser::{
+    AppTargetStep, AssertNotVisibleStep, AssertVisibleStep, Condition, EraseTextStep,
+    ExtendedWaitUntilStep, FlowParseError, FlowStep, InputTextStep, LaunchAppStep, OpenLinkStep,
+    ParsedFlow, PressKeyStep, RepeatStep, RetryStep, RunFlowStep, RunFlowTarget, ScrollDirection,
+    ScrollUntilVisibleStep, SwipeStep, TakeScreenshotStep, TapStep, WaitForAnimationToEndStep,
+    parse_flow,
+};
+use crate::selector::{self, CompiledSelector, Selector, build_visible_context};
+use crate::timing::{RunTimingBreakdown, StepTiming};
+
+/// Maximum byte length produced by a single `${VAR}` interpolation pass (64 KiB).
+pub const MAX_INTERPOLATED_BYTES: usize = 64 * 1024;
+
+/// Maximum iterations allowed for a `repeat` loop (`times` or `while`).
+pub const MAX_REPEAT_ITERATIONS: usize = 1_000;
+
+/// Maximum retries allowed for a `retry` block (`maxRetries`).
+pub const MAX_RETRIES: usize = 20;
+
+/// Maximum nested `runFlow` / `retry` file depth (matches `deja_core::MAX_DEPTH`).
+pub const MAX_FLOW_DEPTH: usize = MAX_DEPTH;
+
+/// Default timeout for selector resolution on actions and assertions.
+pub const DEFAULT_STEP_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Default timeout for `waitForAnimationToEnd`.
+pub const DEFAULT_ANIMATION_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Errors emitted internally during interpolation, confinement, or execution limits.
+#[derive(Debug, Error)]
+pub enum FlowExecutionError {
+    #[error("interpolated string exceeds maximum size of {limit} bytes")]
+    InterpolationLimitExceeded { limit: usize },
+
+    #[error("path confinement violation: {0}")]
+    PathConfinement(String),
+
+    #[error("execution limit exceeded: {0}")]
+    LimitExceeded(String),
+
+    #[error(transparent)]
+    Parse(#[from] FlowParseError),
+
+    #[error(transparent)]
+    Driver(#[from] DriverError),
+}
+
+/// Scoped environment variable stack supporting single-pass, non-recursive `${VAR}` interpolation.
+///
+/// Child frames pushed for `runFlow`/`retry` are popped on exit so child variables never leak
+/// back into the parent scope.
+#[derive(Debug, Clone, Default)]
+pub struct EnvStack {
+    frames: Vec<BTreeMap<String, String>>,
+}
+
+impl EnvStack {
+    pub fn new(base: BTreeMap<String, String>) -> Self {
+        Self { frames: vec![base] }
+    }
+
+    pub fn push(&mut self, frame: BTreeMap<String, String>) {
+        self.frames.push(frame);
+    }
+
+    pub fn pop(&mut self) -> Option<BTreeMap<String, String>> {
+        self.frames.pop()
+    }
+
+    pub fn get(&self, key: &str) -> Option<&str> {
+        for frame in self.frames.iter().rev() {
+            if let Some(val) = frame.get(key) {
+                return Some(val.as_str());
+            }
+        }
+        None
+    }
+
+    /// Flattens the stack into a single map (innermost frames shadow outer frames).
+    pub fn merged(&self) -> BTreeMap<String, String> {
+        let mut out = BTreeMap::new();
+        for frame in &self.frames {
+            for (k, v) in frame {
+                out.insert(k.clone(), v.clone());
+            }
+        }
+        out
+    }
+
+    /// Performs single-pass, non-recursive `${VAR}` interpolation over `input`.
+    ///
+    /// Only variable names matching `^[A-Za-z_][A-Za-z0-9_]*$` are eligible for substitution,
+    /// substituted values are never re-scanned, and output is capped at [`MAX_INTERPOLATED_BYTES`].
+    pub fn interpolate(&self, input: &str) -> Result<String, FlowExecutionError> {
+        let bytes = input.as_bytes();
+        let mut out = String::with_capacity(input.len().min(MAX_INTERPOLATED_BYTES));
+        let mut i = 0;
+
+        while i < bytes.len() {
+            if i + 1 < bytes.len() && bytes[i] == b'$' && bytes[i + 1] == b'{' {
+                let name_start = i + 2;
+                if let Some(rel_close) = input[name_start..].find('}') {
+                    let var_name = &input[name_start..name_start + rel_close];
+                    if is_valid_env_ident(var_name)
+                        && let Some(val) = self.get(var_name)
+                    {
+                        push_bounded(&mut out, val)?;
+                        i = name_start + rel_close + 1;
+                        continue;
+                    }
+                    // Unmatched or non-identifier `${...}`: emit literally and advance past `}`.
+                    let literal = &input[i..name_start + rel_close + 1];
+                    push_bounded(&mut out, literal)?;
+                    i = name_start + rel_close + 1;
+                    continue;
+                }
+            }
+            let ch = input[i..].chars().next().expect("valid UTF-8");
+            push_char_bounded(&mut out, ch)?;
+            i += ch.len_utf8();
+        }
+
+        Ok(out)
+    }
+
+    /// Interpolates every string field inside a [`Selector`] recursively.
+    pub fn interpolate_selector(
+        &self,
+        selector: &Selector,
+    ) -> Result<Selector, FlowExecutionError> {
+        let mut out = selector.clone();
+        if let Some(ref id) = selector.id {
+            out.id = Some(self.interpolate(id)?);
+        }
+        if let Some(ref text) = selector.text {
+            out.text = Some(self.interpolate(text)?);
+        }
+        if let Some(ref below) = selector.below {
+            out.below = Some(Box::new(self.interpolate_selector(below)?));
+        }
+        if let Some(ref above) = selector.above {
+            out.above = Some(Box::new(self.interpolate_selector(above)?));
+        }
+        if let Some(ref left_of) = selector.left_of {
+            out.left_of = Some(Box::new(self.interpolate_selector(left_of)?));
+        }
+        if let Some(ref right_of) = selector.right_of {
+            out.right_of = Some(Box::new(self.interpolate_selector(right_of)?));
+        }
+        if let Some(ref child_of) = selector.child_of {
+            out.child_of = Some(Box::new(self.interpolate_selector(child_of)?));
+        }
+        if let Some(ref contains_child) = selector.contains_child {
+            out.contains_child = Some(Box::new(self.interpolate_selector(contains_child)?));
+        }
+        if !selector.contains_descendants.is_empty() {
+            let mut descs = Vec::with_capacity(selector.contains_descendants.len());
+            for d in &selector.contains_descendants {
+                descs.push(self.interpolate_selector(d)?);
+            }
+            out.contains_descendants = descs;
+        }
+        Ok(out)
+    }
+}
+
+fn is_valid_env_ident(name: &str) -> bool {
+    let mut bytes = name.bytes();
+    let Some(first) = bytes.next() else {
+        return false;
+    };
+    (first.is_ascii_alphabetic() || first == b'_')
+        && bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_')
+}
+
+fn push_bounded(out: &mut String, s: &str) -> Result<(), FlowExecutionError> {
+    if out.len().saturating_add(s.len()) > MAX_INTERPOLATED_BYTES {
+        return Err(FlowExecutionError::InterpolationLimitExceeded {
+            limit: MAX_INTERPOLATED_BYTES,
+        });
+    }
+    out.push_str(s);
+    Ok(())
+}
+
+fn push_char_bounded(out: &mut String, ch: char) -> Result<(), FlowExecutionError> {
+    if out.len().saturating_add(ch.len_utf8()) > MAX_INTERPOLATED_BYTES {
+        return Err(FlowExecutionError::InterpolationLimitExceeded {
+            limit: MAX_INTERPOLATED_BYTES,
+        });
+    }
+    out.push(ch);
+    Ok(())
+}
+
+/// Configuration for [`FlowExecutor`].
+#[derive(Debug, Clone)]
+pub struct FlowExecutionConfig {
+    pub workspace_root: PathBuf,
+    pub flow_dir: Option<PathBuf>,
+    pub screenshot_dir: Option<PathBuf>,
+    pub app_id_override: Option<String>,
+    pub env: BTreeMap<String, String>,
+    pub default_step_timeout: Duration,
+    pub default_animation_timeout: Duration,
+    pub flow_timeout: Option<Duration>,
+    pub include_system_ui: bool,
+    pub redactor: Redactor,
+    pub provider_redactor: ProviderKeyRedactor,
+    pub raw_artifact_path: Option<String>,
+}
+
+impl FlowExecutionConfig {
+    pub fn new(workspace_root: PathBuf) -> Self {
+        let ws_str = workspace_root.to_string_lossy().into_owned();
+        Self {
+            workspace_root,
+            flow_dir: None,
+            screenshot_dir: None,
+            app_id_override: None,
+            env: BTreeMap::new(),
+            default_step_timeout: DEFAULT_STEP_TIMEOUT,
+            default_animation_timeout: DEFAULT_ANIMATION_TIMEOUT,
+            flow_timeout: None,
+            include_system_ui: false,
+            redactor: create_redactor(&ws_str, None, &[]),
+            provider_redactor: provider_key_redactor(std::iter::empty::<(&str, &str)>()),
+            raw_artifact_path: None,
+        }
+    }
+}
+
+/// Complete structured outcome of executing a `maestro/v1` flow.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FlowExecutionOutcome {
+    pub passed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_id: Option<String>,
+    pub duration_ms: u64,
+    pub timing: RunTimingBreakdown,
+    pub assertions_executed: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failed_step: Option<FailedStepContext>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<WalkFailure>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hook_errors: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub screenshots: Vec<PathBuf>,
+}
+
+/// Platform-neutral `maestro/v1` YAML flow executor.
+#[derive(Debug, Clone)]
+pub struct FlowExecutor {
+    config: FlowExecutionConfig,
+}
+
+struct TimeoutGuard {
+    handle: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl Drop for TimeoutGuard {
+    fn drop(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            handle.abort();
+        }
+    }
+}
+
+type StepResult<T = ()> = Result<T, Box<FailedStepContext>>;
+
+struct RuntimeState {
+    canonical_workspace: PathBuf,
+    env: EnvStack,
+    app_id: Option<String>,
+    step_counter: usize,
+    assertions_executed: u64,
+    timing: RunTimingBreakdown,
+    call_stack: Vec<PathBuf>,
+    last_hierarchy: Option<UiHierarchy>,
+    screenshots: Vec<PathBuf>,
+    hook_errors: Vec<String>,
+    run_started_epoch_ms: u64,
+}
+
+impl FlowExecutor {
+    pub fn new(config: FlowExecutionConfig) -> Self {
+        Self { config }
+    }
+
+    /// Parses and executes a `maestro/v1` YAML string.
+    pub async fn execute_yaml<D: PlatformDriver + ?Sized>(
+        &self,
+        driver: &D,
+        yaml: &str,
+        cancel: &CancellationToken,
+    ) -> FlowExecutionOutcome {
+        let started = Instant::now();
+        let canonical_workspace = match fs::canonicalize(&self.config.workspace_root) {
+            Ok(p) => p,
+            Err(err) => {
+                return self.early_error_outcome(
+                    started,
+                    "parseFlow",
+                    "Resolve workspace root",
+                    StepFailureKind::ParseOrConfinement,
+                    format!("cannot resolve workspace root: {err}"),
+                );
+            }
+        };
+
+        let parsed = match parse_flow(yaml) {
+            Ok(p) => p,
+            Err(err) => {
+                return self.early_error_outcome(
+                    started,
+                    "parseFlow",
+                    "Parse flow YAML",
+                    StepFailureKind::ParseOrConfinement,
+                    err.to_string(),
+                );
+            }
+        };
+
+        let flow_dir = self
+            .config
+            .flow_dir
+            .clone()
+            .and_then(|d| fs::canonicalize(d).ok())
+            .filter(|d| d == &canonical_workspace || d.starts_with(&canonical_workspace))
+            .unwrap_or_else(|| canonical_workspace.clone());
+
+        self.run_root_flow(
+            driver,
+            canonical_workspace,
+            flow_dir,
+            None,
+            parsed,
+            cancel,
+            started,
+        )
+        .await
+    }
+
+    /// Loads (with workspace confinement), parses, and executes a `maestro/v1` YAML file.
+    pub async fn execute_file<D: PlatformDriver + ?Sized>(
+        &self,
+        driver: &D,
+        flow_path: &Path,
+        cancel: &CancellationToken,
+    ) -> FlowExecutionOutcome {
+        let started = Instant::now();
+        let canonical_workspace = match fs::canonicalize(&self.config.workspace_root) {
+            Ok(p) => p,
+            Err(err) => {
+                return self.early_error_outcome(
+                    started,
+                    "parseFlow",
+                    "Resolve workspace root",
+                    StepFailureKind::ParseOrConfinement,
+                    format!("cannot resolve workspace root: {err}"),
+                );
+            }
+        };
+
+        let candidate = if flow_path.is_relative() {
+            canonical_workspace.join(flow_path)
+        } else {
+            flow_path.to_path_buf()
+        };
+        let canonical_file =
+            match confine_existing_file(&canonical_workspace, &candidate, MAX_FILE_BYTES, "flow") {
+                Ok(p) => p,
+                Err(err) => {
+                    return self.early_error_outcome(
+                        started,
+                        "parseFlow",
+                        "Load flow file",
+                        StepFailureKind::ParseOrConfinement,
+                        err.to_string(),
+                    );
+                }
+            };
+
+        let bytes = match read_bounded_file(&canonical_file, MAX_FILE_BYTES) {
+            Ok(b) => b,
+            Err(err) => {
+                return self.early_error_outcome(
+                    started,
+                    "parseFlow",
+                    "Read flow file",
+                    StepFailureKind::ParseOrConfinement,
+                    err.to_string(),
+                );
+            }
+        };
+        let yaml = String::from_utf8_lossy(&bytes);
+        let parsed = match parse_flow(&yaml) {
+            Ok(p) => p,
+            Err(err) => {
+                return self.early_error_outcome(
+                    started,
+                    "parseFlow",
+                    "Parse flow YAML",
+                    StepFailureKind::ParseOrConfinement,
+                    err.to_string(),
+                );
+            }
+        };
+
+        let flow_dir = canonical_file
+            .parent()
+            .unwrap_or(&canonical_workspace)
+            .to_path_buf();
+
+        self.run_root_flow(
+            driver,
+            canonical_workspace,
+            flow_dir,
+            Some(canonical_file),
+            parsed,
+            cancel,
+            started,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn run_root_flow<D: PlatformDriver + ?Sized>(
+        &self,
+        driver: &D,
+        canonical_workspace: PathBuf,
+        flow_dir: PathBuf,
+        root_file: Option<PathBuf>,
+        parsed: ParsedFlow,
+        parent_cancel: &CancellationToken,
+        started: Instant,
+    ) -> FlowExecutionOutcome {
+        let child_cancel = parent_cancel.child_token();
+        let timed_out = Arc::new(AtomicBool::new(false));
+        let _timeout_guard = if let Some(limit) = self.config.flow_timeout {
+            let cancel_clone = child_cancel.clone();
+            let flag = Arc::clone(&timed_out);
+            let handle = tokio::spawn(async move {
+                tokio::time::sleep(limit).await;
+                flag.store(true, Ordering::SeqCst);
+                cancel_clone.cancel();
+            });
+            TimeoutGuard {
+                handle: Some(handle),
+            }
+        } else {
+            TimeoutGuard { handle: None }
+        };
+
+        let run_started_epoch_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+
+        let mut state = RuntimeState {
+            canonical_workspace,
+            env: EnvStack::new(self.config.env.clone()),
+            app_id: self
+                .config
+                .app_id_override
+                .clone()
+                .or_else(|| parsed.header.app_id.clone()),
+            step_counter: 0,
+            assertions_executed: 0,
+            timing: RunTimingBreakdown::default(),
+            call_stack: root_file.into_iter().collect(),
+            last_hierarchy: None,
+            screenshots: Vec::new(),
+            hook_errors: Vec::new(),
+            run_started_epoch_ms,
+        };
+
+        let exec_started = Instant::now();
+        let result = match driver.ensure_session(&child_cancel).await {
+            Ok(()) => {
+                self.execute_parsed_flow(driver, &parsed, &flow_dir, &mut state, &child_cancel)
+                    .await
+            }
+            Err(err) => Err(self.driver_err_to_failed_step(
+                0,
+                "ensureSession",
+                "Ensure driver session".to_string(),
+                err,
+            )),
+        };
+        let flow_exec_ms = exec_started.elapsed().as_millis() as u64;
+        let total_ms = started.elapsed().as_millis() as u64;
+        state.timing.flow_exec_ms = flow_exec_ms;
+        state.timing.total_ms = total_ms;
+
+        let did_time_out = timed_out.load(Ordering::SeqCst) && !parent_cancel.is_cancelled();
+
+        match result {
+            Ok(()) if !did_time_out => FlowExecutionOutcome {
+                passed: true,
+                app_id: state.app_id,
+                duration_ms: total_ms,
+                timing: state.timing,
+                assertions_executed: state.assertions_executed,
+                failed_step: None,
+                failure: None,
+                hook_errors: state.hook_errors,
+                screenshots: state.screenshots,
+            },
+            Ok(()) => {
+                let failed_step = FailedStepContext {
+                    step_index: state.step_counter,
+                    command: "flow".to_string(),
+                    label: "Flow timeout".to_string(),
+                    kind: StepFailureKind::Timeout,
+                    message: "flow exceeded configured timeout".to_string(),
+                    visible_context: None,
+                    crash_signal: None,
+                };
+                let failure = FailureClassifier::classify(&ClassificationInput {
+                    passed: false,
+                    timed_out: true,
+                    failed_step: Some(&failed_step),
+                    crash_signal: None,
+                    raw_artifact_path: self.config.raw_artifact_path.clone(),
+                });
+                FlowExecutionOutcome {
+                    passed: false,
+                    app_id: state.app_id,
+                    duration_ms: total_ms,
+                    timing: state.timing,
+                    assertions_executed: state.assertions_executed,
+                    failed_step: Some(failed_step),
+                    failure,
+                    hook_errors: state.hook_errors,
+                    screenshots: state.screenshots,
+                }
+            }
+            Err(mut failed_step) => {
+                if did_time_out && failed_step.kind == StepFailureKind::Cancelled {
+                    failed_step.kind = StepFailureKind::Timeout;
+                    failed_step.message = "flow exceeded configured timeout".to_string();
+                }
+
+                // Check OS/driver crash signal on non-cancelled, non-parse, non-unsupported failures.
+                if !did_time_out
+                    && failed_step.crash_signal.is_none()
+                    && !matches!(
+                        failed_step.kind,
+                        StepFailureKind::Cancelled
+                            | StepFailureKind::UnsupportedCapability
+                            | StepFailureKind::ParseOrConfinement
+                            | StepFailureKind::LimitExceeded
+                    )
+                    && driver
+                        .capabilities()
+                        .supports(DriverCapability::AppCrashReports)
+                    && let Some(ref app_id) = state.app_id
+                {
+                    let fresh_cancel = CancellationToken::new();
+                    if let Ok(Some(sig)) = driver
+                        .check_app_crash(app_id, state.run_started_epoch_ms, &fresh_cancel)
+                        .await
+                    {
+                        failed_step.crash_signal = Some(sig);
+                    }
+                }
+
+                let failure = FailureClassifier::classify(&ClassificationInput {
+                    passed: false,
+                    timed_out: did_time_out,
+                    failed_step: Some(&failed_step),
+                    crash_signal: failed_step.crash_signal.as_ref(),
+                    raw_artifact_path: self.config.raw_artifact_path.clone(),
+                });
+
+                FlowExecutionOutcome {
+                    passed: false,
+                    app_id: state.app_id,
+                    duration_ms: total_ms,
+                    timing: state.timing,
+                    assertions_executed: state.assertions_executed,
+                    failed_step: Some(*failed_step),
+                    failure,
+                    hook_errors: state.hook_errors,
+                    screenshots: state.screenshots,
+                }
+            }
+        }
+    }
+
+    fn early_error_outcome(
+        &self,
+        started: Instant,
+        command: &str,
+        label: &str,
+        kind: StepFailureKind,
+        message: String,
+    ) -> FlowExecutionOutcome {
+        let elapsed = started.elapsed().as_millis() as u64;
+        let failed_step = FailedStepContext {
+            step_index: 0,
+            command: command.to_string(),
+            label: label.to_string(),
+            kind,
+            message: self.scrub(&message),
+            visible_context: None,
+            crash_signal: None,
+        };
+        let failure = FailureClassifier::classify(&ClassificationInput {
+            passed: false,
+            timed_out: false,
+            failed_step: Some(&failed_step),
+            crash_signal: None,
+            raw_artifact_path: self.config.raw_artifact_path.clone(),
+        });
+        FlowExecutionOutcome {
+            passed: false,
+            app_id: self.config.app_id_override.clone(),
+            duration_ms: elapsed,
+            timing: RunTimingBreakdown {
+                total_ms: elapsed,
+                ..RunTimingBreakdown::default()
+            },
+            assertions_executed: 0,
+            failed_step: Some(failed_step),
+            failure,
+            hook_errors: Vec::new(),
+            screenshots: Vec::new(),
+        }
+    }
+
+    fn scrub(&self, text: &str) -> String {
+        self.config
+            .provider_redactor
+            .redact(&self.config.redactor.redact(text))
+    }
+
+    fn execute_parsed_flow<'a, D: PlatformDriver + ?Sized>(
+        &'a self,
+        driver: &'a D,
+        flow: &'a ParsedFlow,
+        flow_dir: &'a Path,
+        state: &'a mut RuntimeState,
+        cancel: &'a CancellationToken,
+    ) -> Pin<Box<dyn Future<Output = StepResult> + Send + 'a>> {
+        Box::pin(async move {
+            // Push header env frame (interpolated in parent scope).
+            let mut header_env = BTreeMap::new();
+            for (k, v) in &flow.header.env {
+                let interp = state.env.interpolate(v).map_err(|err| FailedStepContext {
+                    step_index: state.step_counter,
+                    command: "env".to_string(),
+                    label: format!("Interpolate header env `{k}`"),
+                    kind: StepFailureKind::LimitExceeded,
+                    message: self.scrub(&err.to_string()),
+                    visible_context: None,
+                    crash_signal: None,
+                })?;
+                header_env.insert(k.clone(), interp);
+            }
+            let pushed_header_env = !header_env.is_empty();
+            if pushed_header_env {
+                state.env.push(header_env);
+            }
+
+            // Preserve parent app_id if header overrides it only for this flow scope.
+            let prev_app_id = state.app_id.clone();
+            if let Some(ref hdr_app) = flow.header.app_id
+                && (prev_app_id.is_none() || state.call_stack.len() > 1)
+            {
+                let resolved = state
+                    .env
+                    .interpolate(hdr_app)
+                    .unwrap_or_else(|_| hdr_app.clone());
+                state.app_id = Some(resolved);
+            }
+
+            // 1. onFlowStart -> 2. main steps.
+            let mut primary_result = self
+                .execute_steps(driver, &flow.header.on_flow_start, flow_dir, state, cancel)
+                .await;
+            if primary_result.is_ok() {
+                primary_result = self
+                    .execute_steps(driver, &flow.steps, flow_dir, state, cancel)
+                    .await;
+            }
+
+            // 3. onFlowComplete acts like `finally` on non-cancelled runs, preserving primary error.
+            if !cancel.is_cancelled() && !flow.header.on_flow_complete.is_empty() {
+                let complete_result = self
+                    .execute_steps(
+                        driver,
+                        &flow.header.on_flow_complete,
+                        flow_dir,
+                        state,
+                        cancel,
+                    )
+                    .await;
+                if let Err(hook_err) = complete_result {
+                    if primary_result.is_err() {
+                        warn!(
+                            command = %hook_err.command,
+                            "onFlowComplete hook failed after primary flow failure; preserving primary error"
+                        );
+                        state
+                            .hook_errors
+                            .push(format!("{}: {}", hook_err.label, hook_err.message));
+                    } else {
+                        primary_result = Err(hook_err);
+                    }
+                }
+            }
+
+            if prev_app_id.is_some() && state.call_stack.len() > 1 {
+                state.app_id = prev_app_id;
+            }
+            if pushed_header_env {
+                state.env.pop();
+            }
+
+            primary_result
+        })
+    }
+
+    fn execute_steps<'a, D: PlatformDriver + ?Sized>(
+        &'a self,
+        driver: &'a D,
+        steps: &'a [FlowStep],
+        flow_dir: &'a Path,
+        state: &'a mut RuntimeState,
+        cancel: &'a CancellationToken,
+    ) -> Pin<Box<dyn Future<Output = StepResult> + Send + 'a>> {
+        Box::pin(async move {
+            for step in steps {
+                if cancel.is_cancelled() {
+                    return Err(Box::new(FailedStepContext {
+                        step_index: state.step_counter,
+                        command: step.command_name().to_string(),
+                        label: step.display_label(),
+                        kind: StepFailureKind::Cancelled,
+                        message: "flow execution cancelled".to_string(),
+                        visible_context: None,
+                        crash_signal: None,
+                    }));
+                }
+                self.execute_step(driver, step, flow_dir, state, cancel)
+                    .await?;
+            }
+            Ok(())
+        })
+    }
+
+    fn execute_step<'a, D: PlatformDriver + ?Sized>(
+        &'a self,
+        driver: &'a D,
+        step: &'a FlowStep,
+        flow_dir: &'a Path,
+        state: &'a mut RuntimeState,
+        cancel: &'a CancellationToken,
+    ) -> Pin<Box<dyn Future<Output = StepResult> + Send + 'a>> {
+        Box::pin(async move {
+            match step {
+                FlowStep::RunFlow(s) => {
+                    return self.exec_run_flow(driver, s, flow_dir, state, cancel).await;
+                }
+                FlowStep::Repeat(s) => {
+                    return self.exec_repeat(driver, s, flow_dir, state, cancel).await;
+                }
+                FlowStep::Retry(s) => {
+                    return self.exec_retry(driver, s, flow_dir, state, cancel).await;
+                }
+                _ => {}
+            }
+
+            let step_index = state.step_counter;
+            state.step_counter = state.step_counter.saturating_add(1);
+            let command = step.command_name();
+            let started = Instant::now();
+            let mut settled_early = false;
+
+            let res = match step {
+                FlowStep::LaunchApp(s) => {
+                    self.exec_launch_app(driver, s, step_index, state, cancel)
+                        .await
+                }
+                FlowStep::StopApp(s) => {
+                    self.exec_app_lifecycle(driver, s, "stopApp", step_index, state, cancel)
+                        .await
+                }
+                FlowStep::KillApp(s) => {
+                    self.exec_app_lifecycle(driver, s, "killApp", step_index, state, cancel)
+                        .await
+                }
+                FlowStep::ClearState(s) => {
+                    self.exec_app_lifecycle(driver, s, "clearState", step_index, state, cancel)
+                        .await
+                }
+                FlowStep::ClearKeychain => {
+                    self.exec_clear_keychain(driver, step_index, cancel).await
+                }
+                FlowStep::OpenLink(s) => {
+                    self.exec_open_link(driver, s, step_index, state, cancel)
+                        .await
+                }
+                FlowStep::AddMedia(s) => {
+                    self.exec_add_media(driver, s, flow_dir, step_index, state, cancel)
+                        .await
+                }
+                FlowStep::TapOn(s) => self
+                    .exec_tap(driver, s, TapKind::Tap, step_index, state, cancel)
+                    .await
+                    .map(|early| settled_early = early),
+                FlowStep::LongPressOn(s) => self
+                    .exec_tap(driver, s, TapKind::LongPress, step_index, state, cancel)
+                    .await
+                    .map(|early| settled_early = early),
+                FlowStep::DoubleTapOn(s) => self
+                    .exec_tap(driver, s, TapKind::DoubleTap, step_index, state, cancel)
+                    .await
+                    .map(|early| settled_early = early),
+                FlowStep::InputText(s) => {
+                    self.exec_input_text(driver, s, step_index, state, cancel)
+                        .await
+                }
+                FlowStep::EraseText(s) => {
+                    self.exec_erase_text(driver, s, step_index, state, cancel)
+                        .await
+                }
+                FlowStep::PressKey(s) => {
+                    self.exec_press_key(driver, s, step_index, state, cancel)
+                        .await
+                }
+                FlowStep::HideKeyboard => {
+                    self.exec_hide_keyboard(driver, step_index, state, cancel)
+                        .await
+                }
+                FlowStep::Scroll => self.exec_scroll(driver, step_index, state, cancel).await,
+                FlowStep::ScrollUntilVisible(s) => self
+                    .exec_scroll_until_visible(driver, s, step_index, state, cancel)
+                    .await
+                    .map(|early| settled_early = early),
+                FlowStep::Swipe(s) => self.exec_swipe(driver, s, step_index, state, cancel).await,
+                FlowStep::WaitForAnimationToEnd(s) => self
+                    .exec_wait_animation(driver, s, step_index, state, cancel)
+                    .await
+                    .map(|early| settled_early = early),
+                FlowStep::TakeScreenshot(s) => {
+                    self.exec_take_screenshot(driver, s, step_index, state, cancel)
+                        .await
+                }
+                FlowStep::Back => self.exec_back(driver, step_index, state, cancel).await,
+                FlowStep::AssertVisible(s) => {
+                    state.assertions_executed = state.assertions_executed.saturating_add(1);
+                    self.exec_assert_visible(driver, s, step_index, state, cancel)
+                        .await
+                        .map(|early| settled_early = early)
+                }
+                FlowStep::AssertNotVisible(s) => {
+                    state.assertions_executed = state.assertions_executed.saturating_add(1);
+                    self.exec_assert_not_visible(driver, s, step_index, state, cancel)
+                        .await
+                        .map(|early| settled_early = early)
+                }
+                FlowStep::ExtendedWaitUntil(s) => self
+                    .exec_extended_wait(driver, s, step_index, state, cancel)
+                    .await
+                    .map(|early| settled_early = early),
+                FlowStep::RunFlow(_) | FlowStep::Repeat(_) | FlowStep::Retry(_) => unreachable!(),
+            };
+
+            state.timing.steps.push(StepTiming {
+                step_index,
+                command: command.to_string(),
+                duration_ms: started.elapsed().as_millis() as u64,
+                retries: 0,
+                settled_early,
+            });
+
+            res
+        })
+    }
+
+    fn resolve_app_id(
+        &self,
+        override_id: Option<&str>,
+        state: &RuntimeState,
+        step_index: usize,
+        command: &str,
+    ) -> StepResult<String> {
+        if let Some(raw) = override_id {
+            let interpolated = state
+                .env
+                .interpolate(raw)
+                .map_err(|err| FailedStepContext {
+                    step_index,
+                    command: command.to_string(),
+                    label: format!("{command} (interpolate appId)"),
+                    kind: StepFailureKind::LimitExceeded,
+                    message: self.scrub(&err.to_string()),
+                    visible_context: None,
+                    crash_signal: None,
+                })?;
+            return Ok(interpolated);
+        }
+        if let Some(ref current) = state.app_id {
+            return Ok(current.clone());
+        }
+        Err(Box::new(FailedStepContext {
+            step_index,
+            command: command.to_string(),
+            label: command.to_string(),
+            kind: StepFailureKind::ParseOrConfinement,
+            message: format!("`{command}` requires an `appId` in header or step parameters"),
+            visible_context: None,
+            crash_signal: None,
+        }))
+    }
+
+    fn require_capability<D: PlatformDriver + ?Sized>(
+        &self,
+        driver: &D,
+        cap: DriverCapability,
+        reason: &str,
+        step_index: usize,
+        command: &str,
+        label: String,
+    ) -> StepResult {
+        driver
+            .capabilities()
+            .require(cap, driver.platform(), reason)
+            .map_err(|err| {
+                Box::new(FailedStepContext {
+                    step_index,
+                    command: command.to_string(),
+                    label,
+                    kind: StepFailureKind::UnsupportedCapability,
+                    message: self.scrub(&err.to_string()),
+                    visible_context: None,
+                    crash_signal: None,
+                })
+            })
+    }
+
+    fn driver_err_to_failed_step(
+        &self,
+        step_index: usize,
+        command: &str,
+        label: String,
+        err: DriverError,
+    ) -> Box<FailedStepContext> {
+        let (kind, crash_signal) = match &err {
+            DriverError::Cancelled => (StepFailureKind::Cancelled, None),
+            DriverError::Unsupported(_) => (StepFailureKind::UnsupportedCapability, None),
+            DriverError::Timeout { .. } => (StepFailureKind::Timeout, None),
+            DriverError::LaunchFailed { .. } | DriverError::NavigationFailed { .. } => {
+                (StepFailureKind::NavigationFailed, None)
+            }
+            DriverError::AppCrashed(sig) => (StepFailureKind::AppCrash, Some(sig.clone())),
+            DriverError::Transport { .. } | DriverError::SessionClosed(_) => {
+                (StepFailureKind::Transport, None)
+            }
+            DriverError::InvalidArgument(_) => (StepFailureKind::ParseOrConfinement, None),
+            DriverError::Io(_) => (StepFailureKind::Transport, None),
+        };
+        Box::new(FailedStepContext {
+            step_index,
+            command: command.to_string(),
+            label,
+            kind,
+            message: self.scrub(&err.to_string()),
+            visible_context: None,
+            crash_signal,
+        })
+    }
+
+    async fn exec_launch_app<D: PlatformDriver + ?Sized>(
+        &self,
+        driver: &D,
+        step: &LaunchAppStep,
+        step_index: usize,
+        state: &mut RuntimeState,
+        cancel: &CancellationToken,
+    ) -> StepResult {
+        let app_id = self.resolve_app_id(step.app_id.as_deref(), state, step_index, "launchApp")?;
+        let label = format!("Launch app \"{app_id}\"");
+
+        if step.clear_state {
+            self.require_capability(
+                driver,
+                DriverCapability::ClearState,
+                "launchApp with clearState requires ClearState capability",
+                step_index,
+                "launchApp",
+                label.clone(),
+            )?;
+        }
+        if step.clear_keychain {
+            self.require_capability(
+                driver,
+                DriverCapability::ClearKeychain,
+                "launchApp with clearKeychain requires ClearKeychain capability",
+                step_index,
+                "launchApp",
+                label.clone(),
+            )?;
+        }
+
+        let mut args = BTreeMap::new();
+        for (k, v) in &step.arguments {
+            let resolved_v = match v {
+                LaunchArgumentValue::String(s) => {
+                    let interp = state.env.interpolate(s).map_err(|err| FailedStepContext {
+                        step_index,
+                        command: "launchApp".to_string(),
+                        label: label.clone(),
+                        kind: StepFailureKind::LimitExceeded,
+                        message: self.scrub(&err.to_string()),
+                        visible_context: None,
+                        crash_signal: None,
+                    })?;
+                    LaunchArgumentValue::String(interp)
+                }
+                other => other.clone(),
+            };
+            args.insert(k.clone(), resolved_v);
+        }
+
+        let opts = LaunchOptions {
+            clear_state: step.clear_state,
+            clear_keychain: step.clear_keychain,
+            stop_app: step.stop_app,
+            permissions: step.permissions.clone(),
+            arguments: args,
+            env: state.env.merged(),
+        };
+
+        driver
+            .launch_app(&app_id, &opts, cancel)
+            .await
+            .map_err(|err| self.driver_err_to_failed_step(step_index, "launchApp", label, err))?;
+
+        state.app_id = Some(app_id);
+        state.last_hierarchy = None;
+        Ok(())
+    }
+
+    async fn exec_app_lifecycle<D: PlatformDriver + ?Sized>(
+        &self,
+        driver: &D,
+        step: &AppTargetStep,
+        command: &str,
+        step_index: usize,
+        state: &mut RuntimeState,
+        cancel: &CancellationToken,
+    ) -> StepResult {
+        let app_id = self.resolve_app_id(step.app_id.as_deref(), state, step_index, command)?;
+        let label = format!("{command} \"{app_id}\"");
+
+        if command == "clearState" {
+            self.require_capability(
+                driver,
+                DriverCapability::ClearState,
+                "clearState requires ClearState capability",
+                step_index,
+                command,
+                label.clone(),
+            )?;
+        }
+
+        let res = match command {
+            "stopApp" => driver.stop_app(&app_id, cancel).await,
+            "killApp" => driver.kill_app(&app_id, cancel).await,
+            "clearState" => driver.clear_state(&app_id, cancel).await,
+            _ => unreachable!(),
+        };
+        res.map_err(|err| self.driver_err_to_failed_step(step_index, command, label, err))?;
+        state.last_hierarchy = None;
+        Ok(())
+    }
+
+    async fn exec_clear_keychain<D: PlatformDriver + ?Sized>(
+        &self,
+        driver: &D,
+        step_index: usize,
+        cancel: &CancellationToken,
+    ) -> StepResult {
+        let label = "Clear keychain".to_string();
+        self.require_capability(
+            driver,
+            DriverCapability::ClearKeychain,
+            "clearKeychain is not supported on this platform",
+            step_index,
+            "clearKeychain",
+            label.clone(),
+        )?;
+        driver
+            .clear_keychain(cancel)
+            .await
+            .map_err(|err| self.driver_err_to_failed_step(step_index, "clearKeychain", label, err))
+    }
+
+    async fn exec_open_link<D: PlatformDriver + ?Sized>(
+        &self,
+        driver: &D,
+        step: &OpenLinkStep,
+        step_index: usize,
+        state: &mut RuntimeState,
+        cancel: &CancellationToken,
+    ) -> StepResult {
+        let url = state
+            .env
+            .interpolate(&step.link)
+            .map_err(|err| FailedStepContext {
+                step_index,
+                command: "openLink".to_string(),
+                label: "Open link".to_string(),
+                kind: StepFailureKind::LimitExceeded,
+                message: self.scrub(&err.to_string()),
+                visible_context: None,
+                crash_signal: None,
+            })?;
+        let label = format!("Open link \"{}\"", self.scrub(&url));
+        driver
+            .open_link(state.app_id.as_deref(), &url, cancel)
+            .await
+            .map_err(|err| self.driver_err_to_failed_step(step_index, "openLink", label, err))?;
+        state.last_hierarchy = None;
+        Ok(())
+    }
+
+    async fn exec_add_media<D: PlatformDriver + ?Sized>(
+        &self,
+        driver: &D,
+        step: &crate::parser::AddMediaStep,
+        flow_dir: &Path,
+        step_index: usize,
+        state: &RuntimeState,
+        cancel: &CancellationToken,
+    ) -> StepResult {
+        let label = format!("Add media ({} file(s))", step.files.len());
+        let mut resolved = Vec::with_capacity(step.files.len());
+        for raw_path in &step.files {
+            let confined = confine_relative_read_path(
+                &state.canonical_workspace,
+                flow_dir,
+                raw_path,
+                MAX_MEDIA_BYTES,
+                "media",
+            )
+            .map_err(|err| FailedStepContext {
+                step_index,
+                command: "addMedia".to_string(),
+                label: label.clone(),
+                kind: StepFailureKind::ParseOrConfinement,
+                message: self.scrub(&err.to_string()),
+                visible_context: None,
+                crash_signal: None,
+            })?;
+            resolved.push(confined);
+        }
+        driver
+            .add_media(&resolved, cancel)
+            .await
+            .map_err(|err| self.driver_err_to_failed_step(step_index, "addMedia", label, err))
+    }
+
+    async fn dispatch_action<D: PlatformDriver + ?Sized>(
+        &self,
+        driver: &D,
+        app_id: &str,
+        action: ActAction,
+        state: &mut RuntimeState,
+        cancel: &CancellationToken,
+    ) -> Result<(), DriverError> {
+        if driver
+            .capabilities()
+            .supports(DriverCapability::CompoundAct)
+        {
+            let known_hash = state
+                .last_hierarchy
+                .as_ref()
+                .map(UiHierarchy::hierarchy_hash_hex);
+            let payload = ActPayload {
+                app_id: app_id.to_string(),
+                action,
+                post_action_delay_ms: None,
+                return_hierarchy: driver
+                    .capabilities()
+                    .supports(DriverCapability::AccessibilityTree),
+                include_system_ui: self.config.include_system_ui,
+                known_hash,
+            };
+            let outcome = driver.act_and_observe(&payload, cancel).await?;
+            if let Some(h) = outcome.hierarchy {
+                if !h.unchanged {
+                    state.last_hierarchy = Some(h);
+                }
+            } else if outcome.hierarchy_error.is_some() {
+                state.last_hierarchy = None;
+            }
+            return Ok(());
+        }
+
+        match action {
+            ActAction::Tap { x, y } => driver.tap_point(app_id, UiPoint::new(x, y), cancel).await?,
+            ActAction::LongPress { x, y, duration_ms } => {
+                driver
+                    .long_press_point(app_id, UiPoint::new(x, y), duration_ms, cancel)
+                    .await?;
+            }
+            ActAction::DoubleTap { x, y } => {
+                driver
+                    .double_tap_point(app_id, UiPoint::new(x, y), cancel)
+                    .await?;
+            }
+            ActAction::Swipe {
+                start,
+                end,
+                duration_ms,
+                hold_duration_ms,
+            } => {
+                driver
+                    .swipe(
+                        &SwipeParams {
+                            app_id: app_id.to_string(),
+                            start,
+                            end,
+                            duration_ms,
+                            hold_duration_ms,
+                        },
+                        cancel,
+                    )
+                    .await?;
+            }
+            ActAction::InputText { text } => driver.input_text(app_id, &text, cancel).await?,
+            ActAction::EraseText { count } => driver.erase_text(app_id, count, cancel).await?,
+            ActAction::PressKey {
+                key,
+                modifiers,
+                count,
+            } => {
+                driver
+                    .press_key(
+                        app_id,
+                        &KeyPress {
+                            key,
+                            modifiers,
+                            count,
+                        },
+                        cancel,
+                    )
+                    .await?;
+            }
+            ActAction::HideKeyboard => driver.hide_keyboard(app_id, cancel).await?,
+            ActAction::Back => driver.back(app_id, cancel).await?,
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn wait_selector<D: PlatformDriver + ?Sized>(
+        &self,
+        driver: &D,
+        app_id: &str,
+        selector: Selector,
+        not_visible: bool,
+        timeout: Duration,
+        state: &mut RuntimeState,
+        cancel: &CancellationToken,
+    ) -> Result<crate::driver::WaitSelectorOutcome, DriverError> {
+        let req = WaitSelectorRequest {
+            app_id: app_id.to_string(),
+            selector: selector.clone(),
+            not_visible,
+            wait_stable: false,
+            stable_polls: 2,
+            timeout,
+            include_system_ui: self.config.include_system_ui,
+            return_hierarchy: true,
+            initial_hierarchy: state.last_hierarchy.clone(),
+            redactor: Some(self.config.redactor.clone()),
+            provider_redactor: Some(self.config.provider_redactor.clone()),
+        };
+
+        // Regex, relational, indexed, and state-filtered selectors ALWAYS execute locally.
+        let outcome = if driver
+            .capabilities()
+            .supports(DriverCapability::ServerSideWait)
+            && selector.is_simple_literal_for_server_wait()
+        {
+            driver.wait_for_selector(&req, cancel).await?
+        } else {
+            selector::wait_local(driver, &req, cancel).await?
+        };
+
+        if let Some(ref h) = outcome.hierarchy
+            && !h.unchanged
+        {
+            state.last_hierarchy = Some(h.clone());
+        }
+        Ok(outcome)
+    }
+
+    async fn fetch_fresh_hierarchy<D: PlatformDriver + ?Sized>(
+        &self,
+        driver: &D,
+        app_id: &str,
+        state: &mut RuntimeState,
+        cancel: &CancellationToken,
+    ) -> Result<UiHierarchy, DriverError> {
+        let known_hash = state
+            .last_hierarchy
+            .as_ref()
+            .filter(|h| !h.unchanged)
+            .map(|h| {
+                if is_valid_hex_hash(&h.hierarchy_hash) {
+                    h.hierarchy_hash.to_ascii_lowercase()
+                } else {
+                    h.hierarchy_hash_hex()
+                }
+            });
+        let resp = driver
+            .hierarchy(
+                app_id,
+                self.config.include_system_ui,
+                known_hash.as_deref(),
+                cancel,
+            )
+            .await?;
+
+        if resp.unchanged {
+            if let Some(ref cached) = state.last_hierarchy {
+                return Ok(cached.clone());
+            }
+            // No cached nodes yet; re-fetch uncached.
+            let fresh = driver
+                .hierarchy(app_id, self.config.include_system_ui, None, cancel)
+                .await?;
+            if !fresh.unchanged {
+                state.last_hierarchy = Some(fresh.clone());
+            }
+            return Ok(fresh);
+        }
+
+        state.last_hierarchy = Some(resp.clone());
+        Ok(resp)
+    }
+
+    async fn exec_tap<D: PlatformDriver + ?Sized>(
+        &self,
+        driver: &D,
+        step: &TapStep,
+        kind: TapKind,
+        step_index: usize,
+        state: &mut RuntimeState,
+        cancel: &CancellationToken,
+    ) -> StepResult<bool> {
+        let command = kind.command_name();
+        let app_id = self.resolve_app_id(None, state, step_index, command)?;
+        let selector = state
+            .env
+            .interpolate_selector(&step.selector)
+            .map_err(|err| FailedStepContext {
+                step_index,
+                command: command.to_string(),
+                label: step.label.clone().unwrap_or_else(|| command.to_string()),
+                kind: StepFailureKind::LimitExceeded,
+                message: self.scrub(&err.to_string()),
+                visible_context: None,
+                crash_signal: None,
+            })?;
+        let label = step
+            .label
+            .clone()
+            .unwrap_or_else(|| format!("{} {}", kind.label_prefix(), selector.describe()));
+
+        let mut settled_early = false;
+        let target_point = if selector.has_element_criteria() {
+            self.require_capability(
+                driver,
+                DriverCapability::AccessibilityTree,
+                "selector-based tap requires AccessibilityTree capability",
+                step_index,
+                command,
+                label.clone(),
+            )?;
+
+            let wait = self
+                .wait_selector(
+                    driver,
+                    &app_id,
+                    selector.clone(),
+                    false,
+                    self.config.default_step_timeout,
+                    state,
+                    cancel,
+                )
+                .await
+                .map_err(|err| {
+                    self.driver_err_to_failed_step(step_index, command, label.clone(), err)
+                })?;
+            settled_early = wait.settled_early;
+
+            let Some(node) = wait.matched_node else {
+                if selector.optional {
+                    debug!(command, selector = %selector.describe(), "skipping optional tap miss");
+                    return Ok(false);
+                }
+                return Err(Box::new(FailedStepContext {
+                    step_index,
+                    command: command.to_string(),
+                    label,
+                    kind: StepFailureKind::SelectorNotFound,
+                    message: self.scrub(&format!(
+                        "element not found for {}: {}",
+                        selector.describe(),
+                        wait.visible_context.format_summary()
+                    )),
+                    visible_context: Some(wait.visible_context),
+                    crash_signal: None,
+                }));
+            };
+
+            if let Some(rel_point) = selector.point {
+                let offset = rel_point.resolve(UiSize::new(node.frame.width, node.frame.height));
+                UiPoint::new(node.frame.x + offset.x, node.frame.y + offset.y)
+            } else {
+                node.frame.center()
+            }
+        } else if let Some(pt_spec) = selector.point {
+            let viewport = if let Some(ref h) = state.last_hierarchy {
+                h.effective_viewport()
+            } else if driver
+                .capabilities()
+                .supports(DriverCapability::AccessibilityTree)
+            {
+                self.fetch_fresh_hierarchy(driver, &app_id, state, cancel)
+                    .await
+                    .map(|h| h.effective_viewport())
+                    .unwrap_or_else(|_| {
+                        UiSize::new(
+                            crate::driver::DEFAULT_VIEWPORT_WIDTH,
+                            crate::driver::DEFAULT_VIEWPORT_HEIGHT,
+                        )
+                    })
+            } else {
+                UiSize::new(
+                    crate::driver::DEFAULT_VIEWPORT_WIDTH,
+                    crate::driver::DEFAULT_VIEWPORT_HEIGHT,
+                )
+            };
+            pt_spec.resolve(viewport)
+        } else {
+            return Err(Box::new(FailedStepContext {
+                step_index,
+                command: command.to_string(),
+                label,
+                kind: StepFailureKind::ParseOrConfinement,
+                message: "tap selector has neither element criteria nor point".to_string(),
+                visible_context: None,
+                crash_signal: None,
+            }));
+        };
+
+        let repeats = selector.repeat.unwrap_or(1).max(1) as usize;
+        if repeats > MAX_REPEAT_ITERATIONS {
+            return Err(Box::new(FailedStepContext {
+                step_index,
+                command: command.to_string(),
+                label,
+                kind: StepFailureKind::LimitExceeded,
+                message: format!(
+                    "tap repeat count {repeats} exceeds limit {MAX_REPEAT_ITERATIONS}"
+                ),
+                visible_context: None,
+                crash_signal: None,
+            }));
+        }
+
+        for rep in 0..repeats {
+            let action = match kind {
+                TapKind::Tap => ActAction::Tap {
+                    x: target_point.x,
+                    y: target_point.y,
+                },
+                TapKind::LongPress => ActAction::LongPress {
+                    x: target_point.x,
+                    y: target_point.y,
+                    duration_ms: step.duration_ms,
+                },
+                TapKind::DoubleTap => ActAction::DoubleTap {
+                    x: target_point.x,
+                    y: target_point.y,
+                },
+            };
+            self.dispatch_action(driver, &app_id, action, state, cancel)
+                .await
+                .map_err(|err| {
+                    self.driver_err_to_failed_step(step_index, command, label.clone(), err)
+                })?;
+
+            if rep + 1 < repeats
+                && let Some(delay_ms) = selector.delay_ms
+                && delay_ms > 0
+            {
+                tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => {
+                        return Err(self.driver_err_to_failed_step(
+                            step_index,
+                            command,
+                            label,
+                            DriverError::Cancelled,
+                        ));
+                    }
+                    _ = tokio::time::sleep(Duration::from_millis(delay_ms)) => {}
+                }
+            }
+        }
+
+        if let Some(settle_ms) = selector.wait_to_settle_timeout_ms
+            && settle_ms > 0
+            && driver
+                .capabilities()
+                .supports(DriverCapability::AccessibilityTree)
+        {
+            self.wait_for_hierarchy_settle(
+                driver,
+                &app_id,
+                Duration::from_millis(settle_ms),
+                state,
+                cancel,
+            )
+            .await
+            .map_err(|err| self.driver_err_to_failed_step(step_index, command, label, err))?;
+        }
+
+        Ok(settled_early)
+    }
+
+    async fn exec_input_text<D: PlatformDriver + ?Sized>(
+        &self,
+        driver: &D,
+        step: &InputTextStep,
+        step_index: usize,
+        state: &mut RuntimeState,
+        cancel: &CancellationToken,
+    ) -> StepResult {
+        let app_id = self.resolve_app_id(None, state, step_index, "inputText")?;
+        let text = state
+            .env
+            .interpolate(&step.text)
+            .map_err(|err| FailedStepContext {
+                step_index,
+                command: "inputText".to_string(),
+                label: "Input text".to_string(),
+                kind: StepFailureKind::LimitExceeded,
+                message: self.scrub(&err.to_string()),
+                visible_context: None,
+                crash_signal: None,
+            })?;
+        self.dispatch_action(
+            driver,
+            &app_id,
+            ActAction::InputText { text },
+            state,
+            cancel,
+        )
+        .await
+        .map_err(|err| {
+            self.driver_err_to_failed_step(step_index, "inputText", "Input text".into(), err)
+        })
+    }
+
+    async fn exec_erase_text<D: PlatformDriver + ?Sized>(
+        &self,
+        driver: &D,
+        step: &EraseTextStep,
+        step_index: usize,
+        state: &mut RuntimeState,
+        cancel: &CancellationToken,
+    ) -> StepResult {
+        let app_id = self.resolve_app_id(None, state, step_index, "eraseText")?;
+        self.dispatch_action(
+            driver,
+            &app_id,
+            ActAction::EraseText {
+                count: step.characters_to_erase,
+            },
+            state,
+            cancel,
+        )
+        .await
+        .map_err(|err| {
+            self.driver_err_to_failed_step(
+                step_index,
+                "eraseText",
+                format!("Erase {} character(s)", step.characters_to_erase),
+                err,
+            )
+        })
+    }
+
+    async fn exec_press_key<D: PlatformDriver + ?Sized>(
+        &self,
+        driver: &D,
+        step: &PressKeyStep,
+        step_index: usize,
+        state: &mut RuntimeState,
+        cancel: &CancellationToken,
+    ) -> StepResult {
+        let app_id = self.resolve_app_id(None, state, step_index, "pressKey")?;
+        let key = state
+            .env
+            .interpolate(&step.key)
+            .map_err(|err| FailedStepContext {
+                step_index,
+                command: "pressKey".to_string(),
+                label: "Press key".to_string(),
+                kind: StepFailureKind::LimitExceeded,
+                message: self.scrub(&err.to_string()),
+                visible_context: None,
+                crash_signal: None,
+            })?;
+        let label = format!("Press key \"{key}\"");
+        if key.eq_ignore_ascii_case("back") {
+            self.require_capability(
+                driver,
+                DriverCapability::SystemBack,
+                "pressKey Back requires SystemBack capability",
+                step_index,
+                "pressKey",
+                label.clone(),
+            )?;
+        }
+        self.dispatch_action(
+            driver,
+            &app_id,
+            ActAction::PressKey {
+                key,
+                modifiers: step.modifiers.clone(),
+                count: step.count,
+            },
+            state,
+            cancel,
+        )
+        .await
+        .map_err(|err| self.driver_err_to_failed_step(step_index, "pressKey", label, err))
+    }
+
+    async fn exec_hide_keyboard<D: PlatformDriver + ?Sized>(
+        &self,
+        driver: &D,
+        step_index: usize,
+        state: &mut RuntimeState,
+        cancel: &CancellationToken,
+    ) -> StepResult {
+        let app_id = self.resolve_app_id(None, state, step_index, "hideKeyboard")?;
+        self.dispatch_action(driver, &app_id, ActAction::HideKeyboard, state, cancel)
+            .await
+            .map_err(|err| {
+                self.driver_err_to_failed_step(
+                    step_index,
+                    "hideKeyboard",
+                    "Hide keyboard".into(),
+                    err,
+                )
+            })
+    }
+
+    async fn exec_back<D: PlatformDriver + ?Sized>(
+        &self,
+        driver: &D,
+        step_index: usize,
+        state: &mut RuntimeState,
+        cancel: &CancellationToken,
+    ) -> StepResult {
+        let label = "Back".to_string();
+        self.require_capability(
+            driver,
+            DriverCapability::SystemBack,
+            "system back is not supported on this platform",
+            step_index,
+            "back",
+            label.clone(),
+        )?;
+        let app_id = self.resolve_app_id(None, state, step_index, "back")?;
+        self.dispatch_action(driver, &app_id, ActAction::Back, state, cancel)
+            .await
+            .map_err(|err| self.driver_err_to_failed_step(step_index, "back", label, err))
+    }
+
+    async fn exec_scroll<D: PlatformDriver + ?Sized>(
+        &self,
+        driver: &D,
+        step_index: usize,
+        state: &mut RuntimeState,
+        cancel: &CancellationToken,
+    ) -> StepResult {
+        let app_id = self.resolve_app_id(None, state, step_index, "scroll")?;
+        let viewport = self.current_viewport(driver, &app_id, state, cancel).await;
+        let (start, end) = scroll_endpoints(ScrollDirection::Down, viewport);
+        self.dispatch_action(
+            driver,
+            &app_id,
+            ActAction::Swipe {
+                start,
+                end,
+                duration_ms: 400,
+                hold_duration_ms: None,
+            },
+            state,
+            cancel,
+        )
+        .await
+        .map_err(|err| self.driver_err_to_failed_step(step_index, "scroll", "Scroll".into(), err))
+    }
+
+    async fn exec_swipe<D: PlatformDriver + ?Sized>(
+        &self,
+        driver: &D,
+        step: &SwipeStep,
+        step_index: usize,
+        state: &mut RuntimeState,
+        cancel: &CancellationToken,
+    ) -> StepResult {
+        let app_id = self.resolve_app_id(None, state, step_index, "swipe")?;
+        let label = step.label.clone().unwrap_or_else(|| "Swipe".to_string());
+
+        let bounds = if let Some(ref from_sel) = step.from {
+            self.require_capability(
+                driver,
+                DriverCapability::AccessibilityTree,
+                "swipe `from` selector requires AccessibilityTree capability",
+                step_index,
+                "swipe",
+                label.clone(),
+            )?;
+            let interpolated =
+                state
+                    .env
+                    .interpolate_selector(from_sel)
+                    .map_err(|err| FailedStepContext {
+                        step_index,
+                        command: "swipe".to_string(),
+                        label: label.clone(),
+                        kind: StepFailureKind::LimitExceeded,
+                        message: self.scrub(&err.to_string()),
+                        visible_context: None,
+                        crash_signal: None,
+                    })?;
+            let wait = self
+                .wait_selector(
+                    driver,
+                    &app_id,
+                    interpolated.clone(),
+                    false,
+                    self.config.default_step_timeout,
+                    state,
+                    cancel,
+                )
+                .await
+                .map_err(|err| {
+                    self.driver_err_to_failed_step(step_index, "swipe", label.clone(), err)
+                })?;
+            let Some(node) = wait.matched_node else {
+                return Err(Box::new(FailedStepContext {
+                    step_index,
+                    command: "swipe".to_string(),
+                    label,
+                    kind: StepFailureKind::SelectorNotFound,
+                    message: self.scrub(&format!(
+                        "swipe `from` element not found ({}): {}",
+                        interpolated.describe(),
+                        wait.visible_context.format_summary()
+                    )),
+                    visible_context: Some(wait.visible_context),
+                    crash_signal: None,
+                }));
+            };
+            node.frame
+        } else {
+            let vp = self.current_viewport(driver, &app_id, state, cancel).await;
+            crate::driver::UiRect::new(0.0, 0.0, vp.width, vp.height)
+        };
+
+        let size = UiSize::new(bounds.width, bounds.height);
+        let (start, end) = if let (Some(s), Some(e)) = (step.start, step.end) {
+            let sp = s.resolve(size);
+            let ep = e.resolve(size);
+            (
+                UiPoint::new(bounds.x + sp.x, bounds.y + sp.y),
+                UiPoint::new(bounds.x + ep.x, bounds.y + ep.y),
+            )
+        } else if let Some(dir) = step.direction {
+            let (sp, ep) = swipe_direction_endpoints(dir, size);
+            (
+                UiPoint::new(bounds.x + sp.x, bounds.y + sp.y),
+                UiPoint::new(bounds.x + ep.x, bounds.y + ep.y),
+            )
+        } else {
+            unreachable!("validated in parser");
+        };
+
+        self.dispatch_action(
+            driver,
+            &app_id,
+            ActAction::Swipe {
+                start,
+                end,
+                duration_ms: step.duration_ms,
+                hold_duration_ms: None,
+            },
+            state,
+            cancel,
+        )
+        .await
+        .map_err(|err| self.driver_err_to_failed_step(step_index, "swipe", label, err))
+    }
+
+    async fn exec_scroll_until_visible<D: PlatformDriver + ?Sized>(
+        &self,
+        driver: &D,
+        step: &ScrollUntilVisibleStep,
+        step_index: usize,
+        state: &mut RuntimeState,
+        cancel: &CancellationToken,
+    ) -> StepResult<bool> {
+        let app_id = self.resolve_app_id(None, state, step_index, "scrollUntilVisible")?;
+        let selector = state
+            .env
+            .interpolate_selector(&step.element)
+            .map_err(|err| FailedStepContext {
+                step_index,
+                command: "scrollUntilVisible".to_string(),
+                label: step
+                    .label
+                    .clone()
+                    .unwrap_or_else(|| "Scroll until visible".to_string()),
+                kind: StepFailureKind::LimitExceeded,
+                message: self.scrub(&err.to_string()),
+                visible_context: None,
+                crash_signal: None,
+            })?;
+        let label = step
+            .label
+            .clone()
+            .unwrap_or_else(|| format!("Scroll until visible {}", selector.describe()));
+
+        self.require_capability(
+            driver,
+            DriverCapability::AccessibilityTree,
+            "scrollUntilVisible requires AccessibilityTree capability",
+            step_index,
+            "scrollUntilVisible",
+            label.clone(),
+        )?;
+
+        let compiled = CompiledSelector::compile(&selector).map_err(|err| FailedStepContext {
+            step_index,
+            command: "scrollUntilVisible".to_string(),
+            label: label.clone(),
+            kind: StepFailureKind::ParseOrConfinement,
+            message: self.scrub(&err.to_string()),
+            visible_context: None,
+            crash_signal: None,
+        })?;
+
+        let started = Instant::now();
+        let timeout = Duration::from_millis(step.timeout_ms);
+        let deadline = started + timeout;
+        let mut settle = SettleTracker::new(2);
+        let swipe_duration_ms = scroll_speed_to_duration_ms(step.speed);
+        let min_vis_fraction = f64::from(step.visibility_percentage) / 100.0;
+
+        let mut end_of_scroll = false;
+
+        loop {
+            if cancel.is_cancelled() {
+                return Err(self.driver_err_to_failed_step(
+                    step_index,
+                    "scrollUntilVisible",
+                    label,
+                    DriverError::Cancelled,
+                ));
+            }
+
+            let hierarchy = self
+                .fetch_fresh_hierarchy(driver, &app_id, state, cancel)
+                .await
+                .map_err(|err| {
+                    self.driver_err_to_failed_step(
+                        step_index,
+                        "scrollUntilVisible",
+                        label.clone(),
+                        err,
+                    )
+                })?;
+
+            let viewport = hierarchy.effective_viewport();
+            if let Some(node) = compiled.match_one(&hierarchy.nodes) {
+                let vis_fraction = node.frame.visible_fraction_in(viewport);
+                if node.is_on_screen && vis_fraction + 1e-6 >= min_vis_fraction {
+                    if step.center_element
+                        && let Some((nudge_start, nudge_end)) =
+                            compute_center_nudge(node.frame.center(), viewport, step.direction)
+                    {
+                        self.dispatch_action(
+                            driver,
+                            &app_id,
+                            ActAction::Swipe {
+                                start: nudge_start,
+                                end: nudge_end,
+                                duration_ms: swipe_duration_ms.min(400),
+                                hold_duration_ms: None,
+                            },
+                            state,
+                            cancel,
+                        )
+                        .await
+                        .map_err(|err| {
+                            self.driver_err_to_failed_step(
+                                step_index,
+                                "scrollUntilVisible",
+                                label.clone(),
+                                err,
+                            )
+                        })?;
+                    }
+                    return Ok(started.elapsed() < timeout);
+                }
+            }
+
+            // End-of-scroll bailout over non-truncated captures.
+            if hierarchy.truncated {
+                settle.reset();
+            } else if settle
+                .observe_hash(hierarchy.hierarchy_hash_u64())
+                .is_settled()
+            {
+                end_of_scroll = true;
+                break;
+            }
+
+            if Instant::now() >= deadline {
+                break;
+            }
+
+            let (start, end) = scroll_endpoints(step.direction, viewport);
+            self.dispatch_action(
+                driver,
+                &app_id,
+                ActAction::Swipe {
+                    start,
+                    end,
+                    duration_ms: swipe_duration_ms,
+                    hold_duration_ms: None,
+                },
+                state,
+                cancel,
+            )
+            .await
+            .map_err(|err| {
+                self.driver_err_to_failed_step(step_index, "scrollUntilVisible", label.clone(), err)
+            })?;
+        }
+
+        let visible_context = state
+            .last_hierarchy
+            .as_ref()
+            .map(|h| {
+                build_visible_context(
+                    &h.nodes,
+                    Some(&self.config.redactor),
+                    Some(&self.config.provider_redactor),
+                    VisibleContext::DEFAULT_LIMIT,
+                )
+            })
+            .unwrap_or_default();
+
+        let reason = if end_of_scroll {
+            format!(
+                "reached end of scroll without finding {}: {}",
+                selector.describe(),
+                visible_context.format_summary()
+            )
+        } else {
+            format!(
+                "timed out scrolling for {}: {}",
+                selector.describe(),
+                visible_context.format_summary()
+            )
+        };
+
+        Err(Box::new(FailedStepContext {
+            step_index,
+            command: "scrollUntilVisible".to_string(),
+            label,
+            kind: StepFailureKind::SelectorNotFound,
+            message: self.scrub(&reason),
+            visible_context: Some(visible_context),
+            crash_signal: None,
+        }))
+    }
+
+    async fn exec_wait_animation<D: PlatformDriver + ?Sized>(
+        &self,
+        driver: &D,
+        step: &WaitForAnimationToEndStep,
+        step_index: usize,
+        state: &mut RuntimeState,
+        cancel: &CancellationToken,
+    ) -> StepResult<bool> {
+        let app_id = self.resolve_app_id(None, state, step_index, "waitForAnimationToEnd")?;
+        let label = "Wait for animation to end".to_string();
+        self.require_capability(
+            driver,
+            DriverCapability::AccessibilityTree,
+            "waitForAnimationToEnd requires AccessibilityTree capability",
+            step_index,
+            "waitForAnimationToEnd",
+            label.clone(),
+        )?;
+        let timeout = step
+            .timeout_ms
+            .map(Duration::from_millis)
+            .unwrap_or(self.config.default_animation_timeout);
+        self.wait_for_hierarchy_settle(driver, &app_id, timeout, state, cancel)
+            .await
+            .map_err(|err| {
+                self.driver_err_to_failed_step(step_index, "waitForAnimationToEnd", label, err)
+            })
+    }
+
+    async fn wait_for_hierarchy_settle<D: PlatformDriver + ?Sized>(
+        &self,
+        driver: &D,
+        app_id: &str,
+        timeout: Duration,
+        state: &mut RuntimeState,
+        cancel: &CancellationToken,
+    ) -> Result<bool, DriverError> {
+        let started = Instant::now();
+        let deadline = started + timeout;
+        let mut schedule = PollSchedule::default();
+        let mut settle = SettleTracker::new(2);
+
+        loop {
+            if cancel.is_cancelled() {
+                return Err(DriverError::Cancelled);
+            }
+            let h = self
+                .fetch_fresh_hierarchy(driver, app_id, state, cancel)
+                .await?;
+            if h.truncated {
+                settle.reset();
+            } else if settle.observe_hash(h.hierarchy_hash_u64()).is_settled() {
+                return Ok(started.elapsed() < timeout);
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let Some(delay) = schedule.next_delay(remaining) else {
+                return Ok(false);
+            };
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => return Err(DriverError::Cancelled),
+                _ = tokio::time::sleep(delay) => {}
+            }
+        }
+    }
+
+    async fn exec_take_screenshot<D: PlatformDriver + ?Sized>(
+        &self,
+        driver: &D,
+        step: &TakeScreenshotStep,
+        step_index: usize,
+        state: &mut RuntimeState,
+        cancel: &CancellationToken,
+    ) -> StepResult {
+        let app_id = self.resolve_app_id(None, state, step_index, "takeScreenshot")?;
+        let raw_path = state
+            .env
+            .interpolate(&step.path)
+            .map_err(|err| FailedStepContext {
+                step_index,
+                command: "takeScreenshot".to_string(),
+                label: "Take screenshot".to_string(),
+                kind: StepFailureKind::LimitExceeded,
+                message: self.scrub(&err.to_string()),
+                visible_context: None,
+                crash_signal: None,
+            })?;
+        let label = format!("Take screenshot \"{}\"", self.scrub(&raw_path));
+
+        let base_dir = self
+            .config
+            .screenshot_dir
+            .as_deref()
+            .unwrap_or(&state.canonical_workspace);
+        let with_ext = if Path::new(&raw_path).extension().is_none() {
+            format!("{raw_path}.png")
+        } else {
+            raw_path
+        };
+
+        let target_path = confine_write_path(
+            &state.canonical_workspace,
+            base_dir,
+            &with_ext,
+            "screenshot",
+        )
+        .map_err(|err| FailedStepContext {
+            step_index,
+            command: "takeScreenshot".to_string(),
+            label: label.clone(),
+            kind: StepFailureKind::ParseOrConfinement,
+            message: self.scrub(&err.to_string()),
+            visible_context: None,
+            crash_signal: None,
+        })?;
+
+        let png_bytes = driver
+            .take_screenshot(&app_id, cancel)
+            .await
+            .map_err(|err| {
+                self.driver_err_to_failed_step(step_index, "takeScreenshot", label.clone(), err)
+            })?;
+
+        if let Some(parent) = target_path.parent() {
+            fs::create_dir_all(parent).map_err(|err| FailedStepContext {
+                step_index,
+                command: "takeScreenshot".to_string(),
+                label: label.clone(),
+                kind: StepFailureKind::Transport,
+                message: self.scrub(&err.to_string()),
+                visible_context: None,
+                crash_signal: None,
+            })?;
+        }
+        fs::write(&target_path, png_bytes).map_err(|err| FailedStepContext {
+            step_index,
+            command: "takeScreenshot".to_string(),
+            label,
+            kind: StepFailureKind::Transport,
+            message: self.scrub(&err.to_string()),
+            visible_context: None,
+            crash_signal: None,
+        })?;
+
+        state.screenshots.push(target_path);
+        Ok(())
+    }
+
+    async fn exec_assert_visible<D: PlatformDriver + ?Sized>(
+        &self,
+        driver: &D,
+        step: &AssertVisibleStep,
+        step_index: usize,
+        state: &mut RuntimeState,
+        cancel: &CancellationToken,
+    ) -> StepResult<bool> {
+        let app_id = self.resolve_app_id(None, state, step_index, "assertVisible")?;
+        let selector = state
+            .env
+            .interpolate_selector(&step.selector)
+            .map_err(|err| FailedStepContext {
+                step_index,
+                command: "assertVisible".to_string(),
+                label: step
+                    .label
+                    .clone()
+                    .unwrap_or_else(|| "Assert visible".to_string()),
+                kind: StepFailureKind::LimitExceeded,
+                message: self.scrub(&err.to_string()),
+                visible_context: None,
+                crash_signal: None,
+            })?;
+        let label = step
+            .label
+            .clone()
+            .unwrap_or_else(|| format!("Assert that {} is visible", selector.describe()));
+
+        self.require_capability(
+            driver,
+            DriverCapability::AccessibilityTree,
+            "assertVisible requires AccessibilityTree capability",
+            step_index,
+            "assertVisible",
+            label.clone(),
+        )?;
+
+        let timeout = step
+            .timeout_ms
+            .map(Duration::from_millis)
+            .unwrap_or(self.config.default_step_timeout);
+        let wait = self
+            .wait_selector(
+                driver,
+                &app_id,
+                selector.clone(),
+                false,
+                timeout,
+                state,
+                cancel,
+            )
+            .await
+            .map_err(|err| {
+                self.driver_err_to_failed_step(step_index, "assertVisible", label.clone(), err)
+            })?;
+
+        if wait.matched {
+            return Ok(wait.settled_early);
+        }
+        if selector.optional {
+            debug!(selector = %selector.describe(), "skipping optional assertVisible miss");
+            return Ok(false);
+        }
+
+        Err(Box::new(FailedStepContext {
+            step_index,
+            command: "assertVisible".to_string(),
+            label,
+            kind: StepFailureKind::AssertionFailed,
+            message: self.scrub(&format!(
+                "assertion failed: expected {} to be visible ({})",
+                selector.describe(),
+                wait.visible_context.format_summary()
+            )),
+            visible_context: Some(wait.visible_context),
+            crash_signal: None,
+        }))
+    }
+
+    async fn exec_assert_not_visible<D: PlatformDriver + ?Sized>(
+        &self,
+        driver: &D,
+        step: &AssertNotVisibleStep,
+        step_index: usize,
+        state: &mut RuntimeState,
+        cancel: &CancellationToken,
+    ) -> StepResult<bool> {
+        let app_id = self.resolve_app_id(None, state, step_index, "assertNotVisible")?;
+        let selector = state
+            .env
+            .interpolate_selector(&step.selector)
+            .map_err(|err| FailedStepContext {
+                step_index,
+                command: "assertNotVisible".to_string(),
+                label: step
+                    .label
+                    .clone()
+                    .unwrap_or_else(|| "Assert not visible".to_string()),
+                kind: StepFailureKind::LimitExceeded,
+                message: self.scrub(&err.to_string()),
+                visible_context: None,
+                crash_signal: None,
+            })?;
+        let label = step
+            .label
+            .clone()
+            .unwrap_or_else(|| format!("Assert that {} is not visible", selector.describe()));
+
+        self.require_capability(
+            driver,
+            DriverCapability::AccessibilityTree,
+            "assertNotVisible requires AccessibilityTree capability",
+            step_index,
+            "assertNotVisible",
+            label.clone(),
+        )?;
+
+        let timeout = step
+            .timeout_ms
+            .map(Duration::from_millis)
+            .unwrap_or(self.config.default_step_timeout);
+        let wait = self
+            .wait_selector(
+                driver,
+                &app_id,
+                selector.clone(),
+                true,
+                timeout,
+                state,
+                cancel,
+            )
+            .await
+            .map_err(|err| {
+                self.driver_err_to_failed_step(step_index, "assertNotVisible", label.clone(), err)
+            })?;
+
+        if wait.matched {
+            return Ok(wait.settled_early);
+        }
+        if selector.optional {
+            debug!(selector = %selector.describe(), "skipping optional assertNotVisible miss");
+            return Ok(false);
+        }
+
+        Err(Box::new(FailedStepContext {
+            step_index,
+            command: "assertNotVisible".to_string(),
+            label,
+            kind: StepFailureKind::AssertionFailed,
+            message: self.scrub(&format!(
+                "assertion failed: expected {} to not be visible ({})",
+                selector.describe(),
+                wait.visible_context.format_summary()
+            )),
+            visible_context: Some(wait.visible_context),
+            crash_signal: None,
+        }))
+    }
+
+    async fn exec_extended_wait<D: PlatformDriver + ?Sized>(
+        &self,
+        driver: &D,
+        step: &ExtendedWaitUntilStep,
+        step_index: usize,
+        state: &mut RuntimeState,
+        cancel: &CancellationToken,
+    ) -> StepResult<bool> {
+        let app_id = self.resolve_app_id(None, state, step_index, "extendedWaitUntil")?;
+        let (raw_sel, not_visible) = match (&step.visible, &step.not_visible) {
+            (Some(s), None) => (s, false),
+            (None, Some(s)) => (s, true),
+            _ => unreachable!("validated in parser"),
+        };
+        let selector =
+            state
+                .env
+                .interpolate_selector(raw_sel)
+                .map_err(|err| FailedStepContext {
+                    step_index,
+                    command: "extendedWaitUntil".to_string(),
+                    label: step
+                        .label
+                        .clone()
+                        .unwrap_or_else(|| "Extended wait until".to_string()),
+                    kind: StepFailureKind::LimitExceeded,
+                    message: self.scrub(&err.to_string()),
+                    visible_context: None,
+                    crash_signal: None,
+                })?;
+        let label = step.label.clone().unwrap_or_else(|| {
+            if not_visible {
+                format!("Extended wait until {} is not visible", selector.describe())
+            } else {
+                format!("Extended wait until {} is visible", selector.describe())
+            }
+        });
+
+        self.require_capability(
+            driver,
+            DriverCapability::AccessibilityTree,
+            "extendedWaitUntil requires AccessibilityTree capability",
+            step_index,
+            "extendedWaitUntil",
+            label.clone(),
+        )?;
+
+        let wait = self
+            .wait_selector(
+                driver,
+                &app_id,
+                selector.clone(),
+                not_visible,
+                Duration::from_millis(step.timeout_ms),
+                state,
+                cancel,
+            )
+            .await
+            .map_err(|err| {
+                self.driver_err_to_failed_step(step_index, "extendedWaitUntil", label.clone(), err)
+            })?;
+
+        if wait.matched {
+            return Ok(wait.settled_early);
+        }
+
+        Err(Box::new(FailedStepContext {
+            step_index,
+            command: "extendedWaitUntil".to_string(),
+            label,
+            kind: StepFailureKind::Timeout,
+            message: self.scrub(&format!(
+                "extendedWaitUntil timed out after {}ms waiting for {}: {}",
+                step.timeout_ms,
+                selector.describe(),
+                wait.visible_context.format_summary()
+            )),
+            visible_context: Some(wait.visible_context),
+            crash_signal: None,
+        }))
+    }
+
+    async fn evaluate_condition<D: PlatformDriver + ?Sized>(
+        &self,
+        driver: &D,
+        cond: &Condition,
+        step_index: usize,
+        command: &str,
+        state: &mut RuntimeState,
+        cancel: &CancellationToken,
+    ) -> StepResult<bool> {
+        if let Some(ref platform) = cond.platform
+            && !driver.platform().eq_ignore_ascii_case(platform)
+        {
+            return Ok(false);
+        }
+        if cond.visible.is_none() && cond.not_visible.is_none() {
+            return Ok(true);
+        }
+
+        let app_id = self.resolve_app_id(None, state, step_index, command)?;
+        self.require_capability(
+            driver,
+            DriverCapability::AccessibilityTree,
+            "visible/notVisible condition requires AccessibilityTree capability",
+            step_index,
+            command,
+            format!("{command} condition"),
+        )?;
+
+        let hierarchy = self
+            .fetch_fresh_hierarchy(driver, &app_id, state, cancel)
+            .await
+            .map_err(|err| {
+                self.driver_err_to_failed_step(
+                    step_index,
+                    command,
+                    format!("{command} condition"),
+                    err,
+                )
+            })?;
+
+        if let Some(ref vis_sel) = cond.visible {
+            let interpolated =
+                state
+                    .env
+                    .interpolate_selector(vis_sel)
+                    .map_err(|err| FailedStepContext {
+                        step_index,
+                        command: command.to_string(),
+                        label: format!("{command} condition"),
+                        kind: StepFailureKind::LimitExceeded,
+                        message: self.scrub(&err.to_string()),
+                        visible_context: None,
+                        crash_signal: None,
+                    })?;
+            let compiled =
+                CompiledSelector::compile(&interpolated).map_err(|err| FailedStepContext {
+                    step_index,
+                    command: command.to_string(),
+                    label: format!("{command} condition"),
+                    kind: StepFailureKind::ParseOrConfinement,
+                    message: self.scrub(&err.to_string()),
+                    visible_context: None,
+                    crash_signal: None,
+                })?;
+            if compiled.match_one(&hierarchy.nodes).is_none() {
+                return Ok(false);
+            }
+        }
+
+        if let Some(ref not_vis_sel) = cond.not_visible {
+            if hierarchy.truncated {
+                // Never falsely satisfy `notVisible` on a truncated hierarchy capture.
+                return Ok(false);
+            }
+            let interpolated =
+                state
+                    .env
+                    .interpolate_selector(not_vis_sel)
+                    .map_err(|err| FailedStepContext {
+                        step_index,
+                        command: command.to_string(),
+                        label: format!("{command} condition"),
+                        kind: StepFailureKind::LimitExceeded,
+                        message: self.scrub(&err.to_string()),
+                        visible_context: None,
+                        crash_signal: None,
+                    })?;
+            let compiled =
+                CompiledSelector::compile(&interpolated).map_err(|err| FailedStepContext {
+                    step_index,
+                    command: command.to_string(),
+                    label: format!("{command} condition"),
+                    kind: StepFailureKind::ParseOrConfinement,
+                    message: self.scrub(&err.to_string()),
+                    visible_context: None,
+                    crash_signal: None,
+                })?;
+            if compiled.match_one(&hierarchy.nodes).is_some() {
+                return Ok(false);
+            }
+        }
+
+        Ok(true)
+    }
+
+    async fn exec_run_flow<D: PlatformDriver + ?Sized>(
+        &self,
+        driver: &D,
+        step: &RunFlowStep,
+        flow_dir: &Path,
+        state: &mut RuntimeState,
+        cancel: &CancellationToken,
+    ) -> StepResult {
+        let step_index = state.step_counter;
+        if let Some(ref cond) = step.when {
+            let should_run = self
+                .evaluate_condition(driver, cond, step_index, "runFlow", state, cancel)
+                .await?;
+            if !should_run {
+                debug!("skipping runFlow because `when` condition was false");
+                return Ok(());
+            }
+        }
+
+        let res = self
+            .exec_subflow_target(
+                driver,
+                &step.target,
+                &step.env,
+                flow_dir,
+                "runFlow",
+                state,
+                cancel,
+            )
+            .await;
+
+        if let Err(err) = res {
+            if step.optional
+                && !matches!(
+                    err.kind,
+                    StepFailureKind::Cancelled
+                        | StepFailureKind::ParseOrConfinement
+                        | StepFailureKind::UnsupportedCapability
+                        | StepFailureKind::AppCrash
+                )
+            {
+                debug!(error = %err.message, "ignoring failure of optional runFlow");
+                return Ok(());
+            }
+            return Err(err);
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn exec_subflow_target<D: PlatformDriver + ?Sized>(
+        &self,
+        driver: &D,
+        target: &RunFlowTarget,
+        child_env_raw: &BTreeMap<String, String>,
+        flow_dir: &Path,
+        command: &str,
+        state: &mut RuntimeState,
+        cancel: &CancellationToken,
+    ) -> StepResult {
+        let step_index = state.step_counter;
+
+        // Evaluate child env values in the PARENT scope before pushing child frame.
+        let mut child_env = BTreeMap::new();
+        for (k, v) in child_env_raw {
+            let interp = state.env.interpolate(v).map_err(|err| FailedStepContext {
+                step_index,
+                command: command.to_string(),
+                label: format!("{command} env `{k}`"),
+                kind: StepFailureKind::LimitExceeded,
+                message: self.scrub(&err.to_string()),
+                visible_context: None,
+                crash_signal: None,
+            })?;
+            child_env.insert(k.clone(), interp);
+        }
+
+        let pushed = !child_env.is_empty();
+        if pushed {
+            state.env.push(child_env);
+        }
+
+        let result = match target {
+            RunFlowTarget::Commands(commands) => {
+                self.execute_steps(driver, commands, flow_dir, state, cancel)
+                    .await
+            }
+            RunFlowTarget::File(raw_rel) => {
+                if raw_rel.contains('$') || raw_rel.contains('{') {
+                    Err(Box::new(FailedStepContext {
+                        step_index,
+                        command: command.to_string(),
+                        label: format!("{command} \"{raw_rel}\""),
+                        kind: StepFailureKind::ParseOrConfinement,
+                        message: format!(
+                            "subflow path must be static (no variable interpolation): {raw_rel}"
+                        ),
+                        visible_context: None,
+                        crash_signal: None,
+                    }))
+                } else {
+                    match confine_relative_read_path(
+                        &state.canonical_workspace,
+                        flow_dir,
+                        raw_rel,
+                        MAX_FILE_BYTES,
+                        "subflow",
+                    ) {
+                        Err(err) => Err(Box::new(FailedStepContext {
+                            step_index,
+                            command: command.to_string(),
+                            label: format!("{command} \"{raw_rel}\""),
+                            kind: StepFailureKind::ParseOrConfinement,
+                            message: self.scrub(&err.to_string()),
+                            visible_context: None,
+                            crash_signal: None,
+                        })),
+                        Ok(canonical_subflow) => {
+                            if state.call_stack.contains(&canonical_subflow) {
+                                Err(Box::new(FailedStepContext {
+                                    step_index,
+                                    command: command.to_string(),
+                                    label: format!("{command} \"{raw_rel}\""),
+                                    kind: StepFailureKind::ParseOrConfinement,
+                                    message: format!("subflow cycle detected: {raw_rel}"),
+                                    visible_context: None,
+                                    crash_signal: None,
+                                }))
+                            } else if state.call_stack.len() >= MAX_FLOW_DEPTH {
+                                Err(Box::new(FailedStepContext {
+                                    step_index,
+                                    command: command.to_string(),
+                                    label: format!("{command} \"{raw_rel}\""),
+                                    kind: StepFailureKind::ParseOrConfinement,
+                                    message: format!(
+                                        "subflow nesting exceeds maximum depth of {MAX_FLOW_DEPTH}"
+                                    ),
+                                    visible_context: None,
+                                    crash_signal: None,
+                                }))
+                            } else {
+                                match read_bounded_file(&canonical_subflow, MAX_FILE_BYTES)
+                                    .and_then(|bytes| {
+                                        let text = String::from_utf8_lossy(&bytes);
+                                        parse_flow(&text).map_err(FlowExecutionError::from)
+                                    }) {
+                                    Err(err) => Err(Box::new(FailedStepContext {
+                                        step_index,
+                                        command: command.to_string(),
+                                        label: format!("{command} \"{raw_rel}\""),
+                                        kind: StepFailureKind::ParseOrConfinement,
+                                        message: self.scrub(&err.to_string()),
+                                        visible_context: None,
+                                        crash_signal: None,
+                                    })),
+                                    Ok(sub_parsed) => {
+                                        let sub_dir = canonical_subflow
+                                            .parent()
+                                            .unwrap_or(&state.canonical_workspace)
+                                            .to_path_buf();
+                                        state.call_stack.push(canonical_subflow);
+                                        let sub_res = self
+                                            .execute_parsed_flow(
+                                                driver,
+                                                &sub_parsed,
+                                                &sub_dir,
+                                                state,
+                                                cancel,
+                                            )
+                                            .await;
+                                        state.call_stack.pop();
+                                        sub_res
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        };
+
+        // Always pop child env so it never leaks to the parent scope.
+        if pushed {
+            state.env.pop();
+        }
+        result
+    }
+
+    async fn exec_repeat<D: PlatformDriver + ?Sized>(
+        &self,
+        driver: &D,
+        step: &RepeatStep,
+        flow_dir: &Path,
+        state: &mut RuntimeState,
+        cancel: &CancellationToken,
+    ) -> StepResult {
+        let step_index = state.step_counter;
+        if let Some(times) = step.times
+            && (times as usize) > MAX_REPEAT_ITERATIONS
+        {
+            return Err(Box::new(FailedStepContext {
+                step_index,
+                command: "repeat".to_string(),
+                label: step.label.clone().unwrap_or_else(|| "Repeat".to_string()),
+                kind: StepFailureKind::LimitExceeded,
+                message: format!(
+                    "`repeat.times` ({times}) exceeds maximum of {MAX_REPEAT_ITERATIONS}"
+                ),
+                visible_context: None,
+                crash_signal: None,
+            }));
+        }
+
+        let max_iters = step
+            .times
+            .map(|t| t as usize)
+            .unwrap_or(MAX_REPEAT_ITERATIONS);
+        let mut iteration: usize = 0;
+
+        while iteration < max_iters {
+            if cancel.is_cancelled() {
+                return Err(Box::new(FailedStepContext {
+                    step_index: state.step_counter,
+                    command: "repeat".to_string(),
+                    label: step.label.clone().unwrap_or_else(|| "Repeat".to_string()),
+                    kind: StepFailureKind::Cancelled,
+                    message: "repeat loop cancelled".to_string(),
+                    visible_context: None,
+                    crash_signal: None,
+                }));
+            }
+            if let Some(ref cond) = step.while_cond {
+                let keep_going = self
+                    .evaluate_condition(driver, cond, state.step_counter, "repeat", state, cancel)
+                    .await?;
+                if !keep_going {
+                    return Ok(());
+                }
+            }
+            self.execute_steps(driver, &step.commands, flow_dir, state, cancel)
+                .await?;
+            iteration += 1;
+        }
+
+        // If `while` was unbounded by `times` and still holds after MAX_REPEAT_ITERATIONS, fail closed.
+        if step.times.is_none()
+            && let Some(ref cond) = step.while_cond
+            && self
+                .evaluate_condition(driver, cond, state.step_counter, "repeat", state, cancel)
+                .await?
+        {
+            return Err(Box::new(FailedStepContext {
+                step_index: state.step_counter,
+                command: "repeat".to_string(),
+                label: step.label.clone().unwrap_or_else(|| "Repeat".to_string()),
+                kind: StepFailureKind::LimitExceeded,
+                message: format!(
+                    "`repeat.while` condition still held after {MAX_REPEAT_ITERATIONS} iterations"
+                ),
+                visible_context: None,
+                crash_signal: None,
+            }));
+        }
+
+        Ok(())
+    }
+
+    async fn exec_retry<D: PlatformDriver + ?Sized>(
+        &self,
+        driver: &D,
+        step: &RetryStep,
+        flow_dir: &Path,
+        state: &mut RuntimeState,
+        cancel: &CancellationToken,
+    ) -> StepResult {
+        let step_index = state.step_counter;
+        if (step.max_retries as usize) > MAX_RETRIES {
+            return Err(Box::new(FailedStepContext {
+                step_index,
+                command: "retry".to_string(),
+                label: step.label.clone().unwrap_or_else(|| "Retry".to_string()),
+                kind: StepFailureKind::LimitExceeded,
+                message: format!(
+                    "`retry.maxRetries` ({}) exceeds maximum of {MAX_RETRIES}",
+                    step.max_retries
+                ),
+                visible_context: None,
+                crash_signal: None,
+            }));
+        }
+
+        let total_attempts = step.max_retries.saturating_add(1);
+        let mut last_err: Option<Box<FailedStepContext>> = None;
+
+        for attempt in 0..total_attempts {
+            if cancel.is_cancelled() {
+                return Err(Box::new(FailedStepContext {
+                    step_index: state.step_counter,
+                    command: "retry".to_string(),
+                    label: step.label.clone().unwrap_or_else(|| "Retry".to_string()),
+                    kind: StepFailureKind::Cancelled,
+                    message: "retry block cancelled".to_string(),
+                    visible_context: None,
+                    crash_signal: None,
+                }));
+            }
+            match self
+                .exec_subflow_target(
+                    driver,
+                    &step.target,
+                    &step.env,
+                    flow_dir,
+                    "retry",
+                    state,
+                    cancel,
+                )
+                .await
+            {
+                Ok(()) => return Ok(()),
+                Err(err) => {
+                    // Never retry fatal runner/parse/capability/crash/cancel errors.
+                    if matches!(
+                        err.kind,
+                        StepFailureKind::Cancelled
+                            | StepFailureKind::UnsupportedCapability
+                            | StepFailureKind::ParseOrConfinement
+                            | StepFailureKind::LimitExceeded
+                            | StepFailureKind::AppCrash
+                    ) {
+                        return Err(err);
+                    }
+                    debug!(
+                        attempt = attempt + 1,
+                        total_attempts,
+                        error = %err.message,
+                        "retry attempt failed"
+                    );
+                    last_err = Some(err);
+                }
+            }
+        }
+
+        Err(last_err.expect("total_attempts >= 1 always records last_err on failure"))
+    }
+
+    async fn current_viewport<D: PlatformDriver + ?Sized>(
+        &self,
+        driver: &D,
+        app_id: &str,
+        state: &mut RuntimeState,
+        cancel: &CancellationToken,
+    ) -> UiSize {
+        if let Some(ref h) = state.last_hierarchy {
+            return h.effective_viewport();
+        }
+        if driver
+            .capabilities()
+            .supports(DriverCapability::AccessibilityTree)
+            && let Ok(h) = self
+                .fetch_fresh_hierarchy(driver, app_id, state, cancel)
+                .await
+        {
+            return h.effective_viewport();
+        }
+        UiSize::new(
+            crate::driver::DEFAULT_VIEWPORT_WIDTH,
+            crate::driver::DEFAULT_VIEWPORT_HEIGHT,
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TapKind {
+    Tap,
+    LongPress,
+    DoubleTap,
+}
+
+impl TapKind {
+    const fn command_name(self) -> &'static str {
+        match self {
+            Self::Tap => "tapOn",
+            Self::LongPress => "longPressOn",
+            Self::DoubleTap => "doubleTapOn",
+        }
+    }
+
+    const fn label_prefix(self) -> &'static str {
+        match self {
+            Self::Tap => "Tap on",
+            Self::LongPress => "Long press on",
+            Self::DoubleTap => "Double tap on",
+        }
+    }
+}
+
+fn scroll_speed_to_duration_ms(speed: u8) -> u64 {
+    let clamped = u64::from(speed.clamp(1, 100));
+    1200_u64.saturating_sub(clamped * 10).clamp(150, 1500)
+}
+
+/// Computes swipe endpoints for content scrolling (`direction: DOWN` moves finger UP).
+fn scroll_endpoints(direction: ScrollDirection, viewport: UiSize) -> (UiPoint, UiPoint) {
+    let cx = viewport.width * 0.5;
+    let cy = viewport.height * 0.5;
+    match direction {
+        ScrollDirection::Down => (
+            UiPoint::new(cx, viewport.height * 0.75),
+            UiPoint::new(cx, viewport.height * 0.25),
+        ),
+        ScrollDirection::Up => (
+            UiPoint::new(cx, viewport.height * 0.25),
+            UiPoint::new(cx, viewport.height * 0.75),
+        ),
+        ScrollDirection::Right => (
+            UiPoint::new(viewport.width * 0.80, cy),
+            UiPoint::new(viewport.width * 0.20, cy),
+        ),
+        ScrollDirection::Left => (
+            UiPoint::new(viewport.width * 0.20, cy),
+            UiPoint::new(viewport.width * 0.80, cy),
+        ),
+    }
+}
+
+/// Computes finger movement endpoints for explicit `swipe: { direction }`.
+fn swipe_direction_endpoints(direction: ScrollDirection, size: UiSize) -> (UiPoint, UiPoint) {
+    let cx = size.width * 0.5;
+    let cy = size.height * 0.5;
+    match direction {
+        ScrollDirection::Up => (
+            UiPoint::new(cx, size.height * 0.80),
+            UiPoint::new(cx, size.height * 0.20),
+        ),
+        ScrollDirection::Down => (
+            UiPoint::new(cx, size.height * 0.20),
+            UiPoint::new(cx, size.height * 0.80),
+        ),
+        ScrollDirection::Left => (
+            UiPoint::new(size.width * 0.85, cy),
+            UiPoint::new(size.width * 0.15, cy),
+        ),
+        ScrollDirection::Right => (
+            UiPoint::new(size.width * 0.15, cy),
+            UiPoint::new(size.width * 0.85, cy),
+        ),
+    }
+}
+
+/// If `center` lies outside the `[20%, 80%]` band along the scroll axis, returns a bounded
+/// nudge swipe that moves the element toward the 50% center line.
+fn compute_center_nudge(
+    center: UiPoint,
+    viewport: UiSize,
+    direction: ScrollDirection,
+) -> Option<(UiPoint, UiPoint)> {
+    match direction {
+        ScrollDirection::Down | ScrollDirection::Up => {
+            let low = viewport.height * 0.20;
+            let high = viewport.height * 0.80;
+            if center.y >= low && center.y <= high {
+                return None;
+            }
+            let cx = viewport.width * 0.5;
+            let target_y = viewport.height * 0.5;
+            let delta =
+                (target_y - center.y).clamp(-viewport.height * 0.35, viewport.height * 0.35);
+            let start_y = (viewport.height * 0.5 - delta * 0.5)
+                .clamp(viewport.height * 0.15, viewport.height * 0.85);
+            let end_y = (start_y + delta).clamp(viewport.height * 0.15, viewport.height * 0.85);
+            Some((UiPoint::new(cx, start_y), UiPoint::new(cx, end_y)))
+        }
+        ScrollDirection::Left | ScrollDirection::Right => {
+            let low = viewport.width * 0.20;
+            let high = viewport.width * 0.80;
+            if center.x >= low && center.x <= high {
+                return None;
+            }
+            let cy = viewport.height * 0.5;
+            let target_x = viewport.width * 0.5;
+            let delta = (target_x - center.x).clamp(-viewport.width * 0.35, viewport.width * 0.35);
+            let start_x = (viewport.width * 0.5 - delta * 0.5)
+                .clamp(viewport.width * 0.15, viewport.width * 0.85);
+            let end_x = (start_x + delta).clamp(viewport.width * 0.15, viewport.width * 0.85);
+            Some((UiPoint::new(start_x, cy), UiPoint::new(end_x, cy)))
+        }
+    }
+}
+
+fn lexical_normalize(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(p) => out.push(p.as_os_str()),
+            Component::RootDir => out.push(component.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !out.pop() && !out.has_root() {
+                    out.push("..");
+                }
+            }
+            Component::Normal(part) => out.push(part),
+        }
+    }
+    out
+}
+
+fn validate_relative_path_syntax(raw: &str, kind: &str) -> Result<(), FlowExecutionError> {
+    if raw.is_empty() || raw.contains('\0') {
+        return Err(FlowExecutionError::PathConfinement(format!(
+            "{kind} path is empty or contains NUL byte"
+        )));
+    }
+    if raw.starts_with('/') || raw.contains('\\') {
+        return Err(FlowExecutionError::PathConfinement(format!(
+            "{kind} path must be a relative POSIX path: {raw}"
+        )));
+    }
+    if raw.len() >= 2 && raw.as_bytes()[0].is_ascii_alphabetic() && raw.as_bytes()[1] == b':' {
+        return Err(FlowExecutionError::PathConfinement(format!(
+            "{kind} path must not use a Windows drive prefix: {raw}"
+        )));
+    }
+    Ok(())
+}
+
+fn confine_relative_read_path(
+    canonical_workspace: &Path,
+    base_dir: &Path,
+    raw_rel: &str,
+    max_bytes: u64,
+    kind: &str,
+) -> Result<PathBuf, FlowExecutionError> {
+    validate_relative_path_syntax(raw_rel, kind)?;
+    let lexical = lexical_normalize(&base_dir.join(raw_rel));
+    if lexical == canonical_workspace || !lexical.starts_with(canonical_workspace) {
+        return Err(FlowExecutionError::PathConfinement(format!(
+            "{kind} path escapes workspace: {raw_rel}"
+        )));
+    }
+    confine_existing_file(canonical_workspace, &lexical, max_bytes, kind)
+}
+
+fn confine_existing_file(
+    canonical_workspace: &Path,
+    candidate: &Path,
+    max_bytes: u64,
+    kind: &str,
+) -> Result<PathBuf, FlowExecutionError> {
+    let canonical = fs::canonicalize(candidate).map_err(|err| {
+        FlowExecutionError::PathConfinement(format!(
+            "{kind} file does not exist or cannot be resolved: {err}"
+        ))
+    })?;
+    if canonical == canonical_workspace || !canonical.starts_with(canonical_workspace) {
+        return Err(FlowExecutionError::PathConfinement(format!(
+            "{kind} file escapes workspace after symlink resolution"
+        )));
+    }
+    let meta = fs::metadata(&canonical).map_err(|err| {
+        FlowExecutionError::PathConfinement(format!("cannot stat {kind} file: {err}"))
+    })?;
+    if !meta.is_file() {
+        return Err(FlowExecutionError::PathConfinement(format!(
+            "{kind} target is not a regular file"
+        )));
+    }
+    if meta.len() > max_bytes {
+        return Err(FlowExecutionError::PathConfinement(format!(
+            "{kind} file exceeds maximum size of {max_bytes} bytes"
+        )));
+    }
+    Ok(canonical)
+}
+
+fn confine_write_path(
+    canonical_workspace: &Path,
+    base_dir: &Path,
+    raw_rel: &str,
+    kind: &str,
+) -> Result<PathBuf, FlowExecutionError> {
+    validate_relative_path_syntax(raw_rel, kind)?;
+    let canonical_base = fs::canonicalize(base_dir).unwrap_or_else(|_| lexical_normalize(base_dir));
+    if canonical_base != canonical_workspace && !canonical_base.starts_with(canonical_workspace) {
+        return Err(FlowExecutionError::PathConfinement(format!(
+            "{kind} output base directory escapes workspace"
+        )));
+    }
+    let lexical = lexical_normalize(&canonical_base.join(raw_rel));
+    if lexical == canonical_workspace || !lexical.starts_with(canonical_workspace) {
+        return Err(FlowExecutionError::PathConfinement(format!(
+            "{kind} output path escapes workspace: {raw_rel}"
+        )));
+    }
+
+    // Walk up to nearest existing ancestor and verify canonical confinement (no symlink escape).
+    let mut ancestor = lexical.as_path();
+    while !ancestor.exists() {
+        let Some(parent) = ancestor.parent() else {
+            return Err(FlowExecutionError::PathConfinement(format!(
+                "{kind} output path has no existing ancestor inside workspace"
+            )));
+        };
+        ancestor = parent;
+    }
+    let canonical_ancestor = fs::canonicalize(ancestor).map_err(|err| {
+        FlowExecutionError::PathConfinement(format!("cannot resolve {kind} output ancestor: {err}"))
+    })?;
+    if canonical_ancestor != canonical_workspace
+        && !canonical_ancestor.starts_with(canonical_workspace)
+    {
+        return Err(FlowExecutionError::PathConfinement(format!(
+            "{kind} output ancestor escapes workspace via symlink"
+        )));
+    }
+    if let Ok(lmeta) = fs::symlink_metadata(&lexical)
+        && lmeta.file_type().is_symlink()
+    {
+        return Err(FlowExecutionError::PathConfinement(format!(
+            "{kind} output target must not be a symlink"
+        )));
+    }
+    Ok(lexical)
+}
+
+fn read_bounded_file(path: &Path, limit: u64) -> Result<Vec<u8>, FlowExecutionError> {
+    let file = File::open(path).map_err(|err| {
+        FlowExecutionError::PathConfinement(format!("failed to open file: {err}"))
+    })?;
+    let meta = file.metadata().map_err(|err| {
+        FlowExecutionError::PathConfinement(format!("failed to stat file: {err}"))
+    })?;
+    if !meta.is_file() || meta.len() > limit {
+        return Err(FlowExecutionError::PathConfinement(format!(
+            "file is not a regular file under {limit} bytes"
+        )));
+    }
+    let mut bytes = Vec::with_capacity(usize::try_from(meta.len().min(limit)).unwrap_or(0));
+    file.take(limit.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|err| {
+            FlowExecutionError::PathConfinement(format!("failed to read file: {err}"))
+        })?;
+    if (bytes.len() as u64) > limit {
+        return Err(FlowExecutionError::PathConfinement(format!(
+            "file exceeds {limit} byte limit"
+        )));
+    }
+    Ok(bytes)
+}
