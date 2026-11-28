@@ -1,5 +1,7 @@
 # Spike 001: Android Déjà proof of concept
 
+> **Historical prototype record:** The `bun scripts/*.ts` commands below document the retired TypeScript/Bun prototype (reproducible at pre-`DEJA-75` commit `fedb4e5`). The Android fixture app, flows, and evidence in this directory remain active test inputs for the native Rust Android driver (`DEJA-68`).
+
 ## Verdict: VALIDATED
 
 **Question:** can an OpenClaw/Kimi agent explore this Android app through Maestro, save a
