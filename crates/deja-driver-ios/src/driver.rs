@@ -5238,15 +5238,25 @@ exit 0
         .unwrap();
         std::fs::set_permissions(&xcrun_path, std::fs::Permissions::from_mode(0o755)).unwrap();
 
+        struct ReleaseOnDrop(Arc<AtomicBool>);
+        impl Drop for ReleaseOnDrop {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
         let worker_entered = Arc::new(AtomicBool::new(false));
         let worker_entered_notify = Arc::new(tokio::sync::Notify::new());
         let release_worker = Arc::new(AtomicBool::new(false));
+        let _release_guard = ReleaseOnDrop(Arc::clone(&release_worker));
         let worker_saw_cancel = Arc::new(AtomicBool::new(false));
+        let worker_saw_cancel_notify = Arc::new(tokio::sync::Notify::new());
 
         let entered_clone = Arc::clone(&worker_entered);
         let notify_clone = Arc::clone(&worker_entered_notify);
         let release_clone = Arc::clone(&release_worker);
         let saw_cancel_clone = Arc::clone(&worker_saw_cancel);
+        let saw_cancel_notify_clone = Arc::clone(&worker_saw_cancel_notify);
 
         let mut cfg = IosDriverConfig::new(TEST_UDID);
         cfg.env.env_path = Some(OsString::from(bin_dir.as_os_str()));
@@ -5255,14 +5265,25 @@ exit 0
         driver.on_clear_state_worker = Some(ClearStateTestHook(Arc::new(move |cancel_flag| {
             entered_clone.store(true, Ordering::SeqCst);
             notify_clone.notify_one();
-            while !release_clone.load(Ordering::SeqCst) {
+            let worker_deadline = std::time::Instant::now() + Duration::from_secs(10);
+            let mut notified_cancel = false;
+            while !release_clone.load(Ordering::SeqCst)
+                && std::time::Instant::now() < worker_deadline
+            {
                 if cancel_flag.load(Ordering::SeqCst) {
                     saw_cancel_clone.store(true, Ordering::SeqCst);
+                    if !notified_cancel {
+                        notified_cancel = true;
+                        saw_cancel_notify_clone.notify_one();
+                    }
                 }
                 std::thread::sleep(Duration::from_millis(5));
             }
             if cancel_flag.load(Ordering::SeqCst) {
                 saw_cancel_clone.store(true, Ordering::SeqCst);
+                if !notified_cancel {
+                    saw_cancel_notify_clone.notify_one();
+                }
             }
         })));
         let driver = Arc::new(driver);
@@ -5282,8 +5303,13 @@ exit 0
             "blocking wipe worker should have entered before outer drop"
         );
 
-        // Give the spinning worker 20ms to observe `cancel_flag == true` written by Drop.
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        // Wait deterministically (bounded) for the spinning worker to observe `cancel_flag == true`
+        // written synchronously by `ActiveWipeGuard::drop`.
+        if !worker_saw_cancel.load(Ordering::SeqCst) {
+            tokio::time::timeout(Duration::from_secs(2), worker_saw_cancel_notify.notified())
+                .await
+                .expect("dropping clear_state future must synchronously signal cancel_flag");
+        }
         assert!(
             worker_saw_cancel.load(Ordering::SeqCst),
             "dropping clear_state future must synchronously signal cancel_flag"
