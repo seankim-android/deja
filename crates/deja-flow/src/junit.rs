@@ -424,8 +424,17 @@ fn redact_tag_attributes<F: Fn(&str) -> String>(tag: &str, redact: &F) -> String
             val_end += 1;
         }
         if val_end >= bytes.len() {
-            // Unterminated attribute: copy verbatim.
-            out.push_str(&tag[name_start..]);
+            // Unterminated attribute (e.g. truncated XML): redact non-structural remainder
+            // rather than leaking raw bytes verbatim.
+            if STRUCTURAL_ATTRIBUTES.contains(&name) {
+                out.push_str(&tag[name_start..]);
+            } else {
+                out.push_str(&tag[name_start..cursor]);
+                out.push(quote as char);
+                let decoded = decode_xml(&tag[val_start..]);
+                let redacted = redact(&decoded);
+                out.push_str(&escape_xml(&redacted));
+            }
             break;
         }
         let raw_val = &tag[val_start..val_end];

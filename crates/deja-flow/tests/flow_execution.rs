@@ -144,7 +144,9 @@ struct MockState {
     open_link_error: Option<String>,
     crash_signal: Option<DriverCrashSignal>,
     crash_signals_by_app: BTreeMap<String, DriverCrashSignal>,
+    crash_check_delay: Option<Duration>,
     hierarchy_delay: Option<Duration>,
+    hierarchy_delays: VecDeque<Duration>,
     fail_hierarchy_once: bool,
     fail_all_hierarchies_transient: bool,
     /// Fails the first N taps with Selector-invisible screen before switching.
@@ -366,8 +368,13 @@ impl PlatformDriver for MockDriver {
         cancel: &'a CancellationToken,
     ) -> DriverFuture<'a, UiHierarchy> {
         Box::pin(async move {
-            let delay = self.state.lock().unwrap().hierarchy_delay;
-            if let Some(d) = delay {
+            let delay = {
+                let mut st = self.state.lock().unwrap();
+                st.hierarchy_delays.pop_front().or(st.hierarchy_delay)
+            };
+            if let Some(d) = delay
+                && !d.is_zero()
+            {
                 tokio::select! {
                     biased;
                     _ = cancel.cancelled() => return Err(DriverError::Cancelled),
@@ -593,9 +600,20 @@ impl PlatformDriver for MockDriver {
         &'a self,
         app_id: &'a str,
         _since_epoch_ms: u64,
-        _cancel: &'a CancellationToken,
+        cancel: &'a CancellationToken,
     ) -> DriverFuture<'a, Option<DriverCrashSignal>> {
         Box::pin(async move {
+            let delay = self.state.lock().unwrap().crash_check_delay;
+            if let Some(d) = delay {
+                tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => return Err(DriverError::Cancelled),
+                    _ = tokio::time::sleep(d) => {}
+                }
+            }
+            if cancel.is_cancelled() {
+                return Err(DriverError::Cancelled);
+            }
             let mut st = self.state.lock().unwrap();
             st.events
                 .push(DriverEvent::CheckAppCrash(app_id.to_string()));
@@ -953,11 +971,13 @@ async fn known_hash_reuses_cached_nodes_and_preserves_fnv1a_parity() {
 
     driver.set_screen(screen);
 
-    // 1. wait_stable: poll 1 fetches full tree; poll 2 gets `unchanged: true, nodes: []` via knownHash
-    // and must still match `checkout_btn` by reusing cached nodes!
+    // 1. wait_stable with explicit `enabled: true`: poll 1 fetches full tree; poll 2 gets
+    // `unchanged: true, nodes: []` via knownHash and still matches `checkout_btn` via cached nodes!
+    let mut checkout_sel = Selector::by_id("checkout_btn");
+    checkout_sel.enabled = Some(true);
     let mut req = WaitSelectorRequest::visible(
         "dev.deja.checkout",
-        Selector::by_id("checkout_btn"),
+        checkout_sel,
         Duration::from_millis(500),
     );
     req.wait_stable = true;
@@ -3914,5 +3934,500 @@ fn round2_junit_redacts_unicode_attribute_names() {
     assert!(
         redacted.contains("time=\"1.250\"") && redacted.contains("status=\"SUCCESS\""),
         "exact structural attributes must remain untouched: {redacted}"
+    );
+}
+
+// ============================================================================
+// Codex Cross-Review Round 3 Regression Tests (Findings 1-8)
+// ============================================================================
+
+#[tokio::test]
+async fn round3_disabled_node_visibility_flip_bypasses_known_hash() {
+    let ws = TempDir::new("round3-disabled-vis-flip");
+    let driver = MockDriver::full();
+    driver.state.lock().unwrap().honour_known_hash = true;
+
+    let home = node(
+        0,
+        None,
+        "home",
+        "Home",
+        UiRect::new(20.0, 100.0, 200.0, 44.0),
+    );
+    let mut banner_hidden = node(
+        1,
+        None,
+        "disabled_banner",
+        "Maintenance",
+        UiRect::new(20.0, 300.0, 240.0, 44.0),
+    );
+    banner_hidden.enabled = false;
+    banner_hidden.hittable = false;
+    banner_hidden.is_on_screen = false;
+
+    let mut banner_shown = banner_hidden.clone();
+    banner_shown.is_on_screen = true;
+
+    let screen_hidden = hierarchy_of(vec![home.clone(), banner_hidden]);
+    let screen_shown = hierarchy_of(vec![home, banner_shown]);
+    assert_eq!(
+        screen_hidden.hierarchy_hash, screen_shown.hierarchy_hash,
+        "disabled node flipping is_on_screen leaves FNV-1a hierarchyHash identical"
+    );
+
+    // Step 1 observes `screen_hidden` (`disabled_banner` off-screen); then Step 2 sees
+    // `screen_shown` (`disabled_banner` on-screen with identical FNV-1a hash).
+    driver.push_hierarchy(screen_hidden);
+    driver.set_screen(screen_shown);
+
+    let mut cfg = FlowExecutionConfig::new(ws.path().to_path_buf());
+    cfg.default_step_timeout = Duration::from_millis(80);
+    let yaml = r#"
+appId: dev.deja.checkout
+---
+- assertVisible:
+    id: home
+- assertNotVisible:
+    id: disabled_banner
+"#;
+    let out = FlowExecutor::new(cfg)
+        .execute_yaml(&driver, yaml, &CancellationToken::new())
+        .await;
+    assert!(
+        !out.passed,
+        "disabled node flipping is_on_screen=true must fail assertNotVisible (must not hit stale knownHash cache)"
+    );
+    assert_eq!(
+        out.failure.as_ref().map(|f| f.category),
+        Some(FailureCategory::ProductAssertion)
+    );
+
+    let known_hashes: Vec<Option<String>> = driver
+        .events()
+        .into_iter()
+        .filter_map(|e| match e {
+            DriverEvent::Hierarchy { known_hash } => Some(known_hash),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        known_hashes.iter().all(Option::is_none),
+        "selectors without enabled:true at every level must bypass known_hash: {known_hashes:?}"
+    );
+
+    // Nested relational selectors require `enabled: true` on every nested selector too.
+    let partial_enabled = Selector {
+        id: Some("ok".to_string()),
+        enabled: Some(true),
+        child_of: Some(Box::new(Selector::by_id("row"))),
+        ..Selector::default()
+    };
+    assert!(!partial_enabled.requires_enabled_everywhere());
+
+    let fully_enabled = Selector {
+        id: Some("ok".to_string()),
+        enabled: Some(true),
+        child_of: Some(Box::new(Selector {
+            id: Some("row".to_string()),
+            enabled: Some(true),
+            ..Selector::default()
+        })),
+        ..Selector::default()
+    };
+    assert!(fully_enabled.requires_enabled_everywhere());
+}
+
+#[tokio::test]
+async fn round3_es_whitespace_trimmed_for_add_media_and_subflows() {
+    let ws = TempDir::new("round3-es-whitespace");
+    fs::write(ws.path().join("pic.png"), b"PNG-BYTES").unwrap();
+    fs::write(ws.path().join("sub.yaml"), "- inputText: trimmed-ok\n").unwrap();
+
+    let flow_yaml = concat!(
+        "appId: dev.deja.checkout\n",
+        "---\n",
+        "- addMedia:\n",
+        "    - \" \u{FEFF}pic.png \"\n",
+        "- runFlow: \" \u{FEFF}sub.yaml\u{00A0}\"\n",
+        "- retry:\n",
+        "    maxRetries: 1\n",
+        "    file: \"\u{FEFF} sub.yaml \"\n",
+    );
+    fs::write(ws.path().join("main.yaml"), flow_yaml).unwrap();
+
+    let closure = collect_flow_closure(ws.path(), Path::new("main.yaml"))
+        .expect("closure trims ES whitespace around media and subflow paths");
+    let closure_sources: Vec<String> = closure.files.iter().map(|f| f.source.clone()).collect();
+    assert!(closure_sources.iter().any(|p| p == "pic.png"));
+    assert!(closure_sources.iter().any(|p| p == "sub.yaml"));
+
+    let driver = MockDriver::full();
+    let out = FlowExecutor::new(FlowExecutionConfig::new(ws.path().to_path_buf()))
+        .execute_file(&driver, Path::new("main.yaml"), &CancellationToken::new())
+        .await;
+    assert!(out.passed, "{:#?}", out.failed_step);
+
+    let canonical_pic = fs::canonicalize(ws.path().join("pic.png")).unwrap();
+    let media_paths: Vec<PathBuf> = driver
+        .events()
+        .into_iter()
+        .filter_map(|e| match e {
+            DriverEvent::AddMedia(paths) => Some(paths),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    assert_eq!(media_paths, vec![canonical_pic]);
+
+    let typed: Vec<String> = driver
+        .events()
+        .into_iter()
+        .filter_map(|e| match e {
+            DriverEvent::InputText(s) => Some(s),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(typed, vec!["trimmed-ok", "trimmed-ok"]);
+}
+
+#[test]
+fn round3_junit_redacts_unterminated_attribute() {
+    let redactor = create_redactor("/tmp/ws-trunc", None, &["secret_token_123".to_string()]);
+    let provider = provider_key_redactor(std::iter::empty::<(&str, &str)>());
+
+    let truncated_plain = "<testcase name=\"ok\"><failure message=\"secret_token_123";
+    let redacted_plain = redact_junit_with_redactors(truncated_plain, &redactor, &provider);
+    assert!(
+        !redacted_plain.contains("secret_token_123"),
+        "unterminated attribute must redact secret: {redacted_plain}"
+    );
+    assert!(
+        redacted_plain.contains("message=\"&lt;redacted-fixture-value&gt;"),
+        "unterminated attribute should re-escape redacted value: {redacted_plain}"
+    );
+
+    // Entity-encoded secret inside an unterminated single-quoted attribute is also decoded & redacted.
+    let truncated_entity = "<failure message='&#x73;ecret_token_123";
+    let redacted_entity = redact_junit_with_redactors(truncated_entity, &redactor, &provider);
+    assert!(
+        !redacted_entity.contains("secret_token_123")
+            && !redacted_entity.contains("ecret_token_123"),
+        "entity-encoded unterminated attribute must be decoded before redaction: {redacted_entity}"
+    );
+    assert!(
+        redacted_entity.contains("message='&lt;redacted-fixture-value&gt;"),
+        "redacted entity-encoded unterminated attribute: {redacted_entity}"
+    );
+}
+
+#[tokio::test]
+async fn round3_timed_out_optional_wait_does_not_mark_stale_snapshot_fresh() {
+    let ws = TempDir::new("round3-stale-initial-wait");
+    let driver = MockDriver::full();
+    let screen_a = hierarchy_of(vec![node(
+        0,
+        None,
+        "to_b",
+        "Go to B",
+        UiRect::new(20.0, 200.0, 200.0, 44.0),
+    )]);
+    let screen_b = hierarchy_of(vec![node(
+        0,
+        None,
+        "screen_b",
+        "Screen B",
+        UiRect::new(20.0, 200.0, 200.0, 44.0),
+    )]);
+    driver.set_screen(screen_a);
+    driver.push_tap_screen(screen_b);
+    {
+        let mut st = driver.state.lock().unwrap();
+        // Step 1 (`assertVisible: to_b`) -> fast
+        st.hierarchy_delays.push_back(Duration::ZERO);
+        // Step 2 (`tapOn: to_b`) -> fast (transitions A -> B; `last_hierarchy` stays stale A)
+        st.hierarchy_delays.push_back(Duration::ZERO);
+        // Step 3 (`assertVisible: { id: slow_opt, optional: true, timeout: 1 }`) -> slow so it
+        // times out BEFORE its first poll finishes, returning stale `initial_hierarchy` with
+        // `obtained_fresh_observation: false`!
+        st.hierarchy_delays.push_back(Duration::from_millis(60));
+    }
+
+    let yaml = r#"
+appId: dev.deja.checkout
+---
+- assertVisible:
+    id: to_b
+- tapOn:
+    id: to_b
+- assertVisible:
+    id: slow_opt
+    optional: true
+    timeout: 1
+- tapOn:
+    point: 50%, 50%
+    retryTapIfNoChange: true
+"#;
+    let out = FlowExecutor::new(FlowExecutionConfig::new(ws.path().to_path_buf()))
+        .execute_yaml(&driver, yaml, &CancellationToken::new())
+        .await;
+    assert!(out.passed, "{:#?}", out.failed_step);
+
+    let taps: Vec<(f64, f64)> = driver
+        .events()
+        .into_iter()
+        .filter_map(|e| match e {
+            DriverEvent::Tap(x, y) => Some((x, y)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        taps.len(),
+        3,
+        "point tap after timed-out optional wait must refresh stale screen A -> screen B and retry once, got {taps:?}"
+    );
+    assert_eq!(out.timing.steps[3].retries, 1);
+}
+
+#[tokio::test]
+async fn round3_primary_failure_app_id_captured_before_on_flow_complete() {
+    let ws = TempDir::new("round3-primary-app-id-before-hook");
+    let driver = MockDriver::full();
+    driver.set_screen(hierarchy_of(vec![node(
+        0,
+        None,
+        "home",
+        "Home",
+        UiRect::new(20.0, 200.0, 200.0, 44.0),
+    )]));
+    driver.state.lock().unwrap().crash_signals_by_app.insert(
+        "dev.deja.app_a".to_string(),
+        DriverCrashSignal {
+            source: CrashSignalSource::CrashReport,
+            report_file: Some("AppA-2026-11-28.ips".to_string()),
+            process: Some("AppA".to_string()),
+            detail: Some("SIGABRT".to_string()),
+        },
+    );
+
+    let yaml = r#"
+appId: dev.deja.app_a
+onFlowComplete:
+  - launchApp: dev.deja.app_b
+---
+- tapOn:
+    id: missing_in_app_a
+"#;
+    let mut cfg = FlowExecutionConfig::new(ws.path().to_path_buf());
+    cfg.default_step_timeout = Duration::from_millis(60);
+    let out = FlowExecutor::new(cfg)
+        .execute_yaml(&driver, yaml, &CancellationToken::new())
+        .await;
+    assert!(!out.passed);
+
+    let probed_apps: Vec<String> = driver
+        .events()
+        .into_iter()
+        .filter_map(|e| match e {
+            DriverEvent::CheckAppCrash(app) => Some(app),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        probed_apps,
+        vec!["dev.deja.app_a"],
+        "crash probe must query primary failing app A, not hook's app B"
+    );
+    assert_eq!(
+        out.failed_step
+            .as_ref()
+            .and_then(|s| s.failed_app_id.as_deref()),
+        Some("dev.deja.app_a")
+    );
+    assert_eq!(
+        out.failure.as_ref().map(|f| f.category),
+        Some(FailureCategory::AppCrash)
+    );
+}
+
+#[tokio::test]
+async fn round3_crash_probe_bounded_by_flow_timeout_and_cancel() {
+    let ws = TempDir::new("round3-crash-probe-budget");
+
+    // 1. Slow crash probe (500ms) is bounded by remaining flow_timeout (90ms) and preserves the
+    // original Selector failure instead of hanging or mutating into Timeout/AppCrash.
+    let driver = MockDriver::full();
+    driver.set_screen(hierarchy_of(vec![node(
+        0,
+        None,
+        "home",
+        "Home",
+        UiRect::new(20.0, 200.0, 200.0, 44.0),
+    )]));
+    {
+        let mut st = driver.state.lock().unwrap();
+        st.crash_check_delay = Some(Duration::from_millis(500));
+        st.crash_signal = Some(DriverCrashSignal {
+            source: CrashSignalSource::CrashReport,
+            report_file: Some("LateCrash.ips".to_string()),
+            process: Some("Late".to_string()),
+            detail: None,
+        });
+    }
+
+    let mut cfg = FlowExecutionConfig::new(ws.path().to_path_buf());
+    cfg.default_step_timeout = Duration::from_millis(20);
+    cfg.action_fail_fast_settle_polls = None;
+    cfg.flow_timeout = Some(Duration::from_millis(90));
+
+    let started = Instant::now();
+    let out = FlowExecutor::new(cfg)
+        .execute_yaml(
+            &driver,
+            "appId: dev.deja.checkout\n---\n- tapOn:\n    id: missing_btn\n",
+            &CancellationToken::new(),
+        )
+        .await;
+    let elapsed = started.elapsed();
+    assert!(!out.passed);
+    assert!(
+        elapsed < Duration::from_millis(300),
+        "slow crash probe must be bounded by remaining flow timeout, took {elapsed:?}"
+    );
+    assert_eq!(
+        out.failed_step.as_ref().unwrap().kind,
+        StepFailureKind::SelectorNotFound
+    );
+    assert_eq!(
+        out.failure.as_ref().map(|f| f.category),
+        Some(FailureCategory::Selector),
+        "original failure must be preserved when best-effort crash probe times out"
+    );
+
+    // 2. Caller cancellation during slow crash probe also aborts promptly and preserves failure.
+    let cancel_driver = Arc::new(MockDriver::full());
+    cancel_driver.set_screen(hierarchy_of(vec![node(
+        0,
+        None,
+        "home",
+        "Home",
+        UiRect::new(20.0, 200.0, 200.0, 44.0),
+    )]));
+    cancel_driver.state.lock().unwrap().crash_check_delay = Some(Duration::from_millis(500));
+
+    let cancel = CancellationToken::new();
+    let cancel_trigger = cancel.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        cancel_trigger.cancel();
+    });
+
+    let mut cancel_cfg = FlowExecutionConfig::new(ws.path().to_path_buf());
+    cancel_cfg.default_step_timeout = Duration::from_millis(20);
+    cancel_cfg.action_fail_fast_settle_polls = None;
+    let started_cancel = Instant::now();
+    let out_cancel = FlowExecutor::new(cancel_cfg)
+        .execute_yaml(
+            cancel_driver.as_ref(),
+            "appId: dev.deja.checkout\n---\n- tapOn:\n    id: missing_btn\n",
+            &cancel,
+        )
+        .await;
+    assert!(!out_cancel.passed);
+    assert!(
+        started_cancel.elapsed() < Duration::from_millis(300),
+        "caller cancellation must abort slow crash probe promptly, took {:?}",
+        started_cancel.elapsed()
+    );
+    assert_eq!(
+        out_cancel.failure.as_ref().map(|f| f.category),
+        Some(FailureCategory::Selector)
+    );
+}
+
+#[tokio::test]
+async fn round3_settle_deadline_bounds_slow_hierarchy_requests() {
+    let ws = TempDir::new("round3-settle-deadline");
+    let driver = MockDriver::full();
+    driver.set_screen(hierarchy_of(vec![node(
+        0,
+        None,
+        "home",
+        "Home",
+        UiRect::new(20.0, 200.0, 200.0, 44.0),
+    )]));
+    driver.state.lock().unwrap().hierarchy_delay = Some(Duration::from_millis(200));
+
+    // 1. `waitForAnimationToEnd` with 20ms timeout must not wait 200ms for a slow hierarchy call.
+    let started_anim = Instant::now();
+    let anim_out = FlowExecutor::new(FlowExecutionConfig::new(ws.path().to_path_buf()))
+        .execute_yaml(
+            &driver,
+            "appId: dev.deja.checkout\n---\n- waitForAnimationToEnd:\n    timeout: 20\n",
+            &CancellationToken::new(),
+        )
+        .await;
+    assert!(anim_out.passed, "{:#?}", anim_out.failed_step);
+    assert!(
+        started_anim.elapsed() < Duration::from_millis(120),
+        "waitForAnimationToEnd must bound slow hierarchy call by settle deadline, took {:?}",
+        started_anim.elapsed()
+    );
+    assert!(!anim_out.timing.steps[0].settled_early);
+
+    // 2. `tapOn.waitToSettleTimeoutMs: 20` on a point tap also bounds slow hierarchy fetch!
+    let tap_driver = MockDriver::full();
+    tap_driver.set_screen(hierarchy_of(vec![node(
+        0,
+        None,
+        "home",
+        "Home",
+        UiRect::new(20.0, 200.0, 200.0, 44.0),
+    )]));
+    tap_driver.state.lock().unwrap().hierarchy_delay = Some(Duration::from_millis(200));
+    let started_tap = Instant::now();
+    let tap_out = FlowExecutor::new(FlowExecutionConfig::new(ws.path().to_path_buf()))
+        .execute_yaml(
+            &tap_driver,
+            "appId: dev.deja.checkout\n---\n- tapOn:\n    point: 100, 200\n    waitToSettleTimeoutMs: 20\n",
+            &CancellationToken::new(),
+        )
+        .await;
+    assert!(tap_out.passed, "{:#?}", tap_out.failed_step);
+    assert!(
+        started_tap.elapsed() < Duration::from_millis(120),
+        "waitToSettleTimeoutMs must bound slow hierarchy call by settle deadline, took {:?}",
+        started_tap.elapsed()
+    );
+}
+
+#[tokio::test]
+async fn round3_optional_run_flow_propagates_limit_exceeded() {
+    let ws = TempDir::new("round3-optional-limit-exceeded");
+    let driver = MockDriver::full();
+    let yaml = r#"
+appId: dev.deja.checkout
+---
+- runFlow:
+    optional: true
+    commands:
+      - retry:
+          maxRetries: 21
+          commands:
+            - hideKeyboard
+"#;
+    let out = FlowExecutor::new(FlowExecutionConfig::new(ws.path().to_path_buf()))
+        .execute_yaml(&driver, yaml, &CancellationToken::new())
+        .await;
+    assert!(
+        !out.passed,
+        "optional: true runFlow must NOT suppress LimitExceeded errors"
+    );
+    assert_eq!(
+        out.failed_step.as_ref().unwrap().kind,
+        StepFailureKind::LimitExceeded
+    );
+    assert_eq!(
+        out.failure.as_ref().map(|f| f.category),
+        Some(FailureCategory::Runner)
     );
 }

@@ -635,13 +635,19 @@ impl FlowExecutor {
 
                 // Check OS/driver crash signal for the exact app targeted by the failing step
                 // (e.g. a child subflow's `appId` or an explicit `launchApp` override) before
-                // scrubbing and classifying.
+                // scrubbing and classifying, strictly bounded by remaining flow budget & caller cancel.
                 let crash_app_id = failed_step
                     .failed_app_id
                     .as_deref()
                     .filter(|id| !id.is_empty())
                     .or_else(|| state.app_id.as_deref().filter(|id| !id.is_empty()));
-                if !did_time_out
+                let crash_budget = self
+                    .config
+                    .flow_timeout
+                    .map(|limit| limit.saturating_sub(started.elapsed()));
+                let can_probe_crash = !did_time_out
+                    && !child_cancel.is_cancelled()
+                    && crash_budget.is_none_or(|rem| !rem.is_zero())
                     && failed_step.crash_signal.is_none()
                     && !matches!(
                         failed_step.kind,
@@ -652,14 +658,39 @@ impl FlowExecutor {
                     )
                     && driver
                         .capabilities()
-                        .supports(DriverCapability::AppCrashReports)
-                    && let Some(app_id) = crash_app_id
-                {
-                    let fresh_cancel = CancellationToken::new();
-                    if let Ok(Some(sig)) = driver
-                        .check_app_crash(app_id, state.run_started_epoch_ms, &fresh_cancel)
-                        .await
-                    {
+                        .supports(DriverCapability::AppCrashReports);
+                if can_probe_crash && let Some(app_id) = crash_app_id {
+                    let probe_cancel = child_cancel.child_token();
+                    let probe_result = match crash_budget {
+                        Some(rem) => tokio::select! {
+                            biased;
+                            _ = probe_cancel.cancelled() => None,
+                            timed = tokio::time::timeout(
+                                rem,
+                                driver.check_app_crash(
+                                    app_id,
+                                    state.run_started_epoch_ms,
+                                    &probe_cancel,
+                                ),
+                            ) => match timed {
+                                Ok(Ok(sig)) => sig,
+                                Ok(Err(_)) | Err(_) => {
+                                    probe_cancel.cancel();
+                                    None
+                                }
+                            },
+                        },
+                        None => tokio::select! {
+                            biased;
+                            _ = probe_cancel.cancelled() => None,
+                            res = driver.check_app_crash(
+                                app_id,
+                                state.run_started_epoch_ms,
+                                &probe_cancel,
+                            ) => res.ok().flatten(),
+                        },
+                    };
+                    if let Some(sig) = probe_result {
                         failed_step.crash_signal = Some(sig);
                     }
                 }
@@ -832,6 +863,14 @@ impl FlowExecutor {
                     .await;
             }
 
+            // Capture the primary failing app target BEFORE running `onFlowComplete` hooks so
+            // a cleanup hook launching another app cannot overwrite the primary crash-probe target.
+            if let Err(ref mut failed) = primary_result
+                && failed.failed_app_id.is_none()
+            {
+                failed.failed_app_id = state.app_id.clone();
+            }
+
             // 3. onFlowComplete acts like `finally` on non-cancelled runs, preserving primary error.
             if !cancel.is_cancelled() && !flow.header.on_flow_complete.is_empty() {
                 let complete_result = self
@@ -860,12 +899,6 @@ impl FlowExecutor {
                         primary_result = Err(hook_err);
                     }
                 }
-            }
-
-            if let Err(ref mut failed) = primary_result
-                && failed.failed_app_id.is_none()
-            {
-                failed.failed_app_id = state.app_id.clone();
             }
 
             if is_child_flow {
@@ -1539,7 +1572,7 @@ impl FlowExecutor {
         if let Some(ref h) = outcome.hierarchy
             && !h.unchanged
         {
-            state.last_hierarchy_is_fresh = !h.truncated;
+            state.last_hierarchy_is_fresh = outcome.obtained_fresh_observation && !h.truncated;
             state.last_hierarchy = Some(h.clone());
         } else {
             state.last_hierarchy_is_fresh = false;
@@ -1709,7 +1742,12 @@ impl FlowExecutor {
                 node.frame.center()
             }
         } else if let Some(pt_spec) = selector.point {
-            let viewport = if let Some(ref h) = state.last_hierarchy {
+            let viewport = if !pt_spec.uses_percent() {
+                UiSize::new(
+                    crate::driver::DEFAULT_VIEWPORT_WIDTH,
+                    crate::driver::DEFAULT_VIEWPORT_HEIGHT,
+                )
+            } else if let Some(ref h) = state.last_hierarchy {
                 h.effective_viewport()
             } else if driver
                 .capabilities()
@@ -2232,7 +2270,9 @@ impl FlowExecutor {
             .supports(DriverCapability::HoldScroll)
             .then_some(DEFAULT_HOLD_SCROLL_MS);
         let min_vis_fraction = f64::from(step.visibility_percentage) / 100.0;
-        let allow_known_hash = !self.config.include_system_ui && !selector.uses_unhashed_fields();
+        let allow_known_hash = !self.config.include_system_ui
+            && !selector.uses_unhashed_fields()
+            && selector.requires_enabled_everywhere();
 
         let mut end_of_scroll = false;
         let mut timed_out = false;
@@ -2484,6 +2524,7 @@ impl FlowExecutor {
         cancel: &CancellationToken,
     ) -> Result<bool, DriverError> {
         let started = Instant::now();
+        let single_probe = timeout.is_zero();
         let deadline = started + timeout;
         let mut schedule = PollSchedule::default();
         let mut settle = SettleTracker::new(2);
@@ -2492,13 +2533,39 @@ impl FlowExecutor {
             if cancel.is_cancelled() {
                 return Err(DriverError::Cancelled);
             }
-            let h = self
-                .fetch_fresh_hierarchy(driver, app_id, state, cancel)
-                .await?;
+            let h = if single_probe {
+                tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => return Err(DriverError::Cancelled),
+                    res = self.fetch_fresh_hierarchy(driver, app_id, state, cancel) => res?,
+                }
+            } else {
+                let rem = deadline.saturating_duration_since(Instant::now());
+                if rem.is_zero() {
+                    return Ok(false);
+                }
+                tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => return Err(DriverError::Cancelled),
+                    timed = tokio::time::timeout(
+                        rem,
+                        self.fetch_fresh_hierarchy(driver, app_id, state, cancel),
+                    ) => match timed {
+                        Ok(res) => res?,
+                        Err(_) => return Ok(false),
+                    },
+                }
+            };
+            if !single_probe && Instant::now() > deadline {
+                return Ok(false);
+            }
             if h.truncated {
                 settle.reset();
             } else if settle.observe_hash(h.hierarchy_hash_u64()).is_settled() {
-                return Ok(started.elapsed() < timeout);
+                return Ok(!single_probe && started.elapsed() < timeout);
+            }
+            if single_probe {
+                return Ok(false);
             }
             let remaining = deadline.saturating_duration_since(Instant::now());
             let Some(delay) = schedule.next_delay(remaining) else {
@@ -2896,7 +2963,8 @@ impl FlowExecutor {
                         visible_context: None,
                         crash_signal: None,
                     })?;
-            let uses_unhashed = interpolated.uses_unhashed_fields();
+            let allows_known_hash =
+                !interpolated.uses_unhashed_fields() && interpolated.requires_enabled_everywhere();
             let compiled =
                 CompiledSelector::compile(&interpolated).map_err(|err| FailedStepContext {
                     step_index,
@@ -2908,7 +2976,7 @@ impl FlowExecutor {
                     visible_context: None,
                     crash_signal: None,
                 })?;
-            Some((compiled, uses_unhashed))
+            Some((compiled, allows_known_hash))
         } else {
             None
         };
@@ -2927,7 +2995,8 @@ impl FlowExecutor {
                         crash_signal: None,
                     }
                 })?;
-                let uses_unhashed = interpolated.uses_unhashed_fields();
+                let allows_known_hash = !interpolated.uses_unhashed_fields()
+                    && interpolated.requires_enabled_everywhere();
                 let compiled =
                     CompiledSelector::compile(&interpolated).map_err(|err| FailedStepContext {
                         step_index,
@@ -2939,14 +3008,14 @@ impl FlowExecutor {
                         visible_context: None,
                         crash_signal: None,
                     })?;
-                Some((compiled, uses_unhashed))
+                Some((compiled, allows_known_hash))
             } else {
                 None
             };
 
         let allow_known_hash = !self.config.include_system_ui
-            && !compiled_vis.as_ref().is_some_and(|(_, u)| *u)
-            && !compiled_not_vis.as_ref().is_some_and(|(_, u)| *u);
+            && compiled_vis.as_ref().is_none_or(|(_, ok)| *ok)
+            && compiled_not_vis.as_ref().is_none_or(|(_, ok)| *ok);
 
         let hierarchy = self
             .fetch_fresh_hierarchy_with_cache(driver, &app_id, allow_known_hash, state, cancel)
@@ -3017,6 +3086,7 @@ impl FlowExecutor {
                     StepFailureKind::Cancelled
                         | StepFailureKind::ParseOrConfinement
                         | StepFailureKind::UnsupportedCapability
+                        | StepFailureKind::LimitExceeded
                         | StepFailureKind::AppCrash
                 )
             {

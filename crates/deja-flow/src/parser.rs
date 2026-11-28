@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 
 use deja_core::{
     CoreError, LaunchArgumentValue, YamlValue, js_number_to_string, parse_yaml_documents,
+    trim_es_whitespace,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -1039,14 +1040,15 @@ fn parse_add_media(value: &YamlValue) -> Result<AddMediaStep, FlowParseError> {
     }
     let mut files = Vec::with_capacity(seq.len());
     for item in seq {
-        let path = yaml_scalar_to_string(item, "addMedia")?;
-        if path.trim().is_empty() {
+        let raw = yaml_scalar_to_string(item, "addMedia")?;
+        let trimmed = trim_es_whitespace(&raw);
+        if trimmed.is_empty() {
             return Err(FlowParseError::InvalidStep {
                 command: "addMedia".to_string(),
                 detail: "media path must not be empty".to_string(),
             });
         }
-        files.push(path);
+        files.push(trimmed.to_string());
     }
     Ok(AddMediaStep { files })
 }
@@ -1647,17 +1649,29 @@ fn parse_condition(value: &YamlValue, context: &str) -> Result<Condition, FlowPa
     Ok(cond)
 }
 
+fn parse_reference_file_path(value: &YamlValue, command: &str) -> Result<String, FlowParseError> {
+    let YamlValue::String(raw) = value else {
+        return Err(FlowParseError::InvalidStep {
+            command: command.to_string(),
+            detail: "subflow file path must be a string".to_string(),
+        });
+    };
+    let trimmed = trim_es_whitespace(raw);
+    if trimmed.is_empty() {
+        return Err(FlowParseError::InvalidStep {
+            command: command.to_string(),
+            detail: "subflow file path must not be empty".to_string(),
+        });
+    }
+    Ok(trimmed.to_string())
+}
+
 fn parse_run_flow(value: &YamlValue, depth: usize) -> Result<RunFlowStep, FlowParseError> {
     match value {
-        YamlValue::String(file) => {
-            if file.trim().is_empty() {
-                return Err(FlowParseError::InvalidStep {
-                    command: "runFlow".to_string(),
-                    detail: "subflow file path must not be empty".to_string(),
-                });
-            }
+        YamlValue::String(_) => {
+            let trimmed = parse_reference_file_path(value, "runFlow")?;
             Ok(RunFlowStep {
-                target: RunFlowTarget::File(file.trim().to_string()),
+                target: RunFlowTarget::File(trimmed),
                 env: BTreeMap::new(),
                 when: None,
                 optional: false,
@@ -1674,7 +1688,7 @@ fn parse_run_flow(value: &YamlValue, depth: usize) -> Result<RunFlowStep, FlowPa
 
             for (k, v) in entries {
                 match k.as_str() {
-                    "file" => file = optional_non_empty_string(v, "runFlow.file")?,
+                    "file" => file = Some(parse_reference_file_path(v, "runFlow.file")?),
                     "commands" => {
                         let Some(items) = v.as_seq() else {
                             return Err(FlowParseError::InvalidStep {
@@ -1698,7 +1712,7 @@ fn parse_run_flow(value: &YamlValue, depth: usize) -> Result<RunFlowStep, FlowPa
             }
 
             let target = match (file, commands) {
-                (Some(f), None) => RunFlowTarget::File(f.trim().to_string()),
+                (Some(f), None) => RunFlowTarget::File(f),
                 (None, Some(cmds)) => RunFlowTarget::Commands(cmds),
                 (Some(_), Some(_)) => {
                     return Err(FlowParseError::InvalidStep {
@@ -1801,7 +1815,7 @@ fn parse_retry(value: &YamlValue, depth: usize) -> Result<RetryStep, FlowParseEr
     for (k, v) in entries {
         match k.as_str() {
             "maxRetries" => max_retries = yaml_to_u32(v, "retry", "maxRetries")?,
-            "file" => file = optional_non_empty_string(v, "retry.file")?,
+            "file" => file = Some(parse_reference_file_path(v, "retry.file")?),
             "commands" => {
                 let Some(items) = v.as_seq() else {
                     return Err(FlowParseError::InvalidStep {
@@ -1823,7 +1837,7 @@ fn parse_retry(value: &YamlValue, depth: usize) -> Result<RetryStep, FlowParseEr
     }
 
     let target = match (file, commands) {
-        (Some(f), None) => RunFlowTarget::File(f.trim().to_string()),
+        (Some(f), None) => RunFlowTarget::File(f),
         (None, Some(cmds)) => RunFlowTarget::Commands(cmds),
         (Some(_), Some(_)) => {
             return Err(FlowParseError::InvalidStep {

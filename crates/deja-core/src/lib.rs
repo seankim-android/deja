@@ -33,7 +33,7 @@ pub use contracts::{
     SemanticSelectedWalk, SourceDiff, StaleBuildPolicy, StoredFlowFile, StoredValidation,
     StoredWalk, VERIFIED_SUBFLOW_SCHEMA_VERSION, WALK_RESULT_SCHEMA_VERSION, WalkFailure,
     WalkIdentity, WalkOrigin, WalkValidation, evaluate_gate_from_records, gate_passed,
-    normalize_goal,
+    normalize_goal, trim_es_whitespace,
 };
 pub use error::CoreError;
 pub use fingerprint::{

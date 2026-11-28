@@ -645,6 +645,9 @@ pub struct WaitSelectorOutcome {
     pub elapsed_ms: u64,
     pub polls: u32,
     pub settled_early: bool,
+    /// `true` only when at least one poll inside this wait obtained a fresh observation
+    /// (as opposed to returning the pre-wait `initial_hierarchy` after an immediate timeout).
+    pub obtained_fresh_observation: bool,
     pub hierarchy_hash: String,
     pub matched_node: Option<UiNode>,
     pub visible_context: VisibleContext,

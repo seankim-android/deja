@@ -85,6 +85,11 @@ impl PointSpec {
         Ok(Self { x, y })
     }
 
+    /// Returns `true` when either axis is specified as a viewport percentage.
+    pub const fn uses_percent(self) -> bool {
+        matches!(self.x, PointCoord::Percent(_)) || matches!(self.y, PointCoord::Percent(_))
+    }
+
     /// Resolves pixel or percentage coordinates against a concrete viewport size.
     pub fn resolve(self, viewport: UiSize) -> UiPoint {
         UiPoint {
@@ -274,6 +279,46 @@ impl Selector {
                 .contains_descendants
                 .iter()
                 .any(Self::uses_unhashed_fields)
+    }
+
+    /// Returns `true` when this selector AND every nested relational/descendant selector
+    /// explicitly requires `enabled == Some(true)`.
+    ///
+    /// Because [`crate::backoff::hash_hierarchy_nodes`] hashes `hittable` (`enabled && is_on_screen`)
+    /// rather than `is_on_screen` independently, a disabled node flipping `is_on_screen` leaves
+    /// `hierarchyHash` unchanged. Only selectors requiring `enabled: true` at every level can safely
+    /// short-circuit via `knownHash` without risking stale off-screen/on-screen cached nodes.
+    pub fn requires_enabled_everywhere(&self) -> bool {
+        if self.enabled != Some(true) {
+            return false;
+        }
+        self.below
+            .as_deref()
+            .is_none_or(Self::requires_enabled_everywhere)
+            && self
+                .above
+                .as_deref()
+                .is_none_or(Self::requires_enabled_everywhere)
+            && self
+                .left_of
+                .as_deref()
+                .is_none_or(Self::requires_enabled_everywhere)
+            && self
+                .right_of
+                .as_deref()
+                .is_none_or(Self::requires_enabled_everywhere)
+            && self
+                .child_of
+                .as_deref()
+                .is_none_or(Self::requires_enabled_everywhere)
+            && self
+                .contains_child
+                .as_deref()
+                .is_none_or(Self::requires_enabled_everywhere)
+            && self
+                .contains_descendants
+                .iter()
+                .all(Self::requires_enabled_everywhere)
     }
 
     /// Returns `true` ONLY when `id`/`text` contain no regex metacharacters and no `index`,
@@ -955,10 +1000,15 @@ pub async fn wait_local<D: PlatformDriver + ?Sized>(
     let start = Instant::now();
     let deadline = start + req.timeout;
     let single_probe = req.timeout.is_zero();
-    let allow_known_hash = !req.include_system_ui && !req.selector.uses_unhashed_fields();
+    let selector_tracks_unhashed = req.include_system_ui || req.selector.uses_unhashed_fields();
+    // `hash_hierarchy_nodes` hashes `hittable` (`enabled && is_on_screen`), not `is_on_screen`
+    // independently, so disabled nodes flipping `is_on_screen` keep the same hash. Only use
+    // `knownHash` short-circuiting when no unhashed fields/chrome are queried AND disabled nodes
+    // cannot match any part of the selector.
+    let allow_known_hash = !selector_tracks_unhashed && req.selector.requires_enabled_everywhere();
     let mut schedule = PollSchedule::default();
     let mut settle = SettleTracker::new(req.stable_polls.max(1));
-    let mut miss_settle = if allow_known_hash {
+    let mut miss_settle = if !selector_tracks_unhashed {
         req.fail_fast_on_settle_polls
             .map(|n| SettleTracker::new(n.max(2)))
     } else {
@@ -1121,6 +1171,7 @@ pub async fn wait_local<D: PlatformDriver + ?Sized>(
                             elapsed_ms: elapsed.as_millis() as u64,
                             polls,
                             settled_early: !single_probe && elapsed < req.timeout,
+                            obtained_fresh_observation: true,
                             hierarchy_hash: hash_hex,
                             matched_node,
                             visible_context: VisibleContext::default(),
@@ -1199,6 +1250,7 @@ pub async fn wait_local<D: PlatformDriver + ?Sized>(
         elapsed_ms: start.elapsed().as_millis() as u64,
         polls,
         settled_early: false,
+        obtained_fresh_observation: had_usable_observation_this_wait,
         hierarchy_hash: last_observed_hash.or(known_hash).unwrap_or_default(),
         matched_node: None,
         visible_context,
