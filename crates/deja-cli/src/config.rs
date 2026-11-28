@@ -6,6 +6,7 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 use deja_core::{StaleBuildPolicy, validate_forbidden_values};
+use deja_driver_android::validate_serial;
 use deja_driver_ios::validate_udid;
 use deja_driver_web::{ScreenSize, validate_loopback_http_url};
 use deja_store::{check_flows_dir, check_manifest_path};
@@ -420,19 +421,20 @@ pub fn load_config(opts: &LoadConfigOptions<'_>) -> Result<LoadedConfig, ConfigE
         }
     };
 
-    // `crashReportGraceMs` (iOS only, 0..=120_000, default 10_000)
+    // `crashReportGraceMs` (iOS and Android, 0..=120_000, default 10_000)
     let crash_report_grace_ms = match obj.get("crashReportGraceMs") {
         None | Some(Value::Null) => {
-            if platform == "ios" {
+            if matches!(platform.as_str(), "ios" | "android") {
                 DEFAULT_CRASH_REPORT_GRACE_MS
             } else {
                 0
             }
         }
         Some(val) => {
-            if platform != "ios" {
+            if !matches!(platform.as_str(), "ios" | "android") {
                 return Err(ConfigError(
-                    "`crashReportGraceMs` is only supported on platform \"ios\"".to_string(),
+                    "`crashReportGraceMs` is only supported on platforms \"ios\" and \"android\""
+                        .to_string(),
                 ));
             }
             let ms = parse_non_negative_u64(val, "crashReportGraceMs")?;
@@ -646,6 +648,14 @@ pub fn load_config(opts: &LoadConfigOptions<'_>) -> Result<LoadedConfig, ConfigE
                 })?;
             }
             if opts.capability == CommandCapability::Doctor
+                && platform == "android"
+                && let Some(ref serial) = device
+            {
+                let _ = validate_serial(serial).map_err(|err| {
+                    ConfigError(format!("invalid Android device serial {serial:?}: {err}"))
+                })?;
+            }
+            if opts.capability == CommandCapability::Doctor
                 && platform == "web"
                 && let Some(ref dev) = device
                 && dev != "chromium"
@@ -687,6 +697,12 @@ pub fn load_config(opts: &LoadConfigOptions<'_>) -> Result<LoadedConfig, ConfigE
                 let _ = validate_udid(dev).map_err(|err| {
                     ConfigError(format!(
                         "iOS `device` must be an explicit simulator UDID (got {dev:?}): {err}"
+                    ))
+                })?;
+            } else if platform == "android" {
+                let _ = validate_serial(dev).map_err(|err| {
+                    ConfigError(format!(
+                        "Android `device` must be an explicit ADB serial (got {dev:?}): {err}"
                     ))
                 })?;
             } else if platform == "web" && dev != "chromium" {
@@ -1163,6 +1179,71 @@ mod tests {
             })
             .is_err()
         );
+
+        let _ = fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn android_config_allows_crash_report_grace_ms_and_validates_serial() {
+        let ws = temp_ws("android-cfg");
+        let apk = ws.join("app.apk");
+        fs::write(&apk, b"PK\x03\x04dummy").unwrap();
+        let cfg = ws.join("deja.config.json");
+        let empty = BTreeMap::new();
+
+        fs::write(
+            &cfg,
+            r#"{"workspaceRoot":".","platform":"android","appId":"com.example.app","buildPath":"app.apk","device":"emulator-5554","crashReportGraceMs":3500}"#,
+        )
+        .unwrap();
+        let loaded = load_config(&LoadConfigOptions {
+            cwd: &ws,
+            explicit_config: Some(&cfg),
+            capability: CommandCapability::Execute,
+            device_override: None,
+            build_override: None,
+            env: &empty,
+        })
+        .expect("valid android config with crashReportGraceMs should load");
+        assert_eq!(loaded.platform, "android");
+        assert_eq!(loaded.crash_report_grace_ms, 3_500);
+        assert_eq!(loaded.device.as_deref(), Some("emulator-5554"));
+
+        // Invalid Android serial fails closed on Execute and Doctor.
+        fs::write(
+            &cfg,
+            r#"{"workspaceRoot":".","platform":"android","appId":"com.example.app","buildPath":"app.apk","device":"-bad-serial"}"#,
+        )
+        .unwrap();
+        for cap in [CommandCapability::Execute, CommandCapability::Doctor] {
+            let err = load_config(&LoadConfigOptions {
+                cwd: &ws,
+                explicit_config: Some(&cfg),
+                capability: cap,
+                device_override: None,
+                build_override: None,
+                env: &empty,
+            })
+            .expect_err("invalid Android serial must fail closed");
+            assert!(err.to_string().contains("serial") || err.to_string().contains("ADB"));
+        }
+
+        // Web still rejects crashReportGraceMs.
+        fs::write(
+            &cfg,
+            r#"{"workspaceRoot":".","platform":"web","appId":"http://127.0.0.1:4174","adapter":"maestro-web@2.12.0","browser":"chromium","crashReportGraceMs":1000}"#,
+        )
+        .unwrap();
+        let err = load_config(&LoadConfigOptions {
+            cwd: &ws,
+            explicit_config: Some(&cfg),
+            capability: CommandCapability::Static,
+            device_override: None,
+            build_override: None,
+            env: &empty,
+        })
+        .expect_err("web must reject crashReportGraceMs");
+        assert!(err.to_string().contains("crashReportGraceMs"));
 
         let _ = fs::remove_dir_all(&ws);
     }

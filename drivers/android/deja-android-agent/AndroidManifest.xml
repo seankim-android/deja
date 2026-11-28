@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="dev.deja.agent"
+    android:versionCode="1"
+    android:versionName="1.0.0">
+
+    <uses-sdk
+        android:minSdkVersion="24"
+        android:targetSdkVersion="36" />
+
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <application
+        android:label="Déjà Android Agent"
+        android:debuggable="true" />
+
+    <instrumentation
+        android:name=".DejaAgentInstrumentation"
+        android:targetPackage="dev.deja.agent"
+        android:label="Déjà Android UiAutomator2 HTTP Agent" />
+</manifest>

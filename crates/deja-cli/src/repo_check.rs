@@ -69,6 +69,14 @@ fn has_path_dir_segment(path: &str, segment: &str) -> bool {
     false
 }
 
+/// Sole prebuilt APK path permitted to be tracked in git (the embedded Déjà Android
+/// UiAutomator2 HTTP instrumentation agent for JDK-free execution).
+pub const ALLOWED_PREBUILT_ANDROID_AGENT_APK: &str =
+    "drivers/android/deja-android-agent/prebuilt/deja-android-agent.apk";
+
+/// Maximum permitted size in bytes for [`ALLOWED_PREBUILT_ANDROID_AGENT_APK`] (256 KiB).
+pub const MAX_PREBUILT_ANDROID_AGENT_APK_BYTES: usize = 256 * 1024;
+
 fn is_forbidden_tracked_path(path: &str) -> bool {
     if has_path_dir_segment(path, ".deja")
         || has_path_dir_segment(path, ".tmp")
@@ -80,11 +88,11 @@ fn is_forbidden_tracked_path(path: &str) -> bool {
         return true;
     }
 
-    if path.ends_with(".apk")
-        || path.ends_with(".aab")
-        || path.ends_with(".class")
-        || path.ends_with(".pyc")
-    {
+    if path.ends_with(".apk") && path != ALLOWED_PREBUILT_ANDROID_AGENT_APK {
+        return true;
+    }
+
+    if path.ends_with(".aab") || path.ends_with(".class") || path.ends_with(".pyc") {
         return true;
     }
 
@@ -539,6 +547,14 @@ pub fn validate_repo(root: &Path, options: RepoCheckOptions) -> Result<RepoCheck
         let full_path = canonical_root.join(rel_path);
         let bytes = fs::read(&full_path)
             .map_err(|err| format!("failed to read tracked file {rel_path}: {err}"))?;
+        if *rel_path == ALLOWED_PREBUILT_ANDROID_AGENT_APK
+            && bytes.len() > MAX_PREBUILT_ANDROID_AGENT_APK_BYTES
+        {
+            return Err(format!(
+                "Allowlisted prebuilt Android agent APK {rel_path} ({} bytes) exceeds {MAX_PREBUILT_ANDROID_AGENT_APK_BYTES}-byte limit",
+                bytes.len()
+            ));
+        }
         if bytes.contains(&0) {
             continue;
         }

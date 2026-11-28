@@ -320,6 +320,16 @@ version = "0.1.0"
 dependencies = [
  "deja-core",
  "deja-flow",
+ "hex",
+ "libc",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "tracing",
 ]
 
 [[package]]

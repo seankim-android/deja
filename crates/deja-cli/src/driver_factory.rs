@@ -16,7 +16,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use deja_core::fingerprint_tree_cancellable;
+use deja_core::{fingerprint_file_cancellable, fingerprint_tree_cancellable};
+use deja_driver_android::{
+    Adb, AgentApkReadiness, AndroidDriver, AndroidDriverConfig, AndroidDriverError, discover_adb,
+    extract_apk_package_id_from_path, inspect_agent_apk_readiness, verify_and_hash_apk,
+};
 use deja_driver_ios::cache::{
     build_cache_key, detect_toolchain, native_simulator_arch, resolve_deja_home,
 };
@@ -30,7 +34,6 @@ use deja_driver_web::{
 };
 use deja_flow::{PlatformDriver, decode_xml};
 use serde::{Deserialize, Serialize};
-use tokio::process::Command;
 use tokio_util::sync::CancellationToken;
 
 use crate::fs_safe::{create_new_nofollow, open_read_nofollow};
@@ -65,16 +68,53 @@ impl DriverFactoryError {
     }
 }
 
-/// Cloneable, reference-counted handle to a verified, staged iOS `.app` bundle shared across
-/// parallel batch workers so the `.app` tree is copied and SHA-256 verified only once per batch.
+enum StagedBuildArtifact {
+    Ios(StagedIosAppBundle),
+    Android(StagedAndroidApk),
+}
+
+impl StagedBuildArtifact {
+    fn app_path(&self) -> &Path {
+        match self {
+            Self::Ios(staged) => staged.app_path(),
+            Self::Android(staged) => staged.apk_path(),
+        }
+    }
+
+    fn staging_dir(&self) -> &Path {
+        match self {
+            Self::Ios(staged) => staged.staging_dir(),
+            Self::Android(staged) => staged.staging_dir(),
+        }
+    }
+
+    fn fingerprint(&self) -> &str {
+        match self {
+            Self::Ios(staged) => staged.fingerprint(),
+            Self::Android(staged) => staged.fingerprint(),
+        }
+    }
+
+    fn platform(&self) -> &'static str {
+        match self {
+            Self::Ios(_) => "ios",
+            Self::Android(_) => "android",
+        }
+    }
+}
+
+/// Cloneable, reference-counted handle to a verified, staged iOS `.app` bundle or Android `.apk`
+/// artifact shared across parallel batch workers so the build artifact is copied and SHA-256
+/// verified only once per batch.
 #[derive(Clone)]
 pub struct SharedStagedBuild {
-    inner: Arc<StagedIosAppBundle>,
+    inner: Arc<StagedBuildArtifact>,
 }
 
 impl std::fmt::Debug for SharedStagedBuild {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SharedStagedBuild")
+            .field("platform", &self.inner.platform())
             .field("app_path", &self.inner.app_path())
             .field("fingerprint", &self.inner.fingerprint())
             .finish()
@@ -86,7 +126,15 @@ impl SharedStagedBuild {
     #[must_use]
     pub fn new(staged: StagedIosAppBundle) -> Self {
         Self {
-            inner: Arc::new(staged),
+            inner: Arc::new(StagedBuildArtifact::Ios(staged)),
+        }
+    }
+
+    /// Wrap a verified [`StagedAndroidApk`] for shared read-only reuse across workers.
+    #[must_use]
+    pub fn new_android(staged: StagedAndroidApk) -> Self {
+        Self {
+            inner: Arc::new(StagedBuildArtifact::Android(staged)),
         }
     }
 
@@ -103,6 +151,11 @@ impl SharedStagedBuild {
     #[must_use]
     pub fn fingerprint(&self) -> &str {
         self.inner.fingerprint()
+    }
+
+    #[must_use]
+    pub fn is_platform(&self, platform: &str) -> bool {
+        self.inner.platform() == platform
     }
 }
 
@@ -166,9 +219,67 @@ pub trait DriverFactory: Send + Sync {
     ) -> FactoryFuture<'a, Result<(), DriverFactoryError>>;
 }
 
-/// Production [`DriverFactory`] wiring `IosDriver` and `WebDriver` (with clear exit-2 notice for Android Phase 4 stub).
+/// Production [`DriverFactory`] wiring `IosDriver`, `AndroidDriver`, and `WebDriver`.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct RealDriverFactory;
+
+fn map_android_factory_err(err: AndroidDriverError) -> DriverFactoryError {
+    match err {
+        AndroidDriverError::Cancelled => DriverFactoryError::Cancelled,
+        AndroidDriverError::InvalidAdbPath { .. }
+        | AndroidDriverError::InvalidSerial(_)
+        | AndroidDriverError::InvalidPackageId(_)
+        | AndroidDriverError::InvalidPath(_)
+        | AndroidDriverError::InvalidArgument(_) => {
+            DriverFactoryError::UnsupportedOrConfig(err.to_string())
+        }
+        other => DriverFactoryError::Runtime(other.to_string()),
+    }
+}
+
+/// Validates that an Android `buildPath` is an existing regular, non-symlink `.apk` archive
+/// whose binary `AndroidManifest.xml` `<manifest package="...">` matches `expected_app_id`.
+pub fn verify_android_apk_build(
+    build_path: &Path,
+    expected_app_id: &str,
+) -> Result<String, String> {
+    let lmeta = fs::symlink_metadata(build_path).map_err(|err| {
+        format!(
+            "Android buildPath cannot be inspected ({}): {err}",
+            build_path.display()
+        )
+    })?;
+    if lmeta.file_type().is_symlink() {
+        return Err(format!(
+            "Android buildPath must not be a symbolic link: {}",
+            build_path.display()
+        ));
+    }
+    if !lmeta.file_type().is_file()
+        || build_path
+            .extension()
+            .and_then(|s| s.to_str())
+            .is_none_or(|ext| !ext.eq_ignore_ascii_case("apk"))
+    {
+        return Err(format!(
+            "Android buildPath must be an existing `.apk` regular file (got {})",
+            build_path.display()
+        ));
+    }
+    let sha = verify_and_hash_apk(build_path).map_err(|err| err.to_string())?;
+    let apk_pkg = extract_apk_package_id_from_path(build_path).map_err(|err| {
+        format!(
+            "Android APK manifest package check failed ({}): {err}",
+            build_path.display()
+        )
+    })?;
+    if apk_pkg != expected_app_id {
+        return Err(format!(
+            "Android `.apk` manifest package ({apk_pkg:?}) does not match configured appId ({expected_app_id:?})"
+        ));
+    }
+    Ok(sha)
+}
 
 fn simctl_env_from_map(env: &BTreeMap<String, String>) -> SimctlEnv {
     SimctlEnv {
@@ -202,10 +313,17 @@ impl DriverFactory for RealDriverFactory {
                     })?;
                     Ok(Some(rt))
                 }
-                "android" => Err(DriverFactoryError::UnsupportedOrConfig(
-                    "native Android driver execution is not wired yet (tracked in Phase 4 / DEJA-66)"
-                        .to_string(),
-                )),
+                "android" => {
+                    let adb = Adb::discover(ctx.env.clone()).map_err(map_android_factory_err)?;
+                    adb.resolve_target_device(&ctx.device, cancel)
+                        .await
+                        .map_err(map_android_factory_err)?;
+                    let rt = adb
+                        .runtime_version(&ctx.device, cancel)
+                        .await
+                        .map_err(map_android_factory_err)?;
+                    Ok(Some(rt))
+                }
                 "web" => {
                     if ctx.device != "chromium" {
                         return Err(DriverFactoryError::UnsupportedOrConfig(format!(
@@ -258,6 +376,16 @@ impl DriverFactory for RealDriverFactory {
                 .await?;
                 return Ok(Some(SharedStagedBuild::new(staged)));
             }
+            if ctx.platform == "android" {
+                let staged = run_cancellable_android_apk_staging(
+                    ctx.build_path.clone(),
+                    ctx.app_id.clone(),
+                    ctx.expected_build_fingerprint.clone(),
+                    cancel,
+                )
+                .await?;
+                return Ok(Some(SharedStagedBuild::new_android(staged)));
+            }
             Ok(None)
         })
     }
@@ -273,7 +401,9 @@ impl DriverFactory for RealDriverFactory {
             }
             match ctx.platform.as_str() {
                 "ios" => {
-                    if let Some(ref staged) = ctx.staged_build {
+                    if let Some(ref staged) = ctx.staged_build
+                        && staged.is_platform("ios")
+                    {
                         if let Some(ref expected) = ctx.expected_build_fingerprint
                             && staged.fingerprint() != expected
                         {
@@ -308,10 +438,39 @@ impl DriverFactory for RealDriverFactory {
                     })?;
                     Ok(Box::new(driver) as Box<dyn PlatformDriver>)
                 }
-                "android" => Err(DriverFactoryError::UnsupportedOrConfig(
-                    "native Android driver execution is not wired yet (tracked in Phase 4 / DEJA-66)"
-                        .to_string(),
-                )),
+                "android" => {
+                    if let Some(ref staged) = ctx.staged_build
+                        && staged.is_platform("android")
+                    {
+                        if let Some(ref expected) = ctx.expected_build_fingerprint
+                            && staged.fingerprint() != expected
+                        {
+                            return Err(DriverFactoryError::UnsupportedOrConfig(format!(
+                                "staged Android `.apk` fingerprint ({}) does not match expected ({expected})",
+                                staged.fingerprint()
+                            )));
+                        }
+                    } else {
+                        verify_android_apk_build(&ctx.build_path, &ctx.app_id)
+                            .map_err(DriverFactoryError::UnsupportedOrConfig)?;
+                    }
+                    let mut cfg = AndroidDriverConfig::new(&ctx.device)
+                        .with_disable_animations(ctx.disable_animations)
+                        .with_env(ctx.env.clone());
+                    cfg.deja_home = ctx.deja_home.clone().or_else(|| {
+                        ctx.env
+                            .get("DEJA_HOME")
+                            .filter(|v| !v.is_empty())
+                            .map(PathBuf::from)
+                    });
+                    cfg.crash_report_grace = Duration::from_millis(ctx.crash_report_grace_ms);
+                    let timeout_cap = Duration::from_millis(ctx.timeout_ms.max(1_000));
+                    cfg.startup_timeout = cfg.startup_timeout.min(timeout_cap);
+                    cfg.request_timeout = cfg.request_timeout.min(timeout_cap);
+                    cfg.app_launch_timeout = cfg.app_launch_timeout.min(timeout_cap);
+                    let driver = AndroidDriver::new(cfg).map_err(map_android_factory_err)?;
+                    Ok(Box::new(driver) as Box<dyn PlatformDriver>)
+                }
                 "web" => {
                     if ctx.device != "chromium" {
                         return Err(DriverFactoryError::UnsupportedOrConfig(format!(
@@ -354,7 +513,9 @@ impl DriverFactory for RealDriverFactory {
             }
             if ctx.platform == "ios" {
                 let simctl = Simctl::with_env(simctl_env_from_map(&ctx.env));
-                if let Some(ref staged) = ctx.staged_build {
+                if let Some(ref staged) = ctx.staged_build
+                    && staged.is_platform("ios")
+                {
                     if let Some(ref expected) = ctx.expected_build_fingerprint
                         && staged.fingerprint() != expected
                     {
@@ -396,6 +557,43 @@ impl DriverFactory for RealDriverFactory {
                     ))
                 })?;
                 drop(staged);
+            } else if ctx.platform == "android" {
+                if let Some(ref staged) = ctx.staged_build
+                    && staged.is_platform("android")
+                {
+                    if let Some(ref expected) = ctx.expected_build_fingerprint
+                        && staged.fingerprint() != expected
+                    {
+                        return Err(DriverFactoryError::UnsupportedOrConfig(format!(
+                            "staged Android `.apk` fingerprint ({}) does not match expected ({expected})",
+                            staged.fingerprint()
+                        )));
+                    }
+                    let adb = Adb::discover(ctx.env.clone()).map_err(map_android_factory_err)?;
+                    adb.resolve_target_device(&ctx.device, cancel)
+                        .await
+                        .map_err(map_android_factory_err)?;
+                    adb.install_apk(&ctx.device, staged.app_path(), cancel)
+                        .await
+                        .map_err(map_android_factory_err)?;
+                    return Ok(());
+                }
+
+                let staged = run_cancellable_android_apk_staging(
+                    ctx.build_path.clone(),
+                    ctx.app_id.clone(),
+                    ctx.expected_build_fingerprint.clone(),
+                    cancel,
+                )
+                .await?;
+                let adb = Adb::discover(ctx.env.clone()).map_err(map_android_factory_err)?;
+                adb.resolve_target_device(&ctx.device, cancel)
+                    .await
+                    .map_err(map_android_factory_err)?;
+                adb.install_apk(&ctx.device, staged.apk_path(), cancel)
+                    .await
+                    .map_err(map_android_factory_err)?;
+                drop(staged);
             }
             Ok(())
         })
@@ -431,6 +629,222 @@ impl Drop for StagedIosAppBundle {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.temp_dir);
     }
+}
+
+/// RAII temporary immutable copy of an Android `.apk` archive whose binary `AndroidManifest.xml`
+/// package ID and streaming SHA-256 fingerprint have both been verified before `adb install`.
+pub struct StagedAndroidApk {
+    temp_dir: PathBuf,
+    apk_path: PathBuf,
+    fingerprint: String,
+}
+
+impl StagedAndroidApk {
+    #[must_use]
+    pub fn apk_path(&self) -> &Path {
+        &self.apk_path
+    }
+
+    #[must_use]
+    pub fn staging_dir(&self) -> &Path {
+        &self.temp_dir
+    }
+
+    #[must_use]
+    pub fn fingerprint(&self) -> &str {
+        &self.fingerprint
+    }
+}
+
+impl Drop for StagedAndroidApk {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.temp_dir);
+    }
+}
+
+async fn run_cancellable_android_apk_staging(
+    build_path: PathBuf,
+    app_id: String,
+    expected_fp: Option<String>,
+    cancel: &CancellationToken,
+) -> Result<StagedAndroidApk, DriverFactoryError> {
+    if cancel.is_cancelled() {
+        return Err(DriverFactoryError::Cancelled);
+    }
+    let cancel_flag = Arc::new(AtomicBool::new(false));
+    let worker_flag = Arc::clone(&cancel_flag);
+    let mut handle = tokio::task::spawn_blocking(move || {
+        stage_and_verify_android_apk_cancellable(
+            &build_path,
+            &app_id,
+            expected_fp.as_deref(),
+            &worker_flag,
+        )
+    });
+    tokio::select! {
+        res = &mut handle => match res {
+            Ok(Ok(staged)) => Ok(staged),
+            Ok(Err(StageBundleError::Cancelled)) => Err(DriverFactoryError::Cancelled),
+            Ok(Err(StageBundleError::Failed(msg))) => Err(DriverFactoryError::UnsupportedOrConfig(msg)),
+            Err(join_err) => Err(DriverFactoryError::Runtime(format!(
+                "Android `.apk` staging task failed: {join_err}"
+            ))),
+        },
+        _ = cancel.cancelled() => {
+            cancel_flag.store(true, Ordering::SeqCst);
+            let _ = handle.await;
+            Err(DriverFactoryError::Cancelled)
+        }
+    }
+}
+
+/// Stage an immutable private temporary copy of an Android `.apk` (`O_NOFOLLOW`), verify its
+/// binary `AndroidManifest.xml` `<manifest package="..."> == expected_app_id`, and assert its
+/// streaming SHA-256 matches `expected_fingerprint` on that exact staged copy before `adb install`.
+pub fn stage_and_verify_android_apk_cancellable(
+    build_path: &Path,
+    expected_app_id: &str,
+    expected_fingerprint: Option<&str>,
+    cancel_flag: &AtomicBool,
+) -> Result<StagedAndroidApk, StageBundleError> {
+    use std::io::Write;
+    if cancel_flag.load(Ordering::Relaxed) {
+        return Err(StageBundleError::Cancelled);
+    }
+    let lmeta = fs::symlink_metadata(build_path).map_err(|err| {
+        StageBundleError::Failed(format!(
+            "Android buildPath cannot be inspected ({}): {err}",
+            build_path.display()
+        ))
+    })?;
+    if lmeta.file_type().is_symlink() {
+        return Err(StageBundleError::Failed(format!(
+            "Android buildPath must not be a symbolic link: {}",
+            build_path.display()
+        )));
+    }
+    if !lmeta.file_type().is_file()
+        || build_path
+            .extension()
+            .and_then(|s| s.to_str())
+            .is_none_or(|ext| !ext.eq_ignore_ascii_case("apk"))
+    {
+        return Err(StageBundleError::Failed(format!(
+            "Android buildPath must be an existing `.apk` regular file (got {})",
+            build_path.display()
+        )));
+    }
+    let apk_name = build_path.file_name().ok_or_else(|| {
+        StageBundleError::Failed(format!(
+            "Android buildPath has no filename: {}",
+            build_path.display()
+        ))
+    })?;
+
+    let seq = BUNDLE_STAGE_SEQ.fetch_add(1, Ordering::Relaxed);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let temp_dir = std::env::temp_dir().join(format!(
+        "deja-android-apk-{}-{seq}-{nanos:x}",
+        std::process::id()
+    ));
+    let mut dir_builder = fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        dir_builder.mode(0o700);
+    }
+    dir_builder.create(&temp_dir).map_err(|err| {
+        StageBundleError::Failed(format!(
+            "failed to create temporary Android APK staging directory: {err}"
+        ))
+    })?;
+
+    let apk_path = temp_dir.join(apk_name);
+    let mut staged = StagedAndroidApk {
+        temp_dir,
+        apk_path,
+        fingerprint: String::new(),
+    };
+
+    let mut reader = open_read_nofollow(build_path).map_err(|err| {
+        StageBundleError::Failed(format!(
+            "failed to open Android APK {}: {err}",
+            build_path.display()
+        ))
+    })?;
+    let mut writer = create_new_nofollow(&staged.apk_path).map_err(|err| {
+        StageBundleError::Failed(format!(
+            "failed to create staged Android APK {}: {err}",
+            staged.apk_path.display()
+        ))
+    })?;
+    let mut buf = [0u8; 65_536];
+    loop {
+        if cancel_flag.load(Ordering::Relaxed) {
+            return Err(StageBundleError::Cancelled);
+        }
+        let n = reader.read(&mut buf).map_err(|err| {
+            StageBundleError::Failed(format!(
+                "failed to copy Android APK {}: {err}",
+                build_path.display()
+            ))
+        })?;
+        if n == 0 {
+            break;
+        }
+        writer.write_all(&buf[..n]).map_err(|err| {
+            StageBundleError::Failed(format!(
+                "failed to write staged Android APK {}: {err}",
+                staged.apk_path.display()
+            ))
+        })?;
+    }
+    drop(writer);
+    drop(reader);
+
+    if cancel_flag.load(Ordering::Relaxed) {
+        return Err(StageBundleError::Cancelled);
+    }
+
+    // Verify package ID directly on the private staged copy (eliminating TOCTOU drift).
+    let apk_pkg = extract_apk_package_id_from_path(&staged.apk_path).map_err(|err| {
+        StageBundleError::Failed(format!(
+            "staged Android APK manifest package check failed ({}): {err}",
+            build_path.display()
+        ))
+    })?;
+    if apk_pkg != expected_app_id {
+        return Err(StageBundleError::Failed(format!(
+            "Android `.apk` manifest package ({apk_pkg:?}) does not match configured appId ({expected_app_id:?})"
+        )));
+    }
+    if cancel_flag.load(Ordering::Relaxed) {
+        return Err(StageBundleError::Cancelled);
+    }
+
+    // Compute streaming SHA-256 directly over the private staged copy and check against expected.
+    let staged_fp = fingerprint_file_cancellable(&staged.temp_dir, &staged.apk_path, cancel_flag)
+        .map_err(|err| match err {
+        deja_core::CoreError::Cancelled => StageBundleError::Cancelled,
+        other => StageBundleError::Failed(format!(
+            "failed to fingerprint staged Android `.apk`: {other}"
+        )),
+    })?;
+    if cancel_flag.load(Ordering::Relaxed) {
+        return Err(StageBundleError::Cancelled);
+    }
+    if let Some(expected) = expected_fingerprint
+        && staged_fp != expected
+    {
+        return Err(StageBundleError::Failed(format!(
+            "Android `.apk` changed between fingerprinting ({expected}) and installation ({staged_fp}); rebuild or retry with an immutable build artifact"
+        )));
+    }
+    staged.fingerprint = staged_fp;
+    Ok(staged)
 }
 
 /// Error returned by [`stage_and_verify_ios_app_bundle_cancellable`].
@@ -1221,10 +1635,18 @@ impl DoctorProbes for RealDoctorProbes {
                 }
             }
 
-            // 3. Android `adb` probe (required only when platform == android).
+            // 3. Android `adb`, device pinning, and agent APK probes (required only when platform == android).
             let android_required = target_platform == Some("android");
             if android_required || target_platform.is_none() {
-                checks.push(probe_adb(&req.env, android_required).await);
+                checks.extend(
+                    probe_android(
+                        &req.env,
+                        req.device.as_deref(),
+                        req.deja_home.as_deref(),
+                        android_required,
+                    )
+                    .await,
+                );
             }
 
             // 4. Web Chromium probe (required only when platform == web).
@@ -1238,60 +1660,276 @@ impl DoctorProbes for RealDoctorProbes {
     }
 }
 
-async fn probe_adb(env: &BTreeMap<String, String>, required: bool) -> DoctorCheck {
-    let mut cmd = Command::new("adb");
-    cmd.arg("version").stdin(Stdio::null());
-    if let Some(path) = env.get("PATH") {
-        cmd.env("PATH", path);
-    }
-    match cmd.output().await {
-        Ok(out) if out.status.success() => {
-            let first_line = String::from_utf8_lossy(&out.stdout)
-                .lines()
-                .next()
-                .unwrap_or("adb available")
-                .trim()
-                .to_string();
-            DoctorCheck {
+async fn probe_android(
+    env: &BTreeMap<String, String>,
+    device: Option<&str>,
+    deja_home: Option<&Path>,
+    required: bool,
+) -> Vec<DoctorCheck> {
+    let mut out = Vec::new();
+    let cancel = CancellationToken::new();
+
+    let adb_path = match discover_adb(env) {
+        Ok(p) => p,
+        Err(err) => {
+            out.push(DoctorCheck {
+                name: "android-adb".to_string(),
+                status: if required {
+                    DoctorCheckStatus::NotReady
+                } else {
+                    DoctorCheckStatus::Warn
+                },
+                required,
+                detail: err.to_string(),
+                remediation: Some(
+                    "Install Android Platform-Tools and ensure `adb` is on PATH, set ANDROID_HOME, or set DEJA_ADB"
+                        .to_string(),
+                ),
+            });
+            return out;
+        }
+    };
+
+    let adb = Adb::from_path(adb_path.clone(), env.clone());
+    match adb.version(&cancel).await {
+        Ok(ver) => {
+            out.push(DoctorCheck {
                 name: "android-adb".to_string(),
                 status: DoctorCheckStatus::Ready,
                 required,
-                detail: first_line,
+                detail: format!("{ver} ({})", adb_path.display()),
                 remediation: None,
+            });
+        }
+        Err(err) => {
+            out.push(DoctorCheck {
+                name: "android-adb".to_string(),
+                status: if required {
+                    DoctorCheckStatus::NotReady
+                } else {
+                    DoctorCheckStatus::Warn
+                },
+                required,
+                detail: format!("`adb version` failed: {err}"),
+                remediation: Some(
+                    "Verify the `adb` binary at ANDROID_HOME/platform-tools/adb or DEJA_ADB is executable"
+                        .to_string(),
+                ),
+            });
+            return out;
+        }
+    }
+
+    if required || device.is_some() {
+        match adb.list_devices(&cancel).await {
+            Ok(devices) => {
+                let ready_devices: Vec<&str> = devices
+                    .iter()
+                    .filter(|d| d.state == "device")
+                    .map(|d| d.serial.as_str())
+                    .collect();
+
+                if let Some(target_serial) = device {
+                    match devices.iter().find(|d| d.serial == target_serial) {
+                        Some(dev) if dev.state == "device" => {
+                            let rt = adb
+                                .runtime_version(target_serial, &cancel)
+                                .await
+                                .unwrap_or_else(|_| "android-unknown".to_string());
+                            out.push(DoctorCheck {
+                                name: "android-devices".to_string(),
+                                status: DoctorCheckStatus::Ready,
+                                required,
+                                detail: format!(
+                                    "Device {target_serial} ready ({rt}); {} device(s) online",
+                                    ready_devices.len()
+                                ),
+                                remediation: None,
+                            });
+                        }
+                        Some(dev) => {
+                            let remediation = match dev.state.as_str() {
+                                "unauthorized" => {
+                                    "Unlock the Android device and accept the USB debugging RSA prompt"
+                                }
+                                "offline" => {
+                                    "Reconnect the device or restart the emulator (`adb reconnect`)"
+                                }
+                                _ => {
+                                    "Ensure `adb devices` reports this serial in the `device` state"
+                                }
+                            };
+                            out.push(DoctorCheck {
+                                name: "android-devices".to_string(),
+                                status: DoctorCheckStatus::NotReady,
+                                required: true,
+                                detail: format!(
+                                    "Target Android device {target_serial} is not ready (state={})",
+                                    dev.state
+                                ),
+                                remediation: Some(remediation.to_string()),
+                            });
+                        }
+                        None => {
+                            out.push(DoctorCheck {
+                                name: "android-devices".to_string(),
+                                status: DoctorCheckStatus::NotReady,
+                                required: true,
+                                detail: format!(
+                                    "Target Android device {target_serial} not found in `adb devices` (online: {})",
+                                    if ready_devices.is_empty() {
+                                        "<none>".to_string()
+                                    } else {
+                                        ready_devices.join(", ")
+                                    }
+                                ),
+                                remediation: Some(
+                                    "Connect the Android device or start an emulator, then verify its serial via `adb devices -l` or pass `--device <serial>`"
+                                        .to_string(),
+                                ),
+                            });
+                        }
+                    }
+                } else if ready_devices.is_empty() {
+                    out.push(DoctorCheck {
+                        name: "android-devices".to_string(),
+                        status: if required {
+                            DoctorCheckStatus::NotReady
+                        } else {
+                            DoctorCheckStatus::Warn
+                        },
+                        required,
+                        detail: "No ready Android devices or emulators connected".to_string(),
+                        remediation: Some(
+                            "Start an Android emulator or connect a USB device with USB debugging enabled (`adb devices`)"
+                                .to_string(),
+                        ),
+                    });
+                } else {
+                    out.push(DoctorCheck {
+                        name: "android-devices".to_string(),
+                        status: DoctorCheckStatus::Ready,
+                        required,
+                        detail: format!(
+                            "{} ready Android device(s): {}",
+                            ready_devices.len(),
+                            ready_devices.join(", ")
+                        ),
+                        remediation: None,
+                    });
+                }
+            }
+            Err(err) => {
+                out.push(DoctorCheck {
+                    name: "android-devices".to_string(),
+                    status: if required {
+                        DoctorCheckStatus::NotReady
+                    } else {
+                        DoctorCheckStatus::Warn
+                    },
+                    required,
+                    detail: format!("`adb devices -l` probe failed: {err}"),
+                    remediation: Some(
+                        "Check that the ADB daemon is running (`adb start-server`)".to_string(),
+                    ),
+                });
             }
         }
-        Ok(out) => DoctorCheck {
-            name: "android-adb".to_string(),
-            status: if required {
-                DoctorCheckStatus::NotReady
-            } else {
-                DoctorCheckStatus::Warn
-            },
-            required,
-            detail: format!(
-                "`adb version` exited with {:?}: {}",
-                out.status.code(),
-                String::from_utf8_lossy(&out.stderr).trim()
-            ),
-            remediation: Some(
-                "Install Android Platform-Tools and ensure `adb` is on PATH (or set ANDROID_HOME)"
-                    .to_string(),
-            ),
-        },
-        Err(_) => DoctorCheck {
-            name: "android-adb".to_string(),
-            status: if required {
-                DoctorCheckStatus::NotReady
-            } else {
-                DoctorCheckStatus::Warn
-            },
-            required,
-            detail: "`adb` was not found on PATH".to_string(),
-            remediation: Some(
-                "Install Android Platform-Tools and add platform-tools to PATH".to_string(),
-            ),
-        },
     }
+
+    // Read-only Android agent APK readiness check (never builds or writes to disk).
+    let readiness = inspect_agent_apk_readiness(deja_home, env);
+    match readiness {
+        AgentApkReadiness::PrebuiltReady { apk_path, sha256 } => {
+            out.push(DoctorCheck {
+                name: "android-agent".to_string(),
+                status: DoctorCheckStatus::Ready,
+                required,
+                detail: format!(
+                    "Prebuilt Déjà Android agent APK ready ({}, sha256={}...)",
+                    apk_path.display(),
+                    &sha256[..12]
+                ),
+                remediation: None,
+            });
+        }
+        AgentApkReadiness::PrebuiltInvalid { detail } => {
+            out.push(DoctorCheck {
+                name: "android-agent".to_string(),
+                status: if required {
+                    DoctorCheckStatus::NotReady
+                } else {
+                    DoctorCheckStatus::Warn
+                },
+                required,
+                detail,
+                remediation: Some(
+                    "Fix DEJA_ANDROID_AGENT_APK / DEJA_ANDROID_AGENT_APK_SHA256 or unset them to use on-demand SDK compilation"
+                        .to_string(),
+                ),
+            });
+        }
+        AgentApkReadiness::EmbeddedPrebuiltReady { sha256 } => {
+            out.push(DoctorCheck {
+                name: "android-agent".to_string(),
+                status: DoctorCheckStatus::Ready,
+                required,
+                detail: format!(
+                    "Embedded prebuilt Déjà Android agent APK ready (sha256={}...; no JDK or Android SDK required)",
+                    &sha256[..12]
+                ),
+                remediation: None,
+            });
+        }
+        AgentApkReadiness::CacheHit { source_sha256, .. } => {
+            out.push(DoctorCheck {
+                name: "android-agent".to_string(),
+                status: DoctorCheckStatus::Ready,
+                required: false,
+                detail: format!(
+                    "Déjà Android agent APK cache hit ({}...)",
+                    &source_sha256[..12]
+                ),
+                remediation: None,
+            });
+        }
+        AgentApkReadiness::CacheColdSdkReady {
+            source_sha256,
+            build_tools_version,
+        } => {
+            out.push(DoctorCheck {
+                name: "android-agent".to_string(),
+                status: DoctorCheckStatus::Warn,
+                required: false,
+                detail: format!(
+                    "Déjà Android agent APK cache cold ({}...), Android build-tools {build_tools_version} ready",
+                    &source_sha256[..12]
+                ),
+                remediation: Some(
+                    "No action required: Déjà automatically builds and caches deja-android-agent.apk on the first Android run"
+                        .to_string(),
+                ),
+            });
+        }
+        AgentApkReadiness::Unavailable { detail } => {
+            out.push(DoctorCheck {
+                name: "android-agent".to_string(),
+                status: if required {
+                    DoctorCheckStatus::NotReady
+                } else {
+                    DoctorCheckStatus::Warn
+                },
+                required,
+                detail,
+                remediation: Some(
+                    "Install Android SDK Build-Tools + Platform (API 24+) and a JDK, or set DEJA_ANDROID_AGENT_APK=/path/to/deja-android-agent.apk"
+                        .to_string(),
+                ),
+            });
+        }
+    }
+
+    out
 }
 
 async fn probe_chromium(env: &BTreeMap<String, String>, required: bool) -> DoctorCheck {
@@ -1318,6 +1956,281 @@ async fn probe_chromium(env: &BTreeMap<String, String>, required: bool) -> Docto
                     .to_string(),
             ),
         },
+    }
+}
+
+#[cfg(all(test, unix))]
+mod android_factory_tests {
+    use super::{
+        DoctorCheckStatus, DoctorProbeRequest, DoctorProbes, DriverContext, DriverFactory,
+        DriverFactoryError, RealDoctorProbes, RealDriverFactory,
+    };
+    use deja_core::fingerprint_file;
+    use deja_driver_android::embed::PREBUILT_AGENT_APK;
+    use deja_flow::DriverCapability;
+    use std::collections::BTreeMap;
+    use std::fs;
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+    use tokio_util::sync::CancellationToken;
+
+    fn temp_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "deja-cli-android-factory-{tag}-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn write_mock_adb(dir: &std::path::Path, log: &std::path::Path) -> PathBuf {
+        let adb = dir.join("mock-adb");
+        let script = format!(
+            r#"#!/bin/sh
+echo "$*" >> "{log}"
+case "$*" in
+  "version")
+    echo "Android Debug Bridge version 1.0.41"
+    ;;
+  "devices -l")
+    echo "List of devices attached"
+    echo "emulator-5554          device product:emu model:Pixel transport_id:1"
+    echo "OFFLINE9               offline transport_id:2"
+    ;;
+  "-s emulator-5554 shell getprop ro.build.version.sdk")
+    echo "35"
+    ;;
+  "-s emulator-5554 install -r -g "*)
+    echo "Performing Streamed Install"
+    echo "Success"
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+"#,
+            log = log.display()
+        );
+        fs::write(&adb, script).unwrap();
+        fs::set_permissions(&adb, fs::Permissions::from_mode(0o755)).unwrap();
+        adb
+    }
+
+    #[tokio::test]
+    async fn real_driver_factory_wires_android_runtime_stages_apk_checks_package_id_and_drift() {
+        let dir = temp_dir("wire");
+        let log = dir.join("adb.log");
+        let adb = write_mock_adb(&dir, &log);
+        let apk = dir.join("app-debug.apk");
+        // Use the real compiled APK (package="dev.deja.agent") so AXML extraction runs end-to-end!
+        fs::write(&apk, PREBUILT_AGENT_APK).unwrap();
+        let fp = fingerprint_file(&dir, &apk).unwrap();
+
+        let mut env = BTreeMap::new();
+        env.insert("DEJA_ADB".to_string(), adb.to_string_lossy().into_owned());
+
+        let ctx = DriverContext {
+            platform: "android".to_string(),
+            device: "emulator-5554".to_string(),
+            app_id: "dev.deja.agent".to_string(),
+            build_path: apk.clone(),
+            expected_build_fingerprint: Some(fp.clone()),
+            workspace_root: dir.clone(),
+            disable_animations: true,
+            crash_report_grace_ms: 1_500,
+            crash_report_dir: None,
+            deja_home: Some(dir.join("home")),
+            headless: None,
+            screen_size: None,
+            timeout_ms: 30_000,
+            env: env.clone(),
+            staged_build: None,
+        };
+        let cancel = CancellationToken::new();
+        let factory = RealDriverFactory;
+
+        // 1. resolve_runtime -> "android-35"
+        let rt = factory
+            .resolve_runtime(&ctx, &cancel)
+            .await
+            .expect("resolve_runtime should succeed");
+        assert_eq!(rt.as_deref(), Some("android-35"));
+
+        // 2. create -> AndroidDriver (verifies manifest package == app_id)
+        let drv = factory
+            .create(&ctx, &cancel)
+            .await
+            .expect("create should succeed with matching APK package");
+        assert_eq!(drv.platform(), "android");
+        assert!(drv.capabilities().supports(DriverCapability::SystemBack));
+        assert!(drv.capabilities().supports(DriverCapability::HoldScroll));
+        assert!(!drv.capabilities().supports(DriverCapability::ClearKeychain));
+
+        // 3. Mismatched appId fails closed with exit-2 UnsupportedOrConfig in both create and install_app.
+        let mut wrong_pkg = ctx.clone();
+        wrong_pkg.app_id = "com.example.wrong".to_string();
+        let pkg_err = match factory.create(&wrong_pkg, &cancel).await {
+            Err(err) => err,
+            Ok(_) => panic!("APK package mismatch must fail closed"),
+        };
+        assert!(matches!(
+            pkg_err,
+            DriverFactoryError::UnsupportedOrConfig(_)
+        ));
+        assert!(pkg_err.to_string().contains("dev.deja.agent"));
+        assert!(matches!(
+            factory.install_app(&wrong_pkg, &cancel).await,
+            Err(DriverFactoryError::UnsupportedOrConfig(_))
+        ));
+
+        // 4. Non-APK / corrupt file fails closed with exit-2 UnsupportedOrConfig.
+        let fake_apk = dir.join("fake.apk");
+        fs::write(&fake_apk, b"PK\x03\x04not-a-real-apk").unwrap();
+        let mut fake_ctx = ctx.clone();
+        fake_ctx.build_path = fake_apk;
+        fake_ctx.expected_build_fingerprint = None;
+        assert!(matches!(
+            factory.create(&fake_ctx, &cancel).await,
+            Err(DriverFactoryError::UnsupportedOrConfig(_))
+        ));
+
+        // 5. install_app stages a private copy and passes the STAGED path (not raw workspace path) to `adb install`.
+        factory
+            .install_app(&ctx, &cancel)
+            .await
+            .expect("install_app should succeed");
+        let adb_log = fs::read_to_string(&log).unwrap();
+        let install_line = adb_log
+            .lines()
+            .find(|l| l.contains("-s emulator-5554 install -r -g "))
+            .expect("adb install logged");
+        assert!(
+            !install_line.contains(&apk.display().to_string()),
+            "adb install must receive the private staged APK copy, not raw buildPath: {install_line}"
+        );
+        assert!(
+            install_line.contains("deja-android-apk-"),
+            "expected staged APK temp path in adb log: {install_line}"
+        );
+
+        // 6. prepare_batch_build stages once, install_app reuses it, and Drop cleans up the temp dir.
+        let staged = factory
+            .prepare_batch_build(&ctx, &cancel)
+            .await
+            .expect("prepare_batch_build succeeds")
+            .expect("Android returns SharedStagedBuild");
+        let staging_dir = staged.staging_dir().to_path_buf();
+        assert!(staging_dir.is_dir());
+        assert_eq!(staged.fingerprint(), fp);
+        let mut batch_ctx = ctx.clone();
+        batch_ctx.staged_build = Some(staged.clone());
+        factory
+            .install_app(&batch_ctx, &cancel)
+            .await
+            .expect("batch install_app reuses staged APK");
+        drop(batch_ctx);
+        drop(staged);
+        assert!(
+            !staging_dir.exists(),
+            "dropping SharedStagedBuild must remove temporary Android APK staging dir"
+        );
+
+        // 7. Mutating the `.apk` file on disk between fingerprinting and `install_app` fails closed (exit 2).
+        let mutated_apk = dir.join("mutated.apk");
+        fs::write(&mutated_apk, PREBUILT_AGENT_APK).unwrap();
+        let orig_fp = fingerprint_file(&dir, &mutated_apk).unwrap();
+        let mut mutated_bytes = PREBUILT_AGENT_APK.to_vec();
+        mutated_bytes.extend_from_slice(b"drift");
+        fs::write(&mutated_apk, &mutated_bytes).unwrap();
+        let mut drift_ctx = ctx.clone();
+        drift_ctx.build_path = mutated_apk;
+        drift_ctx.expected_build_fingerprint = Some(orig_fp);
+        let drift_err = factory
+            .install_app(&drift_ctx, &cancel)
+            .await
+            .expect_err("mutated APK on disk must fail closed");
+        assert!(matches!(
+            drift_err,
+            DriverFactoryError::UnsupportedOrConfig(_)
+        ));
+
+        // 8. Symlink APK buildPath fails closed in both create and install_app.
+        let sym_apk = dir.join("symlink.apk");
+        symlink(&apk, &sym_apk).unwrap();
+        let mut sym_ctx = ctx.clone();
+        sym_ctx.build_path = sym_apk;
+        assert!(matches!(
+            factory.create(&sym_ctx, &cancel).await,
+            Err(DriverFactoryError::UnsupportedOrConfig(_))
+        ));
+        assert!(matches!(
+            factory.install_app(&sym_ctx, &cancel).await,
+            Err(DriverFactoryError::UnsupportedOrConfig(_))
+        ));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn real_doctor_probes_android_ready_on_jdk_free_host_via_embedded_prebuilt_apk() {
+        let dir = temp_dir("doctor");
+        let log = dir.join("adb.log");
+        let adb = write_mock_adb(&dir, &log);
+
+        // Minimal JDK-free / SDK-free env: ONLY `DEJA_ADB` (no PATH, no JAVA_HOME, no ANDROID_HOME, no DEJA_ANDROID_AGENT_APK).
+        let mut env = BTreeMap::new();
+        env.insert("DEJA_ADB".to_string(), adb.to_string_lossy().into_owned());
+
+        let probes = RealDoctorProbes;
+        let checks = probes
+            .probe(&DoctorProbeRequest {
+                platform: Some("android".to_string()),
+                device: Some("emulator-5554".to_string()),
+                env: env.clone(),
+                deja_home: Some(dir.join("home")),
+            })
+            .await;
+
+        let by_name = |name: &str| {
+            checks
+                .iter()
+                .find(|c| c.name == name)
+                .unwrap_or_else(|| panic!("missing doctor check `{name}` in {checks:#?}"))
+        };
+        assert_eq!(by_name("android-adb").status, DoctorCheckStatus::Ready);
+        assert_eq!(by_name("android-devices").status, DoctorCheckStatus::Ready);
+        assert!(by_name("android-devices").detail.contains("android-35"));
+        assert_eq!(by_name("android-agent").status, DoctorCheckStatus::Ready);
+        assert!(
+            by_name("android-agent")
+                .detail
+                .contains("Embedded prebuilt"),
+            "JDK-free host should report embedded prebuilt agent ready: {}",
+            by_name("android-agent").detail
+        );
+
+        // Offline serial fails closed with NotReady + remediation.
+        let offline_checks = probes
+            .probe(&DoctorProbeRequest {
+                platform: Some("android".to_string()),
+                device: Some("OFFLINE9".to_string()),
+                env,
+                deja_home: Some(dir.join("home")),
+            })
+            .await;
+        let dev_check = offline_checks
+            .iter()
+            .find(|c| c.name == "android-devices")
+            .unwrap();
+        assert_eq!(dev_check.status, DoctorCheckStatus::NotReady);
+        assert!(dev_check.remediation.is_some());
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }
 

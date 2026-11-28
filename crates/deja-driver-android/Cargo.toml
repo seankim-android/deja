@@ -1,6 +1,6 @@
 [package]
 name = "deja-driver-android"
-description = "Native Android driver backed by adb and the prebuilt UiAutomator2 instrumentation APK"
+description = "Native Android driver backed by adb and the zero-Gradle UiAutomator2 HTTP instrumentation APK"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -15,3 +15,17 @@ workspace = true
 [dependencies]
 deja-core.workspace = true
 deja-flow.workspace = true
+hex.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[dev-dependencies]

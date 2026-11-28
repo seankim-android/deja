@@ -223,3 +223,39 @@ fn require_clean_rejects_dirty_worktree() {
     .expect_err("dirty checkout must fail with require_clean even with showUntrackedFiles=no");
     assert!(err.contains("untracked.txt"), "{err}");
 }
+
+#[test]
+fn allowlists_only_bounded_prebuilt_android_agent_apk() {
+    use deja_cli::repo_check::{
+        ALLOWED_PREBUILT_ANDROID_AGENT_APK, MAX_PREBUILT_ANDROID_AGENT_APK_BYTES,
+    };
+
+    // 1. Small allowlisted prebuilt agent APK passes cleanly.
+    let ok_repo = TempGitRepo::new("prebuilt-apk-ok");
+    ok_repo.write("README.md", b"# Ok\n");
+    ok_repo.write(ALLOWED_PREBUILT_ANDROID_AGENT_APK, b"PK\x03\x04\x00small");
+    ok_repo.commit_all("initial");
+    validate_repo(&ok_repo.path, RepoCheckOptions::default())
+        .expect("bounded allowlisted prebuilt agent APK must pass");
+
+    // 2. Oversized (> 256 KiB) allowlisted prebuilt agent APK fails closed.
+    let big_repo = TempGitRepo::new("prebuilt-apk-big");
+    big_repo.write("README.md", b"# Big\n");
+    big_repo.write(
+        ALLOWED_PREBUILT_ANDROID_AGENT_APK,
+        &vec![0u8; MAX_PREBUILT_ANDROID_AGENT_APK_BYTES + 1],
+    );
+    big_repo.commit_all("initial");
+    let big_err = validate_repo(&big_repo.path, RepoCheckOptions::default())
+        .expect_err("oversized prebuilt agent APK must fail");
+    assert!(big_err.contains("exceeds"), "{big_err}");
+
+    // 3. Any other tracked `.apk` path still fails closed.
+    let other_repo = TempGitRepo::new("other-apk");
+    other_repo.write("README.md", b"# Other\n");
+    other_repo.write("app/build/app-debug.apk", b"PK\x03\x04other");
+    other_repo.commit_all("initial");
+    let other_err = validate_repo(&other_repo.path, RepoCheckOptions::default())
+        .expect_err("non-allowlisted .apk must fail");
+    assert!(other_err.contains("app/build/app-debug.apk"), "{other_err}");
+}

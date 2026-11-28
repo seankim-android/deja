@@ -14,6 +14,7 @@ use deja_core::{
     ArtifactKind, CacheMissReason, CoreError, Goal, RunArtifact, RunAttempt, RunCommand,
     RunOutcome, WALK_RESULT_SCHEMA_VERSION, assertions_sha256, normalize_goal,
 };
+use deja_driver_android::validate_serial;
 use deja_driver_ios::validate_udid;
 use deja_flow::{
     BatchJunitAttemptSummary, BatchJunitCase, BatchJunitCaseStatus, PlatformDriver,
@@ -1282,6 +1283,12 @@ fn resolve_shard_specs(args: &RunArgs, config: &LoadedConfig) -> Result<Vec<Shar
         let canonical_device = if config.platform == "ios" {
             validate_udid(trimmed).map_err(|err| {
                 format!("iOS `--devices` entry must be an explicit simulator UDID (got {trimmed:?}): {err}")
+            })?
+        } else if config.platform == "android" {
+            validate_serial(trimmed).map_err(|err| {
+                format!(
+                    "Android `--devices` entry must be a valid ADB serial (got {trimmed:?}): {err}"
+                )
             })?
         } else {
             trimmed.to_string()
