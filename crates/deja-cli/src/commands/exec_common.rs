@@ -11,7 +11,7 @@ use deja_core::{
     ArtifactKind, CacheMissReason, CacheStatus, DEFAULT_FLOW_SCHEMA_VERSION, ExecutionResult,
     FailureCategory, FlowClosure, FlowReferenceKind, Goal, RunArtifact, RunCommand, RunOutcome,
     RunResult, WALK_RESULT_SCHEMA_VERSION, WalkFailure, WalkIdentity, bytes_hold_forbidden_value,
-    holds_forbidden_value, normalize_goal,
+    holds_forbidden_value, normalize_goal, parse_walk_manifest,
 };
 use deja_flow::{
     ClassificationInput, DriverCapability, EnvStack, FailureClassifier, FlowExecutionConfig,
@@ -24,6 +24,7 @@ use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
 use crate::CliDeps;
+use crate::commands::manifest::has_unsafe_control_or_bidi_char;
 use crate::config::{DEFAULT_CONFIG_PATH, LoadedConfig};
 use crate::driver_factory::DriverContext;
 use crate::exit_codes::{EXIT_USAGE_OR_CONFIG, exit_code_for_outcome};
@@ -37,7 +38,90 @@ use crate::output::{
     write_early_error_junit, write_report_junit,
 };
 
+const MAX_GOALS_FILE_BYTES: u64 = 4 * 1024 * 1024;
 static PREALLOC_REPORT_SEQ: AtomicU64 = AtomicU64::new(1);
+
+/// Parse a goals file shared by `deja gate --goals <FILE>` and `deja run --goals <FILE>`.
+///
+/// Supports plain `#`-comment text lines, a JSON array of strings, or a `deja.walks.json`
+/// manifest object. Reads safely via `O_NOFOLLOW` bounded to 4 MiB and fails closed on empty
+/// lists, control/bidi characters, or invalid goals.
+pub fn parse_goals_file(path: &Path) -> Result<Vec<String>, String> {
+    let raw = read_to_string_nofollow_bounded(path, MAX_GOALS_FILE_BYTES)
+        .map_err(|err| format!("cannot read goals file {}: {err}", path.display()))?;
+    let trimmed = raw.trim_start();
+    let raw_goals: Vec<String> = if trimmed.starts_with('[') {
+        let val: Value =
+            serde_json::from_str(&raw).map_err(|err| format!("invalid JSON goals array: {err}"))?;
+        let arr = val
+            .as_array()
+            .ok_or_else(|| "goals JSON must be an array of strings".to_string())?;
+        let mut out = Vec::with_capacity(arr.len());
+        for item in arr {
+            let s = item
+                .as_str()
+                .ok_or_else(|| "each entry in JSON goals array must be a string".to_string())?;
+            out.push(s.to_string());
+        }
+        out
+    } else if trimmed.starts_with('{') {
+        let manifest = parse_walk_manifest(&raw)
+            .map_err(|err| format!("goals JSON object is not a valid walk manifest: {err}"))?;
+        manifest.walks.into_iter().map(|w| w.goal).collect()
+    } else {
+        raw.lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .map(ToString::to_string)
+            .collect()
+    };
+
+    if raw_goals.is_empty() {
+        return Err("goals list is empty".to_string());
+    }
+    for goal in &raw_goals {
+        if has_unsafe_control_or_bidi_char(goal) {
+            return Err(format!(
+                "goal contains unsafe control, line-break, bidi, or zero-width characters: {goal:?}"
+            ));
+        }
+        normalize_goal(goal).map_err(|err| err.to_string())?;
+    }
+    Ok(raw_goals)
+}
+
+/// Pre-allocate a unique workspace-relative batch report path under `.deja/reports/`.
+#[must_use]
+pub fn allocate_batch_report_rel_path() -> String {
+    let ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let seq = PREALLOC_REPORT_SEQ.fetch_add(1, Ordering::Relaxed);
+    format!(
+        ".deja/reports/batch-run-{ms}-{}-{seq}.json",
+        std::process::id()
+    )
+}
+
+/// Write redacted batch report JSON to `.deja/reports/batch-run-*.json` and `.deja/reports/batch-latest.json`.
+pub fn write_internal_batch_reports(
+    canonical_workspace: &Path,
+    immutable_rel_path: &str,
+    redacted_json: &serde_json::Value,
+) -> std::io::Result<()> {
+    let mut text = serde_json::to_string_pretty(redacted_json)
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err.to_string()))?;
+    text.push('\n');
+    let bytes = text.as_bytes();
+
+    let immutable_abs = canonical_workspace.join(immutable_rel_path);
+    write_atomic_confined(canonical_workspace, &immutable_abs, bytes)?;
+
+    let latest_abs = canonical_workspace.join(".deja/reports/batch-latest.json");
+    write_atomic_confined(canonical_workspace, &latest_abs, bytes)?;
+    Ok(())
+}
 
 /// Pre-allocate a unique workspace-relative report path so SQLite `validation_runs.report_path`
 /// and the saved `.deja/reports/*.json` file share the exact same path.
@@ -82,13 +166,15 @@ pub fn write_internal_reports(
 
 /// Early safety check for explicit `--report` / `--junit` paths BEFORE `load_config` or
 /// `prepare_safe_junit` touches disk, preventing accidental clobbering/deletion of config,
-/// manifest, flow closure files, symlinks, directories, or `.deja/memory/` walk state.
+/// manifest, goals input files, flow closure files, symlinks, directories, or `.deja/memory/`
+/// walk state.
 pub fn validate_early_output_path(
     target: &Path,
     flag_label: &str,
     cwd: &Path,
     explicit_config: Option<&Path>,
     extra_flow: Option<&Path>,
+    extra_protected: &[&Path],
 ) -> Result<(), String> {
     check_output_target_not_symlink_or_dir(target, flag_label)?;
 
@@ -103,6 +189,14 @@ pub fn validate_early_output_path(
         .unwrap_or_else(|| cwd.to_path_buf());
 
     let mut protected_files = vec![config_abs.clone()];
+    for extra in extra_protected {
+        let extra_abs = if extra.is_absolute() {
+            lexical_normalize(extra)
+        } else {
+            lexical_normalize(&cwd.join(extra))
+        };
+        protected_files.push(extra_abs);
+    }
     let mut candidate_ws = fs::canonicalize(&config_dir)
         .or_else(|_| fs::canonicalize(cwd))
         .unwrap_or_else(|_| lexical_normalize(cwd));
@@ -179,6 +273,7 @@ pub fn validate_explicit_output_path(
     flag_label: &str,
     config: &LoadedConfig,
     closure: Option<&FlowClosure>,
+    extra_protected: &[&Path],
 ) -> Result<(), String> {
     check_output_target_not_symlink_or_dir(target, flag_label)?;
 
@@ -190,6 +285,14 @@ pub fn validate_explicit_output_path(
         for file in &c.files {
             protected_files.push(lexical_normalize(&config.workspace_root.join(&file.source)));
         }
+    }
+    for extra in extra_protected {
+        let extra_abs = if extra.is_absolute() {
+            lexical_normalize(extra)
+        } else {
+            lexical_normalize(&config.workspace_root.join(extra))
+        };
+        protected_files.push(extra_abs);
     }
 
     check_output_target_against_protected(
@@ -312,6 +415,7 @@ pub fn build_driver_context(
             .map(PathBuf::from),
         timeout_ms,
         env: deps.env.clone(),
+        staged_build: None,
     }
 }
 

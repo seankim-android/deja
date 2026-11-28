@@ -1,7 +1,10 @@
 //! Native Rust `deja` CLI binary entrypoint.
 
 use std::process::ExitCode;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 
+use deja_cli::exit_codes::{CANCEL_SIGNAL_SIGINT, CANCEL_SIGNAL_SIGTERM};
 use deja_cli::{CliDeps, run_cli_from_args};
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
@@ -18,37 +21,41 @@ async fn main() -> ExitCode {
         .try_init();
 
     let cancel = CancellationToken::new();
+    let cancel_signal = Arc::new(AtomicU8::new(0));
     let signal_cancel = cancel.clone();
+    let signal_slot = Arc::clone(&cancel_signal);
     let signal_task = tokio::spawn(async move {
-        wait_for_termination_signal().await;
+        let sig = wait_for_termination_signal().await;
+        signal_slot.store(sig, Ordering::SeqCst);
         signal_cancel.cancel();
     });
 
-    let deps = CliDeps::real(cancel);
+    let deps = CliDeps::real_with_signal(cancel, cancel_signal);
     let exit_code = run_cli_from_args(std::env::args_os(), &deps).await;
     signal_task.abort();
     ExitCode::from(exit_code)
 }
 
-async fn wait_for_termination_signal() {
+async fn wait_for_termination_signal() -> u8 {
     #[cfg(unix)]
     {
         use tokio::signal::unix::{SignalKind, signal};
         let mut sigterm = signal(SignalKind::terminate()).ok();
         tokio::select! {
-            _ = tokio::signal::ctrl_c() => {}
+            _ = tokio::signal::ctrl_c() => CANCEL_SIGNAL_SIGINT,
             _ = async {
                 if let Some(ref mut s) = sigterm {
                     s.recv().await;
                 } else {
                     std::future::pending::<()>().await;
                 }
-            } => {}
+            } => CANCEL_SIGNAL_SIGTERM,
         }
     }
     #[cfg(not(unix))]
     {
         let _ = tokio::signal::ctrl_c().await;
+        CANCEL_SIGNAL_SIGINT
     }
 }
 

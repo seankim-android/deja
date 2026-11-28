@@ -10,17 +10,18 @@ use deja_core::{
     create_redactor, provider_key_redactor,
 };
 use deja_flow::{
-    ActAction, ActOutcome, ActPayload, ClassificationInput, CompiledSelector,
-    DEFAULT_HOLD_SCROLL_MS, DriverCapabilities, DriverCapability, DriverCrashSignal, DriverError,
-    DriverFuture, EnvStack, FailedStepContext, FailureClassifier, FlowExecutionConfig,
-    FlowExecutor, FlowParseError, KeyPress, LaunchOptions, MAX_INTERPOLATED_BYTES,
-    ObservationSource, OpenLinkOptions, PlatformDriver, PointSpec, Selector, SelectorError,
-    StepFailureKind, SwipeParams, SynthesizedAttemptsJunitInput, SynthesizedJunitInput,
-    UiHierarchy, UiNode, UiPoint, UiRect, UiSize, VisibleContext, WaitSelectorOutcome,
-    WaitSelectorRequest, build_visible_context, count_assertions_in_closure,
-    count_assertions_in_flow_yaml, hash_hierarchy_nodes, merge_junit_suites, parse_flow,
-    prepare_junit, redact_junit, redact_junit_with_redactors, reports_failure,
-    synthesized_attempts_junit, synthesized_junit, wait_local, write_errored_junit,
+    ActAction, ActOutcome, ActPayload, BatchJunitAttemptSummary, BatchJunitCase,
+    BatchJunitCaseStatus, ClassificationInput, CompiledSelector, DEFAULT_HOLD_SCROLL_MS,
+    DriverCapabilities, DriverCapability, DriverCrashSignal, DriverError, DriverFuture, EnvStack,
+    FailedStepContext, FailureClassifier, FlowExecutionConfig, FlowExecutor, FlowParseError,
+    KeyPress, LaunchOptions, MAX_INTERPOLATED_BYTES, ObservationSource, OpenLinkOptions,
+    PlatformDriver, PointSpec, Selector, SelectorError, StepFailureKind, SwipeParams,
+    SynthesizedAttemptsJunitInput, SynthesizedJunitInput, UiHierarchy, UiNode, UiPoint, UiRect,
+    UiSize, VisibleContext, WaitSelectorOutcome, WaitSelectorRequest, build_visible_context,
+    count_assertions_in_closure, count_assertions_in_flow_yaml, hash_hierarchy_nodes,
+    merge_junit_suites, parse_flow, prepare_junit, redact_junit, redact_junit_with_redactors,
+    reports_failure, synthesized_attempts_junit, synthesized_batch_junit, synthesized_junit,
+    wait_local, write_errored_junit,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -4429,5 +4430,170 @@ appId: dev.deja.checkout
     assert_eq!(
         out.failure.as_ref().map(|f| f.category),
         Some(FailureCategory::Runner)
+    );
+}
+
+#[test]
+fn synthesized_batch_junit_totals_order_retries_cancellation_and_redaction() {
+    let secret = ["sk", "-1234567890abcdefghijklmnop"].concat();
+
+    // 1. All-passed batch -> zero failures/errors/skipped, reports_failure == false.
+    let pass_xml = synthesized_batch_junit(
+        "Batch Suite",
+        "passed",
+        &[
+            BatchJunitCase {
+                goal: "Alpha goal".to_string(),
+                status: BatchJunitCaseStatus::Passed,
+                outcome: "passed".to_string(),
+                duration_ms: 1200,
+                detail: None,
+                device: Some("d1".to_string()),
+                error_type: None,
+                attempts: Vec::new(),
+            },
+            BatchJunitCase {
+                goal: "Beta goal".to_string(),
+                status: BatchJunitCaseStatus::Passed,
+                outcome: "passed".to_string(),
+                duration_ms: 800,
+                detail: None,
+                device: Some("d2".to_string()),
+                error_type: None,
+                attempts: Vec::new(),
+            },
+        ],
+        2000,
+    );
+    assert!(!reports_failure(&pass_xml));
+    assert!(
+        pass_xml
+            .contains(r#"<testsuites tests="2" failures="0" errors="0" skipped="0" time="2.000">"#)
+    );
+    assert!(pass_xml.contains(
+        r#"<testsuite name="Batch Suite" tests="2" failures="0" errors="0" skipped="0" time="2.000">"#
+    ));
+    assert!(pass_xml.contains(r#"<property name="source" value="deja-synthesized"/>"#));
+    assert!(pass_xml.contains(r#"<property name="mode" value="batch"/>"#));
+    assert!(pass_xml.contains(r#"<property name="outcome" value="passed"/>"#));
+    assert!(pass_xml.find("Alpha goal").unwrap() < pass_xml.find("Beta goal").unwrap());
+
+    // 2. Mixed batch: passed + retried flaky failure + cancelled mid-flight + unstarted skipped.
+    let mixed_xml = synthesized_batch_junit(
+        "Batch Suite",
+        "cancelled",
+        &[
+            BatchJunitCase {
+                goal: "01 pass".to_string(),
+                status: BatchJunitCaseStatus::Passed,
+                outcome: "passed".to_string(),
+                duration_ms: 400,
+                detail: None,
+                device: Some("d1".to_string()),
+                error_type: None,
+                attempts: Vec::new(),
+            },
+            BatchJunitCase {
+                goal: format!("02 flaky {secret}"),
+                status: BatchJunitCaseStatus::Failed,
+                outcome: "flaky".to_string(),
+                duration_ms: 950,
+                detail: Some("label: selector; step: Tap Checkout".to_string()),
+                device: Some("d2".to_string()),
+                error_type: None,
+                attempts: vec![
+                    BatchJunitAttemptSummary {
+                        attempt: 1,
+                        passed: false,
+                        duration_ms: 500,
+                        label: Some("selector".to_string()),
+                        failing_step: Some("Tap Checkout".to_string()),
+                        artifact_path: None,
+                        crash_summary: None,
+                    },
+                    BatchJunitAttemptSummary {
+                        attempt: 2,
+                        passed: true,
+                        duration_ms: 450,
+                        label: None,
+                        failing_step: None,
+                        artifact_path: None,
+                        crash_summary: None,
+                    },
+                ],
+            },
+            BatchJunitCase {
+                goal: "03 inflight".to_string(),
+                status: BatchJunitCaseStatus::Errored,
+                outcome: "cancelled".to_string(),
+                duration_ms: 250,
+                detail: Some("cancelled during execution".to_string()),
+                device: Some("d1".to_string()),
+                error_type: Some("Cancelled".to_string()),
+                attempts: Vec::new(),
+            },
+            BatchJunitCase {
+                goal: "04 queued".to_string(),
+                status: BatchJunitCaseStatus::Skipped,
+                outcome: "skipped".to_string(),
+                duration_ms: 0,
+                detail: Some("cancelled before execution".to_string()),
+                device: None,
+                error_type: None,
+                attempts: Vec::new(),
+            },
+        ],
+        1600,
+    );
+    assert!(reports_failure(&mixed_xml));
+    assert!(
+        mixed_xml
+            .contains(r#"<testsuites tests="4" failures="1" errors="1" skipped="1" time="1.600">"#)
+    );
+    assert!(mixed_xml.contains(
+        r#"<testsuite name="Batch Suite" tests="4" failures="1" errors="1" skipped="1" time="1.600">"#
+    ));
+    // Verify flaky retried case includes BOTH aggregate outcome AND per-attempt breakdown.
+    assert!(mixed_xml.contains("outcome: flaky"));
+    assert!(mixed_xml.contains("attempt 1: failed"));
+    assert!(mixed_xml.contains("attempt 2: passed"));
+    // Verify cancelled error and unstarted skipped markers.
+    assert!(mixed_xml.contains(r#"<error type="Cancelled""#));
+    assert!(mixed_xml.contains(r#"status="SKIPPED""#));
+    assert!(mixed_xml.contains(r#"<skipped message="cancelled before execution"/>"#));
+    // Verify input order preserved.
+    let p1 = mixed_xml.find("01 pass").unwrap();
+    let p2 = mixed_xml.find("02 flaky").unwrap();
+    let p3 = mixed_xml.find("03 inflight").unwrap();
+    let p4 = mixed_xml.find("04 queued").unwrap();
+    assert!(p1 < p2 && p2 < p3 && p3 < p4);
+
+    // 3. Skipped-only batch still triggers `reports_failure == true` because `status="SKIPPED"`.
+    let skipped_only = synthesized_batch_junit(
+        "Batch Suite",
+        "cancelled",
+        &[BatchJunitCase {
+            goal: "unstarted".to_string(),
+            status: BatchJunitCaseStatus::Skipped,
+            outcome: "skipped".to_string(),
+            duration_ms: 0,
+            detail: None,
+            device: None,
+            error_type: None,
+            attempts: Vec::new(),
+        }],
+        10,
+    );
+    assert!(reports_failure(&skipped_only));
+    assert!(skipped_only.contains(r#"skipped="1""#));
+
+    // 4. Redaction removes provider secret while preserving structural totals.
+    let redactor = create_redactor("/tmp/ws", None, &[]);
+    let provider = provider_key_redactor([("OPENAI_API_KEY", secret.as_str())]);
+    let redacted = redact_junit_with_redactors(&mixed_xml, &redactor, &provider);
+    assert!(!redacted.contains(&secret));
+    assert!(
+        redacted
+            .contains(r#"<testsuites tests="4" failures="1" errors="1" skipped="1" time="1.600">"#)
     );
 }

@@ -64,6 +64,7 @@ pub async fn run(
             &deps.cwd,
             explicit_config,
             args.flow.as_deref(),
+            &[],
         ) {
             return emit_early_exec_error(
                 deps,
@@ -100,6 +101,7 @@ pub async fn run(
             &deps.cwd,
             explicit_config,
             args.flow.as_deref(),
+            &[],
         )
     {
         return emit_early_exec_error(
@@ -220,7 +222,7 @@ pub async fn run(
 
     let effective_junit: Option<PathBuf> = cli_junit.clone().or_else(|| config.junit.clone());
     if let Some(ref jpath) = effective_junit {
-        if let Err(msg) = validate_explicit_output_path(jpath, "--junit", &config, None) {
+        if let Err(msg) = validate_explicit_output_path(jpath, "--junit", &config, None, &[]) {
             return emit_early_exec_error(
                 deps,
                 "remember",
@@ -252,7 +254,7 @@ pub async fn run(
         }
     }
     if let Some(ref rpath) = explicit_report
-        && let Err(msg) = validate_explicit_output_path(rpath, "--report", &config, None)
+        && let Err(msg) = validate_explicit_output_path(rpath, "--report", &config, None, &[])
     {
         return emit_early_exec_error(
             deps,
@@ -393,7 +395,8 @@ pub async fn run(
     };
 
     if let Some(ref jpath) = effective_junit
-        && let Err(msg) = validate_explicit_output_path(jpath, "--junit", &config, Some(&closure))
+        && let Err(msg) =
+            validate_explicit_output_path(jpath, "--junit", &config, Some(&closure), &[])
     {
         return emit_early_exec_error(
             deps,
@@ -409,7 +412,8 @@ pub async fn run(
         );
     }
     if let Some(ref rpath) = explicit_report
-        && let Err(msg) = validate_explicit_output_path(rpath, "--report", &config, Some(&closure))
+        && let Err(msg) =
+            validate_explicit_output_path(rpath, "--report", &config, Some(&closure), &[])
     {
         return emit_early_exec_error(
             deps,

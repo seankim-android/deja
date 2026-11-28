@@ -2,6 +2,7 @@
 //! multi-build & multi-runtime `validation_runs`, durable `flaky` markers, `goal_embeddings`,
 //! and persistent stat-verified `build_fingerprint_cache`.
 
+use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::fs::{self, Metadata};
 use std::io::{ErrorKind, Read, Write};
@@ -1609,6 +1610,74 @@ impl SqliteWalkStore {
             return Ok(Vec::new());
         };
         query_all_runs_for_walk(conn, walk.id)
+    }
+
+    /// Compute the integrity-verified historical median `duration_ms` per `goal_key` across all
+    /// `validation_runs` rows with a non-null `duration_ms` (for LPT batch scheduling).
+    ///
+    /// Strictly read-only via [`Self::ensure_read_conn`]: returns an empty map without creating
+    /// any database or sidecar files when the store does not exist yet. Every matching
+    /// `validation_runs` row is verified against its `integrity_sha256` and checked for a
+    /// non-negative `duration_ms`, failing closed with [`StoreError::InvalidWalkMemory`] on any
+    /// tampering or corruption.
+    pub fn median_goal_durations_ms(&self) -> Result<BTreeMap<String, u64>, StoreError> {
+        let mut guard = self.lock_inner()?;
+        let Some(conn) = self.ensure_read_conn(&mut guard)? else {
+            return Ok(BTreeMap::new());
+        };
+
+        let mut stmt = conn.prepare_cached(
+            "SELECT walk_id, build_fingerprint, runtime, flow_path, flow_sha256,
+                    closure_sha256, subflow_files_json, passed, flaky,
+                    validated_at, origin, failure_category, report_path,
+                    duration_ms, phase_timings_json, integrity_sha256
+             FROM validation_runs
+             WHERE duration_ms IS NOT NULL",
+        )?;
+
+        let rows: Vec<RawValidationRunRow> = stmt
+            .query_map([], read_validation_run_row)?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let mut verified_goal_keys: BTreeMap<i64, String> = BTreeMap::new();
+        let mut grouped: BTreeMap<String, Vec<u64>> = BTreeMap::new();
+        for raw in rows {
+            let validated = validate_run_row_struct(raw)?;
+            let duration_ms = validated.duration_ms.ok_or_else(|| {
+                StoreError::InvalidWalkMemory(
+                    "validation_runs duration_ms unexpectedly NULL".to_string(),
+                )
+            })?;
+            let goal_key = if let Some(cached) = verified_goal_keys.get(&validated.walk_id) {
+                cached.clone()
+            } else {
+                let walk = query_walk_by_id(conn, validated.walk_id).map_err(|err| match err {
+                    StoreError::Sqlite(rusqlite::Error::QueryReturnedNoRows) => {
+                        StoreError::InvalidWalkMemory(format!(
+                            "validation_runs references missing walk_id {}",
+                            validated.walk_id
+                        ))
+                    }
+                    other => other,
+                })?;
+                verified_goal_keys.insert(validated.walk_id, walk.goal_key.clone());
+                walk.goal_key
+            };
+            grouped.entry(goal_key).or_default().push(duration_ms);
+        }
+
+        let mut medians = BTreeMap::new();
+        for (goal_key, mut vals) in grouped {
+            vals.sort_unstable();
+            let n = vals.len();
+            let median = if n % 2 == 1 {
+                vals[n / 2]
+            } else {
+                ((u128::from(vals[n / 2 - 1]) + u128::from(vals[n / 2])) / 2) as u64
+            };
+            medians.insert(goal_key, median);
+        }
+        Ok(medians)
     }
 
     /// Look up `validation_runs` rows for one `(logical walk, build_fingerprint)` and optional `runtime`.

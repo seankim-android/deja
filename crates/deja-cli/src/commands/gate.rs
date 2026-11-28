@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use deja_core::{
     DEFAULT_FLOW_SCHEMA_VERSION, GateFlakyFailure, GateIdentity, GateOutcome, RunOutcome,
-    fingerprint_file, fingerprint_tree, normalize_goal, parse_walk_manifest,
+    fingerprint_file, fingerprint_tree,
 };
 use deja_store::{
     ConsumerFlows, ConsumerFlowsOptions, SqliteStoreOptions, SqliteWalkStore, StoreGateGoalResult,
@@ -18,6 +18,7 @@ use serde_json::{Value, json};
 
 use crate::CliDeps;
 use crate::cli::GateArgs;
+use crate::commands::exec_common::parse_goals_file;
 use crate::commands::manifest::has_unsafe_control_or_bidi_char;
 use crate::config::{CommandCapability, DEFAULT_CONFIG_PATH, LoadConfigOptions, load_config};
 use crate::exit_codes::{EXIT_GATE_CLOSED, EXIT_GATE_ERROR, EXIT_OK, EXIT_USAGE_OR_CONFIG};
@@ -28,7 +29,6 @@ use crate::fs_safe::{
 };
 use crate::output::{CliRunReport, RedactionContext, workspace_relative_display};
 
-const MAX_GOALS_FILE_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_REPORT_SCAN_BYTES: u64 = 4 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -218,7 +218,7 @@ pub fn run(args: &GateArgs, explicit_config: Option<&Path>, json_mode: bool, dep
     }
 
     // Now load & strictly validate the goals file.
-    let goals = match load_goals_file(&goals_abs) {
+    let goals = match parse_goals_file(&goals_abs) {
         Ok(g) => g,
         Err(msg) => {
             emit_gate_error(
@@ -603,50 +603,6 @@ pub fn render_gate_table_from_json(val: &Value) -> Result<String, String> {
         }
     }
     Ok(out)
-}
-
-fn load_goals_file(path: &Path) -> Result<Vec<String>, String> {
-    let raw = read_to_string_nofollow_bounded(path, MAX_GOALS_FILE_BYTES)
-        .map_err(|err| format!("cannot read goals file {}: {err}", path.display()))?;
-    let trimmed = raw.trim_start();
-    let raw_goals: Vec<String> = if trimmed.starts_with('[') {
-        let val: Value =
-            serde_json::from_str(&raw).map_err(|err| format!("invalid JSON goals array: {err}"))?;
-        let arr = val
-            .as_array()
-            .ok_or_else(|| "goals JSON must be an array of strings".to_string())?;
-        let mut out = Vec::with_capacity(arr.len());
-        for item in arr {
-            let s = item
-                .as_str()
-                .ok_or_else(|| "each entry in JSON goals array must be a string".to_string())?;
-            out.push(s.to_string());
-        }
-        out
-    } else if trimmed.starts_with('{') {
-        let manifest = parse_walk_manifest(&raw)
-            .map_err(|err| format!("goals JSON object is not a valid walk manifest: {err}"))?;
-        manifest.walks.into_iter().map(|w| w.goal).collect()
-    } else {
-        raw.lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty() && !line.starts_with('#'))
-            .map(ToString::to_string)
-            .collect()
-    };
-
-    if raw_goals.is_empty() {
-        return Err("goals list is empty".to_string());
-    }
-    for goal in &raw_goals {
-        if has_unsafe_control_or_bidi_char(goal) {
-            return Err(format!(
-                "goal contains unsafe control, line-break, bidi, or zero-width characters: {goal:?}"
-            ));
-        }
-        normalize_goal(goal).map_err(|err| err.to_string())?;
-    }
-    Ok(raw_goals)
 }
 
 #[derive(Default)]

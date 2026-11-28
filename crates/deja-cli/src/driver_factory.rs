@@ -12,6 +12,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::Stdio;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -60,6 +61,47 @@ impl DriverFactoryError {
     }
 }
 
+/// Cloneable, reference-counted handle to a verified, staged iOS `.app` bundle shared across
+/// parallel batch workers so the `.app` tree is copied and SHA-256 verified only once per batch.
+#[derive(Clone)]
+pub struct SharedStagedBuild {
+    inner: Arc<StagedIosAppBundle>,
+}
+
+impl std::fmt::Debug for SharedStagedBuild {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SharedStagedBuild")
+            .field("app_path", &self.inner.app_path())
+            .field("fingerprint", &self.inner.fingerprint())
+            .finish()
+    }
+}
+
+impl SharedStagedBuild {
+    /// Wrap a verified [`StagedIosAppBundle`] for shared read-only reuse across workers.
+    #[must_use]
+    pub fn new(staged: StagedIosAppBundle) -> Self {
+        Self {
+            inner: Arc::new(staged),
+        }
+    }
+
+    #[must_use]
+    pub fn app_path(&self) -> &Path {
+        self.inner.app_path()
+    }
+
+    #[must_use]
+    pub fn staging_dir(&self) -> &Path {
+        self.inner.staging_dir()
+    }
+
+    #[must_use]
+    pub fn fingerprint(&self) -> &str {
+        self.inner.fingerprint()
+    }
+}
+
 /// Parameters passed to [`DriverFactory`] to resolve runtime, build a driver, and install an app.
 #[derive(Debug, Clone)]
 pub struct DriverContext {
@@ -75,6 +117,8 @@ pub struct DriverContext {
     pub deja_home: Option<PathBuf>,
     pub timeout_ms: u64,
     pub env: BTreeMap<String, String>,
+    /// Optional batch-shared staged build artifact verified once and reused across shard workers.
+    pub staged_build: Option<SharedStagedBuild>,
 }
 
 /// Abstract factory for constructing concrete [`PlatformDriver`] instances.
@@ -85,6 +129,21 @@ pub trait DriverFactory: Send + Sync {
         ctx: &'a DriverContext,
         cancel: &'a CancellationToken,
     ) -> FactoryFuture<'a, Result<Option<String>, DriverFactoryError>>;
+
+    /// Optionally stage and verify a shared build artifact once for a multi-goal batch so shard
+    /// workers reuse it without re-copying or re-hashing on every device.
+    fn prepare_batch_build<'a>(
+        &'a self,
+        _ctx: &'a DriverContext,
+        cancel: &'a CancellationToken,
+    ) -> FactoryFuture<'a, Result<Option<SharedStagedBuild>, DriverFactoryError>> {
+        Box::pin(async move {
+            if cancel.is_cancelled() {
+                return Err(DriverFactoryError::Cancelled);
+            }
+            Ok(None)
+        })
+    }
 
     /// Instantiate a concrete [`PlatformDriver`] for the target platform and device.
     fn create<'a>(
@@ -152,6 +211,42 @@ impl DriverFactory for RealDriverFactory {
         })
     }
 
+    fn prepare_batch_build<'a>(
+        &'a self,
+        ctx: &'a DriverContext,
+        cancel: &'a CancellationToken,
+    ) -> FactoryFuture<'a, Result<Option<SharedStagedBuild>, DriverFactoryError>> {
+        Box::pin(async move {
+            if cancel.is_cancelled() {
+                return Err(DriverFactoryError::Cancelled);
+            }
+            if ctx.platform == "ios" {
+                let build_path = ctx.build_path.clone();
+                let app_id = ctx.app_id.clone();
+                let expected_fp = ctx.expected_build_fingerprint.clone();
+                let staged = tokio::select! {
+                    _ = cancel.cancelled() => return Err(DriverFactoryError::Cancelled),
+                    res = tokio::task::spawn_blocking(move || {
+                        stage_and_verify_ios_app_bundle(
+                            &build_path,
+                            &app_id,
+                            expected_fp.as_deref(),
+                        )
+                    }) => match res {
+                        Ok(inner) => inner.map_err(DriverFactoryError::UnsupportedOrConfig)?,
+                        Err(join_err) => {
+                            return Err(DriverFactoryError::Runtime(format!(
+                                "iOS `.app` bundle staging task failed: {join_err}"
+                            )));
+                        }
+                    },
+                };
+                return Ok(Some(SharedStagedBuild::new(staged)));
+            }
+            Ok(None)
+        })
+    }
+
     fn create<'a>(
         &'a self,
         ctx: &'a DriverContext,
@@ -163,8 +258,19 @@ impl DriverFactory for RealDriverFactory {
             }
             match ctx.platform.as_str() {
                 "ios" => {
-                    verify_ios_app_bundle(&ctx.build_path, &ctx.app_id)
-                        .map_err(DriverFactoryError::UnsupportedOrConfig)?;
+                    if let Some(ref staged) = ctx.staged_build {
+                        if let Some(ref expected) = ctx.expected_build_fingerprint
+                            && staged.fingerprint() != expected
+                        {
+                            return Err(DriverFactoryError::UnsupportedOrConfig(format!(
+                                "staged iOS `.app` bundle fingerprint ({}) does not match expected ({expected})",
+                                staged.fingerprint()
+                            )));
+                        }
+                    } else {
+                        verify_ios_app_bundle(&ctx.build_path, &ctx.app_id)
+                            .map_err(DriverFactoryError::UnsupportedOrConfig)?;
+                    }
                     let mut cfg = IosDriverConfig::new(&ctx.device)
                         .with_disable_animations(ctx.disable_animations);
                     cfg.env = simctl_env_from_map(&ctx.env);
@@ -212,6 +318,30 @@ impl DriverFactory for RealDriverFactory {
                 return Err(DriverFactoryError::Cancelled);
             }
             if ctx.platform == "ios" {
+                let simctl = Simctl::with_env(simctl_env_from_map(&ctx.env));
+                if let Some(ref staged) = ctx.staged_build {
+                    if let Some(ref expected) = ctx.expected_build_fingerprint
+                        && staged.fingerprint() != expected
+                    {
+                        return Err(DriverFactoryError::UnsupportedOrConfig(format!(
+                            "staged iOS `.app` bundle fingerprint ({}) does not match expected ({expected})",
+                            staged.fingerprint()
+                        )));
+                    }
+                    tokio::select! {
+                        _ = cancel.cancelled() => return Err(DriverFactoryError::Cancelled),
+                        res = simctl.install_app(&ctx.device, staged.app_path()) => res,
+                    }
+                    .map_err(|err| {
+                        DriverFactoryError::Runtime(format!(
+                            "failed to install {} onto simulator {}: {err}",
+                            ctx.build_path.display(),
+                            ctx.device
+                        ))
+                    })?;
+                    return Ok(());
+                }
+
                 let build_path = ctx.build_path.clone();
                 let app_id = ctx.app_id.clone();
                 let expected_fp = ctx.expected_build_fingerprint.clone();
@@ -232,7 +362,6 @@ impl DriverFactory for RealDriverFactory {
                         }
                     },
                 };
-                let simctl = Simctl::with_env(simctl_env_from_map(&ctx.env));
                 tokio::select! {
                     _ = cancel.cancelled() => return Err(DriverFactoryError::Cancelled),
                     res = simctl.install_app(&ctx.device, staged.app_path()) => res,

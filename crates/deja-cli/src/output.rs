@@ -14,8 +14,9 @@ use deja_core::{
     normalize_goal, provider_key_redactor, redact_json,
 };
 use deja_flow::{
-    RunTimingBreakdown, SynthesizedAttemptsJunitInput, SynthesizedJunitInput, VisibleContext,
-    prepare_junit, synthesized_attempts_junit, synthesized_junit, write_redacted_junit,
+    BatchJunitCase, RunTimingBreakdown, SynthesizedAttemptsJunitInput, SynthesizedJunitInput,
+    VisibleContext, prepare_junit, synthesized_attempts_junit, synthesized_batch_junit,
+    synthesized_junit, write_redacted_junit,
 };
 use deja_store::validate_store_id;
 use serde::{Deserialize, Serialize};
@@ -110,6 +111,94 @@ pub struct CliRunReport {
     pub visible_context: Option<VisibleContext>,
 }
 
+/// Summary of one execution shard (device + isolated store) in a batch run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchShardSummary {
+    pub device: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub store: Option<String>,
+    pub store_label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<String>,
+    pub goals_executed: usize,
+}
+
+/// Aggregate goal outcome counts for a batch run.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchCounts {
+    pub total: usize,
+    pub passed: usize,
+    pub failed: usize,
+    pub flaky: usize,
+    pub drifted: usize,
+    pub cancelled: usize,
+    pub skipped: usize,
+    pub errored: usize,
+}
+
+/// One goal's deterministic result entry in a [`CliBatchRunReport`] (ordered by input index `0..N`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchGoalResult {
+    pub index: usize,
+    pub goal: String,
+    pub goal_key: String,
+    pub outcome: String,
+    pub passed: bool,
+    pub exit_code: u8,
+    pub duration_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub store: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub historical_median_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report: Option<CliRunReport>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub errors: Vec<String>,
+}
+
+/// Structured report emitted for multi-goal batch runs (`deja run --goals ...` / `deja run --all`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CliBatchRunReport {
+    pub schema_version: u32,
+    pub kind: String,
+    pub command: String,
+    pub mode: String,
+    pub outcome: String,
+    pub passed: bool,
+    pub cancelled: bool,
+    pub exit_code: u8,
+    pub started_at: String,
+    pub ended_at: String,
+    pub duration_ms: u64,
+    pub build_fingerprint: String,
+    pub build_fingerprint_ms: u64,
+    pub app_id: String,
+    pub platform: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adapter: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub browser: Option<String>,
+    pub devices: Vec<String>,
+    pub shards: Vec<BatchShardSummary>,
+    pub scheduled_order: Vec<String>,
+    pub counts: BatchCounts,
+    pub goals: Vec<BatchGoalResult>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<RunArtifact>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub errors: Vec<String>,
+}
+
 /// Construct the canonical native Déjà engine provenance record for schema-1 reports.
 #[must_use]
 pub fn native_engine_report() -> EngineReport {
@@ -194,6 +283,29 @@ impl RedactionContext {
             let safe_key = self.redact_goal_key(&report.core.identity.goal);
             obj.insert("goalKey".to_string(), Value::String(safe_key));
         }
+        Ok(self.redact_json(&raw))
+    }
+
+    /// Serialize and redact a [`CliBatchRunReport`], ensuring every `goalKey` (top-level goal
+    /// entry AND embedded per-goal `report.goalKey`) is redacted via [`Self::redact_goal_key`]
+    /// BEFORE `redact_json` runs so mixed-case secrets never leak in lowercased form.
+    pub fn redact_batch_report(
+        &self,
+        report: &CliBatchRunReport,
+    ) -> Result<Value, serde_json::Error> {
+        let mut scrubbed = report.clone();
+        scrubbed.scheduled_order = scrubbed
+            .scheduled_order
+            .iter()
+            .map(|g| self.redact_str(g))
+            .collect();
+        for entry in &mut scrubbed.goals {
+            entry.goal_key = self.redact_goal_key(&entry.goal);
+            if let Some(ref mut inner) = entry.report {
+                inner.core.goal_key = self.redact_goal_key(&inner.core.identity.goal);
+            }
+        }
+        let raw = serde_json::to_value(&scrubbed)?;
         Ok(self.redact_json(&raw))
     }
 }
@@ -399,6 +511,30 @@ pub fn write_report_junit(
     Ok(())
 }
 
+/// Write a redacted merged batch JUnit XML report to `path`.
+pub fn write_batch_junit(
+    path: &Path,
+    suite_name: &str,
+    outcome: &str,
+    cases: &[BatchJunitCase],
+    duration_ms: u64,
+    redaction: &RedactionContext,
+) -> io::Result<()> {
+    if let Ok(meta) = std::fs::symlink_metadata(path)
+        && meta.file_type().is_symlink()
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "refusing to overwrite symbolic link JUnit path: {}",
+                path.display()
+            ),
+        ));
+    }
+    let xml = synthesized_batch_junit(suite_name, outcome, cases, duration_ms);
+    write_redacted_junit(path, &xml, &redaction.redactor, &redaction.provider)
+}
+
 /// Write a redacted fallback JUnit XML file on early CLI/config/store errors.
 pub fn write_early_error_junit(
     path: &Path,
@@ -601,14 +737,84 @@ pub fn format_summary_line(result: &RunResult, redaction: &RedactionContext) -> 
 /// Format an error `deja-summary v=1` line when a command fails before producing a [`RunResult`].
 #[must_use]
 pub fn format_error_summary_line(raw_goal: &str, redaction: &RedactionContext) -> String {
-    let normalized = normalize_goal(raw_goal)
-        .map(|g| g.key)
-        .unwrap_or_else(|_| raw_goal.trim().to_string());
-    let goal_encoded = percent_encode_summary(&redaction.redact_str(&normalized));
+    let goal_redacted = redaction.redact_goal_key(raw_goal);
+    let goal_encoded = percent_encode_summary(&goal_redacted);
     let engine = format_engine_semver(Some(&native_engine_report()));
     format!(
         "deja-summary v=1 outcome=error cache=unknown fingerprint=unknown engine={engine} model_calls=unknown failure=error goal={goal_encoded}"
     )
+}
+
+/// Format a `deja-summary v=1` line for a batch goal that ended without a full [`RunResult`]
+/// (such as `"cancelled"`, `"skipped"`, or a shard attach/store error).
+#[must_use]
+pub fn format_batch_status_summary_line(
+    raw_goal: &str,
+    outcome: &str,
+    failure: &str,
+    build_fingerprint: &str,
+    redaction: &RedactionContext,
+) -> String {
+    let fingerprint = format_fingerprint_12(build_fingerprint);
+    let engine = format_engine_semver(Some(&native_engine_report()));
+    let goal_redacted = redaction.redact_goal_key(raw_goal);
+    let goal_encoded = percent_encode_summary(&goal_redacted);
+    format!(
+        "deja-summary v=1 outcome={outcome} cache=not-checked fingerprint={fingerprint} engine={engine} model_calls=0 failure={failure} goal={goal_encoded}"
+    )
+}
+
+/// Print a human-readable summary of a [`CliBatchRunReport`].
+pub fn print_human_batch_report(
+    out: &OutputSink,
+    report: &CliBatchRunReport,
+    redaction: &RedactionContext,
+) {
+    let fp_short = format_fingerprint_12(&report.build_fingerprint);
+    out.writeln_stdout(&format!(
+        "Déjà run (batch): {} (total={}, passed={}, failed={}, flaky={}, drifted={}, cancelled={}, skipped={}, errored={}, build={}, duration={}ms)",
+        report.outcome,
+        report.counts.total,
+        report.counts.passed,
+        report.counts.failed,
+        report.counts.flaky,
+        report.counts.drifted,
+        report.counts.cancelled,
+        report.counts.skipped,
+        report.counts.errored,
+        fp_short,
+        report.duration_ms,
+    ));
+    if !report.devices.is_empty() {
+        let devs: Vec<String> = report
+            .devices
+            .iter()
+            .map(|d| redaction.redact_str(d))
+            .collect();
+        out.writeln_stdout(&format!("  devices: {}", devs.join(", ")));
+    }
+    for entry in &report.goals {
+        let goal = redaction.redact_str(&entry.goal);
+        let device_str = entry
+            .device
+            .as_deref()
+            .map(|d| format!(" device={}", redaction.redact_str(d)))
+            .unwrap_or_default();
+        out.writeln_stdout(&format!(
+            "  [{}] {}: outcome={} duration={}ms{}",
+            entry.index + 1,
+            goal,
+            entry.outcome,
+            entry.duration_ms,
+            device_str,
+        ));
+        for err in &entry.errors {
+            out.writeln_stderr(&format!("    error: {}", redaction.redact_str(err)));
+        }
+    }
+    for err in &report.errors {
+        out.writeln_stderr(&format!("  error: {}", redaction.redact_str(err)));
+    }
 }
 
 /// Emit the `deja-summary v=1` trailer to the right stream (stderr when `--json`, stdout otherwise).

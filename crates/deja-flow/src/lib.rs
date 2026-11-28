@@ -40,10 +40,11 @@ pub use executor::{
     MAX_REPEAT_ITERATIONS, MAX_RETRIES,
 };
 pub use junit::{
-    SynthesizedAttemptsJunitInput, SynthesizedJunitInput, atomic_write_junit, decode_xml,
-    escape_cdata, escape_xml, merge_junit_suites, prepare_junit, redact_junit,
-    redact_junit_with_redactors, reports_failure, strip_illegal_xml_chars,
-    synthesized_attempts_junit, synthesized_junit, write_errored_junit, write_redacted_junit,
+    BatchJunitAttemptSummary, BatchJunitCase, BatchJunitCaseStatus, SynthesizedAttemptsJunitInput,
+    SynthesizedJunitInput, atomic_write_junit, decode_xml, escape_cdata, escape_xml,
+    merge_junit_suites, prepare_junit, redact_junit, redact_junit_with_redactors, reports_failure,
+    strip_illegal_xml_chars, synthesized_attempts_junit, synthesized_batch_junit,
+    synthesized_junit, write_errored_junit, write_redacted_junit,
 };
 pub use parser::{
     AddMediaStep, AppTargetStep, AssertNotVisibleStep, AssertVisibleStep, Condition, EraseTextStep,

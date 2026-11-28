@@ -28,6 +28,7 @@ use crate::commands::exec_common::{
     parse_goal_tokens, to_execution_result, validate_closure_app_id_confinement,
     validate_early_output_path, validate_explicit_output_path,
 };
+use crate::commands::manifest::has_unsafe_control_or_bidi_char;
 use crate::config::{CommandCapability, LoadConfigOptions, LoadedConfig, load_config};
 use crate::exit_codes::{EXIT_USAGE_OR_CONFIG, exit_code_for_store_error};
 use crate::fs_safe::lexical_normalize;
@@ -41,9 +42,25 @@ pub async fn run(
     json_mode: bool,
     deps: &CliDeps,
 ) -> u8 {
-    let raw_goal_fallback = args.goal.join(" ");
+    let is_batch = args.goals.is_some() || args.all;
+    let raw_goal_fallback = if !args.goal.is_empty() {
+        args.goal.join(" ")
+    } else if is_batch {
+        "batch".to_string()
+    } else {
+        String::new()
+    };
     let early_redaction =
         RedactionContext::new(&deps.cwd, deps.home_dir.as_deref(), &[], &deps.env);
+
+    let goals_abs: Option<PathBuf> = args.goals.as_ref().map(|p| {
+        if p.is_absolute() {
+            lexical_normalize(p)
+        } else {
+            lexical_normalize(&deps.cwd.join(p))
+        }
+    });
+    let extra_protected: Vec<&Path> = goals_abs.as_deref().into_iter().collect();
 
     // Resolve & protect explicit `--junit` and `--report` destinations BEFORE touching disk.
     let cli_junit: Option<PathBuf> = args.junit.as_ref().map(|p| {
@@ -61,9 +78,14 @@ pub async fn run(
         }
     });
     if let Some(ref jpath) = cli_junit {
-        if let Err(msg) =
-            validate_early_output_path(jpath, "--junit", &deps.cwd, explicit_config, None)
-        {
+        if let Err(msg) = validate_early_output_path(
+            jpath,
+            "--junit",
+            &deps.cwd,
+            explicit_config,
+            None,
+            &extra_protected,
+        ) {
             return emit_early_exec_error(
                 deps,
                 "run",
@@ -93,8 +115,14 @@ pub async fn run(
         }
     }
     if let Some(ref rpath) = explicit_report
-        && let Err(msg) =
-            validate_early_output_path(rpath, "--report", &deps.cwd, explicit_config, None)
+        && let Err(msg) = validate_early_output_path(
+            rpath,
+            "--report",
+            &deps.cwd,
+            explicit_config,
+            None,
+            &extra_protected,
+        )
     {
         return emit_early_exec_error(
             deps,
@@ -143,6 +171,125 @@ pub async fn run(
         );
     }
 
+    // Validate batch / single-goal / `--devices` mutual exclusions cleanly (exit 2).
+    if !args.goal.is_empty() && is_batch {
+        return emit_early_exec_error(
+            deps,
+            "run",
+            &raw_goal_fallback,
+            cli_junit.as_deref(),
+            json_mode,
+            args.summary,
+            &early_redaction,
+            "USAGE_ERROR",
+            "cannot combine a positional `<goal>` with `--goals` or `--all`",
+            EXIT_USAGE_OR_CONFIG,
+        );
+    }
+    if args.goals.is_some() && args.all {
+        return emit_early_exec_error(
+            deps,
+            "run",
+            &raw_goal_fallback,
+            cli_junit.as_deref(),
+            json_mode,
+            args.summary,
+            &early_redaction,
+            "USAGE_ERROR",
+            "cannot combine `--goals` with `--all`",
+            EXIT_USAGE_OR_CONFIG,
+        );
+    }
+    if args.goal.is_empty() && !is_batch {
+        return emit_early_exec_error(
+            deps,
+            "run",
+            &raw_goal_fallback,
+            cli_junit.as_deref(),
+            json_mode,
+            args.summary,
+            &early_redaction,
+            "USAGE_ERROR",
+            "provide a `<goal>`, `--goals <FILE>`, or `--all`",
+            EXIT_USAGE_OR_CONFIG,
+        );
+    }
+    if !args.devices.is_empty() {
+        if !is_batch {
+            return emit_early_exec_error(
+                deps,
+                "run",
+                &raw_goal_fallback,
+                cli_junit.as_deref(),
+                json_mode,
+                args.summary,
+                &early_redaction,
+                "USAGE_ERROR",
+                "`--devices` is only valid with `--goals <FILE>` or `--all`",
+                EXIT_USAGE_OR_CONFIG,
+            );
+        }
+        if args.device.is_some() {
+            return emit_early_exec_error(
+                deps,
+                "run",
+                &raw_goal_fallback,
+                cli_junit.as_deref(),
+                json_mode,
+                args.summary,
+                &early_redaction,
+                "USAGE_ERROR",
+                "cannot combine `--devices` with `--device`",
+                EXIT_USAGE_OR_CONFIG,
+            );
+        }
+        if args.store.is_some() {
+            return emit_early_exec_error(
+                deps,
+                "run",
+                &raw_goal_fallback,
+                cli_junit.as_deref(),
+                json_mode,
+                args.summary,
+                &early_redaction,
+                "USAGE_ERROR",
+                "cannot combine `--devices` with `--store` (each device uses its own isolated store)",
+                EXIT_USAGE_OR_CONFIG,
+            );
+        }
+        for raw_dev in &args.devices {
+            let trimmed = raw_dev.trim();
+            if trimmed.is_empty() {
+                return emit_early_exec_error(
+                    deps,
+                    "run",
+                    &raw_goal_fallback,
+                    cli_junit.as_deref(),
+                    json_mode,
+                    args.summary,
+                    &early_redaction,
+                    "USAGE_ERROR",
+                    "`--devices` must not contain empty device identifiers",
+                    EXIT_USAGE_OR_CONFIG,
+                );
+            }
+            if has_unsafe_control_or_bidi_char(trimmed) {
+                return emit_early_exec_error(
+                    deps,
+                    "run",
+                    &raw_goal_fallback,
+                    cli_junit.as_deref(),
+                    json_mode,
+                    args.summary,
+                    &early_redaction,
+                    "USAGE_ERROR",
+                    "`--devices` must not contain control, line-break, bidi, or zero-width characters",
+                    EXIT_USAGE_OR_CONFIG,
+                );
+            }
+        }
+    }
+
     if let Some(ref store_id) = args.store
         && let Err(err) = validate_store_id(store_id)
     {
@@ -158,6 +305,19 @@ pub async fn run(
             &err.to_string(),
             EXIT_USAGE_OR_CONFIG,
         );
+    }
+
+    if is_batch {
+        return crate::commands::run_batch::run_batch(
+            args,
+            explicit_config,
+            json_mode,
+            deps,
+            goals_abs,
+            cli_junit,
+            explicit_report,
+        )
+        .await;
     }
 
     let (raw_goal, goal) = match parse_goal_tokens(&args.goal) {
@@ -216,7 +376,7 @@ pub async fn run(
 
     let effective_junit: Option<PathBuf> = cli_junit.clone().or_else(|| config.junit.clone());
     if let Some(ref jpath) = effective_junit {
-        if let Err(msg) = validate_explicit_output_path(jpath, "--junit", &config, None) {
+        if let Err(msg) = validate_explicit_output_path(jpath, "--junit", &config, None, &[]) {
             return emit_early_exec_error(
                 deps,
                 "run",
@@ -248,7 +408,7 @@ pub async fn run(
         }
     }
     if let Some(ref rpath) = explicit_report
-        && let Err(msg) = validate_explicit_output_path(rpath, "--report", &config, None)
+        && let Err(msg) = validate_explicit_output_path(rpath, "--report", &config, None, &[])
     {
         return emit_early_exec_error(
             deps,
@@ -465,7 +625,8 @@ pub async fn run(
     let closure = exec_plan.closure;
 
     if let Some(ref jpath) = effective_junit
-        && let Err(msg) = validate_explicit_output_path(jpath, "--junit", &config, Some(&closure))
+        && let Err(msg) =
+            validate_explicit_output_path(jpath, "--junit", &config, Some(&closure), &[])
     {
         store.close();
         return emit_early_exec_error(
@@ -482,7 +643,8 @@ pub async fn run(
         );
     }
     if let Some(ref rpath) = explicit_report
-        && let Err(msg) = validate_explicit_output_path(rpath, "--report", &config, Some(&closure))
+        && let Err(msg) =
+            validate_explicit_output_path(rpath, "--report", &config, Some(&closure), &[])
     {
         store.close();
         return emit_early_exec_error(
@@ -1022,7 +1184,7 @@ pub async fn run(
     )
 }
 
-enum RunPlan {
+pub(crate) enum RunPlan {
     Refuse {
         cache_status: CacheStatus,
         miss_reason: CacheMissReason,
@@ -1033,7 +1195,7 @@ enum RunPlan {
     Execute(Box<ExecutionPlan>),
 }
 
-enum ExecMode {
+pub(crate) enum ExecMode {
     ManifestVerify {
         flow_rel: String,
     },
@@ -1049,19 +1211,19 @@ enum ExecMode {
     },
 }
 
-struct ExecutionPlan {
-    flow_abs_path: PathBuf,
-    display_flow_path: String,
-    closure: FlowClosure,
-    cache_status: CacheStatus,
-    miss_reason: Option<CacheMissReason>,
-    validation_origin: Option<WalkOrigin>,
-    closure_matches_manifest: bool,
-    new_build_replay: Option<NewBuildReplayReport>,
-    mode: ExecMode,
+pub(crate) struct ExecutionPlan {
+    pub(crate) flow_abs_path: PathBuf,
+    pub(crate) display_flow_path: String,
+    pub(crate) closure: FlowClosure,
+    pub(crate) cache_status: CacheStatus,
+    pub(crate) miss_reason: Option<CacheMissReason>,
+    pub(crate) validation_origin: Option<WalkOrigin>,
+    pub(crate) closure_matches_manifest: bool,
+    pub(crate) new_build_replay: Option<NewBuildReplayReport>,
+    pub(crate) mode: ExecMode,
 }
 
-fn plan_execution(
+pub(crate) fn plan_execution(
     config: &LoadedConfig,
     consumer: Option<&ConsumerFlows>,
     store: &SqliteWalkStore,
@@ -1395,7 +1557,7 @@ fn collect_and_verify_classic_closure(
     Ok(closure)
 }
 
-fn failure_signature(
+pub(crate) fn failure_signature(
     failure: Option<&deja_core::WalkFailure>,
 ) -> (Option<FailureCategory>, Option<String>) {
     match failure {
@@ -1404,7 +1566,7 @@ fn failure_signature(
     }
 }
 
-fn verify_unchanged_closure(
+pub(crate) fn verify_unchanged_closure(
     workspace_root: &Path,
     flow_abs_path: &Path,
     expected_closure_sha256: &str,
