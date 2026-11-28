@@ -4931,7 +4931,9 @@ struct BatchMockFactory {
     flaky_goals_seen: Arc<Mutex<std::collections::HashMap<String, usize>>>,
     staged_dirs: Arc<Mutex<Vec<PathBuf>>>,
     installed_app_paths: Arc<Mutex<Vec<PathBuf>>>,
+    fail_runtime_devices: BTreeMap<String, String>,
     fail_create_devices: BTreeMap<String, String>,
+    create_delay_by_device: BTreeMap<String, Duration>,
     stage_real_ios_bundle: bool,
     on_goal: Option<AsyncGoalHook>,
 }
@@ -4950,7 +4952,9 @@ impl BatchMockFactory {
             flaky_goals_seen: Arc::new(Mutex::new(std::collections::HashMap::new())),
             staged_dirs: Arc::new(Mutex::new(Vec::new())),
             installed_app_paths: Arc::new(Mutex::new(Vec::new())),
+            fail_runtime_devices: BTreeMap::new(),
             fail_create_devices: BTreeMap::new(),
+            create_delay_by_device: BTreeMap::new(),
             stage_real_ios_bundle: false,
             on_goal: None,
         }
@@ -4985,7 +4989,7 @@ impl BatchMockFactory {
 impl DriverFactory for BatchMockFactory {
     fn resolve_runtime<'a>(
         &'a self,
-        _ctx: &'a DriverContext,
+        ctx: &'a DriverContext,
         cancel: &'a CancellationToken,
     ) -> FactoryFuture<'a, Result<Option<String>, DriverFactoryError>> {
         Box::pin(async move {
@@ -4993,6 +4997,9 @@ impl DriverFactory for BatchMockFactory {
                 return Err(DriverFactoryError::Cancelled);
             }
             self.resolve_runtime_calls.fetch_add(1, Ordering::SeqCst);
+            if let Some(err_msg) = self.fail_runtime_devices.get(&ctx.device) {
+                return Err(DriverFactoryError::Runtime(err_msg.clone()));
+            }
             Ok(self.runtime.clone())
         })
     }
@@ -5032,6 +5039,13 @@ impl DriverFactory for BatchMockFactory {
         Box::pin(async move {
             if cancel.is_cancelled() {
                 return Err(DriverFactoryError::Cancelled);
+            }
+            if let Some(&delay) = self.create_delay_by_device.get(&ctx.device) {
+                tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => return Err(DriverFactoryError::Cancelled),
+                    _ = tokio::time::sleep(delay) => {}
+                }
             }
             if let Some(err_msg) = self.fail_create_devices.get(&ctx.device) {
                 return Err(DriverFactoryError::Runtime(err_msg.clone()));
@@ -7538,7 +7552,6 @@ async fn regression_deja66_r2_f4_batch_build_fingerprint_cancellation_closes_sto
     assert!(xml.contains(r#"status="SKIPPED""#));
 }
 
-
 #[tokio::test]
 async fn web_real_driver_factory_runtime_create_install_doctor_and_invalid_device_exit_2() {
     let ws = TempWs::new("web-factory");
@@ -8015,5 +8028,420 @@ async fn codex_r3_f3_doctor_and_runtime_skip_broken_path_chromium_candidate() {
             .await
             .is_err(),
         "explicit broken DEJA_CHROME must fail closed"
+    );
+}
+
+#[tokio::test]
+async fn regression_deja66_r3_f1_batch_take_screenshot_parent_escape_fails_closed() {
+    let ws = TempWs::new("deja66-r3-f1-batch-shot-escape");
+    ws.write_build("build/App.bin", b"build-v1");
+    ws.write(
+        "deja.config.json",
+        &json!({
+            "workspaceRoot": ".",
+            "platform": "ios",
+            "appId": TEST_APP_ID,
+            "adapter": "maestro-ios/v1",
+            "device": TEST_UDID,
+            "buildPath": "build/App.bin",
+            "manifest": "deja.walks.json",
+            "staleBuild": "replay-last-verified"
+        })
+        .to_string(),
+    );
+    ws.write(
+        "flows/escape.yaml",
+        &format!(
+            "appId: {TEST_APP_ID}\n---\n- takeScreenshot: \"../shared.png\"\n- assertVisible: Done\n"
+        ),
+    );
+    seed_manifest_walk(
+        &ws,
+        &[(
+            "escape goal",
+            TEST_APP_ID,
+            "ios",
+            "maestro-ios/v1",
+            "flows/escape.yaml",
+        )],
+    );
+
+    let (deps, cap) = make_deps(
+        &ws.path,
+        Arc::new(BatchMockFactory::new(Some("ios-27.2"))),
+        default_probes(),
+        CancellationToken::new(),
+    );
+    let code = run_cli_from_args(["deja", "run", "--all", "--json"], &deps).await;
+    assert_ne!(
+        code,
+        0,
+        "batch goal escaping its attempt screenshot directory must fail closed; stdout={}",
+        cap.lock().unwrap().stdout
+    );
+    let parsed: Value = serde_json::from_str(&cap.lock().unwrap().stdout).unwrap();
+    assert_eq!(parsed["goals"][0]["passed"], false);
+
+    // Ensure `shared.png` was NEVER written anywhere under `.deja/reports/batch-screenshots/`.
+    let shot_root = ws.path.join(".deja/reports/batch-screenshots");
+    if shot_root.exists() {
+        for entry in fs::read_dir(&shot_root).unwrap() {
+            let entry = entry.unwrap();
+            assert!(
+                !entry.path().join("shared.png").exists(),
+                "escaping screenshot ../shared.png must never exist in {}",
+                entry.path().display()
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn regression_deja66_r3_f2_runtime_lookup_failure_on_one_shard_continues_on_healthy_shard() {
+    let ws = TempWs::new("deja66-r3-f2-rt-fail-shard");
+    ws.write_build("build/App.bin", b"build-v1");
+    ws.write(
+        "deja.config.json",
+        &json!({
+            "workspaceRoot": ".",
+            "platform": "ios",
+            "appId": TEST_APP_ID,
+            "adapter": "maestro-ios/v1",
+            "buildPath": "build/App.bin",
+            "manifest": "deja.walks.json",
+            "staleBuild": "replay-last-verified"
+        })
+        .to_string(),
+    );
+    write_tagged_flow(&ws, "flows/g1.yaml", "g1");
+    write_tagged_flow(&ws, "flows/g2.yaml", "g2");
+    seed_manifest_walk(
+        &ws,
+        &[
+            ("g1", TEST_APP_ID, "ios", "maestro-ios/v1", "flows/g1.yaml"),
+            ("g2", TEST_APP_ID, "ios", "maestro-ios/v1", "flows/g2.yaml"),
+        ],
+    );
+
+    // 1. Shard 0 (`TEST_UDID`) fails `resolve_runtime`, shard 1 (`TEST_UDID_2`) is healthy.
+    //    Batch MUST continue on `TEST_UDID_2`, execute ALL goals cleanly, release `TEST_UDID`'s
+    //    store lock, and record the runtime lookup failure on `shards[0]`.
+    let mut factory = BatchMockFactory::new(Some("ios-27.2"));
+    factory
+        .fail_runtime_devices
+        .insert(TEST_UDID.to_string(), "simulator UDID deleted".to_string());
+    let (deps, cap) = make_deps(
+        &ws.path,
+        Arc::new(factory) as Arc<dyn DriverFactory>,
+        default_probes(),
+        CancellationToken::new(),
+    );
+    let devices_arg = format!("{TEST_UDID},{TEST_UDID_2}");
+    let code = run_cli_from_args(
+        ["deja", "run", "--all", "--devices", &devices_arg, "--json"],
+        &deps,
+    )
+    .await;
+    assert_eq!(
+        code,
+        0,
+        "healthy shard must execute all eligible goals; stdout={} stderr={}",
+        cap.lock().unwrap().stdout,
+        cap.lock().unwrap().stderr
+    );
+    let parsed: Value = serde_json::from_str(&cap.lock().unwrap().stdout).unwrap();
+    assert_eq!(parsed["passed"], true);
+    assert_eq!(parsed["counts"]["passed"], 2);
+    assert_eq!(parsed["goals"][0]["device"], TEST_UDID_2);
+    assert_eq!(parsed["goals"][1]["device"], TEST_UDID_2);
+
+    assert_eq!(parsed["shards"][0]["device"], TEST_UDID);
+    assert!(parsed["shards"][0]["runtime"].is_null());
+    assert_eq!(parsed["shards"][0]["goalsExecuted"], 0);
+    assert!(
+        parsed["shards"][0]["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("simulator UDID deleted")
+    );
+    assert_eq!(parsed["shards"][1]["device"], TEST_UDID_2);
+    assert_eq!(parsed["shards"][1]["runtime"], "ios-27.2");
+    assert_eq!(parsed["shards"][1]["goalsExecuted"], 2);
+    assert!(parsed["shards"][1].get("error").is_none());
+
+    assert!(
+        !ws.path
+            .join(format!(".deja/memory/stores/{TEST_UDID}/walks.sqlite.lock"))
+            .exists(),
+        "failed shard's store lock must be released"
+    );
+
+    // 2. When ALL shards fail `resolve_runtime`, batch emits per-goal error records + failing JUnit.
+    let mut all_fail_factory = BatchMockFactory::new(Some("ios-27.2"));
+    all_fail_factory
+        .fail_runtime_devices
+        .insert(TEST_UDID.to_string(), "sim 1 missing".to_string());
+    all_fail_factory
+        .fail_runtime_devices
+        .insert(TEST_UDID_2.to_string(), "sim 2 missing".to_string());
+    let (deps2, cap2) = make_deps(
+        &ws.path,
+        Arc::new(all_fail_factory) as Arc<dyn DriverFactory>,
+        default_probes(),
+        CancellationToken::new(),
+    );
+    let code2 = run_cli_from_args(
+        [
+            "deja",
+            "run",
+            "--all",
+            "--devices",
+            &devices_arg,
+            "--junit",
+            "out/all-rt-fail.xml",
+            "--json",
+        ],
+        &deps2,
+    )
+    .await;
+    assert_eq!(code2, 1);
+    let parsed2: Value = serde_json::from_str(&cap2.lock().unwrap().stdout).unwrap();
+    assert_eq!(parsed2["counts"]["errored"], 2);
+    assert_eq!(parsed2["goals"][0]["outcome"], "error");
+    assert_eq!(parsed2["goals"][1]["outcome"], "error");
+    let xml = fs::read_to_string(ws.path.join("out/all-rt-fail.xml")).unwrap();
+    assert!(deja_flow::reports_failure(&xml));
+    assert!(xml.contains(r#"errors="2""#));
+}
+
+#[tokio::test]
+async fn regression_deja66_r3_f3_unstarted_goal_reassigned_when_shard_cannot_attach() {
+    let ws = TempWs::new("deja66-r3-f3-reassign-attach");
+    ws.write_build("build/App.bin", b"build-v1");
+    ws.write(
+        "deja.config.json",
+        &json!({
+            "workspaceRoot": ".",
+            "platform": "ios",
+            "appId": TEST_APP_ID,
+            "adapter": "maestro-ios/v1",
+            "buildPath": "build/App.bin",
+            "manifest": "deja.walks.json",
+            "staleBuild": "replay-last-verified"
+        })
+        .to_string(),
+    );
+    write_tagged_flow(&ws, "flows/g1.yaml", "g1");
+    write_tagged_flow(&ws, "flows/g2.yaml", "g2");
+    seed_manifest_walk(
+        &ws,
+        &[
+            ("g1", TEST_APP_ID, "ios", "maestro-ios/v1", "flows/g1.yaml"),
+            ("g2", TEST_APP_ID, "ios", "maestro-ios/v1", "flows/g2.yaml"),
+        ],
+    );
+
+    // Shard 0 (`TEST_UDID`) delays 50ms in `create()` and then fails attach AFTER shard 1
+    // (`TEST_UDID_2`) has already finished `g2`! Shard 1 MUST wait for the attaching shard, wake
+    // up when `g1` is pushed back onto the queue, and execute BOTH `g1` and `g2` to exit 0!
+    let mut factory = BatchMockFactory::new(Some("ios-27.2"));
+    factory
+        .create_delay_by_device
+        .insert(TEST_UDID.to_string(), Duration::from_millis(50));
+    factory.fail_create_devices.insert(
+        TEST_UDID.to_string(),
+        "WDA attach failed on shard 0".to_string(),
+    );
+    let (deps, cap) = make_deps(
+        &ws.path,
+        Arc::new(factory) as Arc<dyn DriverFactory>,
+        default_probes(),
+        CancellationToken::new(),
+    );
+    let devices_arg = format!("{TEST_UDID},{TEST_UDID_2}");
+    let code = tokio::time::timeout(
+        Duration::from_secs(5),
+        run_cli_from_args(
+            ["deja", "run", "--all", "--devices", &devices_arg, "--json"],
+            &deps,
+        ),
+    )
+    .await
+    .expect("reassignment across shards must not hang");
+    assert_eq!(
+        code,
+        0,
+        "healthy shard must execute reassigned unstarted goal; stdout={} stderr={}",
+        cap.lock().unwrap().stdout,
+        cap.lock().unwrap().stderr
+    );
+    let parsed: Value = serde_json::from_str(&cap.lock().unwrap().stdout).unwrap();
+    assert_eq!(parsed["passed"], true);
+    assert_eq!(parsed["counts"]["passed"], 2);
+    assert_eq!(parsed["goals"][0]["outcome"], "passed");
+    assert_eq!(parsed["goals"][0]["device"], TEST_UDID_2);
+    assert_eq!(parsed["goals"][1]["outcome"], "passed");
+    assert_eq!(parsed["goals"][1]["device"], TEST_UDID_2);
+    assert_eq!(parsed["shards"][0]["goalsExecuted"], 0);
+    assert!(
+        parsed["shards"][0]["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("WDA attach failed on shard 0")
+    );
+    assert_eq!(parsed["shards"][1]["goalsExecuted"], 2);
+}
+
+#[tokio::test]
+async fn regression_deja66_r3_f5_lpt_dequeues_longest_unconstrained_goal_before_shorter_constrained_goals()
+ {
+    let ws = TempWs::new("deja66-r3-f5-lpt-longest-first");
+    ws.write_build("build/App.bin", b"build-v1");
+    // Strict replay (no `staleBuild: replay-last-verified`): each shard can only replay goals
+    // verified in its own store for this build + runtime.
+    ws.write(
+        "deja.config.json",
+        &json!({
+            "workspaceRoot": ".",
+            "platform": "ios",
+            "appId": TEST_APP_ID,
+            "adapter": "maestro-ios/v1",
+            "buildPath": "build/App.bin",
+            "manifest": "deja.walks.json"
+        })
+        .to_string(),
+    );
+    write_tagged_flow(&ws, "flows/short_d1.yaml", "short-d1");
+    write_tagged_flow(&ws, "flows/short_d2.yaml", "short-d2");
+    write_tagged_flow(&ws, "flows/long_both.yaml", "long-both");
+    seed_manifest_walk(
+        &ws,
+        &[
+            (
+                "short d1",
+                TEST_APP_ID,
+                "ios",
+                "maestro-ios/v1",
+                "flows/short_d1.yaml",
+            ),
+            (
+                "short d2",
+                TEST_APP_ID,
+                "ios",
+                "maestro-ios/v1",
+                "flows/short_d2.yaml",
+            ),
+            (
+                "long both",
+                TEST_APP_ID,
+                "ios",
+                "maestro-ios/v1",
+                "flows/long_both.yaml",
+            ),
+        ],
+    );
+
+    let fp = fingerprint_file(&ws.path, &ws.path.join("build/App.bin")).unwrap();
+    let seed_store_goal = |store_id: &str, goal: &str, flow_rel: &str, dur_ms: u64| {
+        let cl = collect_flow_closure(&ws.path, &ws.path.join(flow_rel)).unwrap();
+        let main_sha = cl
+            .files
+            .iter()
+            .find(|f| f.path == cl.main)
+            .unwrap()
+            .sha256
+            .clone();
+        let store = SqliteWalkStore::open_writable(
+            SqliteStoreOptions::new(&ws.path).with_store_id(store_id),
+        )
+        .unwrap();
+        store
+            .upsert_walk(&deja_store::UpsertWalkInput {
+                identity: WalkIdentity {
+                    goal: goal.to_string(),
+                    app_id: TEST_APP_ID.to_string(),
+                    platform: "ios".to_string(),
+                    flow_schema_version: DEFAULT_FLOW_SCHEMA_VERSION.to_string(),
+                    build_fingerprint: fp.clone(),
+                    adapter: Some("maestro-ios/v1".to_string()),
+                    browser: None,
+                },
+                flow_path: flow_rel.to_string(),
+                flow_sha256: main_sha,
+                subflow_files: None,
+                legacy_closure: false,
+                closure_sha256: Some(cl.sha256),
+                validation: RecordValidationInput::new(true, now_iso8601())
+                    .with_runtime("ios-27.2")
+                    .with_duration_ms(dur_ms),
+                exploration: None,
+                repair_history: None,
+            })
+            .unwrap();
+        store.close();
+    };
+
+    // `long both` (2000ms) is eligible on BOTH `TEST_UDID` and `TEST_UDID_2`.
+    // `short d1` (100ms) is constrained to `TEST_UDID` ONLY.
+    // `short d2` (100ms) is constrained to `TEST_UDID_2` ONLY.
+    seed_store_goal(TEST_UDID, "long both", "flows/long_both.yaml", 2_000);
+    seed_store_goal(TEST_UDID_2, "long both", "flows/long_both.yaml", 2_000);
+    seed_store_goal(TEST_UDID, "short d1", "flows/short_d1.yaml", 100);
+    seed_store_goal(TEST_UDID_2, "short d2", "flows/short_d2.yaml", 100);
+
+    // Synchronize the very first goal dequeued by BOTH shards with a 2-party barrier:
+    // under pure LPT-first eligible selection, one of the first two concurrently started goals
+    // MUST be `"long-both"` (NEVER both `"short-d1"` and `"short-d2"` jumping ahead!).
+    let first_wave: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let hook: AsyncGoalHook = {
+        let wave = Arc::clone(&first_wave);
+        let b = Arc::clone(&barrier);
+        Arc::new(
+            move |_dev: String, tag: String, _cancel: CancellationToken| {
+                let wave = Arc::clone(&wave);
+                let b = Arc::clone(&b);
+                Box::pin(async move {
+                    let in_first_wave = {
+                        let mut g = wave.lock().unwrap();
+                        if g.len() < 2 {
+                            g.push(tag);
+                            true
+                        } else {
+                            false
+                        }
+                    };
+                    if in_first_wave {
+                        let _ = tokio::time::timeout(Duration::from_secs(2), b.wait()).await;
+                    }
+                })
+            },
+        )
+    };
+
+    let factory = Arc::new(BatchMockFactory::new(Some("ios-27.2")).with_on_goal(hook));
+    let (deps, cap) = make_deps(
+        &ws.path,
+        Arc::clone(&factory) as Arc<dyn DriverFactory>,
+        default_probes(),
+        CancellationToken::new(),
+    );
+    let devices_arg = format!("{TEST_UDID},{TEST_UDID_2}");
+    let code = run_cli_from_args(
+        ["deja", "run", "--all", "--devices", &devices_arg, "--json"],
+        &deps,
+    )
+    .await;
+    assert_eq!(
+        code,
+        0,
+        "all 3 goals must pass; stdout={} stderr={}",
+        cap.lock().unwrap().stdout,
+        cap.lock().unwrap().stderr
+    );
+    let wave = first_wave.lock().unwrap().clone();
+    assert!(
+        wave.iter().any(|t| t == "long-both"),
+        "longest unconstrained goal (2000ms) MUST be dequeued in the first wave before both 100ms constrained goals; got first_wave={wave:?}"
     );
 }

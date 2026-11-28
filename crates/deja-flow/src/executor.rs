@@ -2751,14 +2751,17 @@ impl FlowExecutor {
         let label = format!("Take screenshot \"{}\"", self.scrub(&raw_path));
 
         let override_resolved;
+        let strict_root: Option<&Path>;
         let base_dir: &Path = if let Some(ref dir) = self.config.screenshot_dir_override {
             override_resolved = if dir.is_absolute() {
                 dir.clone()
             } else {
                 state.canonical_workspace.join(dir)
             };
+            strict_root = Some(&override_resolved);
             &override_resolved
         } else {
+            strict_root = None;
             self.config
                 .screenshot_dir
                 .as_deref()
@@ -2773,6 +2776,7 @@ impl FlowExecutor {
         let target_path = confine_write_path(
             &state.canonical_workspace,
             base_dir,
+            strict_root,
             &with_ext,
             "screenshot",
         )
@@ -3896,23 +3900,71 @@ fn confine_existing_file(
     Ok(canonical)
 }
 
+fn resolve_with_nearest_existing_ancestor(path: &Path) -> Result<PathBuf, FlowExecutionError> {
+    let normalized = lexical_normalize(path);
+    let mut suffix: Vec<std::ffi::OsString> = Vec::new();
+    let mut cur = normalized.as_path();
+    while !cur.exists() {
+        let Some(name) = cur.file_name() else {
+            return Err(FlowExecutionError::PathConfinement(
+                "output path has no existing ancestor".to_string(),
+            ));
+        };
+        suffix.push(name.to_os_string());
+        let Some(parent) = cur.parent() else {
+            return Err(FlowExecutionError::PathConfinement(
+                "output path has no existing ancestor".to_string(),
+            ));
+        };
+        cur = parent;
+    }
+    let mut resolved = fs::canonicalize(cur).map_err(|err| {
+        FlowExecutionError::PathConfinement(format!("cannot resolve output ancestor: {err}"))
+    })?;
+    for comp in suffix.into_iter().rev() {
+        resolved.push(comp);
+    }
+    Ok(resolved)
+}
+
 fn confine_write_path(
     canonical_workspace: &Path,
     base_dir: &Path,
+    strict_root: Option<&Path>,
     raw_rel: &str,
     kind: &str,
 ) -> Result<PathBuf, FlowExecutionError> {
     validate_relative_path_syntax(raw_rel, kind)?;
-    let canonical_base = fs::canonicalize(base_dir).unwrap_or_else(|_| lexical_normalize(base_dir));
+    let canonical_base = resolve_with_nearest_existing_ancestor(base_dir)?;
     if canonical_base != canonical_workspace && !canonical_base.starts_with(canonical_workspace) {
         return Err(FlowExecutionError::PathConfinement(format!(
             "{kind} output base directory escapes workspace"
         )));
     }
+    let resolved_strict_root = match strict_root {
+        Some(root) => {
+            let resolved = resolve_with_nearest_existing_ancestor(root)?;
+            if resolved != canonical_workspace && !resolved.starts_with(canonical_workspace) {
+                return Err(FlowExecutionError::PathConfinement(format!(
+                    "{kind} output root directory escapes workspace"
+                )));
+            }
+            Some(resolved)
+        }
+        None => None,
+    };
+
     let lexical = lexical_normalize(&canonical_base.join(raw_rel));
     if lexical == canonical_workspace || !lexical.starts_with(canonical_workspace) {
         return Err(FlowExecutionError::PathConfinement(format!(
             "{kind} output path escapes workspace: {raw_rel}"
+        )));
+    }
+    if let Some(ref root) = resolved_strict_root
+        && (lexical == *root || !lexical.starts_with(root))
+    {
+        return Err(FlowExecutionError::PathConfinement(format!(
+            "{kind} output path escapes goal attempt screenshot directory: {raw_rel}"
         )));
     }
 
@@ -3935,6 +3987,19 @@ fn confine_write_path(
         return Err(FlowExecutionError::PathConfinement(format!(
             "{kind} output ancestor escapes workspace via symlink"
         )));
+    }
+    if let Some(ref root) = resolved_strict_root {
+        // If the nearest existing ancestor lies at or inside `root`, its canonical target MUST
+        // stay inside `root` (preventing symlinks inside the attempt directory from escaping to a
+        // sibling goal directory or elsewhere in the workspace). If `root` does not exist yet,
+        // the nearest existing ancestor must be an ancestor of `root` itself.
+        let within_root = canonical_ancestor == *root || canonical_ancestor.starts_with(root);
+        let ancestor_of_uncreated_root = !root.exists() && root.starts_with(&canonical_ancestor);
+        if !within_root && !ancestor_of_uncreated_root {
+            return Err(FlowExecutionError::PathConfinement(format!(
+                "{kind} output ancestor escapes goal attempt screenshot directory via symlink"
+            )));
+        }
     }
     if let Ok(lmeta) = fs::symlink_metadata(&lexical)
         && lmeta.file_type().is_symlink()

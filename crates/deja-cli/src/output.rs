@@ -122,6 +122,8 @@ pub struct BatchShardSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime: Option<String>,
     pub goals_executed: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// Aggregate goal outcome counts for a batch run.

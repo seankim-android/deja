@@ -1623,10 +1623,30 @@ impl SqliteWalkStore {
     /// `integrity_sha256` digests and checked for a non-negative `duration_ms`, failing closed
     /// with [`StoreError::InvalidWalkMemory`] on any tampering or corruption.
     pub fn goal_duration_samples_ms(&self) -> Result<BTreeMap<String, Vec<u64>>, StoreError> {
+        let never_cancel = AtomicBool::new(false);
+        self.goal_duration_samples_ms_cancellable(&never_cancel)
+    }
+
+    /// Interruptible variant of [`Self::goal_duration_samples_ms`] that streams rows directly from
+    /// SQLite and checks `cancel` on every row, returning [`StoreError::Cancelled`] immediately if
+    /// cancellation is requested.
+    pub fn goal_duration_samples_ms_cancellable(
+        &self,
+        cancel: &AtomicBool,
+    ) -> Result<BTreeMap<String, Vec<u64>>, StoreError> {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(StoreError::Cancelled);
+        }
         let mut guard = self.lock_inner()?;
+        if cancel.load(Ordering::Relaxed) {
+            return Err(StoreError::Cancelled);
+        }
         let Some(conn) = self.ensure_read_conn(&mut guard)? else {
             return Ok(BTreeMap::new());
         };
+        if cancel.load(Ordering::Relaxed) {
+            return Err(StoreError::Cancelled);
+        }
 
         let mut stmt = conn.prepare_cached(
             "SELECT walk_id, build_fingerprint, runtime, flow_path, flow_sha256,
@@ -1637,13 +1657,14 @@ impl SqliteWalkStore {
              WHERE duration_ms IS NOT NULL",
         )?;
 
-        let rows: Vec<RawValidationRunRow> = stmt
-            .query_map([], read_validation_run_row)?
-            .collect::<Result<Vec<_>, _>>()?;
-
         let mut verified_goal_keys: BTreeMap<i64, String> = BTreeMap::new();
         let mut grouped: BTreeMap<String, Vec<u64>> = BTreeMap::new();
-        for raw in rows {
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            if cancel.load(Ordering::Relaxed) {
+                return Err(StoreError::Cancelled);
+            }
+            let raw = read_validation_run_row(row)?;
             let validated = validate_run_row_struct(raw)?;
             let duration_ms = validated.duration_ms.ok_or_else(|| {
                 StoreError::InvalidWalkMemory(

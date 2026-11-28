@@ -4004,3 +4004,69 @@ fn median_goal_durations_ms_readonly_medians_and_tamper_rejection() {
         "expected InvalidWalkMemory, got {err_walk:?}"
     );
 }
+
+#[test]
+fn goal_duration_samples_ms_cancellable_aborts_cleanly_and_matches_parity() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let ws = TempWorkspace::new("deja66-r3-f4-dur-cancel");
+    let (flow_path, flow_sha) = write_classic_flow(
+        &ws,
+        ".deja/flows/cancel/ios.yaml",
+        "appId: com.demo.app\n---\n- launchApp\n",
+    );
+
+    let store = SqliteWalkStore::open_writable(SqliteStoreOptions::new(ws.path())).unwrap();
+    for i in 0..40u64 {
+        store
+            .upsert_walk(&UpsertWalkInput {
+                identity: ios_identity(&format!("goal {i}"), &format!("b{i}")),
+                flow_path: flow_path.clone(),
+                flow_sha256: flow_sha.clone(),
+                subflow_files: Some(vec![]),
+                legacy_closure: false,
+                closure_sha256: None,
+                validation: RecordValidationInput::new(true, "2026-05-01T10:00:00Z")
+                    .with_duration_ms(100 + i),
+                exploration: None,
+                repair_history: None,
+            })
+            .unwrap();
+    }
+
+    let false_flag = AtomicBool::new(false);
+    let expected = store.goal_duration_samples_ms().unwrap();
+    let cancellable_ok = store
+        .goal_duration_samples_ms_cancellable(&false_flag)
+        .unwrap();
+    assert_eq!(cancellable_ok, expected);
+
+    // Pre-cancelled flag must immediately return `StoreError::Cancelled`.
+    let pre_cancel = AtomicBool::new(true);
+    let pre_err = store
+        .goal_duration_samples_ms_cancellable(&pre_cancel)
+        .expect_err("pre-cancelled duration scan must abort");
+    assert!(
+        matches!(pre_err, StoreError::Cancelled),
+        "expected StoreError::Cancelled, got {pre_err:?}"
+    );
+    assert_eq!(pre_err.code(), "CANCELLED");
+    assert_eq!(pre_err.exit_code(), 1);
+    store.close();
+
+    // Concurrent mid-scan cancellation on read-only handle either cancels cleanly or returns full
+    // exact parity (never partial/corrupt data or lock leaks).
+    let ro = Arc::new(SqliteWalkStore::open_readonly(SqliteStoreOptions::new(ws.path())).unwrap());
+    let flag = Arc::new(AtomicBool::new(false));
+    let ro_bg = Arc::clone(&ro);
+    let flag_bg = Arc::clone(&flag);
+    let handle = std::thread::spawn(move || ro_bg.goal_duration_samples_ms_cancellable(&flag_bg));
+    flag.store(true, Ordering::SeqCst);
+    match handle.join().unwrap() {
+        Err(StoreError::Cancelled) => {}
+        Ok(samples) => assert_eq!(samples, expected),
+        Err(other) => panic!("unexpected error: {other:?}"),
+    }
+    assert!(!ws.path().join(".deja/memory/walks.sqlite.lock").exists());
+}

@@ -25,7 +25,7 @@ use deja_store::{
     validate_store_id,
 };
 use sha2::{Digest, Sha256};
-use tokio::sync::{Mutex as AsyncMutex, MutexGuard, OnceCell};
+use tokio::sync::{Mutex as AsyncMutex, MutexGuard, OnceCell, watch};
 use tokio_util::sync::CancellationToken;
 
 use crate::CliDeps;
@@ -65,6 +65,7 @@ struct ShardSpec {
 }
 
 struct OpenedShard {
+    orig_idx: usize,
     device: String,
     store_id: Option<String>,
     store_label: String,
@@ -200,6 +201,61 @@ fn close_all_stores(stores: &[Arc<SqliteWalkStore>]) {
     for store in stores {
         store.close();
     }
+}
+
+async fn scan_duration_medians_cancellable(
+    opened_stores: &[Arc<SqliteWalkStore>],
+    cancel: &CancellationToken,
+) -> Result<BTreeMap<String, u64>, Option<StoreError>> {
+    if cancel.is_cancelled() {
+        return Err(None);
+    }
+    let stores_for_scan: Vec<Arc<SqliteWalkStore>> = opened_stores.to_vec();
+    let dur_cancel_flag = Arc::new(AtomicBool::new(false));
+    let dur_worker_flag = Arc::clone(&dur_cancel_flag);
+    let mut dur_handle = tokio::task::spawn_blocking(move || {
+        let mut pooled: BTreeMap<String, Vec<u64>> = BTreeMap::new();
+        for store in &stores_for_scan {
+            if dur_worker_flag.load(Ordering::Relaxed) {
+                return Err(StoreError::Cancelled);
+            }
+            let map = store.goal_duration_samples_ms_cancellable(&dur_worker_flag)?;
+            for (goal_key, samples) in map {
+                pooled.entry(goal_key).or_default().extend(samples);
+            }
+        }
+        Ok(pooled)
+    });
+    let pooled = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => {
+            dur_cancel_flag.store(true, Ordering::SeqCst);
+            let _ = dur_handle.await;
+            return Err(None);
+        }
+        res = &mut dur_handle => match res {
+            Ok(Ok(pooled)) => pooled,
+            Ok(Err(StoreError::Cancelled)) => return Err(None),
+            Ok(Err(err)) => {
+                if cancel.is_cancelled() {
+                    return Err(None);
+                }
+                return Err(Some(err));
+            }
+            Err(join_err) => {
+                return Err(Some(StoreError::Io(std::io::Error::other(format!(
+                    "duration history scan task failed: {join_err}"
+                )))));
+            }
+        },
+    };
+    let mut medians = BTreeMap::new();
+    for (goal_key, mut vals) in pooled {
+        if let Some(med) = integer_median(&mut vals) {
+            medians.insert(goal_key, med);
+        }
+    }
+    Ok(medians)
 }
 
 /// Entrypoint for `deja run --goals <FILE>` and `deja run --all`.
@@ -713,48 +769,31 @@ async fn run_batch_inner(
     };
     let build_fingerprint_ms = fp_t0.elapsed().as_millis() as u64;
 
-    // Pool all integrity-verified historical `duration_ms` samples across EVERY shard store so
-    // LPT uses the exact pooled median rather than a skewed median-of-shard-medians.
+    // Pool all integrity-verified historical `duration_ms` samples across EVERY shard store inside
+    // a cancellable `spawn_blocking` task so LPT uses the exact pooled median while remaining
+    // promptly interruptible on cancellation.
     let mut aggregated_medians: BTreeMap<String, u64> = BTreeMap::new();
     if !cancelled_during_setup {
-        let mut pooled_samples_by_goal: BTreeMap<String, Vec<u64>> = BTreeMap::new();
-        for store in &opened_stores {
-            if deps.cancel.is_cancelled() {
+        match scan_duration_medians_cancellable(&opened_stores, &deps.cancel).await {
+            Ok(medians) => aggregated_medians = medians,
+            Err(None) => {
                 cancelled_during_setup = true;
-                break;
             }
-            match store.goal_duration_samples_ms() {
-                Ok(map) => {
-                    for (goal_key, samples) in map {
-                        pooled_samples_by_goal
-                            .entry(goal_key)
-                            .or_default()
-                            .extend(samples);
-                    }
-                }
-                Err(err) => {
-                    close_all_stores(&opened_stores);
-                    let code = exit_code_for_store_error(&err);
-                    return emit_early_exec_error(
-                        deps,
-                        "run",
-                        "batch",
-                        effective_junit.as_deref(),
-                        json_mode,
-                        args.summary,
-                        &redaction,
-                        err.code(),
-                        &err.to_string(),
-                        code,
-                    );
-                }
-            }
-        }
-        if !cancelled_during_setup {
-            for (goal_key, mut vals) in pooled_samples_by_goal {
-                if let Some(med) = integer_median(&mut vals) {
-                    aggregated_medians.insert(goal_key, med);
-                }
+            Err(Some(err)) => {
+                close_all_stores(&opened_stores);
+                let code = exit_code_for_store_error(&err);
+                return emit_early_exec_error(
+                    deps,
+                    "run",
+                    "batch",
+                    effective_junit.as_deref(),
+                    json_mode,
+                    args.summary,
+                    &redaction,
+                    err.code(),
+                    &err.to_string(),
+                    code,
+                );
             }
         }
     }
@@ -779,9 +818,12 @@ async fn run_batch_inner(
     let scheduled_order: Vec<String> = lpt_sorted.iter().map(|g| g.goal.text.clone()).collect();
 
     // Resolve runtime ONCE per shard via `driver_factory.resolve_runtime`.
+    // In multi-device mode, if one shard fails runtime lookup, record the error against that shard,
+    // close its store, exclude it from eligible shards, and continue running on healthy shards.
     let mut opened_shards: Vec<OpenedShard> = Vec::with_capacity(shard_specs.len());
+    let mut shard_runtime_errors: BTreeMap<usize, (u8, String)> = BTreeMap::new();
     if !cancelled_during_setup {
-        for (spec, store) in shard_specs.iter().zip(opened_stores.iter()) {
+        for (orig_idx, (spec, store)) in shard_specs.iter().zip(opened_stores.iter()).enumerate() {
             let mut base_ctx = build_driver_context(
                 &config,
                 deps,
@@ -797,6 +839,7 @@ async fn run_batch_inner(
             {
                 Ok(runtime) => {
                     opened_shards.push(OpenedShard {
+                        orig_idx,
                         device: spec.device.clone(),
                         store_id: spec.store_id.clone(),
                         store_label: store.store_label(),
@@ -815,29 +858,22 @@ async fn run_batch_inner(
                         cancelled_during_setup = true;
                         break;
                     }
-                    close_all_stores(&opened_stores);
+                    store.close();
                     let code = err.exit_code();
-                    return emit_early_exec_error(
-                        deps,
-                        "run",
-                        "batch",
-                        effective_junit.as_deref(),
-                        json_mode,
-                        args.summary,
-                        &redaction,
-                        "DRIVER_ERROR",
-                        &err.to_string(),
-                        code,
-                    );
+                    let msg = redaction.redact_str(&err.to_string());
+                    deps.output.writeln_stderr(&format!(
+                        "deja warning: skipping shard {} (runtime lookup failed): {msg}",
+                        redaction.redact_str(&spec.device)
+                    ));
+                    shard_runtime_errors.insert(orig_idx, (code, msg));
                 }
             }
         }
     }
 
-    // In multi-device sharding, probe read-only replay eligibility per `(goal, shard)` BEFORE
-    // spawning workers so each goal is scheduled only onto shards whose store/runtime can execute
-    // it (e.g., strict replay after `--verify --devices d1,d2` where goal A lives in store `d1`
-    // and goal B lives in store `d2`).
+    // In multi-device sharding, probe read-only replay eligibility per `(goal, shard)` ONLY across
+    // healthy resolved shards (NEVER treating an unresolved/failed shard as eligible) BEFORE
+    // spawning workers so each goal runs only on shards whose store/runtime can execute it.
     if !cancelled_during_setup && opened_shards.len() > 1 {
         for bg in &mut lpt_sorted {
             if deps.cancel.is_cancelled() {
@@ -874,11 +910,16 @@ async fn run_batch_inner(
     let shard_attach_errors: Arc<AsyncMutex<BTreeMap<usize, (u8, String)>>> =
         Arc::new(AsyncMutex::new(BTreeMap::new()));
 
-    if cancelled_during_setup {
+    if cancelled_during_setup || opened_shards.is_empty() {
         close_all_stores(&opened_stores);
     } else {
-        let queue: Arc<AsyncMutex<VecDeque<BatchGoal>>> =
-            Arc::new(AsyncMutex::new(VecDeque::from(lpt_sorted)));
+        let queue_state = Arc::new(AsyncMutex::new(SharedQueueState {
+            queue: VecDeque::from(lpt_sorted),
+            attaching_shards: BTreeSet::new(),
+            dead_shards: BTreeSet::new(),
+        }));
+        let (queue_version_tx, _queue_version_rx) = watch::channel(0u64);
+        let queue_version_tx = Arc::new(queue_version_tx);
         let shared_staged: Arc<OnceCell<Option<SharedStagedBuild>>> = Arc::new(OnceCell::new());
         let extra_protected_arc = Arc::new(extra_protected_owned);
         let batch_screenshot_root = Arc::new(config.workspace_root.join(&batch_screenshots_rel));
@@ -905,7 +946,8 @@ async fn run_batch_inner(
                 manifest_protected: Arc::clone(&manifest_protected),
                 extra_protected: Arc::clone(&extra_protected_arc),
                 batch_screenshot_root: Arc::clone(&batch_screenshot_root),
-                queue: Arc::clone(&queue),
+                queue_state: Arc::clone(&queue_state),
+                queue_version_tx: Arc::clone(&queue_version_tx),
                 shared_staged: Arc::clone(&shared_staged),
                 manifest_mutex: Arc::clone(&manifest_mutex),
                 results: Arc::clone(&results),
@@ -941,9 +983,10 @@ async fn run_batch_inner(
     let cancel_signal = deps.cancel_signal.load(Ordering::SeqCst);
     let attach_fallback = last_attach_error.lock().await.clone();
     let per_shard_attach = shard_attach_errors.lock().await.clone();
+    let first_runtime_err = shard_runtime_errors.values().next().cloned();
 
     // Assemble deterministic `0..N` input-order results, marking any unstarted goals as skipped
-    // (on cancellation) or errored (if eligible shard(s) failed to attach).
+    // (on cancellation) or errored (if eligible shard(s) failed runtime lookup or driver attach).
     let mut locked_results = results.lock().await;
     let mut final_records: Vec<BatchGoalOutcomeRecord> = Vec::with_capacity(total_goals);
     for bg in &input_goals {
@@ -959,6 +1002,7 @@ async fn run_batch_inner(
             });
             let (code, msg) = eligible_err
                 .or_else(|| attach_fallback.clone())
+                .or_else(|| first_runtime_err.clone())
                 .unwrap_or_else(|| {
                     (
                         EXIT_FAILURE,
@@ -979,31 +1023,45 @@ async fn run_batch_inner(
     }
     drop(locked_results);
 
-    // Build shard summaries, counts, JUnit cases, and preliminary exit code.
-    let shard_summaries: Vec<BatchShardSummary> = if opened_shards.is_empty() {
-        shard_specs
-            .iter()
-            .zip(opened_stores.iter())
-            .map(|(spec, store)| BatchShardSummary {
-                device: spec.device.clone(),
-                store: spec.store_id.clone(),
-                store_label: store.store_label(),
-                runtime: None,
-                goals_executed: 0,
-            })
-            .collect()
-    } else {
-        opened_shards
-            .iter()
-            .map(|s| BatchShardSummary {
-                device: s.device.clone(),
-                store: s.store_id.clone(),
-                store_label: s.store_label.clone(),
-                runtime: s.runtime.clone(),
-                goals_executed: s.goals_executed.load(Ordering::SeqCst),
-            })
-            .collect()
-    };
+    // Build shard summaries in original `--devices` order, recording any runtime-lookup or attach
+    // error directly on the corresponding shard entry.
+    let opened_by_orig: BTreeMap<usize, (usize, &OpenedShard)> = opened_shards
+        .iter()
+        .enumerate()
+        .map(|(worker_idx, s)| (s.orig_idx, (worker_idx, s)))
+        .collect();
+    let shard_summaries: Vec<BatchShardSummary> = shard_specs
+        .iter()
+        .zip(opened_stores.iter())
+        .enumerate()
+        .map(|(orig_idx, (spec, store))| {
+            if let Some(&(worker_idx, s)) = opened_by_orig.get(&orig_idx) {
+                let attach_err = per_shard_attach
+                    .get(&worker_idx)
+                    .map(|(_, msg)| redaction.redact_str(msg));
+                BatchShardSummary {
+                    device: s.device.clone(),
+                    store: s.store_id.clone(),
+                    store_label: s.store_label.clone(),
+                    runtime: s.runtime.clone(),
+                    goals_executed: s.goals_executed.load(Ordering::SeqCst),
+                    error: attach_err,
+                }
+            } else {
+                let rt_err = shard_runtime_errors
+                    .get(&orig_idx)
+                    .map(|(_, msg)| msg.clone());
+                BatchShardSummary {
+                    device: spec.device.clone(),
+                    store: spec.store_id.clone(),
+                    store_label: store.store_label(),
+                    runtime: None,
+                    goals_executed: 0,
+                    error: rt_err,
+                }
+            }
+        })
+        .collect();
 
     let mut counts = BatchCounts {
         total: final_records.len(),
@@ -1290,6 +1348,15 @@ struct WorkerShard {
     goals_executed: Arc<AtomicUsize>,
 }
 
+struct SharedQueueState {
+    queue: VecDeque<BatchGoal>,
+    /// Shards currently performing lazy first-time driver attach for an unstarted goal that may be
+    /// pushed back onto `queue` if attach fails.
+    attaching_shards: BTreeSet<usize>,
+    /// Shards that failed lazy attach and exited permanently.
+    dead_shards: BTreeSet<usize>,
+}
+
 struct WorkerSharedContext {
     config: Arc<LoadedConfig>,
     consumer: Option<Arc<ConsumerFlows>>,
@@ -1304,7 +1371,8 @@ struct WorkerSharedContext {
     manifest_protected: Arc<BTreeSet<PathBuf>>,
     extra_protected: Arc<Vec<PathBuf>>,
     batch_screenshot_root: Arc<PathBuf>,
-    queue: Arc<AsyncMutex<VecDeque<BatchGoal>>>,
+    queue_state: Arc<AsyncMutex<SharedQueueState>>,
+    queue_version_tx: Arc<watch::Sender<u64>>,
     shared_staged: Arc<OnceCell<Option<SharedStagedBuild>>>,
     manifest_mutex: Arc<AsyncMutex<()>>,
     results: Arc<AsyncMutex<Vec<Option<BatchGoalOutcomeRecord>>>>,
@@ -1312,6 +1380,40 @@ struct WorkerSharedContext {
     refused_report: Arc<AtomicBool>,
     last_attach_error: Arc<AsyncMutex<Option<(u8, String)>>>,
     shard_attach_errors: Arc<AsyncMutex<BTreeMap<usize, (u8, String)>>>,
+}
+
+async fn clear_attaching_shard(ctx: &WorkerSharedContext, shard_idx: usize) {
+    let mut state = ctx.queue_state.lock().await;
+    if state.attaching_shards.remove(&shard_idx) {
+        ctx.queue_version_tx.send_modify(|v| *v = v.wrapping_add(1));
+    }
+}
+
+async fn fail_attach_and_requeue(
+    ctx: &WorkerSharedContext,
+    shard_idx: usize,
+    bg: BatchGoal,
+    code: u8,
+    msg: String,
+) {
+    *ctx.last_attach_error.lock().await = Some((code, msg.clone()));
+    ctx.shard_attach_errors
+        .lock()
+        .await
+        .insert(shard_idx, (code, msg));
+    let mut state = ctx.queue_state.lock().await;
+    state.attaching_shards.remove(&shard_idx);
+    state.dead_shards.insert(shard_idx);
+    let insert_pos = state
+        .queue
+        .iter()
+        .position(|other| {
+            (Reverse(bg.historical_median_ms), bg.index)
+                < (Reverse(other.historical_median_ms), other.index)
+        })
+        .unwrap_or(state.queue.len());
+    state.queue.insert(insert_pos, bg);
+    ctx.queue_version_tx.send_modify(|v| *v = v.wrapping_add(1));
 }
 
 async fn acquire_manifest_lock_cancellable<'a>(
@@ -1332,31 +1434,46 @@ async fn acquire_manifest_lock_cancellable<'a>(
 
 async fn run_shard_worker(shard: WorkerShard, ctx: WorkerSharedContext) {
     let mut persistent_driver: Option<Box<dyn PlatformDriver>> = None;
+    let mut queue_version_rx = ctx.queue_version_tx.subscribe();
 
     loop {
         if ctx.deps.cancel.is_cancelled() {
             break;
         }
 
-        let maybe_goal = {
-            let mut q = ctx.queue.lock().await;
-            if ctx.deps.cancel.is_cancelled() {
-                None
-            } else {
-                // Pop the highest-LPT goal eligible on this shard, preferring shard-constrained
-                // goals ahead of unconstrained goals so exclusive goals run in parallel while
-                // keeping exact LPT order whenever goals are unconstrained.
-                let pos = q
-                    .iter()
-                    .position(|bg| {
-                        bg.eligible_shards.is_some() && bg.is_eligible_for(shard.shard_idx)
-                    })
-                    .or_else(|| {
-                        q.iter().position(|bg| {
-                            bg.eligible_shards.is_none() && bg.is_eligible_for(shard.shard_idx)
-                        })
-                    });
-                pos.and_then(|idx| q.remove(idx))
+        let maybe_goal = loop {
+            let mut state = ctx.queue_state.lock().await;
+            let _ = queue_version_rx.borrow_and_update();
+            if ctx.deps.cancel.is_cancelled() || state.dead_shards.contains(&shard.shard_idx) {
+                break None;
+            }
+            // Strictly pick the FIRST (longest-LPT) eligible goal in the queue — never prioritizing
+            // shorter constrained goals ahead of longer unconstrained goals.
+            let pos = state
+                .queue
+                .iter()
+                .position(|bg| bg.is_eligible_for(shard.shard_idx));
+            if let Some(idx) = pos {
+                let bg = state.queue.remove(idx).expect("queue index valid");
+                if persistent_driver.is_none() {
+                    state.attaching_shards.insert(shard.shard_idx);
+                }
+                break Some(bg);
+            }
+            if state.attaching_shards.is_empty() {
+                break None;
+            }
+            // Another shard is performing lazy driver attach and may return its unstarted goal to
+            // the queue if attach fails; wait until queue state changes or cancellation triggers.
+            drop(state);
+            tokio::select! {
+                biased;
+                _ = ctx.deps.cancel.cancelled() => break None,
+                changed = queue_version_rx.changed() => {
+                    if changed.is_err() {
+                        break None;
+                    }
+                }
             }
         };
         let Some(bg) = maybe_goal else {
@@ -1378,6 +1495,7 @@ async fn run_shard_worker(shard: WorkerShard, ctx: WorkerSharedContext) {
         ) {
             Ok(p) => p,
             Err(err) => {
+                clear_attaching_shard(&ctx, shard.shard_idx).await;
                 let code = exit_code_for_store_error(&err);
                 let rec = make_error_goal_record(
                     &bg,
@@ -1404,6 +1522,7 @@ async fn run_shard_worker(shard: WorkerShard, ctx: WorkerSharedContext) {
                 yaml_path,
             } => {
                 // Refused goals NEVER trigger build staging or driver attach.
+                clear_attaching_shard(&ctx, shard.shard_idx).await;
                 let total_ms = goal_t0.elapsed().as_millis() as u64;
                 let mut report = build_base_report(
                     RunCommand::Run,
@@ -1462,6 +1581,7 @@ async fn run_shard_worker(shard: WorkerShard, ctx: WorkerSharedContext) {
                 &extra_prot_refs,
             )
         {
+            clear_attaching_shard(&ctx, shard.shard_idx).await;
             ctx.refused_junit.store(true, Ordering::SeqCst);
             let rec = make_error_goal_record(
                 &bg,
@@ -1487,6 +1607,7 @@ async fn run_shard_worker(shard: WorkerShard, ctx: WorkerSharedContext) {
                 &extra_prot_refs,
             )
         {
+            clear_attaching_shard(&ctx, shard.shard_idx).await;
             ctx.refused_report.store(true, Ordering::SeqCst);
             let rec = make_error_goal_record(
                 &bg,
@@ -1506,6 +1627,7 @@ async fn run_shard_worker(shard: WorkerShard, ctx: WorkerSharedContext) {
         if let Err(msg) =
             validate_closure_app_id_confinement(&closure, &ctx.config.app_id, &ctx.config.env)
         {
+            clear_attaching_shard(&ctx, shard.shard_idx).await;
             let rec = make_error_goal_record(
                 &bg,
                 EXIT_USAGE_OR_CONFIG,
@@ -1524,6 +1646,7 @@ async fn run_shard_worker(shard: WorkerShard, ctx: WorkerSharedContext) {
         if ctx.consumer.is_some()
             && let Err(msg) = check_closure_forbidden_values(&closure, &ctx.config.forbidden_values)
         {
+            clear_attaching_shard(&ctx, shard.shard_idx).await;
             let rec = make_error_goal_record(
                 &bg,
                 EXIT_USAGE_OR_CONFIG,
@@ -1549,6 +1672,7 @@ async fn run_shard_worker(shard: WorkerShard, ctx: WorkerSharedContext) {
         let expected_assertions_sha256 = match assertions_sha256(&closure) {
             Ok(h) => h,
             Err(err) => {
+                clear_attaching_shard(&ctx, shard.shard_idx).await;
                 let rec = make_error_goal_record(
                     &bg,
                     EXIT_USAGE_OR_CONFIG,
@@ -1570,6 +1694,7 @@ async fn run_shard_worker(shard: WorkerShard, ctx: WorkerSharedContext) {
         let mut driver_attach_ms = 0u64;
         if persistent_driver.is_none() {
             if ctx.deps.cancel.is_cancelled() {
+                clear_attaching_shard(&ctx, shard.shard_idx).await;
                 let rec = make_cancelled_goal_record(
                     &bg,
                     goal_t0.elapsed().as_millis() as u64,
@@ -1596,6 +1721,7 @@ async fn run_shard_worker(shard: WorkerShard, ctx: WorkerSharedContext) {
             {
                 Ok(opt) => opt.clone(),
                 Err(DriverFactoryError::Cancelled) => {
+                    clear_attaching_shard(&ctx, shard.shard_idx).await;
                     let rec = make_cancelled_goal_record(
                         &bg,
                         goal_t0.elapsed().as_millis() as u64,
@@ -1610,6 +1736,7 @@ async fn run_shard_worker(shard: WorkerShard, ctx: WorkerSharedContext) {
                 }
                 Err(err) => {
                     if ctx.deps.cancel.is_cancelled() {
+                        clear_attaching_shard(&ctx, shard.shard_idx).await;
                         let rec = make_cancelled_goal_record(
                             &bg,
                             goal_t0.elapsed().as_millis() as u64,
@@ -1622,25 +1749,14 @@ async fn run_shard_worker(shard: WorkerShard, ctx: WorkerSharedContext) {
                         store_goal_record(&ctx.results, bg.index, rec).await;
                         break;
                     }
-                    let code = err.exit_code();
-                    let msg = err.to_string();
-                    *ctx.last_attach_error.lock().await = Some((code, msg.clone()));
-                    ctx.shard_attach_errors
-                        .lock()
-                        .await
-                        .insert(shard.shard_idx, (code, msg.clone()));
-                    let rec = make_error_goal_record(
-                        &bg,
-                        code,
-                        &msg,
-                        Some(shard.device.clone()),
-                        shard.store_id.clone(),
-                        shard.runtime.clone(),
-                        "DriverError",
-                        &ctx.redaction,
-                    );
-                    store_goal_record(&ctx.results, bg.index, rec).await;
-                    shard.goals_executed.fetch_add(1, Ordering::SeqCst);
+                    fail_attach_and_requeue(
+                        &ctx,
+                        shard.shard_idx,
+                        bg,
+                        err.exit_code(),
+                        err.to_string(),
+                    )
+                    .await;
                     break;
                 }
             };
@@ -1656,6 +1772,7 @@ async fn run_shard_worker(shard: WorkerShard, ctx: WorkerSharedContext) {
             {
                 Ok(d) => d,
                 Err(DriverFactoryError::Cancelled) => {
+                    clear_attaching_shard(&ctx, shard.shard_idx).await;
                     let rec = make_cancelled_goal_record(
                         &bg,
                         goal_t0.elapsed().as_millis() as u64,
@@ -1670,6 +1787,7 @@ async fn run_shard_worker(shard: WorkerShard, ctx: WorkerSharedContext) {
                 }
                 Err(err) => {
                     if ctx.deps.cancel.is_cancelled() {
+                        clear_attaching_shard(&ctx, shard.shard_idx).await;
                         let rec = make_cancelled_goal_record(
                             &bg,
                             goal_t0.elapsed().as_millis() as u64,
@@ -1682,25 +1800,14 @@ async fn run_shard_worker(shard: WorkerShard, ctx: WorkerSharedContext) {
                         store_goal_record(&ctx.results, bg.index, rec).await;
                         break;
                     }
-                    let code = err.exit_code();
-                    let msg = err.to_string();
-                    *ctx.last_attach_error.lock().await = Some((code, msg.clone()));
-                    ctx.shard_attach_errors
-                        .lock()
-                        .await
-                        .insert(shard.shard_idx, (code, msg.clone()));
-                    let rec = make_error_goal_record(
-                        &bg,
-                        code,
-                        &msg,
-                        Some(shard.device.clone()),
-                        shard.store_id.clone(),
-                        shard.runtime.clone(),
-                        "DriverError",
-                        &ctx.redaction,
-                    );
-                    store_goal_record(&ctx.results, bg.index, rec).await;
-                    shard.goals_executed.fetch_add(1, Ordering::SeqCst);
+                    fail_attach_and_requeue(
+                        &ctx,
+                        shard.shard_idx,
+                        bg,
+                        err.exit_code(),
+                        err.to_string(),
+                    )
+                    .await;
                     break;
                 }
             };
@@ -1727,6 +1834,7 @@ async fn run_shard_worker(shard: WorkerShard, ctx: WorkerSharedContext) {
             if let Err((code, msg, is_cancel)) = attach_res {
                 let _ = driver.shutdown().await;
                 if is_cancel || ctx.deps.cancel.is_cancelled() {
+                    clear_attaching_shard(&ctx, shard.shard_idx).await;
                     let rec = make_cancelled_goal_record(
                         &bg,
                         goal_t0.elapsed().as_millis() as u64,
@@ -1738,29 +1846,14 @@ async fn run_shard_worker(shard: WorkerShard, ctx: WorkerSharedContext) {
                     );
                     store_goal_record(&ctx.results, bg.index, rec).await;
                 } else {
-                    *ctx.last_attach_error.lock().await = Some((code, msg.clone()));
-                    ctx.shard_attach_errors
-                        .lock()
-                        .await
-                        .insert(shard.shard_idx, (code, msg.clone()));
-                    let rec = make_error_goal_record(
-                        &bg,
-                        code,
-                        &msg,
-                        Some(shard.device.clone()),
-                        shard.store_id.clone(),
-                        shard.runtime.clone(),
-                        "DriverError",
-                        &ctx.redaction,
-                    );
-                    store_goal_record(&ctx.results, bg.index, rec).await;
-                    shard.goals_executed.fetch_add(1, Ordering::SeqCst);
+                    fail_attach_and_requeue(&ctx, shard.shard_idx, bg, code, msg).await;
                 }
                 break;
             }
 
             driver_attach_ms = attach_t0.elapsed().as_millis() as u64;
             persistent_driver = Some(driver);
+            clear_attaching_shard(&ctx, shard.shard_idx).await;
         }
 
         let driver_ref = persistent_driver
@@ -2280,7 +2373,8 @@ async fn run_shard_worker(shard: WorkerShard, ctx: WorkerSharedContext) {
         shard.goals_executed.fetch_add(1, Ordering::SeqCst);
     }
 
-    // Guaranteed teardown: ALWAYS shut down persistent driver and close shard store before exit.
+    // Guaranteed teardown: ALWAYS clear attaching state, shut down persistent driver, and close shard store.
+    clear_attaching_shard(&ctx, shard.shard_idx).await;
     if let Some(driver) = persistent_driver.take() {
         let _ = driver.shutdown().await;
     }
@@ -3014,6 +3108,86 @@ mod tests {
             "store lock must be cleaned up"
         );
 
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn regression_deja66_r3_f4_duration_scan_cancellable_aborts_and_releases_locks() {
+        use std::fs;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        use deja_core::{DEFAULT_FLOW_SCHEMA_VERSION, WalkIdentity, collect_flow_closure};
+
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let root = std::env::temp_dir().join(format!(
+            "deja-r3f4-dur-scan-{}-{nanos:x}",
+            std::process::id()
+        ));
+        fs::create_dir_all(root.join("flows")).unwrap();
+        let flow = root.join("flows/g.yaml");
+        fs::write(&flow, "appId: com.example.r3f4\n---\n- assertVisible: Ok\n").unwrap();
+        let cl = collect_flow_closure(&root, &flow).unwrap();
+        let main_sha = cl
+            .files
+            .iter()
+            .find(|f| f.path == cl.main)
+            .unwrap()
+            .sha256
+            .clone();
+
+        let s1 = Arc::new(
+            SqliteWalkStore::open_writable(SqliteStoreOptions::new(&root).with_store_id("d1"))
+                .unwrap(),
+        );
+        for i in 0..20u64 {
+            s1.upsert_walk(&UpsertWalkInput {
+                identity: WalkIdentity {
+                    goal: format!("goal {i}"),
+                    app_id: "com.example.r3f4".to_string(),
+                    platform: "ios".to_string(),
+                    flow_schema_version: DEFAULT_FLOW_SCHEMA_VERSION.to_string(),
+                    build_fingerprint: format!("{i:064x}"),
+                    adapter: Some("maestro-ios/v1".to_string()),
+                    browser: None,
+                },
+                flow_path: "flows/g.yaml".to_string(),
+                flow_sha256: main_sha.clone(),
+                subflow_files: None,
+                legacy_closure: false,
+                closure_sha256: Some(cl.sha256.clone()),
+                validation: RecordValidationInput::new(true, now_iso8601())
+                    .with_duration_ms(100 + i),
+                exploration: None,
+                repair_history: None,
+            })
+            .unwrap();
+        }
+        let stores = vec![Arc::clone(&s1)];
+
+        // 1. Pre-cancelled scan returns `Err(None)` promptly.
+        let pre_cancel = CancellationToken::new();
+        pre_cancel.cancel();
+        let res = scan_duration_medians_cancellable(&stores, &pre_cancel).await;
+        assert!(matches!(res, Err(None)));
+
+        // 2. Uncancelled scan succeeds with exact medians.
+        let ok_cancel = CancellationToken::new();
+        let medians = scan_duration_medians_cancellable(&stores, &ok_cancel)
+            .await
+            .expect("uncancelled scan succeeds");
+        assert_eq!(medians.get("goal 0"), Some(&100));
+        assert_eq!(medians.get("goal 19"), Some(&119));
+
+        close_all_stores(&stores);
+        assert!(
+            !root
+                .join(".deja/memory/stores/d1/walks.sqlite.lock")
+                .exists(),
+            "closing stores after cancelled duration scan must leave zero lock files"
+        );
         let _ = fs::remove_dir_all(&root);
     }
 }

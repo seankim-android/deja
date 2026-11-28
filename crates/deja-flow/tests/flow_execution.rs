@@ -4599,7 +4599,6 @@ fn synthesized_batch_junit_totals_order_retries_cancellation_and_redaction() {
     );
 }
 
-
 #[tokio::test]
 async fn codex_r1_f2_clipped_node_taps_visible_frame_center_and_preserves_full_frame_fraction() {
     let ws = TempDir::new("codex-r1-f2-visible-frame");
@@ -4836,4 +4835,75 @@ appId: http://127.0.0.1:4174
             .events()
             .contains(&DriverEvent::Tap(190.0, 224.0))
     );
+}
+
+#[tokio::test]
+async fn regression_deja66_r3_f1_screenshot_dir_override_strictly_confines_attempts() {
+    let ws = TempDir::new("deja66-r3-f1-shot-confine");
+    let attempt_dir = ws
+        .path()
+        .join(".deja/reports/batch-screenshots/batch-test/goal-0-attempt-1");
+    let driver = MockDriver::full();
+    driver.set_screen(hierarchy_of(vec![]));
+
+    // 1. `../shared.png` MUST be rejected even though it stays inside `workspace_root`!
+    for escaping_path in ["../shared.png", "nested/../../shared.png", "/tmp/evil.png"] {
+        let yaml =
+            format!("appId: dev.deja.checkout\n---\n- takeScreenshot: \"{escaping_path}\"\n");
+        let mut cfg = FlowExecutionConfig::new(ws.path().to_path_buf());
+        cfg.screenshot_dir_override = Some(attempt_dir.clone());
+        let out = FlowExecutor::new(cfg)
+            .execute_yaml(&driver, &yaml, &CancellationToken::new())
+            .await;
+        assert!(
+            !out.passed,
+            "escaping screenshot path {escaping_path:?} must fail closed"
+        );
+        assert!(
+            !ws.path()
+                .join(".deja/reports/batch-screenshots/batch-test/shared.png")
+                .exists(),
+            "escaping screenshot {escaping_path:?} must never be written outside attempt dir"
+        );
+    }
+
+    // 2. Symlink inside the attempt directory pointing to a sibling attempt dir MUST be rejected!
+    #[cfg(unix)]
+    {
+        let sibling_dir = ws
+            .path()
+            .join(".deja/reports/batch-screenshots/batch-test/goal-1-attempt-1");
+        std::fs::create_dir_all(&attempt_dir).unwrap();
+        std::fs::create_dir_all(&sibling_dir).unwrap();
+        std::os::unix::fs::symlink(&sibling_dir, attempt_dir.join("escape_link")).unwrap();
+
+        let yaml = "appId: dev.deja.checkout\n---\n- takeScreenshot: \"escape_link/leak.png\"\n";
+        let mut cfg = FlowExecutionConfig::new(ws.path().to_path_buf());
+        cfg.screenshot_dir_override = Some(attempt_dir.clone());
+        let out = FlowExecutor::new(cfg)
+            .execute_yaml(&driver, yaml, &CancellationToken::new())
+            .await;
+        assert!(
+            !out.passed,
+            "symlink escaping attempt dir to sibling goal dir must fail closed"
+        );
+        assert!(
+            !sibling_dir.join("leak.png").exists(),
+            "symlink escape must never write into sibling attempt dir"
+        );
+    }
+
+    // 3. Relative paths strictly inside the attempt directory succeed!
+    let ok_yaml = "appId: dev.deja.checkout\n---\n- takeScreenshot: \"nested/ok_shot\"\n";
+    let mut ok_cfg = FlowExecutionConfig::new(ws.path().to_path_buf());
+    ok_cfg.screenshot_dir_override = Some(attempt_dir.clone());
+    let ok_out = FlowExecutor::new(ok_cfg)
+        .execute_yaml(&driver, ok_yaml, &CancellationToken::new())
+        .await;
+    assert!(
+        ok_out.passed,
+        "confined screenshot inside attempt dir must succeed: {:#?}",
+        ok_out.failed_step
+    );
+    assert!(attempt_dir.join("nested/ok_shot.png").exists());
 }
