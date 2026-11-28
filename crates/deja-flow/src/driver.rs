@@ -286,6 +286,22 @@ impl UiNode {
             .center()
     }
 
+    /// Returns the fraction `[0.0, 1.0]` of this node's full [`Self::frame`] visible inside
+    /// `viewport`, using [`Self::visible_frame`] when clipped by an overflow scroll container
+    /// or viewport boundary and falling back to [`UiRect::visible_fraction_in`] otherwise.
+    #[must_use]
+    pub fn visible_fraction(&self, viewport: UiSize) -> f64 {
+        let total = self.frame.area();
+        if total <= 0.0 || !viewport.is_positive() {
+            return 0.0;
+        }
+        if let Some(clipped) = self.visible_frame {
+            let vp_rect = UiRect::new(0.0, 0.0, viewport.width, viewport.height);
+            return (clipped.intersection_area(vp_rect) / total).clamp(0.0, 1.0);
+        }
+        self.frame.visible_fraction_in(viewport)
+    }
+
     /// Projects this node into a [`HashableNode`] matching Swift↔Rust FNV-1a parity.
     pub fn as_hashable(&self) -> HashableNode<'_> {
         HashableNode {

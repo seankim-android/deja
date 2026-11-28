@@ -25,7 +25,7 @@ use deja_driver_ios::{
 };
 use deja_driver_web::{
     ScreenSize, WebDriver, WebDriverConfig, WebDriverError, discover_chromium,
-    probe_chromium_version,
+    format_web_runtime_suffix, probe_chromium_version,
 };
 use deja_flow::{PlatformDriver, decode_xml};
 use serde::{Deserialize, Serialize};
@@ -154,6 +154,14 @@ impl DriverFactory for RealDriverFactory {
                             ctx.device
                         )));
                     }
+                    let screen_size = match ctx.screen_size.as_ref() {
+                        Some(val) => ScreenSize::parse(val).map_err(|err| {
+                            DriverFactoryError::UnsupportedOrConfig(err.to_string())
+                        })?,
+                        None => ScreenSize::default(),
+                    };
+                    let suffix =
+                        format_web_runtime_suffix(screen_size, ctx.headless.unwrap_or(true));
                     let binary = discover_chromium(&ctx.env).map_err(|err| match err {
                         WebDriverError::InvalidChromiumPath { .. } => {
                             DriverFactoryError::UnsupportedOrConfig(err.to_string())
@@ -169,7 +177,7 @@ impl DriverFactory for RealDriverFactory {
                                 binary.display()
                             )),
                         })?;
-                    Ok(Some(format!("chromium-{version}")))
+                    Ok(Some(format!("chromium-{version}{suffix}")))
                 }
                 other => Err(DriverFactoryError::UnsupportedOrConfig(format!(
                     "unsupported platform {other:?}"

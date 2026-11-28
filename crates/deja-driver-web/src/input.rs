@@ -111,6 +111,17 @@ impl ScreenSize {
     }
 }
 
+/// Formats the normalized Web viewport/mode suffix appended to Web runtime identifiers
+/// (for example `"@1280x800"` for headless mode, or `"@1280x800-headed"` when `headless == false`).
+#[must_use]
+pub fn format_web_runtime_suffix(screen_size: ScreenSize, headless: bool) -> String {
+    if headless {
+        format!("@{}x{}", screen_size.width, screen_size.height)
+    } else {
+        format!("@{}x{}-headed", screen_size.width, screen_size.height)
+    }
+}
+
 fn parse_exact_u32(value: Option<&Value>, field: &str) -> Result<u32> {
     let Some(val) = value else {
         return Err(WebDriverError::InvalidScreenSize(format!(

@@ -4491,3 +4491,74 @@ appId: dev.deja.checkout
         "longPressOn must target visible_frame.center() (100,792), got events: {events:#?}"
     );
 }
+
+#[tokio::test]
+async fn codex_r2_f2_scroll_until_visible_measures_overflow_clipped_visible_fraction() {
+    let ws = TempDir::new("codex-r2-f2-clipped-scroll");
+    let viewport = UiSize::new(390.0, 844.0);
+
+    // Element lies wholly inside the 390x844 viewport, but an overflow scroll container clips
+    // 90% of it (`visible_frame` height = 10px of 100px -> `visible_fraction == 0.10`).
+    let mut clipped_initial = node(
+        0,
+        None,
+        "overflow_item",
+        "Deep Row",
+        UiRect::new(20.0, 300.0, 200.0, 100.0),
+    );
+    clipped_initial.visible_frame = Some(UiRect::new(20.0, 300.0, 200.0, 10.0));
+    assert!(
+        (clipped_initial.frame.visible_fraction_in(viewport) - 1.0).abs() < 1e-6,
+        "unclipped frame is 100% inside viewport"
+    );
+    assert!(
+        (clipped_initial.visible_fraction(viewport) - 0.10).abs() < 1e-6,
+        "visible_fraction must reflect 10% clipped area, got {}",
+        clipped_initial.visible_fraction(viewport)
+    );
+
+    // After scrolling once, 90% of the element is visible inside the overflow container.
+    let mut revealed_after_scroll = node(
+        0,
+        None,
+        "overflow_item",
+        "Deep Row",
+        UiRect::new(20.0, 220.0, 200.0, 100.0),
+    );
+    revealed_after_scroll.visible_frame = Some(UiRect::new(20.0, 220.0, 200.0, 90.0));
+    assert!((revealed_after_scroll.visible_fraction(viewport) - 0.90).abs() < 1e-6);
+
+    let driver = MockDriver::full();
+    driver.set_screen(hierarchy_of(vec![clipped_initial]));
+    driver.push_swipe_screen(hierarchy_of(vec![revealed_after_scroll]));
+
+    let yaml = r#"
+appId: dev.deja.checkout
+---
+- scrollUntilVisible:
+    element:
+      id: overflow_item
+    direction: DOWN
+    timeout: 5000
+    visibilityPercentage: 80
+    centerElement: false
+"#;
+    let out = FlowExecutor::new(FlowExecutionConfig::new(ws.path().to_path_buf()))
+        .execute_yaml(&driver, yaml, &CancellationToken::new())
+        .await;
+    assert!(
+        out.passed,
+        "expected scrollUntilVisible to succeed: {:#?}",
+        out.failed_step
+    );
+    let swipes: Vec<_> = driver
+        .events()
+        .into_iter()
+        .filter(|e| matches!(e, DriverEvent::Swipe { .. }))
+        .collect();
+    assert_eq!(
+        swipes.len(),
+        1,
+        "scrollUntilVisible must keep scrolling when overflow clip leaves only 10% visible"
+    );
+}

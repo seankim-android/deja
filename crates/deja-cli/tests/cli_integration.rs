@@ -4664,13 +4664,34 @@ async fn web_real_driver_factory_runtime_create_install_doctor_and_invalid_devic
     let cancel = CancellationToken::new();
     let factory = RealDriverFactory;
 
-    // 1. `resolve_runtime` returns `chromium-<version>` via `DEJA_CHROME`.
+    // 1. `resolve_runtime` returns `chromium-<version>@<W>x<H>` (and `-headed` when `headless == false`) via `DEJA_CHROME`.
     let valid_ctx = make_web_ctx("chromium", Some(json!("1280x800")));
     let rt = factory
         .resolve_runtime(&valid_ctx, &cancel)
         .await
         .expect("resolve_runtime should succeed");
-    assert_eq!(rt.as_deref(), Some("chromium-145.0.7000.12"));
+    assert_eq!(rt.as_deref(), Some("chromium-145.0.7000.12@1280x800"));
+
+    let mut headed_ctx = make_web_ctx("chromium", Some(json!("1280x800")));
+    headed_ctx.headless = Some(false);
+    let rt_headed = factory
+        .resolve_runtime(&headed_ctx, &cancel)
+        .await
+        .expect("headed resolve_runtime should succeed");
+    assert_eq!(
+        rt_headed.as_deref(),
+        Some("chromium-145.0.7000.12@1280x800-headed")
+    );
+
+    let default_sz_ctx = make_web_ctx("chromium", None);
+    let rt_default = factory
+        .resolve_runtime(&default_sz_ctx, &cancel)
+        .await
+        .expect("default screenSize resolve_runtime should succeed");
+    assert_eq!(
+        rt_default.as_deref(),
+        Some("chromium-145.0.7000.12@1280x720")
+    );
 
     // 2. `create` constructs a native `WebDriver` with `"web"` platform and `DisableAnimations`.
     let driver = factory
@@ -4710,8 +4731,13 @@ async fn web_real_driver_factory_runtime_create_install_doctor_and_invalid_devic
         .expect("non-chromium device must fail create");
     assert_eq!(err_create.exit_code(), 2);
 
-    // 5. Invalid `screenSize` fails closed with exit 2.
+    // 5. Invalid `screenSize` fails closed with exit 2 on both `resolve_runtime` and `create`.
     let bad_sz_ctx = make_web_ctx("chromium", Some(json!("99x50")));
+    let err_rt_sz = factory
+        .resolve_runtime(&bad_sz_ctx, &cancel)
+        .await
+        .expect_err("invalid screenSize must fail resolve_runtime");
+    assert_eq!(err_rt_sz.exit_code(), 2);
     let err_sz = factory
         .create(&bad_sz_ctx, &cancel)
         .await
@@ -4781,4 +4807,192 @@ async fn web_real_driver_factory_runtime_create_install_doctor_and_invalid_devic
     )
     .await;
     assert_eq!(exit, 2, "invalid non-chromium web device must exit 2");
+}
+
+#[tokio::test]
+async fn codex_r2_f1_web_gate_enforces_configured_viewport_and_headless_mode() {
+    let ws = TempWs::new("web-gate-viewport");
+    ws.write("public/index.html", "<!doctype html><h1>Shop</h1>");
+    ws.write(
+        "flows/checkout.yaml",
+        "url: http://127.0.0.1:4174\n---\n- openLink: http://127.0.0.1:4174\n- assertVisible: Shop\n",
+    );
+    ws.write("goals.txt", "complete checkout\n");
+
+    let write_web_config = |screen_size: &str, headless: bool| {
+        ws.write(
+            "deja.config.json",
+            &json!({
+                "workspaceRoot": ".",
+                "platform": "web",
+                "appId": "http://127.0.0.1:4174",
+                "adapter": "maestro-web@2.12.0",
+                "browser": "chromium",
+                "device": "chromium",
+                "buildPath": "public",
+                "screenSize": screen_size,
+                "headless": headless
+            })
+            .to_string(),
+        );
+    };
+
+    // 1. Record a passing validation at desktop `1280x800` (headless).
+    write_web_config("1280x800", true);
+    let ok_tree = hierarchy_with_nodes(
+        "http://127.0.0.1:4174",
+        vec![node_with_label("heading", "Shop")],
+    );
+    let desktop_rt = "chromium-145.0.7000.12@1280x800";
+    let factory = Arc::new(MockFactory::new(
+        Some(desktop_rt),
+        MockDriver::new(vec![ok_tree]),
+    ));
+    let (deps_rem, _) = make_deps(
+        &ws.path,
+        factory.clone(),
+        default_probes(),
+        CancellationToken::new(),
+    );
+    let rem_code = run_cli_from_args(
+        [
+            "deja",
+            "remember",
+            "complete checkout",
+            "--flow",
+            "flows/checkout.yaml",
+        ],
+        &deps_rem,
+    )
+    .await;
+    assert_eq!(rem_code, 0);
+
+    // 2. With matching `1280x800` config, BOTH `deja gate` (without `--runtime`) AND
+    // `deja gate --runtime chromium-145.0.7000.12@1280x800` pass.
+    let (deps_g1, cap_g1) = make_deps(
+        &ws.path,
+        factory.clone(),
+        default_probes(),
+        CancellationToken::new(),
+    );
+    assert_eq!(
+        run_cli_from_args(["deja", "gate", "--goals", "goals.txt", "--json"], &deps_g1).await,
+        0
+    );
+    let g1: Value = serde_json::from_str(&cap_g1.lock().unwrap().stdout).unwrap();
+    assert_eq!(g1["verdict"], "passed");
+
+    let (deps_g2, cap_g2) = make_deps(
+        &ws.path,
+        factory.clone(),
+        default_probes(),
+        CancellationToken::new(),
+    );
+    assert_eq!(
+        run_cli_from_args(
+            [
+                "deja",
+                "gate",
+                "--goals",
+                "goals.txt",
+                "--runtime",
+                desktop_rt,
+                "--json",
+            ],
+            &deps_g2,
+        )
+        .await,
+        0
+    );
+    let g2: Value = serde_json::from_str(&cap_g2.lock().unwrap().stdout).unwrap();
+    assert_eq!(g2["verdict"], "passed");
+
+    // Passing `--runtime` without the normalized viewport suffix MUST NOT match.
+    let (deps_g_bare, cap_g_bare) = make_deps(
+        &ws.path,
+        factory.clone(),
+        default_probes(),
+        CancellationToken::new(),
+    );
+    assert_eq!(
+        run_cli_from_args(
+            [
+                "deja",
+                "gate",
+                "--goals",
+                "goals.txt",
+                "--runtime",
+                "chromium-145.0.7000.12",
+                "--json",
+            ],
+            &deps_g_bare,
+        )
+        .await,
+        10
+    );
+    let g_bare: Value = serde_json::from_str(&cap_g_bare.lock().unwrap().stdout).unwrap();
+    assert_eq!(g_bare["verdict"], "closed");
+    assert_eq!(g_bare["goals"][0]["outcome"], "not-run");
+
+    // 3. Change ONLY `screenSize` to mobile `"390x844"` (same `buildPath`!):
+    // BOTH `deja gate` (omitting `--runtime`) AND `deja gate --runtime <desktop_rt>` MUST close!
+    write_web_config("390x844", true);
+
+    let (deps_m1, cap_m1) = make_deps(
+        &ws.path,
+        factory.clone(),
+        default_probes(),
+        CancellationToken::new(),
+    );
+    assert_eq!(
+        run_cli_from_args(["deja", "gate", "--goals", "goals.txt", "--json"], &deps_m1).await,
+        10,
+        "desktop 1280x800 pass must NEVER approve a 390x844 web config when --runtime is omitted"
+    );
+    let m1: Value = serde_json::from_str(&cap_m1.lock().unwrap().stdout).unwrap();
+    assert_eq!(m1["verdict"], "closed");
+    assert_eq!(m1["goals"][0]["outcome"], "not-run");
+
+    let (deps_m2, cap_m2) = make_deps(
+        &ws.path,
+        factory.clone(),
+        default_probes(),
+        CancellationToken::new(),
+    );
+    assert_eq!(
+        run_cli_from_args(
+            [
+                "deja",
+                "gate",
+                "--goals",
+                "goals.txt",
+                "--runtime",
+                desktop_rt,
+                "--json",
+            ],
+            &deps_m2,
+        )
+        .await,
+        10,
+        "desktop 1280x800 --runtime must NEVER approve a 390x844 web config"
+    );
+    let m2: Value = serde_json::from_str(&cap_m2.lock().unwrap().stdout).unwrap();
+    assert_eq!(m2["verdict"], "closed");
+    assert_eq!(m2["goals"][0]["outcome"], "not-run");
+
+    // 4. Switching `headless: false` at `1280x800` also isolates against headless evidence.
+    write_web_config("1280x800", false);
+    let (deps_h, cap_h) = make_deps(
+        &ws.path,
+        factory,
+        default_probes(),
+        CancellationToken::new(),
+    );
+    assert_eq!(
+        run_cli_from_args(["deja", "gate", "--goals", "goals.txt", "--json"], &deps_h).await,
+        10
+    );
+    let h_json: Value = serde_json::from_str(&cap_h.lock().unwrap().stdout).unwrap();
+    assert_eq!(h_json["verdict"], "closed");
+    assert_eq!(h_json["goals"][0]["outcome"], "not-run");
 }

@@ -324,7 +324,7 @@ pub const AX_DOM_SCRIPT: &str = r#"(() => {
     return null;
   }
 
-  function extractLabel(el, tag, role) {
+  function extractAccessibleName(el, tag) {
     const ariaLabel = cleanText(el.getAttribute('aria-label'));
     if (ariaLabel) return ariaLabel;
     const labelledBy = resolveAriaLabelledBy(el);
@@ -333,10 +333,6 @@ pub const AX_DOM_SCRIPT: &str = r#"(() => {
       const formLabel = resolveFormLabel(el);
       if (formLabel) return formLabel;
       const it = (el.getAttribute('type') || '').toLowerCase();
-      if (it === 'button' || it === 'submit' || it === 'reset') {
-        const v = cleanText(el.value);
-        if (v) return v;
-      }
       if (it === 'image') {
         const alt = cleanText(el.getAttribute('alt'));
         if (alt) return alt;
@@ -346,8 +342,19 @@ pub const AX_DOM_SCRIPT: &str = r#"(() => {
     if (tag === 'IMG' || tag === 'AREA') {
       return cleanText(el.getAttribute('alt'));
     }
-    if (CONTAINER_TAGS.has(tag)) {
-      return directText(el);
+    return '';
+  }
+
+  function extractVisibleText(el, tag, role) {
+    if (tag === 'INPUT') {
+      const it = (el.getAttribute('type') || '').toLowerCase();
+      if (it === 'button' || it === 'submit' || it === 'reset') {
+        return cleanText(el.value);
+      }
+      return '';
+    }
+    if (tag === 'TEXTAREA' || tag === 'SELECT' || tag === 'IMG' || tag === 'AREA') {
+      return '';
     }
     if (
       tag === 'BUTTON' || tag === 'A' || tag === 'SUMMARY' || tag === 'OPTION' ||
@@ -356,6 +363,9 @@ pub const AX_DOM_SCRIPT: &str = r#"(() => {
       role === 'tab' || role === 'menuitem' || role === 'heading'
     ) {
       return visibleSubtreeText(el);
+    }
+    if (CONTAINER_TAGS.has(tag)) {
+      return directText(el);
     }
     if (!hasBlockOrInteractiveChild(el)) {
       return visibleSubtreeText(el);
@@ -421,11 +431,16 @@ pub const AX_DOM_SCRIPT: &str = r#"(() => {
     const domId = cleanText(el.id);
     const nameAttr = cleanText(el.getAttribute('name'));
     const identifier = testId || domId || nameAttr || '';
-    const title = cleanText(el.getAttribute('title'));
+    const titleAttr = cleanText(el.getAttribute('title'));
     const placeholderRaw = el.getAttribute('placeholder');
     const placeholderValue = placeholderRaw && placeholderRaw.trim() ? placeholderRaw.trim() : null;
     const value = extractValue(el, tag, role);
-    const label = isSlot ? '' : extractLabel(el, tag, role);
+    const accessibleName = isSlot ? '' : extractAccessibleName(el, tag);
+    const visibleText = isSlot ? '' : extractVisibleText(el, tag, role);
+    const label = accessibleName || visibleText;
+    const title = (accessibleName && visibleText && visibleText !== accessibleName)
+      ? visibleText
+      : titleAttr;
 
     const hasMeaning = !isSlot && (
       tag === 'BODY' ||
@@ -699,6 +714,47 @@ pub(crate) fn dom_snapshot_to_hierarchy(
     }
 
     Ok(hierarchy)
+}
+
+/// Computes a deterministic 64-bit FNV-1a fingerprint covering every node's `(index, visible_frame)`
+/// so `WebDriver` invalidates `known_hash` short-circuits whenever container clipping changes even
+/// when unclipped `frame` and `hittable` remain identical (without altering
+/// `deja_flow::hash_hierarchy_nodes` Swift↔Rust parity).
+pub(crate) fn clipped_geometry_hash(nodes: &[UiNode]) -> u64 {
+    const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+    #[inline]
+    fn mix(mut hash: u64, bytes: &[u8]) -> u64 {
+        for &b in bytes {
+            hash ^= u64::from(b);
+            hash = hash.wrapping_mul(FNV_PRIME);
+        }
+        hash
+    }
+
+    #[inline]
+    fn norm_bits(v: f64) -> [u8; 8] {
+        let canonical = if !v.is_finite() || v == 0.0 { 0.0 } else { v };
+        canonical.to_bits().to_le_bytes()
+    }
+
+    let mut hash = FNV_OFFSET_BASIS;
+    hash = mix(hash, &(nodes.len() as u64).to_le_bytes());
+    for node in nodes {
+        hash = mix(hash, &(node.index as u64).to_le_bytes());
+        match node.visible_frame {
+            None => hash = mix(hash, &[0]),
+            Some(rect) => {
+                hash = mix(hash, &[1]);
+                hash = mix(hash, &norm_bits(rect.x));
+                hash = mix(hash, &norm_bits(rect.y));
+                hash = mix(hash, &norm_bits(rect.width));
+                hash = mix(hash, &norm_bits(rect.height));
+            }
+        }
+    }
+    hash
 }
 
 const PNG_MAGIC: &[u8; 8] = b"\x89PNG\r\n\x1a\n";

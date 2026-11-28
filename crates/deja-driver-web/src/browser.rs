@@ -60,18 +60,28 @@ const OS_CHROMIUM_FALLBACKS: &[&str] = &[];
 /// 2. `PATH` from `env` (`chromium`, `chromium-browser`, `google-chrome`, `google-chrome-stable`).
 /// 3. OS-specific standard install locations (macOS `/Applications/...`, Homebrew; Linux `/usr/bin/...`, `/snap/bin/...`).
 pub fn discover_chromium(env: &BTreeMap<String, String>) -> Result<PathBuf> {
-    discover_chromium_with_fallbacks(env, OS_CHROMIUM_FALLBACKS)
+    discover_chromium_with_cwd_and_fallbacks(env, None, OS_CHROMIUM_FALLBACKS)
 }
 
+#[cfg(test)]
 pub(crate) fn discover_chromium_with_fallbacks(
     env: &BTreeMap<String, String>,
+    os_fallbacks: &[&str],
+) -> Result<PathBuf> {
+    discover_chromium_with_cwd_and_fallbacks(env, None, os_fallbacks)
+}
+
+pub(crate) fn discover_chromium_with_cwd_and_fallbacks(
+    env: &BTreeMap<String, String>,
+    cwd_override: Option<&Path>,
     os_fallbacks: &[&str],
 ) -> Result<PathBuf> {
     for var in ["DEJA_CHROME", "CHROME_PATH"] {
         if let Some(raw) = env.get(var) {
             let trimmed = raw.trim();
             if !trimmed.is_empty() {
-                let candidate = PathBuf::from(trimmed);
+                let raw_path = PathBuf::from(trimmed);
+                let candidate = resolve_override_path(var, &raw_path, cwd_override)?;
                 validate_executable_override(var, &candidate)?;
                 return Ok(candidate);
             }
@@ -105,6 +115,30 @@ pub(crate) fn discover_chromium_with_fallbacks(
         "install Chromium or Google Chrome, ensure it is on PATH or in /Applications, or set DEJA_CHROME"
             .to_string(),
     ))
+}
+
+fn resolve_override_path(var: &str, raw: &Path, cwd_override: Option<&Path>) -> Result<PathBuf> {
+    if raw.is_absolute() {
+        return Ok(raw.to_path_buf());
+    }
+    let base = match cwd_override {
+        Some(dir) if dir.is_absolute() => dir.to_path_buf(),
+        Some(dir) => {
+            let cwd =
+                std::env::current_dir().map_err(|err| WebDriverError::InvalidChromiumPath {
+                    source_var: var.to_string(),
+                    path: raw.to_path_buf(),
+                    reason: format!("failed to resolve current working directory: {err}"),
+                })?;
+            cwd.join(dir)
+        }
+        None => std::env::current_dir().map_err(|err| WebDriverError::InvalidChromiumPath {
+            source_var: var.to_string(),
+            path: raw.to_path_buf(),
+            reason: format!("failed to resolve current working directory: {err}"),
+        })?,
+    };
+    Ok(base.join(raw))
 }
 
 fn validate_executable_override(var: &str, path: &Path) -> Result<()> {

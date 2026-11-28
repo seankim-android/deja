@@ -2435,7 +2435,7 @@ impl FlowExecutor {
 
             let viewport = hierarchy.effective_viewport();
             if let Some(node) = compiled.match_one(&hierarchy.nodes) {
-                let vis_fraction = node.frame.visible_fraction_in(viewport);
+                let vis_fraction = node.visible_fraction(viewport);
                 if node.is_on_screen && vis_fraction + 1e-6 >= min_vis_fraction {
                     if step.center_element
                         && let Some((nudge_start, nudge_end)) =

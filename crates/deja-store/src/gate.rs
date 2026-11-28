@@ -52,6 +52,10 @@ pub struct StoreGateOptions<'a> {
     /// Optional `--runtime` isolation filter (`Some(rt)` filters `runtime_key == rt`;
     /// `None` evaluates across all runtimes fail-closed).
     pub runtime: Option<&'a str>,
+    /// Optional required runtime suffix filter (for example Web viewport/mode suffix `"@1280x800"`
+    /// or `"@1280x800-headed"`). When `Some(suffix)`, only runs whose recorded `runtime` ends with
+    /// `suffix` are eligible — enforced both with and without an explicit `runtime` filter.
+    pub runtime_suffix: Option<&'a str>,
     /// External flaky failure markers from run reports (supplementing durable `validation_runs.flaky`).
     pub flaky_failures: &'a [GateFlakyFailure],
     /// Optional consumer manifest for manifest-mode gate checks.
@@ -140,6 +144,15 @@ pub fn evaluate_gate(
 ) -> Result<Vec<StoreGateGoalResult>, StoreError> {
     validate_gate_identity(identity)?;
     let rt_filter = validate_runtime(options.runtime)?;
+    let rt_suffix = match options.runtime_suffix {
+        None => None,
+        Some(sfx) if is_non_empty(sfx) => Some(sfx),
+        Some(_) => {
+            return Err(StoreError::InvalidIdentity(
+                "runtime_suffix must be non-empty when present".to_string(),
+            ));
+        }
+    };
 
     // Validate every store upfront (read-only: corrupt/tampered/symlinked DBs fail immediately).
     for store in stores {
@@ -274,6 +287,10 @@ pub fn evaluate_gate(
                 .filter(|run| run.build_fingerprint == identity.build_fingerprint)
                 .filter(|run| match rt_filter {
                     Some(rt) => run.runtime.as_deref().unwrap_or("") == rt,
+                    None => true,
+                })
+                .filter(|run| match rt_suffix {
+                    Some(suffix) => run.runtime.as_deref().is_some_and(|r| r.ends_with(suffix)),
                     None => true,
                 })
                 .filter(|run| match &manifest_closure_filter {

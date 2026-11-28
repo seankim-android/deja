@@ -73,6 +73,7 @@ impl NetworkTracker {
 pub(crate) struct CdpEventState {
     active_target_id: StdMutex<Option<String>>,
     active_session_id: StdMutex<Option<String>>,
+    main_frame_id: StdMutex<Option<String>>,
     nav_seq: AtomicU64,
     nav_notify: Notify,
     load_seq: AtomicU64,
@@ -89,6 +90,7 @@ impl CdpEventState {
         Self {
             active_target_id: StdMutex::new(None),
             active_session_id: StdMutex::new(None),
+            main_frame_id: StdMutex::new(None),
             nav_seq: AtomicU64::new(0),
             nav_notify: Notify::new(),
             load_seq: AtomicU64::new(0),
@@ -116,8 +118,14 @@ impl CdpEventState {
                 .unwrap_or_else(|p| p.into_inner());
             *guard = session_id;
         }
+        self.set_main_frame_id(None);
         self.detached.store(false, Ordering::SeqCst);
         self.reset_network_state();
+    }
+
+    pub(crate) fn set_main_frame_id(&self, frame_id: Option<String>) {
+        let mut guard = self.main_frame_id.lock().unwrap_or_else(|p| p.into_inner());
+        *guard = frame_id;
     }
 
     pub(crate) fn reset_network_state(&self) {
@@ -223,20 +231,43 @@ impl CdpEventState {
             }
             "Page.frameNavigated" if self.matches_active_session(session_id) => {
                 // Only main-frame navigations (`frame.parentId` absent or null) advance `nav_seq`.
-                let is_main_frame = params
-                    .get("frame")
+                let frame = params.get("frame");
+                let is_main_frame = frame
                     .and_then(|f| f.get("parentId"))
                     .is_none_or(Value::is_null);
                 if is_main_frame {
+                    if let Some(frame_id) = frame
+                        .and_then(|f| f.get("id"))
+                        .and_then(Value::as_str)
+                        .filter(|s| !s.is_empty())
+                    {
+                        self.set_main_frame_id(Some(frame_id.to_string()));
+                    }
                     trace!(session_id = ?session_id, "received main-frame Page.frameNavigated");
                     self.nav_seq.fetch_add(1, Ordering::SeqCst);
                     self.nav_notify.notify_waiters();
                 }
             }
             "Page.navigatedWithinDocument" if self.matches_active_session(session_id) => {
-                trace!(session_id = ?session_id, "received Page.navigatedWithinDocument");
-                self.nav_seq.fetch_add(1, Ordering::SeqCst);
-                self.nav_notify.notify_waiters();
+                // Only main-frame same-document navigations advance `nav_seq`.
+                let event_frame_id = params.get("frameId").and_then(Value::as_str);
+                let matches_main = {
+                    let guard = self.main_frame_id.lock().unwrap_or_else(|p| p.into_inner());
+                    match (guard.as_deref(), event_frame_id) {
+                        (Some(main), Some(ev)) => main == ev,
+                        (Some(_), None) => false,
+                        (None, _) => true,
+                    }
+                };
+                if matches_main {
+                    trace!(
+                        session_id = ?session_id,
+                        frame_id = ?event_frame_id,
+                        "received main-frame Page.navigatedWithinDocument"
+                    );
+                    self.nav_seq.fetch_add(1, Ordering::SeqCst);
+                    self.nav_notify.notify_waiters();
+                }
             }
             "Page.loadEventFired" | "Page.frameStoppedLoading"
                 if self.matches_active_session(session_id) =>
@@ -600,6 +631,10 @@ impl CdpClient {
         self.inner.events.set_active_target(target_id, session_id);
     }
 
+    pub(crate) fn set_main_frame_id(&self, frame_id: Option<String>) {
+        self.inner.events.set_main_frame_id(frame_id);
+    }
+
     pub(crate) fn reset_network_state(&self) {
         self.inner.events.reset_network_state();
     }
@@ -827,8 +862,6 @@ pub(crate) async fn create_and_attach_page_in_context(
             json!({
                 "url": "about:blank",
                 "browserContextId": browser_context_id,
-                "width": screen_size.width,
-                "height": screen_size.height,
             }),
             timeout,
             cancel,
@@ -893,6 +926,18 @@ async fn configure_page_session(
     let _ = cdp
         .call_session(session_id, "Page.enable", json!({}), timeout, cancel)
         .await?;
+    let frame_tree = cdp
+        .call_session(session_id, "Page.getFrameTree", json!({}), timeout, cancel)
+        .await?;
+    if let Some(main_frame_id) = frame_tree
+        .get("frameTree")
+        .and_then(|ft| ft.get("frame"))
+        .and_then(|f| f.get("id"))
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+    {
+        cdp.set_main_frame_id(Some(main_frame_id.to_string()));
+    }
     let _ = cdp
         .call_session(session_id, "Runtime.enable", json!({}), timeout, cancel)
         .await?;

@@ -318,11 +318,11 @@ fn live_web_cli_end_to_end_lifecycle_without_maestro_node_or_playwright() {
     assert_eq!(rem_json["assertions"], 12);
     let runtime = rem_json["runtime"]
         .as_str()
-        .expect("remember must record chromium-<version> runtime")
+        .expect("remember must record chromium-<version>@<W>x<H> runtime")
         .to_string();
     assert!(
-        runtime.starts_with("chromium-"),
-        "expected chromium-<version> runtime, got {runtime}"
+        runtime.starts_with("chromium-") && runtime.ends_with("@1280x800"),
+        "expected chromium-<version>@1280x800 runtime, got {runtime}"
     );
     eprintln!(
         "LIVE WEB E2E remember: runtime={runtime}, assertions={}, durationMs={}, timing={}",
@@ -486,7 +486,7 @@ fn live_web_cli_end_to_end_lifecycle_without_maestro_node_or_playwright() {
 #[ignore = "requires live local Chromium / Google Chrome binary"]
 async fn live_web_dom_ancestor_opacity_and_clipped_visible_frame_in_chromium() {
     use deja_driver_web::{ScreenSize, WebDriver, WebDriverConfig};
-    use deja_flow::{OpenLinkOptions, PlatformDriver};
+    use deja_flow::{CompiledSelector, OpenLinkOptions, PlatformDriver, Selector};
     use std::collections::BTreeMap;
     use tokio_util::sync::CancellationToken;
 
@@ -505,6 +505,7 @@ async fn live_web_dom_ancestor_opacity_and_clipped_visible_frame_in_chromium() {
       #opacity_child { opacity: 1; width: 160px; height: 40px; }
       #clip_box { width: 120px; height: 60px; overflow: hidden; margin-top: 20px; }
       #clipped_btn { width: 320px; height: 60px; border: 0; }
+      #pay_btn { width: 160px; height: 44px; margin-top: 16px; }
     </style>
   </head>
   <body>
@@ -514,6 +515,7 @@ async fn live_web_dom_ancestor_opacity_and_clipped_visible_frame_in_chromium() {
     <div id="clip_box">
       <button id="clipped_btn" type="button">Wide clipped button</button>
     </div>
+    <button id="pay_btn" aria-label="Submit order" type="button">Pay now</button>
     <p id="click_status">idle</p>
     <script>
       document.getElementById('clipped_btn').addEventListener('click', () => {
@@ -626,6 +628,26 @@ async fn live_web_dom_ancestor_opacity_and_clipped_visible_frame_in_chromium() {
         .find(|n| n.identifier == "click_status")
         .expect("click_status node");
     assert_eq!(status.label, "clicked");
+
+    // Codex R2 Finding 6: `<button aria-label="Submit order">Pay now</button>` exposes BOTH
+    // `label == "Submit order"` AND `title == "Pay now"` so selectors match either!
+    let pay_btn = h
+        .nodes
+        .iter()
+        .find(|n| n.identifier == "pay_btn")
+        .expect("pay_btn node present");
+    assert_eq!(pay_btn.label, "Submit order");
+    assert_eq!(pay_btn.title, "Pay now");
+    let match_accessible = CompiledSelector::compile(&Selector::by_text("Submit order"))
+        .unwrap()
+        .match_one(&h.nodes)
+        .expect("by_text(Submit order) must match pay_btn");
+    assert_eq!(match_accessible.identifier, "pay_btn");
+    let match_visible = CompiledSelector::compile(&Selector::by_text("Pay now"))
+        .unwrap()
+        .match_one(&h.nodes)
+        .expect("by_text(Pay now) must match pay_btn");
+    assert_eq!(match_visible.identifier, "pay_btn");
 
     driver.shutdown().await.unwrap();
     stop.store(true, Ordering::SeqCst);

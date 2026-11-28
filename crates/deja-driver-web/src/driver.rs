@@ -23,7 +23,9 @@ use crate::cdp::{
     CdpClient, PageSessionIds, RecordedCrash, create_and_attach_page_in_context,
     create_isolated_context_and_page, now_epoch_ms,
 };
-use crate::dom::{AX_DOM_SCRIPT, decode_base64_png, dom_snapshot_to_hierarchy};
+use crate::dom::{
+    AX_DOM_SCRIPT, clipped_geometry_hash, decode_base64_png, dom_snapshot_to_hierarchy,
+};
 use crate::error::{Result, WebDriverError, map_web_err};
 use crate::input::{
     CdpKeySpec, MAX_KEY_REPEAT_COUNT, ResolvedKeyAction, ScreenSize, backspace_key_spec,
@@ -160,6 +162,10 @@ pub struct WebDriver {
     /// triggers fresh `BrowserContext` rotation on the next [`PlatformDriver::ensure_session`]
     /// while keeping Chromium warm.
     context_dirty: AtomicBool,
+    /// Last non-truncated `(hierarchy_hash, clipped_geometry_hash)` observed on the active page,
+    /// ensuring `known_hash` short-circuits invalidate whenever any node's `visible_frame` changes
+    /// even if unclipped `frame` & `hittable` are unchanged.
+    last_clipped_hash: StdMutex<Option<(String, u64)>>,
 }
 
 impl WebDriver {
@@ -177,6 +183,7 @@ impl WebDriver {
             crashes: Arc::new(StdMutex::new(None)),
             attach_count: AtomicU64::new(0),
             context_dirty: AtomicBool::new(false),
+            last_clipped_hash: StdMutex::new(None),
         }
     }
 
@@ -225,9 +232,19 @@ impl WebDriver {
             .clone()
     }
 
+    fn clear_clipped_hash(&self) {
+        let mut guard = self
+            .last_clipped_hash
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        *guard = None;
+    }
+
     fn set_handle(&self, handle: Option<ActiveHandle>) {
         let mut guard = self.active.lock().unwrap_or_else(|p| p.into_inner());
         *guard = handle;
+        drop(guard);
+        self.clear_clipped_hash();
     }
 
     fn record_browser_exit_crash(&self, status: Option<i32>) {
@@ -365,6 +382,7 @@ impl WebDriver {
 
     async fn teardown_locked(&self) {
         self.context_dirty.store(false, Ordering::SeqCst);
+        self.clear_clipped_hash();
         let old_handle = {
             let mut guard = self.active.lock().unwrap_or_else(|p| p.into_inner());
             guard.take()
@@ -541,7 +559,6 @@ impl WebDriver {
         &self,
         handle: &ActiveHandle,
         nav_before: u64,
-        load_before: u64,
         deadline: tokio::time::Instant,
         started: Instant,
         cancel: &CancellationToken,
@@ -550,7 +567,7 @@ impl WebDriver {
             if cancel.is_cancelled() {
                 return Err(WebDriverError::Cancelled);
             }
-            if handle.cdp.nav_seq() > nav_before || handle.cdp.load_seq() > load_before {
+            if handle.cdp.nav_seq() > nav_before {
                 return Ok(());
             }
             if handle.cdp.is_closed() {
@@ -566,13 +583,10 @@ impl WebDriver {
             }
 
             let nav_notified = handle.cdp.nav_notify().notified();
-            let load_notified = handle.cdp.load_notify().notified();
             tokio::pin!(nav_notified);
-            tokio::pin!(load_notified);
             nav_notified.as_mut().enable();
-            load_notified.as_mut().enable();
 
-            if handle.cdp.nav_seq() > nav_before || handle.cdp.load_seq() > load_before {
+            if handle.cdp.nav_seq() > nav_before {
                 return Ok(());
             }
 
@@ -592,7 +606,6 @@ impl WebDriver {
                 biased;
                 _ = cancel.cancelled() => return Err(WebDriverError::Cancelled),
                 _ = nav_notified => {}
-                _ = load_notified => {}
                 _ = tokio::time::sleep(remaining) => {
                     return Err(WebDriverError::Timeout {
                         operation: "history_commit".to_string(),
@@ -932,7 +945,31 @@ impl WebDriver {
                 cancel,
             )
             .await?;
-        dom_snapshot_to_hierarchy(value, app_id, known_hash)
+        let mut hierarchy = dom_snapshot_to_hierarchy(value, app_id, None)?;
+        let current_clipped = clipped_geometry_hash(&hierarchy.nodes);
+
+        let mut last_clipped = self
+            .last_clipped_hash
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        if !hierarchy.truncated
+            && let Some(expected) = known_hash
+            && expected.eq_ignore_ascii_case(&hierarchy.hierarchy_hash)
+            && last_clipped
+                .as_ref()
+                .is_some_and(|(prev_hash, prev_clipped)| {
+                    prev_hash.eq_ignore_ascii_case(&hierarchy.hierarchy_hash)
+                        && *prev_clipped == current_clipped
+                })
+        {
+            hierarchy.unchanged = true;
+            hierarchy.nodes.clear();
+        } else if !hierarchy.truncated {
+            *last_clipped = Some((hierarchy.hierarchy_hash.clone(), current_clipped));
+        } else {
+            *last_clipped = None;
+        }
+        Ok(hierarchy)
     }
 
     async fn tap_with_handle(
@@ -1193,7 +1230,6 @@ impl WebDriver {
         let started = Instant::now();
         let deadline = tokio::time::Instant::now() + self.config.navigation_timeout;
         let nav_before = handle.cdp.nav_seq();
-        let load_before = handle.cdp.load_seq();
 
         let _ = handle
             .cdp
@@ -1206,10 +1242,10 @@ impl WebDriver {
             )
             .await?;
 
-        // Wait for history traversal commit (`Page.frameNavigated` on main frame,
-        // `Page.navigatedWithinDocument`, or `Page.loadEventFired`) BEFORE evaluating
-        // `document.readyState` so we never settle on the outgoing page!
-        self.wait_for_history_commit(handle, nav_before, load_before, deadline, started, cancel)
+        // Wait strictly for main-frame history traversal commit (`Page.frameNavigated` on main
+        // frame or main-frame `Page.navigatedWithinDocument`) BEFORE evaluating
+        // `document.readyState` so iframe load events never let us settle on the outgoing page!
+        self.wait_for_history_commit(handle, nav_before, deadline, started, cancel)
             .await?;
 
         self.wait_ready_state_network_and_raf(handle, deadline, started, cancel)

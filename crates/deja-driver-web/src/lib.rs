@@ -10,7 +10,7 @@ pub mod input;
 pub use browser::{discover_chromium, probe_chromium_version};
 pub use driver::{WebDriver, WebDriverConfig};
 pub use error::{Result, WebDriverError, map_web_err};
-pub use input::{ScreenSize, validate_loopback_http_url};
+pub use input::{ScreenSize, format_web_runtime_suffix, validate_loopback_http_url};
 
 /// Canonical crate identifier used by workspace smoke checks.
 pub const CRATE_NAME: &str = "deja-driver-web";

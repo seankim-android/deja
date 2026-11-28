@@ -27,12 +27,14 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_util::sync::CancellationToken;
 
 use crate::browser::{
-    BrowserLaunchOptions, ManagedBrowser, TempProfileDir, discover_chromium_with_fallbacks,
-    extract_devtools_ws_url_from_line, parse_chromium_version_output, probe_chromium_version,
-    safe_pgid,
+    BrowserLaunchOptions, ManagedBrowser, TempProfileDir, discover_chromium_with_cwd_and_fallbacks,
+    discover_chromium_with_fallbacks, extract_devtools_ws_url_from_line,
+    parse_chromium_version_output, probe_chromium_version, safe_pgid,
 };
 use crate::cdp::{CdpClient, RecordedCrash, now_epoch_ms};
-use crate::dom::{decode_base64, decode_base64_png, dom_snapshot_to_hierarchy};
+use crate::dom::{
+    clipped_geometry_hash, decode_base64, decode_base64_png, dom_snapshot_to_hierarchy,
+};
 use crate::driver::{WebDriver, WebDriverConfig};
 use crate::error::WebDriverError;
 use crate::input::{
@@ -492,6 +494,11 @@ fn standard_mock_handler(
                     let n = session_seq.fetch_add(1, Ordering::SeqCst) + 1;
                     json!({ "sessionId": format!("sess-{n}") })
                 }
+                "Page.getFrameTree" => json!({
+                    "frameTree": {
+                        "frame": { "id": "f1", "url": "about:blank" }
+                    }
+                }),
                 "Page.navigate" => {
                     let url = call.params.get("url").and_then(Value::as_str).unwrap_or("");
                     if url.contains("fail-nav") {
@@ -798,6 +805,16 @@ async fn warm_reuse_context_isolation_and_reduced_motion_toggle() {
         .nth(2)
         .expect("third Target.createTarget after clear_state");
     assert_eq!(third_create.params["browserContextId"], "ctx-2");
+    for create_call in after_clear
+        .iter()
+        .filter(|c| c.method == "Target.createTarget")
+    {
+        assert!(
+            create_call.params.get("width").is_none() && create_call.params.get("height").is_none(),
+            "Target.createTarget must omit width/height and rely on Emulation.setDeviceMetricsOverride: {:?}",
+            create_call.params
+        );
+    }
     assert_eq!(driver.attach_count(), 1);
     driver.shutdown().await.unwrap();
 
@@ -1536,6 +1553,7 @@ async fn codex_r1_f3_back_waits_for_cross_document_and_same_document_history_com
             "Target.createBrowserContext" => json!({ "browserContextId": "ctx-1" }),
             "Target.createTarget" => json!({ "targetId": "target-1" }),
             "Target.attachToTarget" => json!({ "sessionId": "sess-1" }),
+            "Page.getFrameTree" => json!({ "frameTree": { "frame": { "id": "main" } } }),
             "Page.getNavigationHistory" => json!({
                 "currentIndex": 1,
                 "entries": [
@@ -1610,6 +1628,7 @@ async fn codex_r1_f3_back_waits_for_cross_document_and_same_document_history_com
             "Target.createBrowserContext" => json!({ "browserContextId": "ctx-1" }),
             "Target.createTarget" => json!({ "targetId": "target-1" }),
             "Target.attachToTarget" => json!({ "sessionId": "sess-1" }),
+            "Page.getFrameTree" => json!({ "frameTree": { "frame": { "id": "main" } } }),
             "Page.getNavigationHistory" => json!({
                 "currentIndex": 1,
                 "entries": [
@@ -1874,4 +1893,367 @@ async fn codex_r1_f6_open_link_waits_for_post_load_network_settle_and_caps_strea
         sse_started.elapsed()
     );
     driver.shutdown().await.unwrap();
+}
+
+// ===========================================================================
+// Codex Round 2 Regression Tests (Findings 3 through 7)
+// ===========================================================================
+
+#[tokio::test]
+async fn codex_r2_f3_hierarchy_cache_invalidates_when_visible_frame_changes() {
+    let make_snap = |vis_x: f64, vis_w: f64| {
+        json!({
+            "url": "http://127.0.0.1:4174/",
+            "viewport": { "width": 1280, "height": 720 },
+            "truncated": false,
+            "nodes": [
+                {
+                    "index": 0,
+                    "parentIndex": null,
+                    "depth": 0,
+                    "elementType": "Button",
+                    "identifier": "clipped_btn",
+                    "label": "Checkout",
+                    "title": "",
+                    "value": null,
+                    "placeholderValue": null,
+                    "enabled": true,
+                    "checked": false,
+                    "selected": false,
+                    "hasFocus": false,
+                    "hittable": true,
+                    "isOnScreen": true,
+                    "frame": { "x": 100.0, "y": 200.0, "width": 300.0, "height": 60.0 },
+                    "visibleFrame": { "x": vis_x, "y": 200.0, "width": vis_w, "height": 60.0 }
+                }
+            ]
+        })
+    };
+
+    let snap = Arc::new(StdMutex::new(make_snap(100.0, 120.0)));
+    let server = MockCdpServer::start(standard_mock_handler(
+        Arc::clone(&snap),
+        Arc::new(StdMutex::new(None)),
+    ))
+    .await;
+    let driver = WebDriver::with_cdp_url_for_tests(WebDriverConfig::new(), server.ws_url.clone());
+    let cancel = CancellationToken::new();
+    let app = "http://127.0.0.1:4174";
+
+    // 1. Cold fetch seeds `last_clipped_hash` and returns full nodes with initial `visible_frame`.
+    let h1 = driver.hierarchy(app, false, None, &cancel).await.unwrap();
+    assert!(!h1.unchanged);
+    assert_eq!(h1.nodes.len(), 1);
+    assert_eq!(
+        h1.nodes[0].visible_frame,
+        Some(deja_flow::UiRect::new(100.0, 200.0, 120.0, 60.0))
+    );
+    let hash_before = clipped_geometry_hash(&h1.nodes);
+
+    // 2. Identical snapshot + matching `known_hash` short-circuits cleanly.
+    let h2 = driver
+        .hierarchy(app, false, Some(&h1.hierarchy_hash), &cancel)
+        .await
+        .unwrap();
+    assert!(h2.unchanged);
+    assert!(h2.nodes.is_empty());
+
+    // 3. Container clip changes so `visibleFrame` shifts while `frame`, `hittable`, and all
+    // Swift-parity hash fields remain IDENTICAL -> MUST return `unchanged: false` with new rect!
+    *snap.lock().unwrap() = make_snap(160.0, 240.0);
+    let h3 = driver
+        .hierarchy(app, false, Some(&h1.hierarchy_hash), &cancel)
+        .await
+        .unwrap();
+    assert_eq!(
+        h3.hierarchy_hash, h1.hierarchy_hash,
+        "deja_flow::hash_hierarchy_nodes must preserve Swift↔Rust parity"
+    );
+    assert!(
+        !h3.unchanged,
+        "changing visible_frame must invalidate WebDriver known_hash cache"
+    );
+    assert_eq!(h3.nodes.len(), 1);
+    assert_eq!(
+        h3.nodes[0].visible_frame,
+        Some(deja_flow::UiRect::new(160.0, 200.0, 240.0, 60.0))
+    );
+    assert_ne!(clipped_geometry_hash(&h3.nodes), hash_before);
+
+    // 4. Subsequent poll with the updated clip short-circuits again.
+    let h4 = driver
+        .hierarchy(app, false, Some(&h3.hierarchy_hash), &cancel)
+        .await
+        .unwrap();
+    assert!(h4.unchanged);
+    assert!(h4.nodes.is_empty());
+
+    driver.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn codex_r2_f4_back_ignores_iframe_load_and_subframe_same_document_nav() {
+    use std::sync::atomic::AtomicBool;
+
+    // 1. Slow cross-document `back()`: iframe fires `Page.frameStoppedLoading`, `Page.loadEventFired`,
+    // AND subframe `Page.navigatedWithinDocument` before main-frame `Page.frameNavigated` commits.
+    let main_committed = Arc::new(AtomicBool::new(false));
+    let saw_premature_ready = Arc::new(AtomicBool::new(false));
+    let main_c = Arc::clone(&main_committed);
+    let premature_c = Arc::clone(&saw_premature_ready);
+    let server = MockCdpServer::start(Arc::new(move |call, out_tx| {
+        let id = call.id;
+        let res = match call.method.as_str() {
+            "Target.createBrowserContext" => json!({ "browserContextId": "ctx-1" }),
+            "Target.createTarget" => json!({ "targetId": "target-1" }),
+            "Target.attachToTarget" => json!({ "sessionId": "sess-1" }),
+            "Page.getFrameTree" => json!({
+                "frameTree": { "frame": { "id": "main-frame-1", "url": "about:blank" } }
+            }),
+            "Page.getNavigationHistory" => json!({
+                "currentIndex": 1,
+                "entries": [
+                    { "id": 1, "url": "http://127.0.0.1:4174/first" },
+                    { "id": 2, "url": "http://127.0.0.1:4174/second" }
+                ]
+            }),
+            "Page.navigateToHistoryEntry" => {
+                let sid = call.session_id.clone().unwrap();
+                let flag = Arc::clone(&main_c);
+                tokio::spawn(async move {
+                    // Unrelated iframe finishes loading and fires load events -> MUST be ignored!
+                    tokio::time::sleep(Duration::from_millis(15)).await;
+                    let _ = out_tx.send(json!({
+                        "method": "Page.frameStoppedLoading",
+                        "sessionId": sid,
+                        "params": { "frameId": "iframe-child" }
+                    }));
+                    let _ = out_tx.send(json!({
+                        "method": "Page.loadEventFired",
+                        "sessionId": sid,
+                        "params": { "timestamp": 1.0 }
+                    }));
+                    // Subframe same-document hash nav -> MUST be ignored!
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                    let _ = out_tx.send(json!({
+                        "method": "Page.navigatedWithinDocument",
+                        "sessionId": sid,
+                        "params": { "frameId": "iframe-child", "url": "http://127.0.0.1:4174/iframe#x" }
+                    }));
+                    // Finally the requested main-frame history traversal commits.
+                    tokio::time::sleep(Duration::from_millis(45)).await;
+                    flag.store(true, Ordering::SeqCst);
+                    let _ = out_tx.send(json!({
+                        "method": "Page.frameNavigated",
+                        "sessionId": sid,
+                        "params": { "frame": { "id": "main-frame-1", "url": "http://127.0.0.1:4174/first" } }
+                    }));
+                });
+                json!({})
+            }
+            "Runtime.evaluate" => {
+                let expr = call
+                    .params
+                    .get("expression")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                if expr == "document.readyState" {
+                    if !main_c.load(Ordering::SeqCst) {
+                        premature_c.store(true, Ordering::SeqCst);
+                    }
+                    json!({ "result": { "type": "string", "value": "complete" } })
+                } else {
+                    json!({ "result": { "type": "boolean", "value": true } })
+                }
+            }
+            _ => json!({}),
+        };
+        Some(json!({ "id": id, "result": res }))
+    }))
+    .await;
+
+    let mut cfg = WebDriverConfig::new();
+    cfg.network_quiet_window = Duration::from_millis(10);
+    let driver = WebDriver::with_cdp_url_for_tests(cfg, server.ws_url.clone());
+    let cancel = CancellationToken::new();
+    driver.ensure_session(&cancel).await.unwrap();
+    driver.back("http://127.0.0.1:4174", &cancel).await.unwrap();
+    assert!(main_committed.load(Ordering::SeqCst));
+    assert!(
+        !saw_premature_ready.load(Ordering::SeqCst),
+        "back() must ignore iframe frameStoppedLoading, loadEventFired, and subframe navigatedWithinDocument"
+    );
+    driver.shutdown().await.unwrap();
+
+    // 2. Main-frame same-document `Page.navigatedWithinDocument` commits only when `frameId == main_frame_id`.
+    let spa_committed = Arc::new(AtomicBool::new(false));
+    let spa_premature = Arc::new(AtomicBool::new(false));
+    let spa_c = Arc::clone(&spa_committed);
+    let spa_p = Arc::clone(&spa_premature);
+    let spa_server = MockCdpServer::start(Arc::new(move |call, out_tx| {
+        let id = call.id;
+        let res = match call.method.as_str() {
+            "Target.createBrowserContext" => json!({ "browserContextId": "ctx-1" }),
+            "Target.createTarget" => json!({ "targetId": "target-1" }),
+            "Target.attachToTarget" => json!({ "sessionId": "sess-1" }),
+            "Page.getFrameTree" => json!({
+                "frameTree": { "frame": { "id": "main-spa", "url": "about:blank" } }
+            }),
+            "Page.getNavigationHistory" => json!({
+                "currentIndex": 1,
+                "entries": [
+                    { "id": 1, "url": "http://127.0.0.1:4174/#a" },
+                    { "id": 2, "url": "http://127.0.0.1:4174/#b" }
+                ]
+            }),
+            "Page.navigateToHistoryEntry" => {
+                let sid = call.session_id.clone().unwrap();
+                let flag = Arc::clone(&spa_c);
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(15)).await;
+                    let _ = out_tx.send(json!({
+                        "method": "Page.navigatedWithinDocument",
+                        "sessionId": sid,
+                        "params": { "frameId": "iframe-other", "url": "http://127.0.0.1:4174/frame#a" }
+                    }));
+                    tokio::time::sleep(Duration::from_millis(40)).await;
+                    flag.store(true, Ordering::SeqCst);
+                    let _ = out_tx.send(json!({
+                        "method": "Page.navigatedWithinDocument",
+                        "sessionId": sid,
+                        "params": { "frameId": "main-spa", "url": "http://127.0.0.1:4174/#a" }
+                    }));
+                });
+                json!({})
+            }
+            "Runtime.evaluate" => {
+                let expr = call
+                    .params
+                    .get("expression")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                if expr == "document.readyState" {
+                    if !spa_c.load(Ordering::SeqCst) {
+                        spa_p.store(true, Ordering::SeqCst);
+                    }
+                    json!({ "result": { "type": "string", "value": "complete" } })
+                } else {
+                    json!({ "result": { "type": "boolean", "value": true } })
+                }
+            }
+            _ => json!({}),
+        };
+        Some(json!({ "id": id, "result": res }))
+    }))
+    .await;
+
+    let mut spa_cfg = WebDriverConfig::new();
+    spa_cfg.network_quiet_window = Duration::from_millis(10);
+    let spa_driver = WebDriver::with_cdp_url_for_tests(spa_cfg, spa_server.ws_url.clone());
+    spa_driver.ensure_session(&cancel).await.unwrap();
+    spa_driver
+        .back("http://127.0.0.1:4174", &cancel)
+        .await
+        .unwrap();
+    assert!(spa_committed.load(Ordering::SeqCst));
+    assert!(
+        !spa_premature.load(Ordering::SeqCst),
+        "same-document back() must ignore subframe navigatedWithinDocument and wait for main frameId"
+    );
+    spa_driver.shutdown().await.unwrap();
+}
+
+#[test]
+fn codex_r2_f6_dom_preserves_visible_text_alongside_accessible_name() {
+    use deja_flow::{CompiledSelector, Selector};
+
+    assert!(crate::dom::AX_DOM_SCRIPT.contains("extractAccessibleName"));
+    assert!(crate::dom::AX_DOM_SCRIPT.contains("extractVisibleText"));
+
+    let snap = json!({
+        "url": "http://127.0.0.1:4174/",
+        "viewport": { "width": 1280, "height": 720 },
+        "truncated": false,
+        "nodes": [
+            {
+                "index": 0,
+                "parentIndex": null,
+                "depth": 0,
+                "elementType": "Button",
+                "identifier": "pay_btn",
+                "label": "Submit order",
+                "title": "Pay now",
+                "value": null,
+                "placeholderValue": null,
+                "enabled": true,
+                "checked": false,
+                "selected": false,
+                "hasFocus": false,
+                "hittable": true,
+                "isOnScreen": true,
+                "frame": { "x": 100, "y": 100, "width": 160, "height": 44 },
+                "visibleFrame": { "x": 100, "y": 100, "width": 160, "height": 44 }
+            }
+        ]
+    });
+    let h = dom_snapshot_to_hierarchy(snap, "http://127.0.0.1:4174", None).unwrap();
+    assert_eq!(h.nodes[0].label, "Submit order");
+    assert_eq!(h.nodes[0].title, "Pay now");
+
+    let by_accessible = CompiledSelector::compile(&Selector::by_text("Submit order"))
+        .unwrap()
+        .match_one(&h.nodes)
+        .expect("selector by accessible name must match");
+    assert_eq!(by_accessible.identifier, "pay_btn");
+
+    let by_visible = CompiledSelector::compile(&Selector::by_text("Pay now"))
+        .unwrap()
+        .match_one(&h.nodes)
+        .expect("selector by visible button text must match");
+    assert_eq!(by_visible.identifier, "pay_btn");
+}
+
+#[tokio::test]
+async fn codex_r2_f7_bare_relative_override_resolves_to_absolute_path_never_path_lookup() {
+    let dir = TempDir::new("bare-override");
+    let cwd_dir = dir.path().join("cwd");
+    let path_dir = dir.path().join("path-bin");
+    let cwd_chrome = cwd_dir.join("my-chrome");
+    let path_chrome = path_dir.join("my-chrome");
+
+    write_executable(&cwd_chrome, "#!/bin/sh\necho 'Google Chrome 199.0.0.1'\n");
+    write_executable(&path_chrome, "#!/bin/sh\necho 'Google Chrome 100.0.0.9'\n");
+
+    let mut env = BTreeMap::new();
+    env.insert("DEJA_CHROME".to_string(), "my-chrome".to_string());
+    env.insert("PATH".to_string(), path_dir.to_string_lossy().into_owned());
+
+    let resolved = discover_chromium_with_cwd_and_fallbacks(&env, Some(&cwd_dir), &[]).unwrap();
+    assert!(
+        resolved.is_absolute(),
+        "bare DEJA_CHROME override must resolve to an absolute path, got {}",
+        resolved.display()
+    );
+    assert_eq!(resolved, cwd_chrome);
+
+    // Probing the returned path executes the validated cwd binary (`199.0.0.1`), never PATH (`100.0.0.9`).
+    let cancel = CancellationToken::new();
+    let version = probe_chromium_version(&resolved, &cancel).await.unwrap();
+    assert_eq!(version, "199.0.0.1");
+
+    // Relative override missing from cwd MUST fail closed even if a same-named binary exists on PATH.
+    let mut missing_env = BTreeMap::new();
+    missing_env.insert("CHROME_PATH".to_string(), "other-chrome".to_string());
+    write_executable(
+        &path_dir.join("other-chrome"),
+        "#!/bin/sh\necho 'Google Chrome 100.0.0.9'\n",
+    );
+    missing_env.insert("PATH".to_string(), path_dir.to_string_lossy().into_owned());
+    let err = discover_chromium_with_cwd_and_fallbacks(&missing_env, Some(&cwd_dir), &[])
+        .expect_err("missing relative CHROME_PATH must fail closed");
+    assert!(matches!(
+        err,
+        WebDriverError::InvalidChromiumPath { ref source_var, ref path, .. }
+            if source_var == "CHROME_PATH" && path.is_absolute()
+    ));
 }
