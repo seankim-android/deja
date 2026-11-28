@@ -2012,6 +2012,7 @@ async fn regression_r1_f1_ios_bundle_validation_rejects_non_app_missing_plist_mi
         timeout_ms: 5_000,
         env: BTreeMap::new(),
         staged_build: None,
+        resolved_runtime: None,
     };
 
     // 1. Plain regular file (`build/App.bin`) rejected with exit 2.
@@ -3099,6 +3100,7 @@ async fn regression_r2_f1_ios_bundle_staging_binds_install_to_fingerprinted_buil
         timeout_ms: 5_000,
         env: BTreeMap::new(),
         staged_build: None,
+        resolved_runtime: None,
     };
     let drift_err = RealDriverFactory
         .install_app(&drift_ctx, &cancel)
@@ -6337,6 +6339,7 @@ async fn batch_verify_serializes_manifest_commits_across_shards_and_real_factory
         timeout_ms: 5_000,
         env: BTreeMap::new(),
         staged_build: None,
+        resolved_runtime: None,
     };
     let staged = RealDriverFactory
         .prepare_batch_build(&base_ctx, &cancel)
@@ -7590,6 +7593,7 @@ async fn web_real_driver_factory_runtime_create_install_doctor_and_invalid_devic
         timeout_ms: 30_000,
         env: env.clone(),
         staged_build: None,
+        resolved_runtime: None,
     };
 
     let cancel = CancellationToken::new();
@@ -7993,6 +7997,7 @@ async fn codex_r3_f3_doctor_and_runtime_skip_broken_path_chromium_candidate() {
         timeout_ms: 30_000,
         env: env.clone(),
         staged_build: None,
+        resolved_runtime: None,
     };
     let cancel = CancellationToken::new();
     let rt = RealDriverFactory

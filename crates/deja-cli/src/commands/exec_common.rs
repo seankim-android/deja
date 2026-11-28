@@ -618,6 +618,7 @@ pub fn build_driver_context(
         timeout_ms,
         env: deps.env.clone(),
         staged_build: None,
+        resolved_runtime: None,
     }
 }
 

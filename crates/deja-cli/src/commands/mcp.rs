@@ -42,6 +42,7 @@ impl CliMcpDriverFactory {
             timeout_ms: ctx.timeout_ms,
             env: ctx.env.clone(),
             staged_build: None,
+            resolved_runtime: ctx.resolved_runtime.clone(),
         }
     }
 }

@@ -125,6 +125,9 @@ pub struct DriverContext {
     pub env: BTreeMap<String, String>,
     /// Optional batch-shared staged build artifact verified once and reused across shard workers.
     pub staged_build: Option<SharedStagedBuild>,
+    /// Optional resolved runtime string (for example `"chromium-158.0.8127.38@1280x800"` or
+    /// `"ios-27.2"`) passed into daemon pooling so browser upgrades invalidate stale warm drivers.
+    pub resolved_runtime: Option<String>,
 }
 
 /// Abstract factory for constructing concrete [`PlatformDriver`] instances.
@@ -164,6 +167,62 @@ pub trait DriverFactory: Send + Sync {
         ctx: &'a DriverContext,
         cancel: &'a CancellationToken,
     ) -> FactoryFuture<'a, Result<(), DriverFactoryError>>;
+
+    /// Perform lightweight context validation before reusing an existing warm pooled driver
+    /// (for example verifying an iOS `.app` bundle's `Info.plist` `CFBundleIdentifier` or Web
+    /// `device`/`screenSize` bounds) so invalid builds or mismatched `appId`s still fail closed
+    /// with exit `2`.
+    fn validate_warm_context(&self, _ctx: &DriverContext) -> Result<(), DriverFactoryError> {
+        Ok(())
+    }
+
+    /// Return the wrapped direct [`DriverFactory`] when this factory proxies through a daemon,
+    /// allowing `--no-daemon`, `DEJA_NO_DAEMON=1`, and `deja daemon start --foreground` to unwrap
+    /// without recursion.
+    fn unwrapped_without_daemon(&self) -> Option<Arc<dyn DriverFactory>> {
+        None
+    }
+}
+
+impl dyn DriverFactory + 'static {
+    /// Unwrap any daemon proxy wrapper layers to obtain the underlying direct [`DriverFactory`].
+    #[must_use]
+    pub fn without_daemon(self: Arc<Self>) -> Arc<dyn DriverFactory> {
+        let mut current = self;
+        while let Some(inner) = current.unwrapped_without_daemon() {
+            current = inner;
+        }
+        current
+    }
+}
+
+/// Validate platform/device/build configuration fields for [`RealDriverFactory`] without spawning
+/// a simulator runner or Chromium process.
+pub fn validate_real_driver_context(ctx: &DriverContext) -> Result<(), DriverFactoryError> {
+    match ctx.platform.as_str() {
+        "ios" => verify_ios_app_bundle(&ctx.build_path, &ctx.app_id)
+            .map_err(DriverFactoryError::UnsupportedOrConfig),
+        "android" => Err(DriverFactoryError::UnsupportedOrConfig(
+            "native Android driver execution is not wired yet (tracked in Phase 4 / DEJA-66)"
+                .to_string(),
+        )),
+        "web" => {
+            if ctx.device != "chromium" {
+                return Err(DriverFactoryError::UnsupportedOrConfig(format!(
+                    "web `device` must be \"chromium\" (got {:?})",
+                    ctx.device
+                )));
+            }
+            if let Some(val) = ctx.screen_size.as_ref() {
+                ScreenSize::parse(val)
+                    .map_err(|err| DriverFactoryError::UnsupportedOrConfig(err.to_string()))?;
+            }
+            Ok(())
+        }
+        other => Err(DriverFactoryError::UnsupportedOrConfig(format!(
+            "unsupported platform {other:?}"
+        ))),
+    }
 }
 
 /// Production [`DriverFactory`] wiring `IosDriver` and `WebDriver` (with clear exit-2 notice for Android Phase 4 stub).
@@ -399,6 +458,10 @@ impl DriverFactory for RealDriverFactory {
             }
             Ok(())
         })
+    }
+
+    fn validate_warm_context(&self, ctx: &DriverContext) -> Result<(), DriverFactoryError> {
+        validate_real_driver_context(ctx)
     }
 }
 
@@ -1368,6 +1431,7 @@ mod tests {
             screen_size: None,
             timeout_ms: 30_000,
             env: BTreeMap::new(),
+            resolved_runtime: None,
         };
         let pre_res = factory.prepare_batch_build(&ctx, &pre_cancel).await;
         assert!(

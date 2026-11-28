@@ -3,6 +3,7 @@
 pub mod cli;
 pub mod commands;
 pub mod config;
+pub mod daemon;
 pub mod driver_factory;
 pub mod exit_codes;
 pub mod fs_safe;
@@ -71,12 +72,20 @@ impl CliDeps {
             .or_else(|| env.get("USERPROFILE"))
             .filter(|v| !v.is_empty())
             .map(PathBuf::from);
+        let direct_factory: Arc<dyn DriverFactory> = Arc::new(RealDriverFactory);
+        #[cfg(unix)]
+        let driver_factory: Arc<dyn DriverFactory> = Arc::new(
+            crate::daemon::client::DaemonDriverFactory::new(direct_factory, env.clone(), true),
+        );
+        #[cfg(not(unix))]
+        let driver_factory = direct_factory;
+
         Self {
             cwd,
             env,
             home_dir,
             output: OutputSink::Stdio,
-            driver_factory: Arc::new(RealDriverFactory),
+            driver_factory,
             doctor_probes: Arc::new(RealDoctorProbes),
             cancel,
             cancel_signal,
@@ -89,41 +98,55 @@ pub async fn run_cli(cli: Cli, deps: &CliDeps) -> u8 {
     let _ = LINKED_WORKSPACE_CRATES;
     let explicit_config = cli.config.as_deref();
 
+    let bypass_daemon = cli.no_daemon || crate::daemon::is_no_daemon_env(&deps.env);
+    let owned_deps;
+    let effective_deps = if bypass_daemon {
+        let mut d = deps.clone();
+        d.driver_factory = Arc::clone(&deps.driver_factory).without_daemon();
+        owned_deps = d;
+        &owned_deps
+    } else {
+        deps
+    };
+
     match cli.command {
         None => {
-            deps.output.writeln_stderr(
+            effective_deps.output.writeln_stderr(
                 "No command specified. Run `deja --help` for usage or `deja guide` for the agent workflow guide.",
             );
             EXIT_USAGE_OR_CONFIG
         }
         Some(Commands::Run(ref args)) => {
-            commands::run::run(args, explicit_config, cli.json, deps).await
+            commands::run::run(args, explicit_config, cli.json, effective_deps).await
         }
         Some(Commands::Remember(ref args)) => {
-            commands::remember::run(args, explicit_config, cli.json, deps).await
+            commands::remember::run(args, explicit_config, cli.json, effective_deps).await
         }
         Some(Commands::List(ref args)) => {
-            commands::list::run(args, explicit_config, cli.json, deps)
+            commands::list::run(args, explicit_config, cli.json, effective_deps)
         }
         Some(Commands::Inspect(ref args)) => {
-            commands::inspect::run(args, explicit_config, cli.json, deps)
+            commands::inspect::run(args, explicit_config, cli.json, effective_deps)
         }
         Some(Commands::Manifest(ref args)) => {
-            commands::manifest::run(args, explicit_config, cli.json, deps)
+            commands::manifest::run(args, explicit_config, cli.json, effective_deps)
         }
         Some(Commands::Gate(ref args)) => {
-            commands::gate::run(args, explicit_config, cli.json, deps)
+            commands::gate::run(args, explicit_config, cli.json, effective_deps)
         }
         Some(Commands::Doctor(ref args)) => {
-            commands::doctor::run(args, explicit_config, cli.json, deps).await
+            commands::doctor::run(args, explicit_config, cli.json, effective_deps).await
         }
         Some(Commands::Migrate(ref args)) => {
-            commands::migrate::run(args, explicit_config, cli.json, deps)
+            commands::migrate::run(args, explicit_config, cli.json, effective_deps)
         }
-        Some(Commands::Guide) => commands::guide::run(deps),
-        Some(Commands::Engine(ref args)) => commands::engine::run(args, cli.json, deps),
+        Some(Commands::Guide) => commands::guide::run(effective_deps),
+        Some(Commands::Engine(ref args)) => commands::engine::run(args, cli.json, effective_deps),
         Some(Commands::Mcp(ref args)) => {
-            commands::mcp::run(args, explicit_config, cli.json, deps).await
+            commands::mcp::run(args, explicit_config, cli.json, effective_deps).await
+        }
+        Some(Commands::Daemon(ref args)) => {
+            commands::daemon::run(args, cli.json, effective_deps).await
         }
     }
 }

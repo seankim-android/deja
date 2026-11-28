@@ -547,7 +547,7 @@ pub async fn run(
     let identity = make_walk_identity(&config, &goal, fp_res.digest);
 
     // Resolve runtime (e.g. "ios-27.2") via driver factory.
-    let driver_ctx = build_driver_context(
+    let mut driver_ctx = build_driver_context(
         &config,
         deps,
         config.timeout_ms,
@@ -576,6 +576,7 @@ pub async fn run(
             );
         }
     };
+    driver_ctx.resolved_runtime = runtime.clone();
 
     // Plan what to run (manifest mode vs classic mode).
     let plan = match plan_execution(

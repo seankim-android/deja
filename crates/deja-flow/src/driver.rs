@@ -747,6 +747,31 @@ pub trait PlatformDriver: Send + Sync {
     /// Capabilities genuinely supported by this driver implementation.
     fn capabilities(&self) -> &DriverCapabilities;
 
+    /// Optional warm-session attach counter for drivers that track session creation/recovery
+    /// (such as `IosDriver` and `WebDriver`), reported by `deja daemon status`.
+    fn session_attach_count(&self) -> Option<u64> {
+        None
+    }
+
+    /// Returns `true` when this driver proxies a leased session from the persistent warm daemon,
+    /// allowing long-lived callers such as `deja-mcp` to release the exclusive lease immediately
+    /// after each tool call while the daemon keeps the underlying driver warm.
+    fn is_daemon_backed(&self) -> bool {
+        false
+    }
+
+    /// Returns `true` when this driver benefits from asynchronous background reset between warm
+    /// daemon leases (for example rotating a dirty Web `BrowserContext`).
+    fn needs_idle_reuse_prep(&self) -> bool {
+        false
+    }
+
+    /// Optional post-lease idle reset hook invoked asynchronously by the warm daemon after
+    /// releasing a client lease when [`Self::needs_idle_reuse_prep`] returns `true`.
+    fn prepare_idle_reuse<'a>(&'a self, _cancel: &'a CancellationToken) -> DriverFuture<'a, ()> {
+        Box::pin(async { Ok(()) })
+    }
+
     fn ensure_session<'a>(&'a self, cancel: &'a CancellationToken) -> DriverFuture<'a, ()>;
 
     fn launch_app<'a>(
