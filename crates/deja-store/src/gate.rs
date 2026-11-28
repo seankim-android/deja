@@ -24,6 +24,9 @@ pub struct StoreGateGoalResult {
     pub closure_sha256: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+    /// Workspace-relative path of the winning validation run's saved report, if recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report_path: Option<String>,
     /// Store labels (`store_id` or workspace-relative DB path) that contributed evidence.
     #[serde(default)]
     pub source_stores: Vec<String>,
@@ -69,6 +72,7 @@ struct ShardEvidence {
     flow_sha256: Option<String>,
     closure_sha256: Option<String>,
     detail: Option<String>,
+    report_path: Option<String>,
 }
 
 fn outcome_severity(outcome: GateOutcome) -> u8 {
@@ -190,6 +194,7 @@ pub fn evaluate_gate(
                             flow_sha256: None,
                             closure_sha256: None,
                             detail: Some("no matching entry in walk manifest".to_string()),
+                            report_path: None,
                             source_stores: Vec::new(),
                         });
                         continue;
@@ -204,6 +209,7 @@ pub fn evaluate_gate(
                                 flow_sha256: None,
                                 closure_sha256: None,
                                 detail: Some(format!("the flow file is missing: {file}")),
+                                report_path: None,
                                 source_stores: Vec::new(),
                             });
                             continue;
@@ -226,6 +232,7 @@ pub fn evaluate_gate(
                                         "the flow or a file it runs changed (manifest {}, now {})",
                                         entry.closure_sha256, closure.sha256
                                     )),
+                                    report_path: None,
                                     source_stores: Vec::new(),
                                 });
                                 continue;
@@ -242,6 +249,7 @@ pub fn evaluate_gate(
                                         "the flow's assertions changed (manifest {}, now {})",
                                         entry.assertions_sha256, assertions_sha256
                                     )),
+                                    report_path: None,
                                     source_stores: Vec::new(),
                                 });
                                 continue;
@@ -299,6 +307,7 @@ pub fn evaluate_gate(
                         } else {
                             "the latest validation on this build is a failure".to_string()
                         }),
+                        report_path: run.report_path,
                     });
                     continue;
                 }
@@ -313,6 +322,7 @@ pub fn evaluate_gate(
                         flow_sha256: Some(run.flow_sha256),
                         closure_sha256: run.closure_sha256,
                         detail: Some("the run on this build is marked flaky".to_string()),
+                        report_path: run.report_path,
                     });
                     continue;
                 }
@@ -330,6 +340,7 @@ pub fn evaluate_gate(
                             flow_sha256: Some(run.flow_sha256),
                             closure_sha256: run.closure_sha256,
                             detail: Some(detail),
+                            report_path: run.report_path,
                         });
                     } else {
                         evidence.push(ShardEvidence {
@@ -339,6 +350,7 @@ pub fn evaluate_gate(
                             flow_sha256: Some(main_sha.clone()),
                             closure_sha256: Some(expected_closure.clone()),
                             detail: None,
+                            report_path: run.report_path,
                         });
                     }
                 } else {
@@ -351,6 +363,7 @@ pub fn evaluate_gate(
                                 flow_sha256: Some(run.flow_sha256),
                                 closure_sha256: run.closure_sha256,
                                 detail: None,
+                                report_path: run.report_path,
                             });
                         }
                         ClassicFlowCheck::Missing => {
@@ -361,6 +374,7 @@ pub fn evaluate_gate(
                                 flow_sha256: None,
                                 closure_sha256: None,
                                 detail: Some("the flow file is missing".to_string()),
+                                report_path: None,
                             });
                         }
                         ClassicFlowCheck::Legacy => {
@@ -374,6 +388,7 @@ pub fn evaluate_gate(
                                     "no passing validation on this build (legacy-closure-unknown)"
                                         .to_string(),
                                 ),
+                                report_path: None,
                             });
                         }
                         ClassicFlowCheck::Invalid(msg) => {
@@ -384,6 +399,7 @@ pub fn evaluate_gate(
                                 flow_sha256: None,
                                 closure_sha256: None,
                                 detail: Some(msg),
+                                report_path: None,
                             });
                         }
                         ClassicFlowCheck::FlowChanged {
@@ -398,6 +414,7 @@ pub fn evaluate_gate(
                                 flow_sha256: None,
                                 closure_sha256: current_closure_sha256,
                                 detail: Some(detail),
+                                report_path: None,
                             });
                         }
                     }
@@ -425,6 +442,7 @@ fn merge_shard_evidence(
             flow_sha256: None,
             closure_sha256: None,
             detail: Some("no passing validation on this build (not-run)".to_string()),
+            report_path: None,
             source_stores: Vec::new(),
         };
     }
@@ -458,6 +476,7 @@ fn merge_shard_evidence(
                     "conflicting passed flow/closure hashes across stores ({} vs {})",
                     first.store_label, conflict.store_label
                 )),
+                report_path: None,
                 source_stores,
             };
         }
@@ -477,6 +496,7 @@ fn merge_shard_evidence(
         flow_sha256: winner.flow_sha256.clone(),
         closure_sha256: winner.closure_sha256.clone(),
         detail: winner.detail.clone(),
+        report_path: winner.report_path.clone(),
         source_stores,
     }
 }

@@ -367,7 +367,11 @@ impl Simctl {
     async fn run_simctl(&self, args: &[&str]) -> Result<std::process::Output> {
         let mut cmd = self.command();
         cmd.args(args);
-        debug!(args = ?args, "running xcrun simctl");
+        debug!(
+            subcommand = args.first().copied().unwrap_or(""),
+            arg_count = args.len(),
+            "running xcrun simctl"
+        );
         let output = cmd
             .output()
             .await

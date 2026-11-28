@@ -138,6 +138,7 @@ pub enum ConsumerRunPlan {
         flow_sha256: String,
         closure_sha256: String,
         assertions_sha256: String,
+        closure: FlowClosure,
         run: ValidationRunRecord,
     },
     /// `DEJA-51`: `staleBuild == Some(ReplayLastVerified)` and disk strictly matches BOTH
@@ -149,6 +150,7 @@ pub enum ConsumerRunPlan {
         flow_sha256: String,
         closure_sha256: String,
         assertions_sha256: String,
+        closure: FlowClosure,
         reason: CacheMissReason,
         previous_successful: Option<ValidationRunRecord>,
     },
@@ -677,8 +679,9 @@ impl ConsumerFlows {
                     entry,
                     flow_path: canonical_flow,
                     flow_sha256: main_sha256,
-                    closure_sha256: closure.sha256,
+                    closure_sha256: closure.sha256.clone(),
                     assertions_sha256: current_assertions_sha256,
+                    closure,
                     run: run.clone(),
                 });
             }
@@ -687,8 +690,9 @@ impl ConsumerFlows {
                     entry,
                     flow_path: canonical_flow,
                     flow_sha256: main_sha256,
-                    closure_sha256: closure.sha256,
+                    closure_sha256: closure.sha256.clone(),
                     assertions_sha256: current_assertions_sha256,
+                    closure,
                     reason: CacheMissReason::FailedValidation,
                     previous_successful,
                 });
@@ -715,8 +719,9 @@ impl ConsumerFlows {
                 entry,
                 flow_path: canonical_flow,
                 flow_sha256: main_sha256,
-                closure_sha256: closure.sha256,
+                closure_sha256: closure.sha256.clone(),
                 assertions_sha256: current_assertions_sha256,
+                closure,
                 reason: miss_reason,
                 previous_successful,
             });

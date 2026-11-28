@@ -1863,9 +1863,266 @@ fn parse_retry(value: &YamlValue, depth: usize) -> Result<RetryStep, FlowParseEr
     })
 }
 
+/// Statically validates that a parsed `maestro/v1` flow never targets an `appId` other than
+/// `expected_app_id`.
+///
+/// Inspects `header.app_id`, `header.on_flow_start`, `header.on_flow_complete`, and every
+/// [`FlowStep`] (recursively descending into inline `runFlow.commands`, `repeat.commands`, and
+/// `retry.commands`) for `launchApp`, `stopApp`, `killApp`, and `clearState` targets. Resolves
+/// static `${VAR}` interpolations against `env` plus scoped header/block `env` frames, failing
+/// closed on any unresolvable `${...}` dynamic app ID or mismatch with `expected_app_id`.
+pub fn validate_flow_app_id_confinement(
+    flow: &ParsedFlow,
+    expected_app_id: &str,
+    env: &BTreeMap<String, String>,
+) -> Result<(), String> {
+    let mut env_stack = crate::executor::EnvStack::new(env.clone());
+
+    let mut header_frame = BTreeMap::new();
+    for (k, v) in &flow.header.env {
+        let interp = env_stack
+            .interpolate(v)
+            .map_err(|err| format!("header env `{k}` interpolation failed: {err}"))?;
+        header_frame.insert(k.clone(), interp);
+    }
+    let pushed_header = !header_frame.is_empty();
+    if pushed_header {
+        env_stack.push(header_frame);
+    }
+
+    let result = (|| -> Result<(), String> {
+        if let Some(ref raw_app_id) = flow.header.app_id {
+            check_confined_app_id(raw_app_id, expected_app_id, &env_stack, "header appId")?;
+        }
+        if let Some(ref raw_url) = flow.header.url {
+            check_confined_app_id(raw_url, expected_app_id, &env_stack, "header url")?;
+        }
+        check_steps_app_id_confinement(
+            &flow.header.on_flow_start,
+            expected_app_id,
+            &mut env_stack,
+            0,
+            "onFlowStart",
+        )?;
+        check_steps_app_id_confinement(
+            &flow.steps,
+            expected_app_id,
+            &mut env_stack,
+            0,
+            "flow step",
+        )?;
+        check_steps_app_id_confinement(
+            &flow.header.on_flow_complete,
+            expected_app_id,
+            &mut env_stack,
+            0,
+            "onFlowComplete",
+        )?;
+        Ok(())
+    })();
+
+    if pushed_header {
+        env_stack.pop();
+    }
+    result
+}
+
+fn resolve_static_app_id(
+    raw: &str,
+    env: &crate::executor::EnvStack,
+    location: &str,
+) -> Result<String, String> {
+    let bytes = raw.as_bytes();
+    let mut out = String::with_capacity(raw.len());
+    let mut i = 0;
+
+    while i < bytes.len() {
+        if i + 1 < bytes.len() && bytes[i] == b'$' && bytes[i + 1] == b'{' {
+            let name_start = i + 2;
+            let Some(rel_close) = raw[name_start..].find('}') else {
+                return Err(format!(
+                    "{location} contains unclosed variable expression `{raw}`"
+                ));
+            };
+            let var_name = &raw[name_start..name_start + rel_close];
+            let valid_ident = !var_name.is_empty() && {
+                let mut vb = var_name.bytes();
+                let first = vb.next().expect("non-empty");
+                (first.is_ascii_alphabetic() || first == b'_')
+                    && vb.all(|b| b.is_ascii_alphanumeric() || b == b'_')
+            };
+            if !valid_ident {
+                return Err(format!(
+                    "{location} uses dynamic or invalid appId expression `{raw}`"
+                ));
+            }
+            let Some(val) = env.get(var_name) else {
+                return Err(format!(
+                    "{location} uses unresolvable dynamic appId `{raw}` (variable `{var_name}` is not defined)"
+                ));
+            };
+            if val.contains("${") {
+                return Err(format!(
+                    "{location} resolved `{var_name}` to dynamic appId `{val}`"
+                ));
+            }
+            out.push_str(val);
+            if out.len() > crate::executor::MAX_INTERPOLATED_BYTES {
+                return Err(format!("{location} appId exceeds maximum length"));
+            }
+            i = name_start + rel_close + 1;
+            continue;
+        }
+        let ch = raw[i..].chars().next().expect("valid UTF-8");
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+
+    if out.trim().is_empty() {
+        return Err(format!("{location} resolved to an empty appId"));
+    }
+    Ok(out)
+}
+
+fn check_confined_app_id(
+    raw: &str,
+    expected_app_id: &str,
+    env: &crate::executor::EnvStack,
+    location: &str,
+) -> Result<(), String> {
+    let resolved = resolve_static_app_id(raw, env, location)?;
+    if resolved != expected_app_id {
+        return Err(format!(
+            "{location} targets appId `{resolved}`, which does not match configured appId `{expected_app_id}`"
+        ));
+    }
+    Ok(())
+}
+
+fn check_steps_app_id_confinement(
+    steps: &[FlowStep],
+    expected_app_id: &str,
+    env: &mut crate::executor::EnvStack,
+    depth: usize,
+    scope: &str,
+) -> Result<(), String> {
+    if depth > MAX_PARSE_DEPTH {
+        return Err(format!(
+            "{scope} exceeds maximum nesting depth of {MAX_PARSE_DEPTH}"
+        ));
+    }
+    for step in steps {
+        match step {
+            FlowStep::LaunchApp(s) => {
+                if let Some(ref app_id) = s.app_id {
+                    check_confined_app_id(
+                        app_id,
+                        expected_app_id,
+                        env,
+                        &format!("{scope} launchApp"),
+                    )?;
+                }
+            }
+            FlowStep::StopApp(s) => {
+                if let Some(ref app_id) = s.app_id {
+                    check_confined_app_id(
+                        app_id,
+                        expected_app_id,
+                        env,
+                        &format!("{scope} stopApp"),
+                    )?;
+                }
+            }
+            FlowStep::KillApp(s) => {
+                if let Some(ref app_id) = s.app_id {
+                    check_confined_app_id(
+                        app_id,
+                        expected_app_id,
+                        env,
+                        &format!("{scope} killApp"),
+                    )?;
+                }
+            }
+            FlowStep::ClearState(s) => {
+                if let Some(ref app_id) = s.app_id {
+                    check_confined_app_id(
+                        app_id,
+                        expected_app_id,
+                        env,
+                        &format!("{scope} clearState"),
+                    )?;
+                }
+            }
+            FlowStep::RunFlow(s) => {
+                if let RunFlowTarget::Commands(ref cmds) = s.target {
+                    let mut child_frame = BTreeMap::new();
+                    for (k, v) in &s.env {
+                        let interp = env.interpolate(v).map_err(|err| {
+                            format!("runFlow env `{k}` interpolation failed: {err}")
+                        })?;
+                        child_frame.insert(k.clone(), interp);
+                    }
+                    let pushed = !child_frame.is_empty();
+                    if pushed {
+                        env.push(child_frame);
+                    }
+                    let res = check_steps_app_id_confinement(
+                        cmds,
+                        expected_app_id,
+                        env,
+                        depth + 1,
+                        "runFlow",
+                    );
+                    if pushed {
+                        env.pop();
+                    }
+                    res?;
+                }
+            }
+            FlowStep::Repeat(s) => {
+                check_steps_app_id_confinement(
+                    &s.commands,
+                    expected_app_id,
+                    env,
+                    depth + 1,
+                    "repeat",
+                )?;
+            }
+            FlowStep::Retry(s) => {
+                if let RunFlowTarget::Commands(ref cmds) = s.target {
+                    let mut child_frame = BTreeMap::new();
+                    for (k, v) in &s.env {
+                        let interp = env.interpolate(v).map_err(|err| {
+                            format!("retry env `{k}` interpolation failed: {err}")
+                        })?;
+                        child_frame.insert(k.clone(), interp);
+                    }
+                    let pushed = !child_frame.is_empty();
+                    if pushed {
+                        env.push(child_frame);
+                    }
+                    let res = check_steps_app_id_confinement(
+                        cmds,
+                        expected_app_id,
+                        env,
+                        depth + 1,
+                        "retry",
+                    );
+                    if pushed {
+                        env.pop();
+                    }
+                    res?;
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{FlowStep, parse_flow};
+    use super::{FlowStep, parse_flow, validate_flow_app_id_confinement};
     use std::collections::BTreeMap;
 
     #[test]
@@ -1902,5 +2159,93 @@ mod tests {
             }
             other => panic!("expected LaunchApp, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn app_id_confinement_accepts_matching_static_and_interpolated_targets() {
+        let yaml = r#"appId: ${TARGET_APP}
+env:
+  LOCAL_APP: ${TARGET_APP}
+onFlowStart:
+  - clearState: ${LOCAL_APP}
+onFlowComplete:
+  - stopApp: dev.deja.shop
+---
+- launchApp:
+    appId: ${TARGET_APP}
+- runFlow:
+    env:
+      NESTED_APP: dev.deja.shop
+    commands:
+      - repeat:
+          times: 1
+          commands:
+            - retry:
+                maxRetries: 1
+                commands:
+                  - killApp: ${NESTED_APP}
+"#;
+        let parsed = parse_flow(yaml).expect("parse flow");
+        let mut env = BTreeMap::new();
+        env.insert("TARGET_APP".to_string(), "dev.deja.shop".to_string());
+        validate_flow_app_id_confinement(&parsed, "dev.deja.shop", &env)
+            .expect("matching targets should pass");
+    }
+
+    #[test]
+    fn app_id_confinement_rejects_mismatches_in_header_hooks_and_nested_steps() {
+        let empty = BTreeMap::new();
+
+        let bad_header = parse_flow("appId: com.evil.app\n---\n- launchApp\n").unwrap();
+        assert!(validate_flow_app_id_confinement(&bad_header, "dev.deja.shop", &empty).is_err());
+
+        let bad_hook = parse_flow(
+            "appId: dev.deja.shop\nonFlowStart:\n  - clearState: com.apple.Preferences\n---\n- launchApp\n",
+        )
+        .unwrap();
+        assert!(validate_flow_app_id_confinement(&bad_hook, "dev.deja.shop", &empty).is_err());
+
+        let bad_complete = parse_flow(
+            "appId: dev.deja.shop\nonFlowComplete:\n  - stopApp: com.other.app\n---\n- launchApp\n",
+        )
+        .unwrap();
+        assert!(validate_flow_app_id_confinement(&bad_complete, "dev.deja.shop", &empty).is_err());
+
+        let bad_nested = parse_flow(
+            "appId: dev.deja.shop\n---\n- repeat:\n    times: 1\n    commands:\n      - runFlow:\n          commands:\n            - retry:\n                maxRetries: 1\n                commands:\n                  - killApp: com.other.app\n",
+        )
+        .unwrap();
+        assert!(validate_flow_app_id_confinement(&bad_nested, "dev.deja.shop", &empty).is_err());
+
+        let unresolved =
+            parse_flow("appId: dev.deja.shop\n---\n- launchApp: ${UNKNOWN_APP}\n").unwrap();
+        let err = validate_flow_app_id_confinement(&unresolved, "dev.deja.shop", &empty)
+            .expect_err("unresolved dynamic appId must fail");
+        assert!(err.contains("unresolvable dynamic appId"));
+    }
+
+    #[test]
+    fn app_id_confinement_validates_header_url_targets() {
+        let empty = BTreeMap::new();
+
+        // A native flow or file-backed subflow with `url:` (and no `appId:`) must fail closed.
+        let url_only = parse_flow("url: https://evil.example\n---\n- assertVisible: Hi\n").unwrap();
+        let err = validate_flow_app_id_confinement(&url_only, "dev.deja.shop", &empty)
+            .expect_err("url header must be rejected on native bundle appId");
+        assert!(err.contains("header url"));
+
+        // Dynamic unresolved `url:` must fail closed.
+        let dyn_url = parse_flow("url: ${TARGET_URL}\n---\n- assertVisible: Hi\n").unwrap();
+        assert!(
+            validate_flow_app_id_confinement(&dyn_url, "http://127.0.0.1:3000", &empty).is_err()
+        );
+
+        // Confined web flow whose `url:` matches `expected_app_id` passes; mismatched URL fails.
+        let ok_web = parse_flow("url: http://127.0.0.1:3000\n---\n- assertVisible: Hi\n").unwrap();
+        validate_flow_app_id_confinement(&ok_web, "http://127.0.0.1:3000", &empty)
+            .expect("matching web url header should pass");
+        assert!(
+            validate_flow_app_id_confinement(&ok_web, "http://127.0.0.1:4000", &empty).is_err()
+        );
     }
 }
