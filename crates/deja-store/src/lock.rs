@@ -203,6 +203,110 @@ pub(crate) fn is_eloop(err: &io::Error) -> bool {
     false
 }
 
+/// Verify that the nearest existing ancestor of `dir` resolves inside `canonical_root` and is a
+/// real directory *before* calling `fs::create_dir_all`, then re-verify after creation.
+///
+/// Prevents `create_dir_all` from traversing an in-workspace symlink to create directories outside
+/// the canonical workspace.
+pub(crate) fn ensure_confined_dir(
+    canonical_root: &Path,
+    dir: &Path,
+) -> Result<PathBuf, StoreError> {
+    let normalized = lexical_normalize(dir);
+    if normalized != canonical_root && !path_inside(canonical_root, &normalized) {
+        return Err(StoreError::InvalidWalkMemory(format!(
+            "directory escapes workspace: {}",
+            dir.display()
+        )));
+    }
+
+    let mut ancestor = normalized.clone();
+    loop {
+        match fs::symlink_metadata(&ancestor) {
+            Ok(_) => {
+                let canonical_ancestor = fs::canonicalize(&ancestor).map_err(|err| {
+                    StoreError::InvalidWalkMemory(format!(
+                        "ancestor path cannot be resolved ({}): {err}",
+                        ancestor.display()
+                    ))
+                })?;
+                if canonical_ancestor != canonical_root
+                    && !path_inside(canonical_root, &canonical_ancestor)
+                {
+                    return Err(StoreError::InvalidWalkMemory(format!(
+                        "ancestor escapes workspace: {}",
+                        ancestor.display()
+                    )));
+                }
+                let meta = fs::metadata(&canonical_ancestor).map_err(|err| {
+                    StoreError::InvalidWalkMemory(format!(
+                        "ancestor path cannot be read ({}): {err}",
+                        ancestor.display()
+                    ))
+                })?;
+                if !meta.is_dir() {
+                    return Err(StoreError::InvalidWalkMemory(format!(
+                        "ancestor path is not a directory: {}",
+                        ancestor.display()
+                    )));
+                }
+                break;
+            }
+            Err(err) if is_enotdir(&err) => {
+                return Err(StoreError::InvalidWalkMemory(format!(
+                    "path traverses a non-directory: {}",
+                    ancestor.display()
+                )));
+            }
+            Err(err) if err.kind() == ErrorKind::NotFound => {
+                if ancestor == canonical_root {
+                    return Err(StoreError::InvalidWalkMemory(format!(
+                        "workspace root does not exist: {}",
+                        canonical_root.display()
+                    )));
+                }
+                let Some(parent) = ancestor.parent() else {
+                    return Err(StoreError::InvalidWalkMemory(format!(
+                        "directory has no existing ancestor: {}",
+                        dir.display()
+                    )));
+                };
+                ancestor = parent.to_path_buf();
+            }
+            Err(err) => {
+                return Err(StoreError::InvalidWalkMemory(format!(
+                    "ancestor path cannot be inspected ({}): {err}",
+                    ancestor.display()
+                )));
+            }
+        }
+    }
+
+    fs::create_dir_all(&normalized)?;
+    let canonical_dir = fs::canonicalize(&normalized)?;
+    if canonical_dir != canonical_root && !path_inside(canonical_root, &canonical_dir) {
+        return Err(StoreError::InvalidWalkMemory(format!(
+            "directory escapes workspace: {}",
+            dir.display()
+        )));
+    }
+    Ok(canonical_dir)
+}
+
+/// Ensure `target.parent()` is confined inside `canonical_root` before creating any directories.
+pub(crate) fn ensure_confined_parent_dir(
+    canonical_root: &Path,
+    target: &Path,
+) -> Result<PathBuf, StoreError> {
+    let parent = target.parent().ok_or_else(|| {
+        StoreError::InvalidWalkMemory(format!(
+            "file has no parent directory: {}",
+            target.display()
+        ))
+    })?;
+    ensure_confined_dir(canonical_root, parent)
+}
+
 /// Resolve a store metadata path safely inside `workspace_root` without following unchecked
 /// paths outside the canonical workspace.
 ///
@@ -468,6 +572,18 @@ fn civil_from_days(days_since_epoch: i64) -> (i64, u32, u32) {
     (year, m as u32, d as u32)
 }
 
+/// Howard Hinnant's days-from-civil algorithm (Gregorian `(y, m, d)` -> days since 1970-01-01).
+fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
+    let y = year - i64::from(month <= 2);
+    let era = y.div_euclid(400);
+    let yoe = (y - era * 400) as u64;
+    let m = u64::from(month);
+    let d = u64::from(day);
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + (doe as i64) - 719_468
+}
+
 fn is_leap_year(year: u32) -> bool {
     (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400)
 }
@@ -494,12 +610,13 @@ fn parse_ascii_digits(bytes: &[u8]) -> Option<u32> {
     std::str::from_utf8(bytes).ok()?.parse::<u32>().ok()
 }
 
-/// Strictly validate an ISO-8601 / RFC 3339 timestamp string (`YYYY-MM-DDTHH:MM:SS[.fff](Z|±HH:MM)`).
+/// Parse an ISO-8601 / RFC 3339 timestamp (`YYYY-MM-DDTHH:MM:SS[.f{1..9}](Z|±HH:MM)`) into a
+/// normalized UTC instant `(unix_seconds, nanoseconds)` for exact chronological comparison.
 #[must_use]
-pub fn is_valid_iso8601(value: &str) -> bool {
+pub fn parse_rfc3339_utc(value: &str) -> Option<(i64, u32)> {
     let b = value.as_bytes();
     if b.len() < 20 {
-        return false;
+        return None;
     }
     if b[4] != b'-'
         || b[7] != b'-'
@@ -507,26 +624,14 @@ pub fn is_valid_iso8601(value: &str) -> bool {
         || b[13] != b':'
         || b[16] != b':'
     {
-        return false;
+        return None;
     }
-    let Some(year) = parse_ascii_digits(&b[0..4]) else {
-        return false;
-    };
-    let Some(month) = parse_ascii_digits(&b[5..7]) else {
-        return false;
-    };
-    let Some(day) = parse_ascii_digits(&b[8..10]) else {
-        return false;
-    };
-    let Some(hour) = parse_ascii_digits(&b[11..13]) else {
-        return false;
-    };
-    let Some(minute) = parse_ascii_digits(&b[14..16]) else {
-        return false;
-    };
-    let Some(second) = parse_ascii_digits(&b[17..19]) else {
-        return false;
-    };
+    let year = parse_ascii_digits(&b[0..4])?;
+    let month = parse_ascii_digits(&b[5..7])?;
+    let day = parse_ascii_digits(&b[8..10])?;
+    let hour = parse_ascii_digits(&b[11..13])?;
+    let minute = parse_ascii_digits(&b[14..16])?;
+    let second = parse_ascii_digits(&b[17..19])?;
     if !(1..=12).contains(&month)
         || day == 0
         || day > days_in_month(year, month)
@@ -534,41 +639,67 @@ pub fn is_valid_iso8601(value: &str) -> bool {
         || minute > 59
         || second > 59
     {
-        return false;
+        return None;
     }
 
     let mut pos = 19;
+    let mut nanos: u32 = 0;
     if pos < b.len() && b[pos] == b'.' {
         pos += 1;
         let frac_start = pos;
+        let mut scale: u32 = 100_000_000;
         while pos < b.len() && b[pos].is_ascii_digit() {
+            if scale == 0 {
+                return None;
+            }
+            nanos += u32::from(b[pos] - b'0') * scale;
+            scale /= 10;
             pos += 1;
         }
-        let frac_len = pos - frac_start;
-        if frac_len == 0 || frac_len > 9 {
-            return false;
+        if pos == frac_start {
+            return None;
         }
     }
 
     if pos >= b.len() {
-        return false;
+        return None;
     }
-    match b[pos] {
-        b'Z' | b'z' => pos + 1 == b.len(),
-        b'+' | b'-' => {
-            if b.len() != pos + 6 || b[pos + 3] != b':' {
-                return false;
+    let offset_secs: i64 = match b[pos] {
+        b'Z' | b'z' => {
+            if pos + 1 != b.len() {
+                return None;
             }
-            let Some(off_h) = parse_ascii_digits(&b[pos + 1..pos + 3]) else {
-                return false;
-            };
-            let Some(off_m) = parse_ascii_digits(&b[pos + 4..pos + 6]) else {
-                return false;
-            };
-            off_h <= 23 && off_m <= 59
+            0
         }
-        _ => false,
-    }
+        sign @ (b'+' | b'-') => {
+            if b.len() != pos + 6 || b[pos + 3] != b':' {
+                return None;
+            }
+            let off_h = parse_ascii_digits(&b[pos + 1..pos + 3])?;
+            let off_m = parse_ascii_digits(&b[pos + 4..pos + 6])?;
+            if off_h > 23 || off_m > 59 {
+                return None;
+            }
+            let mag = i64::from(off_h) * 3600 + i64::from(off_m) * 60;
+            if sign == b'+' { mag } else { -mag }
+        }
+        _ => return None,
+    };
+
+    let days = days_from_civil(i64::from(year), month, day);
+    let local_secs = days
+        .checked_mul(86_400)?
+        .checked_add(i64::from(hour) * 3600)?
+        .checked_add(i64::from(minute) * 60)?
+        .checked_add(i64::from(second))?;
+    let utc_secs = local_secs.checked_sub(offset_secs)?;
+    Some((utc_secs, nanos))
+}
+
+/// Strictly validate an ISO-8601 / RFC 3339 timestamp string (`YYYY-MM-DDTHH:MM:SS[.fff](Z|±HH:MM)`).
+#[must_use]
+pub fn is_valid_iso8601(value: &str) -> bool {
+    parse_rfc3339_utc(value).is_some()
 }
 
 /// Extract field 22 (process start time in clock ticks since boot) from a Linux `/proc/<pid>/stat` line.

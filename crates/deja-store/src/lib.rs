@@ -27,7 +27,8 @@ pub use lock::{
     BeforeMoveAsideHook, CanonicalMetadataTarget, LEGACY_JSON_MEMORY_PATH, LockHolder,
     SQLITE_MEMORY_PATH, WriterLock, canonical_metadata_target, current_hostname,
     inspect_lock_holder, is_stale, is_valid_iso8601, machine_id, now_iso8601,
-    parse_proc_start_ticks, process_start, store_metadata_path, validate_store_id,
+    parse_proc_start_ticks, parse_rfc3339_utc, process_start, store_metadata_path,
+    validate_store_id,
 };
 pub use migrate::{LegacyImportReport, import_legacy_walks_json, parse_legacy_walks_json};
 pub use schema::{

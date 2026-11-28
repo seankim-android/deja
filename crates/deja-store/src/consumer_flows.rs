@@ -18,8 +18,8 @@ use deja_core::{
 
 use crate::error::StoreError;
 use crate::lock::{
-    WriterLock, create_new_nofollow, generate_token, is_eloop, lexical_normalize,
-    open_read_nofollow, path_inside,
+    WriterLock, create_new_nofollow, ensure_confined_parent_dir, generate_token, is_eloop,
+    lexical_normalize, open_read_nofollow, parse_rfc3339_utc, path_inside,
 };
 use crate::store::{
     RecordValidationInput, SqliteWalkStore, UpsertWalkInput, ValidationRunRecord,
@@ -276,10 +276,16 @@ impl ConsumerFlows {
     /// Returns an empty manifest when the file does not exist; refuses symlinks, workspace escapes,
     /// invalid JSON, duplicate keys, or schema violations.
     pub fn load(&self) -> Result<WalkManifest, StoreError> {
+        self.load_with_raw().map(|(manifest, _)| manifest)
+    }
+
+    fn load_with_raw(&self) -> Result<(WalkManifest, Option<Vec<u8>>), StoreError> {
         let (root, target) = self.manifest_file()?;
         let lmeta = match fs::symlink_metadata(&target) {
             Ok(meta) => meta,
-            Err(err) if err.kind() == ErrorKind::NotFound => return Ok(empty_walk_manifest()),
+            Err(err) if err.kind() == ErrorKind::NotFound => {
+                return Ok((empty_walk_manifest(), None));
+            }
             Err(err) => {
                 return Err(StoreError::Core(CoreError::InvalidManifest(format!(
                     "the manifest cannot be read: {err}"
@@ -310,13 +316,18 @@ impl ConsumerFlows {
             };
             StoreError::Core(CoreError::InvalidManifest(detail))
         })?;
-        let mut contents = String::new();
-        file.read_to_string(&mut contents).map_err(|err| {
+        let mut raw_bytes = Vec::new();
+        file.read_to_end(&mut raw_bytes).map_err(|err| {
             StoreError::Core(CoreError::InvalidManifest(format!(
                 "the manifest cannot be read: {err}"
             )))
         })?;
-        Ok(parse_walk_manifest(&contents)?)
+        let contents = String::from_utf8(raw_bytes.clone()).map_err(|err| {
+            StoreError::Core(CoreError::InvalidManifest(format!(
+                "the manifest is not valid UTF-8: {err}"
+            )))
+        })?;
+        Ok((parse_walk_manifest(&contents)?, Some(raw_bytes)))
     }
 
     /// Validate that `manifest` serializes cleanly, contains zero forbidden fixture values,
@@ -344,6 +355,12 @@ impl ConsumerFlows {
     ) -> Result<T, StoreError> {
         let root = self.canonical_root()?;
         let lock_path = root.join(".deja/manifest.lock");
+        ensure_confined_parent_dir(&root, &lock_path).map_err(|err| {
+            StoreError::StoreLockUnavailable {
+                lock_path: lock_path.display().to_string(),
+                message: err.to_string(),
+            }
+        })?;
         let mut lock = None;
         for attempt in 0..=self.lock_retries {
             match WriterLock::acquire(lock_path.clone()) {
@@ -370,20 +387,21 @@ impl ConsumerFlows {
 
     /// Atomically write `manifest` to disk (caller should hold [`ConsumerFlows::with_manifest_lock`]).
     pub fn write_manifest(&self, manifest: &WalkManifest) -> Result<(), StoreError> {
+        let _ = self.write_manifest_returning_bytes(manifest)?;
+        Ok(())
+    }
+
+    fn write_manifest_returning_bytes(
+        &self,
+        manifest: &WalkManifest,
+    ) -> Result<Vec<u8>, StoreError> {
         let text = self.check_manifest(manifest)?;
         let (root, target) = self.manifest_file()?;
-        let parent = target.parent().ok_or_else(|| {
-            StoreError::Core(CoreError::InvalidManifest(
-                "the manifest path has no parent directory".to_string(),
-            ))
+        // Verify nearest existing ancestor confinement BEFORE `create_dir_all` runs.
+        ensure_confined_parent_dir(&root, &target).map_err(|err| match err {
+            StoreError::InvalidWalkMemory(msg) => StoreError::Core(CoreError::InvalidManifest(msg)),
+            other => other,
         })?;
-        fs::create_dir_all(parent)?;
-        let canonical_parent = fs::canonicalize(parent)?;
-        if canonical_parent != root && !path_inside(&root, &canonical_parent) {
-            return Err(StoreError::Core(CoreError::InvalidManifest(
-                "the manifest path escapes the workspace".to_string(),
-            )));
-        }
         if let Ok(lmeta) = fs::symlink_metadata(&target)
             && lmeta.file_type().is_symlink()
         {
@@ -392,12 +410,13 @@ impl ConsumerFlows {
             )));
         }
 
+        let bytes = text.into_bytes();
         let mut tmp_os = target.as_os_str().to_os_string();
         tmp_os.push(format!(".{}.{}.tmp", std::process::id(), generate_token()));
         let tmp = PathBuf::from(tmp_os);
         let write_res = (|| -> Result<(), StoreError> {
             let mut f = create_new_nofollow(&tmp)?;
-            f.write_all(text.as_bytes())?;
+            f.write_all(&bytes)?;
             f.sync_all()?;
             Ok(())
         })();
@@ -409,7 +428,7 @@ impl ConsumerFlows {
             let _ = fs::remove_file(&tmp);
             return Err(StoreError::Io(err));
         }
-        Ok(())
+        Ok(bytes)
     }
 
     /// Inspect one manifest entry's files on disk, computing live `closureSha256` and `assertionsSha256`.
@@ -625,7 +644,10 @@ impl ConsumerFlows {
 
         let matching_closure_runs: Vec<ValidationRunRecord> = all_runs
             .into_iter()
-            .filter(|r| r.closure_sha256.as_deref() == Some(entry.closure_sha256.as_str()))
+            .filter(|r| {
+                r.closure_sha256.as_deref() == Some(entry.closure_sha256.as_str())
+                    && r.flow_sha256 == main_sha256
+            })
             .collect();
 
         let rt_key = rt.unwrap_or("");
@@ -636,15 +658,17 @@ impl ConsumerFlows {
 
         let previous_successful = matching_closure_runs
             .iter()
-            .filter(|r| r.passed && r.runtime.as_deref().unwrap_or("") == rt_key)
-            .max_by(|a, b| a.validated_at.cmp(&b.validated_at))
-            .cloned()
+            .enumerate()
+            .filter(|(_, r)| r.passed && r.runtime.as_deref().unwrap_or("") == rt_key)
+            .max_by_key(|(idx, r)| (parse_rfc3339_utc(&r.validated_at), *idx))
+            .map(|(_, r)| r.clone())
             .or_else(|| {
                 matching_closure_runs
                     .iter()
-                    .filter(|r| r.passed)
-                    .max_by(|a, b| a.validated_at.cmp(&b.validated_at))
-                    .cloned()
+                    .enumerate()
+                    .filter(|(_, r)| r.passed)
+                    .max_by_key(|(idx, r)| (parse_rfc3339_utc(&r.validated_at), *idx))
+                    .map(|(_, r)| r.clone())
             });
 
         if let Some(run) = exact_run {
@@ -1009,19 +1033,12 @@ impl ConsumerFlows {
 
             // Keep the SQLite `BEGIN IMMEDIATE` transaction uncommitted until the manifest
             // conflict check and atomic manifest write succeed; if either fails, SQLite rolls
-            // back cleanly so prior validations are never clobbered. If SQLite commit later fails
-            // after writing the manifest, restore the prior manifest bytes on disk.
+            // back cleanly so prior validations are never clobbered. Capture `pre_merge_bytes`
+            // from the locked re-read right before writing `merged_bytes`, and on SQLite failure
+            // restore `pre_merge_bytes` ONLY if the on-disk manifest still equals `merged_bytes`
+            // so concurrent edits are never lost.
             let (_, manifest_target) = self.manifest_file()?;
-            let prior_manifest_bytes: Option<Vec<u8>> = if manifest_changed {
-                match fs::read(&manifest_target) {
-                    Ok(bytes) => Some(bytes),
-                    Err(err) if err.kind() == ErrorKind::NotFound => None,
-                    Err(err) => return Err(StoreError::Io(err)),
-                }
-            } else {
-                None
-            };
-            let mut manifest_written = false;
+            let mut rollback_state: Option<(Option<Vec<u8>>, Vec<u8>)> = None;
 
             let upsert_input = UpsertWalkInput {
                 identity: options.identity.clone(),
@@ -1041,8 +1058,8 @@ impl ConsumerFlows {
                         hook(&manifest_target);
                     }
                     // Re-read under lock BEFORE SQLite commits so concurrent edits to unrelated
-                    // goals are preserved while conflicting edits to this goal roll back SQLite.
-                    let current = self.load()?;
+                    // goals are preserved in both the merged write AND any rollback snapshot.
+                    let (current, pre_merge_bytes) = self.load_with_raw()?;
                     let current_entry = current
                         .walks
                         .iter()
@@ -1064,8 +1081,8 @@ impl ConsumerFlows {
                         hash_version: current.hash_version,
                         walks: merged_walks,
                     };
-                    self.write_manifest(&merged_manifest)?;
-                    manifest_written = true;
+                    let merged_bytes = self.write_manifest_returning_bytes(&merged_manifest)?;
+                    rollback_state = Some((pre_merge_bytes, merged_bytes));
                 }
                 Ok(())
             });
@@ -1073,20 +1090,44 @@ impl ConsumerFlows {
             match tx_res {
                 Ok((stored, ())) => Ok((stored, manifest_changed)),
                 Err(err) => {
-                    if manifest_written {
-                        match prior_manifest_bytes {
-                            Some(bytes) => {
-                                let _ = self.restore_manifest_bytes(&manifest_target, &bytes);
-                            }
-                            None => {
-                                let _ = fs::remove_file(&manifest_target);
-                            }
-                        }
+                    if let Some((pre_merge_bytes, merged_bytes)) = rollback_state {
+                        let _ = self.rollback_manifest_if_unchanged(
+                            &manifest_target,
+                            pre_merge_bytes.as_deref(),
+                            &merged_bytes,
+                        );
                     }
                     Err(err)
                 }
             }
         })
+    }
+
+    fn rollback_manifest_if_unchanged(
+        &self,
+        target: &Path,
+        pre_merge_bytes: Option<&[u8]>,
+        expected_written_bytes: &[u8],
+    ) -> Result<bool, StoreError> {
+        let mut file = match open_read_nofollow(target) {
+            Ok(f) => f,
+            Err(err) if err.kind() == ErrorKind::NotFound => return Ok(false),
+            Err(err) => return Err(StoreError::Io(err)),
+        };
+        let mut on_disk = Vec::new();
+        file.read_to_end(&mut on_disk)?;
+        if on_disk.as_slice() != expected_written_bytes {
+            return Ok(false);
+        }
+        match pre_merge_bytes {
+            Some(bytes) => self.restore_manifest_bytes(target, bytes)?,
+            None => match fs::remove_file(target) {
+                Ok(()) => {}
+                Err(err) if err.kind() == ErrorKind::NotFound => {}
+                Err(err) => return Err(StoreError::Io(err)),
+            },
+        }
+        Ok(true)
     }
 
     fn restore_manifest_bytes(&self, target: &Path, bytes: &[u8]) -> Result<(), StoreError> {
@@ -1112,5 +1153,53 @@ impl ConsumerFlows {
             return Err(StoreError::Io(err));
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rollback_manifest_if_unchanged_skips_when_concurrent_writer_replaced_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "deja-cf-rollback-{}-{}",
+            std::process::id(),
+            generate_token()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("deja.walks.json");
+        let consumer =
+            ConsumerFlows::new(ConsumerFlowsOptions::new(&dir, "deja.walks.json")).unwrap();
+
+        let pre = b"{\"manifestVersion\":1,\"hashVersion\":1,\"walks\":[{\"goal\":\"A\"}]}\n";
+        let merged = b"{\"manifestVersion\":1,\"hashVersion\":1,\"walks\":[{\"goal\":\"A\"},{\"goal\":\"B\"}]}\n";
+        let newer = b"{\"manifestVersion\":1,\"hashVersion\":1,\"walks\":[{\"goal\":\"A\"},{\"goal\":\"C\"}]}\n";
+
+        // Case 1: on-disk bytes were concurrently overwritten -> MUST NOT roll back!
+        fs::write(&target, newer).unwrap();
+        let restored = consumer
+            .rollback_manifest_if_unchanged(&target, Some(pre), merged)
+            .unwrap();
+        assert!(!restored);
+        assert_eq!(fs::read(&target).unwrap(), newer);
+
+        // Case 2: on-disk bytes still equal `merged` -> cleanly restores `pre`!
+        fs::write(&target, merged).unwrap();
+        let restored = consumer
+            .rollback_manifest_if_unchanged(&target, Some(pre), merged)
+            .unwrap();
+        assert!(restored);
+        assert_eq!(fs::read(&target).unwrap(), pre);
+
+        // Case 3: `pre` is None and on-disk equals `merged` -> cleanly removes target!
+        fs::write(&target, merged).unwrap();
+        let restored = consumer
+            .rollback_manifest_if_unchanged(&target, None, merged)
+            .unwrap();
+        assert!(restored);
+        assert!(!target.exists());
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

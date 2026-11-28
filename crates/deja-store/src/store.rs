@@ -27,8 +27,9 @@ use tracing::debug;
 use crate::error::StoreError;
 use crate::lock::{
     BeforeMoveAsideHook, SQLITE_MEMORY_PATH, WriterLock, canonical_metadata_target,
-    create_new_nofollow, generate_token, is_valid_iso8601, lexical_normalize, now_iso8601,
-    open_read_nofollow, path_inside, store_metadata_path,
+    create_new_nofollow, ensure_confined_dir, ensure_confined_parent_dir, generate_token,
+    is_valid_iso8601, lexical_normalize, now_iso8601, open_read_nofollow, parse_rfc3339_utc,
+    path_inside, store_metadata_path,
 };
 use crate::schema::{
     BuildFingerprintCacheIntegrityFields, ValidationHistoryIntegrityFields,
@@ -346,7 +347,10 @@ struct StoreInner {
 #[derive(Debug, Default)]
 enum ReadOnlyConnState {
     #[default]
-    Direct,
+    None,
+    Direct {
+        file_id: Option<FileIdentity>,
+    },
     Immutable {
         db_stamp: Option<DbFileStamp>,
     },
@@ -366,8 +370,23 @@ impl ReadOnlyConnState {
     }
 }
 
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FileIdentity {
+    dev: u64,
+    ino: u64,
+}
+
+#[cfg(not(unix))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FileIdentity {
+    len: u64,
+    modified: SystemTime,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct DbFileStamp {
+    file_id: FileIdentity,
     len: u64,
     modified: SystemTime,
     change_counter: [u8; 4],
@@ -375,6 +394,7 @@ struct DbFileStamp {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SidecarStamp {
+    file_id: FileIdentity,
     len: u64,
     modified: SystemTime,
 }
@@ -412,6 +432,7 @@ pub(crate) struct ValidatedWalkRow {
     pub last_at: String,
     pub origin: Option<WalkOrigin>,
     pub exploration: Option<ExplorationDetails>,
+    pub exploration_json: Option<String>,
     pub has_files: bool,
     pub legacy_closure: bool,
     pub closure_sha256: Option<String>,
@@ -497,7 +518,7 @@ impl SqliteWalkStore {
             inner: Mutex::new(StoreInner {
                 mode: OpenMode::Writable,
                 conn: Some(conn),
-                ro_state: ReadOnlyConnState::Direct,
+                ro_state: ReadOnlyConnState::None,
                 lock: Some(lock),
             }),
         })
@@ -518,7 +539,7 @@ impl SqliteWalkStore {
             let (conn, state) = open_readonly_connection(&target.path)?;
             (Some(conn), state)
         } else {
-            (None, ReadOnlyConnState::Direct)
+            (None, ReadOnlyConnState::None)
         };
 
         Ok(Self {
@@ -602,9 +623,13 @@ impl SqliteWalkStore {
         }
         if guard.mode == OpenMode::ReadOnly && guard.conn.is_some() {
             let needs_reopen = match &guard.ro_state {
-                ReadOnlyConnState::Direct => false,
+                ReadOnlyConnState::None => true,
+                ReadOnlyConnState::Direct { file_id } => {
+                    file_id.is_none() || read_file_identity(&target.path) != *file_id
+                }
                 ReadOnlyConnState::Immutable { db_stamp } => {
-                    non_empty_wal_exists(&target.path)
+                    db_stamp.is_none()
+                        || non_empty_wal_exists(&target.path)
                         || read_db_file_stamp(&target.path) != *db_stamp
                 }
                 ReadOnlyConnState::WalSnapshot {
@@ -612,7 +637,9 @@ impl SqliteWalkStore {
                     wal_stamp,
                     ..
                 } => {
-                    shm_sidecar_exists(&target.path)
+                    db_stamp.is_none()
+                        || wal_stamp.is_none()
+                        || shm_sidecar_exists(&target.path)
                         || !non_empty_wal_exists(&target.path)
                         || read_db_file_stamp(&target.path) != *db_stamp
                         || read_sidecar_stamp(&append_suffix(&target.path, "-wal")) != *wal_stamp
@@ -1205,10 +1232,6 @@ impl SqliteWalkStore {
             };
 
             let next_origin = origin_str.or_else(|| walk.origin.map(origin_to_str));
-            let exp_json = walk
-                .exploration
-                .as_ref()
-                .map(|e| serde_json::to_string(e).expect("ExplorationDetails serializes"));
 
             let walk_integrity = compute_walk_integrity(&WalkIntegrityFields {
                 goal: &walk.goal,
@@ -1224,7 +1247,7 @@ impl SqliteWalkStore {
                 last_passed: validation.passed,
                 last_at: &validation.at,
                 origin: next_origin,
-                exploration_json: exp_json.as_deref(),
+                exploration_json: walk.exploration_json.as_deref(),
                 has_files: next_has_files,
                 legacy_closure: next_legacy_closure,
                 closure_sha256: closure_sha256.as_deref(),
@@ -1380,13 +1403,7 @@ impl SqliteWalkStore {
         let snapshot_dir = canonical_root.join(&rel_dir);
 
         let write_result = (|| -> Result<Vec<CandidateSnapshotFile>, StoreError> {
-            fs::create_dir_all(&snapshot_dir)?;
-            let canonical_snap_dir = fs::canonicalize(&snapshot_dir)?;
-            if !path_inside(&canonical_root, &canonical_snap_dir) {
-                return Err(StoreError::InvalidWalkMemory(
-                    "snapshot directory escapes workspace".to_string(),
-                ));
-            }
+            let canonical_snap_dir = ensure_confined_dir(&canonical_root, &snapshot_dir)?;
             let mut copied = Vec::with_capacity(closure.files.len());
             for file in &closure.files {
                 let dest = lexical_normalize(&canonical_snap_dir.join(&file.path));
@@ -1479,32 +1496,20 @@ impl SqliteWalkStore {
         let plan = plan_stored_closure(&closure, &goal_slug, &platform_slug);
 
         let flow_root = lexical_normalize(&canonical_root.join(".deja/flows"));
-        let mut newly_written: Vec<PathBuf> = Vec::new();
-        let write_files_res = (|| -> Result<(), StoreError> {
-            for (rel_dest, bytes) in &plan.writes {
-                let dest = lexical_normalize(&canonical_root.join(rel_dest));
-                if !path_inside(&flow_root, &dest) {
-                    return Err(StoreError::InvalidWalkMemory(format!(
-                        "planned flow file escapes .deja/flows: {rel_dest}"
-                    )));
-                }
-                let existed = dest.exists();
-                atomic_write_confined_file(&canonical_root, &dest, bytes)?;
-                if !existed {
-                    newly_written.push(dest);
-                }
+        // Publish content-addressed flow files atomically via private `.tmp` staging files.
+        // Never unlink published content-addressed paths on SQLite failure because another shard
+        // may already reference the identical content-addressed file under shared `.deja/flows/`.
+        for (rel_dest, bytes) in &plan.writes {
+            let dest = lexical_normalize(&canonical_root.join(rel_dest));
+            if !path_inside(&flow_root, &dest) {
+                return Err(StoreError::InvalidWalkMemory(format!(
+                    "planned flow file escapes .deja/flows: {rel_dest}"
+                )));
             }
-            Ok(())
-        })();
-
-        if let Err(err) = write_files_res {
-            for path in newly_written.into_iter().rev() {
-                let _ = fs::remove_file(path);
-            }
-            return Err(err);
+            atomic_write_confined_file(&canonical_root, &dest, bytes)?;
         }
 
-        let upsert_res = self.upsert_walk(&UpsertWalkInput {
+        self.upsert_walk(&UpsertWalkInput {
             identity: identity.clone(),
             flow_path: plan.flow_path,
             flow_sha256: plan.flow_sha256,
@@ -1514,14 +1519,7 @@ impl SqliteWalkStore {
             validation: options.validation.clone(),
             exploration: options.exploration.clone(),
             repair_history: options.repair_history.clone(),
-        });
-
-        if upsert_res.is_err() {
-            for path in newly_written.into_iter().rev() {
-                let _ = fs::remove_file(path);
-            }
-        }
-        upsert_res
+        })
     }
 
     /// List every stored walk in deterministic `id` order, verifying every row's `integrity_sha256`.
@@ -1926,13 +1924,42 @@ fn non_empty_wal_exists(db_path: &Path) -> bool {
         .is_some_and(|meta| meta.file_type().is_file() && meta.len() > 0)
 }
 
+fn file_identity_from_metadata(meta: &Metadata) -> Option<FileIdentity> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        Some(FileIdentity {
+            dev: meta.dev(),
+            ino: meta.ino(),
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        let modified = meta.modified().ok()?;
+        Some(FileIdentity {
+            len: meta.len(),
+            modified,
+        })
+    }
+}
+
+fn read_file_identity(path: &Path) -> Option<FileIdentity> {
+    let meta = fs::symlink_metadata(path).ok()?;
+    if !meta.file_type().is_file() {
+        return None;
+    }
+    file_identity_from_metadata(&meta)
+}
+
 fn read_sidecar_stamp(path: &Path) -> Option<SidecarStamp> {
     let meta = fs::symlink_metadata(path).ok()?;
     if !meta.file_type().is_file() {
         return None;
     }
+    let file_id = file_identity_from_metadata(&meta)?;
     let modified = meta.modified().ok()?;
     Some(SidecarStamp {
+        file_id,
         len: meta.len(),
         modified,
     })
@@ -1941,6 +1968,7 @@ fn read_sidecar_stamp(path: &Path) -> Option<SidecarStamp> {
 fn read_db_file_stamp(path: &Path) -> Option<DbFileStamp> {
     let mut file = open_read_nofollow(path).ok()?;
     let meta = file.metadata().ok()?;
+    let file_id = file_identity_from_metadata(&meta)?;
     let modified = meta.modified().ok()?;
     let mut header = [0u8; 28];
     let change_counter = if file.read_exact(&mut header).is_ok() {
@@ -1949,6 +1977,7 @@ fn read_db_file_stamp(path: &Path) -> Option<DbFileStamp> {
         [0u8; 4]
     };
     Some(DbFileStamp {
+        file_id,
         len: meta.len(),
         modified,
         change_counter,
@@ -2013,6 +2042,7 @@ fn open_readonly_connection(path: &Path) -> Result<(Connection, ReadOnlyConnStat
     if !wal_has_frames && !shm_exists {
         // Cleanly closed DB (no active WAL frames, no -shm): open immutable so SQLite creates
         // ZERO -wal and ZERO -shm files in the workspace.
+        let db_stamp = read_db_file_stamp(path);
         let uri = encode_sqlite_uri_path(path);
         let flags = OpenFlags::SQLITE_OPEN_READ_ONLY
             | OpenFlags::SQLITE_OPEN_URI
@@ -2024,7 +2054,6 @@ fn open_readonly_connection(path: &Path) -> Result<(Connection, ReadOnlyConnStat
             StoreError::InvalidWalkMemory(format!("walks.sqlite cannot be read: {err}"))
         })?;
         verify_readonly_schema(&conn)?;
-        let db_stamp = read_db_file_stamp(path);
         return Ok((conn, ReadOnlyConnState::Immutable { db_stamp }));
     }
 
@@ -2091,7 +2120,9 @@ fn open_readonly_connection(path: &Path) -> Result<(Connection, ReadOnlyConnStat
     }
 
     // Live writer already maintains -shm alongside -wal: open standard read-only directly without
-    // creating new sidecar files, seeing all live committed WAL frames.
+    // creating new sidecar files, seeing all live committed WAL frames. Capture `(dev, ino)` before
+    // opening so an atomic rename replacement triggers a clean reopen on the next read.
+    let file_id = read_file_identity(path);
     let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
     let conn = Connection::open_with_flags(path, flags).map_err(|err| {
         StoreError::InvalidWalkMemory(format!("walks.sqlite cannot be opened read-only: {err}"))
@@ -2100,7 +2131,7 @@ fn open_readonly_connection(path: &Path) -> Result<(Connection, ReadOnlyConnStat
         StoreError::InvalidWalkMemory(format!("walks.sqlite cannot be read: {err}"))
     })?;
     verify_readonly_schema(&conn)?;
-    Ok((conn, ReadOnlyConnState::Direct))
+    Ok((conn, ReadOnlyConnState::Direct { file_id }))
 }
 
 fn miss(reason: CacheMissReason) -> LookupResult {
@@ -2255,6 +2286,7 @@ fn validate_walk_row_struct(raw: RawWalkRow) -> Result<ValidatedWalkRow, StoreEr
         last_at: raw.last_at,
         origin,
         exploration,
+        exploration_json: raw.exploration_json,
         has_files: raw.has_files == 1,
         legacy_closure: raw.legacy_closure == 1,
         closure_sha256: raw.closure_sha256,
@@ -2553,37 +2585,78 @@ fn query_all_runs_for_walk(
         .collect()
 }
 
+fn read_validation_run_row_with_id(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<(i64, RawValidationRunRow)> {
+    Ok((
+        row.get(0)?,
+        RawValidationRunRow {
+            walk_id: row.get(1)?,
+            build_fingerprint: row.get(2)?,
+            runtime: row.get(3)?,
+            flow_path: row.get(4)?,
+            flow_sha256: row.get(5)?,
+            closure_sha256: row.get(6)?,
+            subflow_files_json: row.get(7)?,
+            passed: row.get(8)?,
+            flaky: row.get(9)?,
+            validated_at: row.get(10)?,
+            origin: row.get(11)?,
+            failure_category: row.get(12)?,
+            report_path: row.get(13)?,
+            duration_ms: row.get(14)?,
+            phase_timings_json: row.get(15)?,
+            integrity_sha256: row.get(16)?,
+        },
+    ))
+}
+
 fn query_latest_passing_run(
     conn: &Connection,
     walk_id: i64,
     runtime: Option<&str>,
 ) -> Result<Option<ValidationRunRecord>, StoreError> {
-    let raw = if let Some(rt) = runtime {
+    let rows: Vec<(i64, RawValidationRunRow)> = if let Some(rt) = runtime {
         let mut stmt = conn.prepare_cached(
-            "SELECT walk_id, build_fingerprint, runtime, flow_path, flow_sha256, closure_sha256,
+            "SELECT id, walk_id, build_fingerprint, runtime, flow_path, flow_sha256, closure_sha256,
                     subflow_files_json, passed, flaky, validated_at, origin, failure_category,
                     report_path, duration_ms, phase_timings_json, integrity_sha256
              FROM validation_runs
              WHERE walk_id = ?1 AND passed = 1 AND runtime_key = ?2
-             ORDER BY validated_at DESC, id DESC
-             LIMIT 1",
+             ORDER BY id ASC",
         )?;
-        stmt.query_row(params![walk_id, rt], read_validation_run_row)
-            .optional()?
+        stmt.query_map(params![walk_id, rt], read_validation_run_row_with_id)?
+            .collect::<Result<Vec<_>, _>>()?
     } else {
         let mut stmt = conn.prepare_cached(
-            "SELECT walk_id, build_fingerprint, runtime, flow_path, flow_sha256, closure_sha256,
+            "SELECT id, walk_id, build_fingerprint, runtime, flow_path, flow_sha256, closure_sha256,
                     subflow_files_json, passed, flaky, validated_at, origin, failure_category,
                     report_path, duration_ms, phase_timings_json, integrity_sha256
              FROM validation_runs
              WHERE walk_id = ?1 AND passed = 1
-             ORDER BY validated_at DESC, id DESC
-             LIMIT 1",
+             ORDER BY id ASC",
         )?;
-        stmt.query_row([walk_id], read_validation_run_row)
-            .optional()?
+        stmt.query_map([walk_id], read_validation_run_row_with_id)?
+            .collect::<Result<Vec<_>, _>>()?
     };
-    raw.map(validate_run_row_struct).transpose()
+
+    let mut best: Option<((i64, u32), i64, ValidationRunRecord)> = None;
+    for (row_id, raw) in rows {
+        let record = validate_run_row_struct(raw)?;
+        let instant = parse_rfc3339_utc(&record.validated_at).ok_or_else(|| {
+            StoreError::InvalidWalkMemory(
+                "validation_runs row has unparseable validated_at timestamp".to_string(),
+            )
+        })?;
+        let replace = match &best {
+            None => true,
+            Some((best_instant, best_id, _)) => (instant, row_id) > (*best_instant, *best_id),
+        };
+        if replace {
+            best = Some((instant, row_id, record));
+        }
+    }
+    Ok(best.map(|(_, _, record)| record))
 }
 
 fn query_validation_history(
@@ -3007,17 +3080,7 @@ fn atomic_write_confined_file(
     dest: &Path,
     bytes: &[u8],
 ) -> Result<(), StoreError> {
-    let parent = dest.parent().ok_or_else(|| {
-        StoreError::InvalidWalkMemory(format!("file has no parent directory: {}", dest.display()))
-    })?;
-    fs::create_dir_all(parent)?;
-    let canonical_parent = fs::canonicalize(parent)?;
-    if canonical_parent != canonical_root && !path_inside(canonical_root, &canonical_parent) {
-        return Err(StoreError::InvalidWalkMemory(format!(
-            "file parent escapes workspace: {}",
-            dest.display()
-        )));
-    }
+    let _ = ensure_confined_parent_dir(canonical_root, dest)?;
     if let Ok(lmeta) = fs::symlink_metadata(dest)
         && lmeta.file_type().is_symlink()
     {

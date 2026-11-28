@@ -318,14 +318,29 @@ pub fn evaluate_gate(
                 }
 
                 if let Some((ref expected_closure, ref main_sha)) = manifest_closure_filter {
-                    evidence.push(ShardEvidence {
-                        store_label: store_label.clone(),
-                        outcome: GateOutcome::Passed,
-                        validated_at: Some(run.validated_at),
-                        flow_sha256: Some(main_sha.clone()),
-                        closure_sha256: Some(expected_closure.clone()),
-                        detail: None,
-                    });
+                    if &run.flow_sha256 != main_sha {
+                        let detail = format!(
+                            "recorded run flowSha256 ({}) does not match current manifest main flow ({})",
+                            run.flow_sha256, main_sha
+                        );
+                        evidence.push(ShardEvidence {
+                            store_label: store_label.clone(),
+                            outcome: GateOutcome::FlowChanged,
+                            validated_at: Some(run.validated_at),
+                            flow_sha256: Some(run.flow_sha256),
+                            closure_sha256: run.closure_sha256,
+                            detail: Some(detail),
+                        });
+                    } else {
+                        evidence.push(ShardEvidence {
+                            store_label: store_label.clone(),
+                            outcome: GateOutcome::Passed,
+                            validated_at: Some(run.validated_at),
+                            flow_sha256: Some(main_sha.clone()),
+                            closure_sha256: Some(expected_closure.clone()),
+                            detail: None,
+                        });
+                    }
                 } else {
                     match store.verify_classic_stored_flow(&walk, &run)? {
                         ClassicFlowCheck::Ok(_) => {
