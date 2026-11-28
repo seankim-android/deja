@@ -235,15 +235,15 @@ Sizes: S is under a day, M is a few days, L is a week or more.
 ## Risks and open questions
 
 - **Name and scope.** Decided 2026-11-27 (superseding the 2026-11-22 `@deja-qa` choice): GitHub
-  org is `deja-run` (`github.com/deja-run/deja`), packages publish under `@deja-run`, and target
-  project domains are `deja-run.com` and `deja-run.dev`. Plain `deja` is taken in too many places:
+  org is `deja-run` (`github.com/deja-run/deja`), packages publish under `@deja-run`, and the
+  project domain is `deja-run.com`. Plain `deja` is taken in too many places:
   the `deja` npm package (v0.1.12, a dotfiles CLI by another maintainer), `deja.dev`, `deja.sh`,
   and `deja.run`. Checked 2026-11-27:
   - `@deja-run` on npm and `deja-run` on crates.io return 404 (not registered).
-  - `deja-run.com` (WHOIS) and `deja-run.dev` (registry RDAP) return not found (unregistered). A
-    registrar can still mark a name premium or reserved.
+  - `deja-run.com` (WHOIS) returns not found (unregistered). A registrar can still mark a name
+    premium or reserved.
   - The `deja-run` GitHub org was set up on 2026-11-27. Still to do: claim the `deja-run` npm org
-    and buy the domain(s).
+    and buy `deja-run.com`.
   - Test data never uses the project domain. Fixture logins use the reserved `example.com`.
 - **Maestro version pinning.** All evidence is on Maestro 2.12.0, and Maestro Web is beta. Done
   (DEJA-24): Déjà pins 2.12.0 and its zip sha256, installs it with `deja engine install` into

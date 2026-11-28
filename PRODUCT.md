@@ -48,7 +48,7 @@ Learn once with a model, then replay with no model. Verification gates every sav
 - Original work only. No imagery from *The Matrix* or other Warner Bros. properties: no green digital or code rain, no black cat, no katakana columns.
 - Formerly called WalkCache. That name and the "WC" placeholder favicon are retired and not brand assets.
 - The trademark policy is in TRADEMARKS.md (draft, DEJA-27).
-- npm scope `@deja-run`, domain `deja-run.com` / `deja-run.dev`.
+- npm scope `@deja-run`, domain deja-run.com.
 
 ## Evidence on Hand
 

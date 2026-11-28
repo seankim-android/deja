@@ -13,7 +13,7 @@ The Déjà source code is licensed under the [Apache License 2.0](LICENSE). You 
 Sean Kim ("the owner", the same person as the Maintainer in CLA.md) or a successor entity the owner designates uses these marks:
 
 - **Déjà**, as the name of this software
-- **deja-run**, including the `@deja-run` npm scope and the `deja-run.com` / `deja-run.dev` domains
+- **deja-run**, including the `@deja-run` npm scope and the deja-run.com domain
 - **The Déjà logo and mark**: the files in `docs/brand/` and `public/favicon.svg`
 
 The owner may use ™ with these names. No trademark registration is claimed.
