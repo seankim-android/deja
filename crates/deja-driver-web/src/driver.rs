@@ -1448,6 +1448,18 @@ impl PlatformDriver for WebDriver {
         &self.capabilities
     }
 
+    fn session_attach_count(&self) -> Option<u64> {
+        Some(self.attach_count())
+    }
+
+    fn needs_idle_reuse_prep(&self) -> bool {
+        self.context_dirty.load(Ordering::SeqCst)
+    }
+
+    fn prepare_idle_reuse<'a>(&'a self, cancel: &'a CancellationToken) -> DriverFuture<'a, ()> {
+        self.ensure_session(cancel)
+    }
+
     fn ensure_session<'a>(&'a self, cancel: &'a CancellationToken) -> DriverFuture<'a, ()> {
         Box::pin(async move {
             let _ = self.ensure_or_recover_session(cancel).await?;

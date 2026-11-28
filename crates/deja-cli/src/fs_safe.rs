@@ -238,6 +238,16 @@ fn temp_nonce() -> String {
 /// Atomically write `bytes` to `target` using an `O_EXCL | O_NOFOLLOW` sibling temporary file
 /// followed by `sync_all` and `rename`. Refuses to replace a symlink or directory.
 pub fn write_atomic_nofollow_excl(target: &Path, bytes: &[u8]) -> io::Result<()> {
+    write_atomic_nofollow_excl_with_mode(target, bytes, None)
+}
+
+/// Atomically write `bytes` to `target` using an `O_EXCL | O_NOFOLLOW` sibling temporary file
+/// created with explicit Unix permissions `mode` (when `Some`), followed by `sync_all` and `rename`.
+pub fn write_atomic_nofollow_excl_with_mode(
+    target: &Path,
+    bytes: &[u8],
+    unix_mode: Option<u32>,
+) -> io::Result<()> {
     if let Some(parent) = target.parent()
         && !parent.as_os_str().is_empty()
     {
@@ -271,7 +281,7 @@ pub fn write_atomic_nofollow_excl(target: &Path, bytes: &[u8]) -> io::Result<()>
     let temp_path = target.with_file_name(format!(".{file_name}.{}.tmp", temp_nonce()));
 
     let write_res = (|| -> io::Result<()> {
-        let mut f = create_new_nofollow(&temp_path)?;
+        let mut f = create_new_nofollow_with_mode(&temp_path, unix_mode)?;
         f.write_all(bytes)?;
         f.sync_all()?;
         Ok(())
@@ -297,6 +307,30 @@ pub fn write_atomic_nofollow_excl(target: &Path, bytes: &[u8]) -> io::Result<()>
         return Err(err);
     }
     Ok(())
+}
+
+fn create_new_nofollow_with_mode(path: &Path, unix_mode: Option<u32>) -> io::Result<File> {
+    let mut opts = OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.custom_flags(libc::O_NOFOLLOW);
+        if let Some(mode) = unix_mode {
+            opts.mode(mode);
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = unix_mode;
+    }
+    let file = opts.open(path)?;
+    #[cfg(unix)]
+    if let Some(mode) = unix_mode {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(fs::Permissions::from_mode(mode))?;
+    }
+    Ok(file)
 }
 
 struct TempFileGuard {

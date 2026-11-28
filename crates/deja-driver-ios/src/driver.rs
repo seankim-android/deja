@@ -1196,6 +1196,10 @@ impl PlatformDriver for IosDriver {
         &self.capabilities
     }
 
+    fn session_attach_count(&self) -> Option<u64> {
+        Some(self.attach_count())
+    }
+
     fn ensure_session<'a>(&'a self, cancel: &'a CancellationToken) -> DriverFuture<'a, ()> {
         Box::pin(async move {
             let _ = self.ensure_session_handle(cancel).await?;

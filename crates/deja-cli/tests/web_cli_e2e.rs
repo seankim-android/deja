@@ -212,6 +212,7 @@ fn run_deja(ws: &Path, tmp_dir: &Path, args: &[&str]) -> std::process::Output {
         .args(args)
         .env("PATH", SANITIZED_SYSTEM_PATH)
         .env("TMPDIR", tmp_dir)
+        .env("DEJA_NO_DAEMON", "1")
         .env_remove("DEJA_MAESTRO")
         .env_remove("DEJA_DEVICE")
         .stdin(Stdio::null());
@@ -222,6 +223,32 @@ fn run_deja(ws: &Path, tmp_dir: &Path, args: &[&str]) -> std::process::Output {
         cmd.env("CHROME_PATH", chrome);
     }
     cmd.output().expect("spawn deja binary")
+}
+
+#[cfg(unix)]
+fn run_deja_with_daemon(
+    ws: &Path,
+    tmp_dir: &Path,
+    daemon_dir: &Path,
+    args: &[&str],
+) -> std::process::Output {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_deja"));
+    cmd.current_dir(ws)
+        .args(args)
+        .env("PATH", SANITIZED_SYSTEM_PATH)
+        .env("TMPDIR", tmp_dir)
+        .env("DEJA_DAEMON_DIR", daemon_dir)
+        .env_remove("DEJA_NO_DAEMON")
+        .env_remove("DEJA_MAESTRO")
+        .env_remove("DEJA_DEVICE")
+        .stdin(Stdio::null());
+    if let Ok(chrome) = std::env::var("DEJA_CHROME") {
+        cmd.env("DEJA_CHROME", chrome);
+    }
+    if let Ok(chrome) = std::env::var("CHROME_PATH") {
+        cmd.env("CHROME_PATH", chrome);
+    }
+    cmd.output().expect("spawn deja binary (daemon mode)")
 }
 
 #[test]
@@ -722,4 +749,221 @@ async fn live_web_dom_ancestor_opacity_and_clipped_visible_frame_in_chromium() {
     driver.shutdown().await.unwrap();
     stop.store(true, Ordering::SeqCst);
     let _ = srv_handle.join();
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "requires live local Chromium / Google Chrome binary"]
+fn live_web_cli_warm_daemon_reuses_chromium_and_cleans_up_on_stop() {
+    struct DaemonCleanupGuard {
+        ws: PathBuf,
+        tmp: PathBuf,
+        daemon_dir: PathBuf,
+    }
+
+    impl Drop for DaemonCleanupGuard {
+        fn drop(&mut self) {
+            let _ =
+                run_deja_with_daemon(&self.ws, &self.tmp, &self.daemon_dir, &["daemon", "stop"]);
+            let _ = fs::remove_dir_all(&self.daemon_dir);
+        }
+    }
+
+    let spike_dir = repo_root().join("spikes/002-web-deja");
+    let ws = TempDirGuard::new("daemon-ws");
+    let isolated_tmp = TempDirGuard::new("daemon-tmp");
+
+    // Keep daemon directory short (< 104 bytes for macOS `sun_path`).
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock")
+        .as_nanos();
+    let daemon_dir = PathBuf::from(format!(
+        "/tmp/dj-wd-{}-{:x}",
+        std::process::id(),
+        nanos & 0xffff_ffff
+    ));
+    let _cleanup = DaemonCleanupGuard {
+        ws: ws.path().to_path_buf(),
+        tmp: isolated_tmp.path().to_path_buf(),
+        daemon_dir: daemon_dir.clone(),
+    };
+
+    let public_dst = ws.path().join("public");
+    fs::create_dir_all(&public_dst).unwrap();
+    for file in ["index.html", "app.js", "styles.css"] {
+        fs::copy(spike_dir.join("public").join(file), public_dst.join(file))
+            .expect("copy public fixture file");
+    }
+
+    let server = FixtureWebServer::start(public_dst, "WC-1001");
+    let old_origin = "127.0.0.1:4174";
+    let new_origin = format!("127.0.0.1:{}", server.port());
+
+    let raw_cfg = fs::read_to_string(spike_dir.join("deja.config.json")).unwrap();
+    fs::write(
+        ws.path().join("deja.config.json"),
+        raw_cfg.replace(old_origin, &new_origin),
+    )
+    .unwrap();
+
+    fs::create_dir_all(ws.path().join("flows")).unwrap();
+    let raw_flow = fs::read_to_string(spike_dir.join("flows/checkout.yaml")).unwrap();
+    fs::write(
+        ws.path().join("flows/checkout.yaml"),
+        raw_flow.replace(old_origin, &new_origin),
+    )
+    .unwrap();
+
+    // 1. Start the warm daemon explicitly.
+    let start_out = run_deja_with_daemon(
+        ws.path(),
+        isolated_tmp.path(),
+        &daemon_dir,
+        &["daemon", "start", "--idle-timeout", "120", "--json"],
+    );
+    assert_eq!(
+        start_out.status.code(),
+        Some(0),
+        "daemon start failed:\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&start_out.stdout),
+        String::from_utf8_lossy(&start_out.stderr)
+    );
+    let start_json: Value = serde_json::from_slice(&start_out.stdout).expect("start JSON");
+    assert_eq!(start_json["started"], true);
+    assert_eq!(start_json["alreadyRunning"], false);
+
+    // 2. Run #1 (`deja remember`) — cold Chromium launch inside the daemon.
+    let rem = run_deja_with_daemon(
+        ws.path(),
+        isolated_tmp.path(),
+        &daemon_dir,
+        &[
+            "remember",
+            "complete checkout",
+            "--flow",
+            "flows/checkout.yaml",
+            "--summary",
+            "--json",
+        ],
+    );
+    assert_eq!(
+        rem.status.code(),
+        Some(0),
+        "daemon remember failed:\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&rem.stdout),
+        String::from_utf8_lossy(&rem.stderr)
+    );
+    let rem_json: Value = serde_json::from_slice(&rem.stdout).expect("remember JSON");
+    assert_eq!(rem_json["outcome"], "remembered");
+    let run1_attach_ms = rem_json["timing"]["driverAttachMs"]
+        .as_u64()
+        .expect("run1 driverAttachMs");
+
+    // Verify status shows 1 warm Chromium session with attachCount == 1, leaseCount == 1.
+    let status1 = run_deja_with_daemon(
+        ws.path(),
+        isolated_tmp.path(),
+        &daemon_dir,
+        &["daemon", "status", "--json"],
+    );
+    assert_eq!(status1.status.code(), Some(0));
+    let status1_json: Value = serde_json::from_slice(&status1.stdout).expect("status1 JSON");
+    assert_eq!(status1_json["running"], true);
+    assert_eq!(status1_json["pooledSessions"], 1);
+    assert_eq!(status1_json["activeLeases"], 0);
+    assert_eq!(status1_json["sessions"][0]["attachCount"], 1);
+    assert_eq!(status1_json["sessions"][0]["leaseCount"], 1);
+
+    // 3. Run #2 (`deja run`) — warm pool reuse!
+    let run2 = run_deja_with_daemon(
+        ws.path(),
+        isolated_tmp.path(),
+        &daemon_dir,
+        &["run", "complete checkout", "--summary", "--json"],
+    );
+    assert_eq!(
+        run2.status.code(),
+        Some(0),
+        "daemon run2 failed:\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&run2.stdout),
+        String::from_utf8_lossy(&run2.stderr)
+    );
+    let run2_json: Value = serde_json::from_slice(&run2.stdout).expect("run2 JSON");
+    assert_eq!(run2_json["outcome"], "passed");
+    assert_eq!(run2_json["cacheStatus"], "hit");
+    let run2_attach_ms = run2_json["timing"]["driverAttachMs"]
+        .as_u64()
+        .expect("run2 driverAttachMs");
+    eprintln!(
+        "LIVE WEB DAEMON BENCHMARK: run1 driverAttachMs={run1_attach_ms}ms, run2 driverAttachMs={run2_attach_ms}ms, run1 durationMs={}, run2 durationMs={}",
+        rem_json["durationMs"], run2_json["durationMs"]
+    );
+    assert!(
+        run2_attach_ms < 100,
+        "expected warm daemon Run #2 driverAttachMs < 100ms, got {run2_attach_ms}ms"
+    );
+
+    // Verify status STILL has attachCount == 1 while leaseCount == 2!
+    let status2 = run_deja_with_daemon(
+        ws.path(),
+        isolated_tmp.path(),
+        &daemon_dir,
+        &["daemon", "status", "--json"],
+    );
+    assert_eq!(status2.status.code(), Some(0));
+    let status2_json: Value = serde_json::from_slice(&status2.stdout).expect("status2 JSON");
+    assert_eq!(status2_json["pooledSessions"], 1);
+    assert_eq!(status2_json["sessions"][0]["attachCount"], 1);
+    assert_eq!(status2_json["sessions"][0]["leaseCount"], 2);
+
+    // 4. Stop the daemon cleanly.
+    let stop_out = run_deja_with_daemon(
+        ws.path(),
+        isolated_tmp.path(),
+        &daemon_dir,
+        &["daemon", "stop", "--json"],
+    );
+    assert_eq!(
+        stop_out.status.code(),
+        Some(0),
+        "daemon stop failed:\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&stop_out.stdout),
+        String::from_utf8_lossy(&stop_out.stderr)
+    );
+    let stop_json: Value = serde_json::from_slice(&stop_out.stdout).expect("stop JSON");
+    assert_eq!(stop_json["stopped"], true);
+    assert_eq!(stop_json["stoppedSessions"], 1);
+    assert!(!daemon_dir.join("deja.sock").exists());
+    assert!(!daemon_dir.join("daemon.json").exists());
+
+    // 5. Verify ZERO leftover `deja-web-profile-*` temp dirs and ZERO orphaned Chromium processes.
+    let leftover_profiles: Vec<String> = fs::read_dir(isolated_tmp.path())
+        .unwrap()
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            name.starts_with("deja-web-profile-").then_some(name)
+        })
+        .collect();
+    assert!(
+        leftover_profiles.is_empty(),
+        "leftover Chromium profile dirs after `deja daemon stop`: {leftover_profiles:?}"
+    );
+
+    let marker = isolated_tmp.path().to_string_lossy().into_owned();
+    let ps = Command::new("/bin/ps")
+        .args(["-eo", "pid,args"])
+        .output()
+        .expect("ps");
+    let ps_out = String::from_utf8_lossy(&ps.stdout);
+    let orphans: Vec<&str> = ps_out
+        .lines()
+        .filter(|line| line.contains(&marker))
+        .collect();
+    assert!(
+        orphans.is_empty(),
+        "orphaned Chromium processes referencing test TMPDIR survived `deja daemon stop`:\n{}",
+        orphans.join("\n")
+    );
 }

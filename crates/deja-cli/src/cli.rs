@@ -20,6 +20,10 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub json: bool,
 
+    /// Bypass the persistent warm driver daemon and run drivers directly in-process.
+    #[arg(long, global = true)]
+    pub no_daemon: bool,
+
     #[command(subcommand)]
     pub command: Option<Commands>,
 }
@@ -59,6 +63,9 @@ pub enum Commands {
 
     /// Start the stdio JSON-RPC 2.0 MCP server confined to this workspace and app.
     Mcp(McpArgs),
+
+    /// Manage the persistent warm driver daemon (`start`, `status`, `stop`).
+    Daemon(DaemonArgs),
 }
 
 /// Arguments for `deja run [<goal>... | --goals <FILE> | --all]`.
@@ -278,6 +285,38 @@ pub struct McpArgs {
     pub device: Option<String>,
 }
 
+/// Arguments for `deja daemon <subcommand>`.
+#[derive(Debug, Args)]
+pub struct DaemonArgs {
+    #[command(subcommand)]
+    pub command: DaemonCommand,
+}
+
+/// Subcommands under `deja daemon`.
+#[derive(Debug, Subcommand)]
+pub enum DaemonCommand {
+    /// Start the persistent warm driver daemon (idempotent if already running).
+    Start(DaemonStartArgs),
+
+    /// Inspect daemon liveness, idle TTL, and warm pooled sessions.
+    Status,
+
+    /// Gracefully stop the warm driver daemon and shut down all pooled drivers.
+    Stop,
+}
+
+/// Arguments for `deja daemon start`.
+#[derive(Debug, Args)]
+pub struct DaemonStartArgs {
+    /// Run the daemon in the foreground until SIGINT, SIGTERM, `deja daemon stop`, or idle TTL.
+    #[arg(long)]
+    pub foreground: bool,
+
+    /// Shut down automatically after this many idle seconds with zero active leases.
+    #[arg(long, value_name = "SECS", default_value_t = crate::daemon::DEFAULT_IDLE_TIMEOUT_SECS)]
+    pub idle_timeout: u64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -369,5 +408,48 @@ mod tests {
             }
             other => panic!("expected Gate, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn daemon_subcommands_and_global_no_daemon_parse() {
+        let start = Cli::try_parse_from([
+            "deja",
+            "daemon",
+            "start",
+            "--foreground",
+            "--idle-timeout",
+            "45",
+        ])
+        .unwrap();
+        match start.command {
+            Some(Commands::Daemon(DaemonArgs {
+                command: DaemonCommand::Start(args),
+            })) => {
+                assert!(args.foreground);
+                assert_eq!(args.idle_timeout, 45);
+            }
+            other => panic!("expected Daemon::Start, got {other:?}"),
+        }
+
+        let status = Cli::try_parse_from(["deja", "daemon", "status", "--json"]).unwrap();
+        assert!(status.json);
+        assert!(matches!(
+            status.command,
+            Some(Commands::Daemon(DaemonArgs {
+                command: DaemonCommand::Status
+            }))
+        ));
+
+        let stop = Cli::try_parse_from(["deja", "daemon", "stop"]).unwrap();
+        assert!(matches!(
+            stop.command,
+            Some(Commands::Daemon(DaemonArgs {
+                command: DaemonCommand::Stop
+            }))
+        ));
+
+        let bypass = Cli::try_parse_from(["deja", "--no-daemon", "run", "checkout"]).unwrap();
+        assert!(bypass.no_daemon);
+        assert!(matches!(bypass.command, Some(Commands::Run(_))));
     }
 }
