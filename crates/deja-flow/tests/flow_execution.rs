@@ -10,16 +10,17 @@ use deja_core::{
     create_redactor, provider_key_redactor,
 };
 use deja_flow::{
-    ActAction, ActPayload, ClassificationInput, CompiledSelector, DriverCapabilities,
-    DriverCapability, DriverCrashSignal, DriverError, DriverFuture, EnvStack, FailedStepContext,
-    FailureClassifier, FlowExecutionConfig, FlowExecutor, FlowParseError, KeyPress, LaunchOptions,
-    MAX_INTERPOLATED_BYTES, ObservationSource, PlatformDriver, PointSpec, Selector, SelectorError,
-    StepFailureKind, SwipeParams, SynthesizedAttemptsJunitInput, SynthesizedJunitInput,
-    UiHierarchy, UiNode, UiPoint, UiRect, UiSize, VisibleContext, WaitSelectorOutcome,
-    WaitSelectorRequest, build_visible_context, count_assertions_in_closure,
-    count_assertions_in_flow_yaml, hash_hierarchy_nodes, merge_junit_suites, parse_flow,
-    prepare_junit, redact_junit, redact_junit_with_redactors, reports_failure,
-    synthesized_attempts_junit, synthesized_junit, wait_local, write_errored_junit,
+    ActAction, ActOutcome, ActPayload, ClassificationInput, CompiledSelector,
+    DEFAULT_HOLD_SCROLL_MS, DriverCapabilities, DriverCapability, DriverCrashSignal, DriverError,
+    DriverFuture, EnvStack, FailedStepContext, FailureClassifier, FlowExecutionConfig,
+    FlowExecutor, FlowParseError, KeyPress, LaunchOptions, MAX_INTERPOLATED_BYTES,
+    ObservationSource, PlatformDriver, PointSpec, Selector, SelectorError, StepFailureKind,
+    SwipeParams, SynthesizedAttemptsJunitInput, SynthesizedJunitInput, UiHierarchy, UiNode,
+    UiPoint, UiRect, UiSize, VisibleContext, WaitSelectorOutcome, WaitSelectorRequest,
+    build_visible_context, count_assertions_in_closure, count_assertions_in_flow_yaml,
+    hash_hierarchy_nodes, merge_junit_suites, parse_flow, prepare_junit, redact_junit,
+    redact_junit_with_redactors, reports_failure, synthesized_attempts_junit, synthesized_junit,
+    wait_local, write_errored_junit,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -112,6 +113,7 @@ enum DriverEvent {
         start: UiPoint,
         end: UiPoint,
         duration_ms: u64,
+        hold_duration_ms: Option<u64>,
     },
     InputText(String),
     EraseText(u32),
@@ -141,6 +143,8 @@ struct MockState {
     /// Fails the first N taps with Selector-invisible screen before switching.
     fail_tap_count: usize,
     tap_calls: usize,
+    /// Optional scripted outcomes returned by overridden `act_and_observe`.
+    scripted_act_outcomes: VecDeque<ActOutcome>,
 }
 
 struct MockDriver {
@@ -468,6 +472,7 @@ impl PlatformDriver for MockDriver {
                 start: params.start,
                 end: params.end,
                 duration_ms: params.duration_ms,
+                hold_duration_ms: params.hold_duration_ms,
             });
             if let Some(next_screen) = st.on_swipe_screens.pop_front() {
                 st.fallback_hierarchy = next_screen;
@@ -576,6 +581,99 @@ impl PlatformDriver for MockDriver {
 
     fn shutdown<'a>(&'a self) -> DriverFuture<'a, ()> {
         Box::pin(async move { Ok(()) })
+    }
+
+    fn act_and_observe<'a>(
+        &'a self,
+        req: &'a ActPayload,
+        cancel: &'a CancellationToken,
+    ) -> DriverFuture<'a, ActOutcome> {
+        if let Some(scripted) = self.state.lock().unwrap().scripted_act_outcomes.pop_front() {
+            return Box::pin(async move { Ok(scripted) });
+        }
+        Box::pin(async move {
+            // Delegate to standard primitive behavior + post-action observation when unscripted.
+            let started = Instant::now();
+            match &req.action {
+                ActAction::Tap { x, y } => {
+                    self.tap_point(&req.app_id, UiPoint::new(*x, *y), cancel)
+                        .await?;
+                }
+                ActAction::LongPress { x, y, duration_ms } => {
+                    self.long_press_point(&req.app_id, UiPoint::new(*x, *y), *duration_ms, cancel)
+                        .await?;
+                }
+                ActAction::DoubleTap { x, y } => {
+                    self.double_tap_point(&req.app_id, UiPoint::new(*x, *y), cancel)
+                        .await?;
+                }
+                ActAction::Swipe {
+                    start,
+                    end,
+                    duration_ms,
+                    hold_duration_ms,
+                } => {
+                    self.swipe(
+                        &SwipeParams {
+                            app_id: req.app_id.clone(),
+                            start: *start,
+                            end: *end,
+                            duration_ms: *duration_ms,
+                            hold_duration_ms: *hold_duration_ms,
+                        },
+                        cancel,
+                    )
+                    .await?;
+                }
+                ActAction::InputText { text } => {
+                    self.input_text(&req.app_id, text, cancel).await?;
+                }
+                ActAction::EraseText { count } => {
+                    self.erase_text(&req.app_id, *count, cancel).await?;
+                }
+                ActAction::PressKey {
+                    key,
+                    modifiers,
+                    count,
+                } => {
+                    self.press_key(
+                        &req.app_id,
+                        &KeyPress {
+                            key: key.clone(),
+                            modifiers: modifiers.clone(),
+                            count: *count,
+                        },
+                        cancel,
+                    )
+                    .await?;
+                }
+                ActAction::HideKeyboard => self.hide_keyboard(&req.app_id, cancel).await?,
+                ActAction::Back => self.back(&req.app_id, cancel).await?,
+            }
+            let (hierarchy, hierarchy_error) = if req.return_hierarchy {
+                match self
+                    .hierarchy(
+                        &req.app_id,
+                        req.include_system_ui,
+                        req.known_hash.as_deref(),
+                        cancel,
+                    )
+                    .await
+                {
+                    Ok(h) => (Some(h), None),
+                    Err(DriverError::Cancelled) => return Err(DriverError::Cancelled),
+                    Err(err) => (None, Some(err.to_string())),
+                }
+            } else {
+                (None, None)
+            };
+            Ok(ActOutcome {
+                action_ok: true,
+                elapsed_ms: started.elapsed().as_millis() as u64,
+                hierarchy,
+                hierarchy_error,
+            })
+        })
     }
 
     fn wait_for_selector<'a>(
@@ -1292,12 +1390,18 @@ appId: dev.deja.checkout
     );
 
     let tie_nodes = vec![off, vis_nonhit, hit_a, hit_b];
-    let buy_all = CompiledSelector::compile(&Selector::by_text("Buy"))
+    let buy_visible = CompiledSelector::compile(&Selector::by_text("Buy"))
         .unwrap()
         .match_all(&tie_nodes);
-    let ordered: Vec<&str> = buy_all.iter().map(|n| n.identifier.as_str()).collect();
+    let visible_ordered: Vec<&str> = buy_visible.iter().map(|n| n.identifier.as_str()).collect();
+    assert_eq!(visible_ordered, vec!["dup_hit_a", "dup_hit_b", "dup_vis"]);
+
+    let buy_all_raw = CompiledSelector::compile(&Selector::by_text("Buy"))
+        .unwrap()
+        .match_all_including_offscreen(&tie_nodes);
+    let raw_ordered: Vec<&str> = buy_all_raw.iter().map(|n| n.identifier.as_str()).collect();
     assert_eq!(
-        ordered,
+        raw_ordered,
         vec!["dup_hit_a", "dup_hit_b", "dup_vis", "dup_off"]
     );
 
@@ -2119,4 +2223,960 @@ fn junit_single_attempts_merged_redaction_and_errored_fallback() {
         merged.contains("tests=\"3\" failures=\"1\" errors=\"0\" skipped=\"0\" time=\"3.300\"")
     );
     assert_eq!(merged.matches("<testsuite ").count(), 2);
+}
+
+// ============================================================================
+// Codex Cross-Review Round 1 Regression Tests (Findings 1-14)
+// ============================================================================
+
+#[tokio::test]
+async fn round1_redacts_failure_labels_in_outcomes_and_classifier() {
+    let ws = TempDir::new("round1-redact-labels");
+    let driver = MockDriver::full();
+    driver.set_screen(hierarchy_of(vec![node(
+        0,
+        None,
+        "home",
+        "Home",
+        UiRect::new(0.0, 0.0, 390.0, 844.0),
+    )]));
+
+    let fake_key = format!("{}live_0123456789abcdefghijkl", "sk-");
+    let secret_url = "https://alice:superSecretPass99@example.com/pay";
+    let ws_str = ws.path().to_string_lossy().into_owned();
+
+    let redactor = create_redactor(&ws_str, None, &["fixtureSecretVal".to_string()]);
+    let provider = provider_key_redactor([("API_TOKEN", "envSecretToken987654")]);
+
+    // 1. Generated assertVisible label containing secrets + workspace path + fixture value.
+    let yaml_generated = format!(
+        r#"
+appId: dev.deja.checkout
+onFlowComplete:
+  - assertVisible:
+      text: "Hook {fake_key}"
+      label: "Hook label {secret_url}"
+---
+- assertVisible: "Expected {fake_key} fixtureSecretVal at {ws_str}"
+"#
+    );
+    let mut cfg = FlowExecutionConfig::new(ws.path().to_path_buf());
+    cfg.default_step_timeout = Duration::from_millis(40);
+    cfg.redactor = redactor.clone();
+    cfg.provider_redactor = provider.clone();
+    let out = FlowExecutor::new(cfg)
+        .execute_yaml(&driver, &yaml_generated, &CancellationToken::new())
+        .await;
+    assert!(!out.passed);
+    let serialized = serde_json::to_string(&out).unwrap();
+    assert!(
+        !serialized.contains(&fake_key),
+        "provider key leaked: {serialized}"
+    );
+    assert!(
+        !serialized.contains("fixtureSecretVal"),
+        "fixture secret leaked: {serialized}"
+    );
+    assert!(
+        !serialized.contains(&ws_str),
+        "workspace path leaked: {serialized}"
+    );
+    assert!(
+        !serialized.contains("superSecretPass99"),
+        "URL password in hook label leaked: {serialized}"
+    );
+    assert!(
+        out.failure
+            .as_ref()
+            .and_then(|f| f.failing_step.as_deref())
+            .is_some_and(
+                |s| s.contains("<redacted-secret>") && s.contains("<redacted-fixture-value>")
+            )
+    );
+
+    // 2. User-provided `label:` on tapOn containing URL password + fixture value.
+    let yaml_custom_label = format!(
+        r#"
+appId: dev.deja.checkout
+---
+- tapOn:
+    id: missing_btn
+    label: "Tap {secret_url} with fixtureSecretVal"
+"#
+    );
+    let mut cfg2 = FlowExecutionConfig::new(ws.path().to_path_buf());
+    cfg2.default_step_timeout = Duration::from_millis(40);
+    cfg2.redactor = redactor;
+    cfg2.provider_redactor = provider;
+    let out2 = FlowExecutor::new(cfg2)
+        .execute_yaml(&driver, &yaml_custom_label, &CancellationToken::new())
+        .await;
+    assert!(!out2.passed);
+    let serialized2 = serde_json::to_string(&out2).unwrap();
+    assert!(!serialized2.contains("superSecretPass99"));
+    assert!(!serialized2.contains("fixtureSecretVal"));
+    assert!(
+        out2.failed_step
+            .as_ref()
+            .is_some_and(|s| s.label.contains("<redacted-secret>")
+                && s.label.contains("<redacted-fixture-value>"))
+    );
+}
+
+#[tokio::test]
+async fn round1_offscreen_nodes_excluded_before_index_across_visibility_checks() {
+    let ws = TempDir::new("round1-offscreen");
+    let driver = MockDriver::full();
+
+    let mut off_row = node(
+        1,
+        None,
+        "row_btn",
+        "Row",
+        UiRect::new(0.0, -200.0, 100.0, 40.0),
+    );
+    off_row.is_on_screen = false;
+    let on_row_first = node(
+        2,
+        None,
+        "row_btn",
+        "Row",
+        UiRect::new(20.0, 100.0, 100.0, 40.0),
+    );
+    let on_row_second = node(
+        3,
+        None,
+        "row_btn",
+        "Row",
+        UiRect::new(20.0, 200.0, 100.0, 40.0),
+    );
+    let mut off_only = node(
+        4,
+        None,
+        "only_offscreen",
+        "Offscreen Only",
+        UiRect::new(0.0, 1500.0, 100.0, 40.0),
+    );
+    off_only.is_on_screen = false;
+
+    driver.set_screen(hierarchy_of(vec![
+        off_row,
+        on_row_first,
+        on_row_second,
+        off_only,
+    ]));
+
+    // 1. tapOn with index: 0 skips off-screen node at tree pos 0 and taps on_row_first (center 70, 120).
+    // 2. assertNotVisible on off-screen-only element passes.
+    // 3. when.visible on off-screen element is skipped; when.notVisible runs.
+    let yaml_ok = r#"
+appId: dev.deja.checkout
+---
+- tapOn:
+    id: row_btn
+    index: 0
+- assertNotVisible:
+    id: only_offscreen
+- runFlow:
+    when:
+      visible:
+        id: only_offscreen
+    commands:
+      - inputText: should-not-run
+- runFlow:
+    when:
+      notVisible:
+        id: only_offscreen
+    commands:
+      - inputText: offscreen-is-not-visible
+"#;
+    let mut cfg = FlowExecutionConfig::new(ws.path().to_path_buf());
+    cfg.default_step_timeout = Duration::from_millis(80);
+    let out = FlowExecutor::new(cfg.clone())
+        .execute_yaml(&driver, yaml_ok, &CancellationToken::new())
+        .await;
+    assert!(out.passed, "{:#?}", out.failed_step);
+    let events = driver.events();
+    assert!(events.contains(&DriverEvent::Tap(70.0, 120.0)));
+    assert!(events.contains(&DriverEvent::InputText(
+        "offscreen-is-not-visible".to_string()
+    )));
+    assert!(!events.contains(&DriverEvent::InputText("should-not-run".to_string())));
+
+    // 4. assertVisible on off-screen-only element MUST fail!
+    let out_fail = FlowExecutor::new(cfg)
+        .execute_yaml(
+            &driver,
+            "appId: dev.deja.checkout\n---\n- assertVisible:\n    id: only_offscreen\n",
+            &CancellationToken::new(),
+        )
+        .await;
+    assert!(!out_fail.passed);
+    assert_eq!(
+        out_fail.failure.as_ref().map(|f| f.category),
+        Some(FailureCategory::ProductAssertion)
+    );
+}
+
+#[tokio::test]
+async fn round1_literal_regex_syntax_and_url_only_web_checkout() {
+    let ws = TempDir::new("round1-web-checkout");
+    let driver = MockDriver::with_caps(
+        "web",
+        DriverCapabilities::with([DriverCapability::AccessibilityTree]),
+    );
+
+    // Exact copy of the checked-in `spikes/002-web-deja/flows/checkout.yaml` shape:
+    // URL-only header (no `appId:`), multi-byte UTF-8, and `$5.00 · 6 stickers` / `Total: $5.00`!
+    let login_screen = hierarchy_of(vec![
+        node(
+            0,
+            None,
+            "screen_login",
+            "Déjà Web Shop",
+            UiRect::new(0.0, 0.0, 1280.0, 720.0),
+        ),
+        node(
+            1,
+            Some(0),
+            "username",
+            "qa@example.com",
+            UiRect::new(100.0, 100.0, 200.0, 40.0),
+        ),
+        node(
+            2,
+            Some(0),
+            "password",
+            "Password",
+            UiRect::new(100.0, 160.0, 200.0, 40.0),
+        ),
+        node(
+            3,
+            Some(0),
+            "login_button",
+            "Sign in",
+            UiRect::new(100.0, 220.0, 120.0, 40.0),
+        ),
+    ]);
+    let catalog_screen = hierarchy_of(vec![
+        node(
+            0,
+            None,
+            "screen_catalog",
+            "Mochi sticker pack",
+            UiRect::new(0.0, 0.0, 1280.0, 720.0),
+        ),
+        node(
+            1,
+            Some(0),
+            "price_line",
+            "$5.00 · 6 stickers",
+            UiRect::new(100.0, 120.0, 220.0, 30.0),
+        ),
+        node(
+            2,
+            Some(0),
+            "usd_note",
+            "$5.00 (USD) [promo",
+            UiRect::new(100.0, 160.0, 220.0, 30.0),
+        ),
+        node(
+            3,
+            Some(0),
+            "add_to_cart",
+            "Add to cart",
+            UiRect::new(100.0, 220.0, 150.0, 40.0),
+        ),
+    ]);
+    let cart_screen = hierarchy_of(vec![
+        node(
+            0,
+            None,
+            "screen_cart",
+            "1 × Mochi sticker pack",
+            UiRect::new(0.0, 0.0, 1280.0, 720.0),
+        ),
+        node(
+            1,
+            Some(0),
+            "cart_total",
+            "Total: $5.00",
+            UiRect::new(100.0, 160.0, 200.0, 30.0),
+        ),
+        node(
+            2,
+            Some(0),
+            "checkout_button",
+            "Checkout",
+            UiRect::new(100.0, 220.0, 150.0, 40.0),
+        ),
+    ]);
+    let done_screen = hierarchy_of(vec![
+        node(
+            0,
+            None,
+            "order_confirmation",
+            "Order confirmed",
+            UiRect::new(0.0, 0.0, 1280.0, 720.0),
+        ),
+        node(
+            1,
+            Some(0),
+            "order_summary",
+            "Order WC-1001 · Mochi sticker pack",
+            UiRect::new(100.0, 140.0, 320.0, 30.0),
+        ),
+    ]);
+
+    driver.set_screen(login_screen.clone());
+    driver.push_tap_screen(login_screen.clone());
+    driver.push_tap_screen(login_screen);
+    driver.push_tap_screen(catalog_screen);
+    driver.push_tap_screen(cart_screen);
+    driver.push_tap_screen(done_screen);
+
+    let web_checkout_yaml = r#"
+url: http://127.0.0.1:4174
+---
+- openLink: http://127.0.0.1:4174
+- assertVisible:
+    id: screen_login
+- assertVisible: Déjà Web Shop
+- tapOn:
+    id: username
+- inputText: qa@example.com
+- assertVisible: qa@example.com
+- tapOn:
+    id: password
+- inputText: testing123
+- tapOn:
+    id: login_button
+- assertVisible:
+    id: screen_catalog
+- assertVisible: Mochi sticker pack
+- assertVisible: $5.00 · 6 stickers
+- assertVisible: "$5.00 (USD) [promo"
+- tapOn:
+    id: add_to_cart
+- assertVisible:
+    id: screen_cart
+- assertVisible: 1 × Mochi sticker pack
+- assertVisible: "Total: $5.00"
+- tapOn:
+    id: checkout_button
+- assertVisible:
+    id: order_confirmation
+- assertVisible: Order confirmed
+- assertVisible: "Order WC-1001 · Mochi sticker pack"
+"#;
+
+    let mut cfg = FlowExecutionConfig::new(ws.path().to_path_buf());
+    cfg.default_step_timeout = Duration::from_millis(300);
+    let out = FlowExecutor::new(cfg.clone())
+        .execute_yaml(&driver, web_checkout_yaml, &CancellationToken::new())
+        .await;
+    assert!(
+        out.passed,
+        "URL-only web checkout failed: {:#?}",
+        out.failed_step
+    );
+    assert_eq!(out.app_id.as_deref(), Some("http://127.0.0.1:4174"));
+
+    // Bare 1-doc web flow (no `appId:` and no `url:`) also works on `platform == "web"`.
+    let bare_web = FlowExecutor::new(cfg)
+        .execute_yaml(
+            &driver,
+            "- assertVisible: Order confirmed\n",
+            &CancellationToken::new(),
+        )
+        .await;
+    assert!(bare_web.passed, "{:#?}", bare_web.failed_step);
+}
+
+#[tokio::test]
+async fn round1_unchanged_cache_hit_preserves_fresh_truncation_metadata() {
+    let ws = TempDir::new("round1-unchanged-trunc");
+    let driver = MockDriver::full();
+
+    let complete = hierarchy_of(vec![node(
+        0,
+        None,
+        "home",
+        "Home",
+        UiRect::new(0.0, 0.0, 390.0, 844.0),
+    )]);
+    let hash = complete.hierarchy_hash.clone();
+
+    let unchanged_truncated = UiHierarchy {
+        app_id: "dev.deja.checkout".to_string(),
+        state: "running_background".to_string(),
+        viewport: Some(UiSize::new(390.0, 844.0)),
+        truncated: true,
+        hierarchy_hash: hash,
+        unchanged: true,
+        nodes: Vec::new(),
+    };
+    driver.set_screen(unchanged_truncated);
+
+    let mut req = WaitSelectorRequest::not_visible(
+        "dev.deja.checkout",
+        Selector::by_id("missing_banner"),
+        Duration::from_millis(70),
+    );
+    req.initial_hierarchy = Some(complete.clone());
+
+    let outcome = wait_local(&driver, &req, &CancellationToken::new())
+        .await
+        .unwrap();
+    assert!(
+        !outcome.matched,
+        "unchanged: true with truncated: true MUST NOT falsely pass assertNotVisible"
+    );
+    let returned = outcome.hierarchy.expect("hierarchy returned");
+    assert!(
+        returned.truncated,
+        "fresh truncated: true must be preserved"
+    );
+    assert_eq!(returned.state, "running_background");
+    assert_eq!(returned.nodes.len(), 1, "cached nodes must still be reused");
+
+    // Also verify `fetch_fresh_hierarchy` (via `when.notVisible`) preserves `truncated: true`.
+    let driver2 = MockDriver::full();
+    driver2.push_hierarchy(complete.clone());
+    driver2.push_hierarchy(UiHierarchy {
+        app_id: "dev.deja.checkout".to_string(),
+        state: "running_foreground".to_string(),
+        viewport: None,
+        truncated: true,
+        hierarchy_hash: complete.hierarchy_hash,
+        unchanged: true,
+        nodes: Vec::new(),
+    });
+    let yaml = r#"
+appId: dev.deja.checkout
+---
+- assertVisible: "Home"
+- runFlow:
+    when:
+      notVisible: "MissingBanner"
+    commands:
+      - inputText: should-not-run-on-truncated
+"#;
+    let out = FlowExecutor::new(FlowExecutionConfig::new(ws.path().to_path_buf()))
+        .execute_yaml(&driver2, yaml, &CancellationToken::new())
+        .await;
+    assert!(out.passed, "{:#?}", out.failed_step);
+    assert!(!driver2.events().contains(&DriverEvent::InputText(
+        "should-not-run-on-truncated".to_string()
+    )));
+}
+
+#[test]
+fn round1_junit_multibyte_utf8_scans_without_panicking() {
+    let utf8_pass = r#"<?xml version="1.0" encoding="UTF-8"?>
+<testsuites>
+  <testsuite name="Déjà — café" tests="1" failures="0" errors="0" skipped="0" time="0.500">
+    <testcase id="c1" name="Déjà checkout — €5" classname="web" time="0.500" status="SUCCESS">
+      <system-out>Déjà — café 🎉</system-out>
+      <![CDATA[Déjà — café 🎉]]>
+      <!-- Déjà — café -->
+    </testcase>
+  </testsuite>
+</testsuites>
+"#;
+    let utf8_fail = r#"<?xml version="1.0" encoding="UTF-8"?>
+<testsuites>
+  <testsuite name="Café suite" tests="1" failures="1" errors="0" skipped="0" time="0.750">
+    <testcase id="c2" name="Order €5" classname="web" time="0.750" status="ERROR">
+      <failure message="Déjà — café">expected Déjà — café</failure>
+      <system-out>Déjà — café</system-out>
+    </testcase>
+  </testsuite>
+</testsuites>
+"#;
+
+    assert!(!reports_failure(utf8_pass));
+    assert!(reports_failure(utf8_fail));
+
+    let merged = merge_junit_suites(&[utf8_pass, utf8_fail]);
+    assert!(
+        merged.contains("tests=\"2\" failures=\"1\" errors=\"0\" skipped=\"0\" time=\"1.250\"")
+    );
+    assert!(merged.contains("Déjà — café 🎉"));
+    assert!(reports_failure(&merged));
+
+    let redacted = redact_junit(utf8_pass, |s| s.replace("café", "espresso"));
+    assert!(redacted.contains("Déjà — espresso 🎉"));
+}
+
+#[tokio::test]
+async fn round1_header_env_interpolates_app_id_and_child_flow_scopes_app_id() {
+    let ws = TempDir::new("round1-header-app-scope");
+    fs::write(
+        ws.path().join("child.yaml"),
+        r#"
+appId: dev.deja.child
+---
+- launchApp
+"#,
+    )
+    .unwrap();
+    let parent_yaml = r#"
+appId: ${TARGET_APP}
+env:
+  TARGET_APP: dev.deja.parent
+---
+- launchApp
+- runFlow: child.yaml
+- stopApp
+"#;
+    fs::write(ws.path().join("parent.yaml"), parent_yaml).unwrap();
+
+    // 1. Via `execute_yaml`: root `appId` interpolated after header `env`; child scopes & restores parent!
+    let driver_yaml = MockDriver::full();
+    let out_yaml = FlowExecutor::new(FlowExecutionConfig::new(ws.path().to_path_buf()))
+        .execute_yaml(&driver_yaml, parent_yaml, &CancellationToken::new())
+        .await;
+    assert!(out_yaml.passed, "{:#?}", out_yaml.failed_step);
+    let events_yaml = driver_yaml.events();
+    assert!(events_yaml.contains(&DriverEvent::LaunchApp {
+        app_id: "dev.deja.parent".to_string(),
+        clear_state: false,
+        clear_keychain: false,
+    }));
+    assert!(events_yaml.contains(&DriverEvent::LaunchApp {
+        app_id: "dev.deja.child".to_string(),
+        clear_state: false,
+        clear_keychain: false,
+    }));
+    assert!(events_yaml.contains(&DriverEvent::StopApp("dev.deja.parent".to_string())));
+
+    // 2. Via `execute_file`: identical child appId scoping & restoration!
+    let driver_file = MockDriver::full();
+    let out_file = FlowExecutor::new(FlowExecutionConfig::new(ws.path().to_path_buf()))
+        .execute_file(
+            &driver_file,
+            Path::new("parent.yaml"),
+            &CancellationToken::new(),
+        )
+        .await;
+    assert!(out_file.passed, "{:#?}", out_file.failed_step);
+    assert_eq!(driver_file.events(), events_yaml);
+
+    // 3. Explicit `config.app_id_override` takes precedence over root header `appId`.
+    let driver_override = MockDriver::full();
+    let mut cfg_override = FlowExecutionConfig::new(ws.path().to_path_buf());
+    cfg_override.app_id_override = Some("dev.deja.override".to_string());
+    let out_override = FlowExecutor::new(cfg_override)
+        .execute_yaml(&driver_override, parent_yaml, &CancellationToken::new())
+        .await;
+    assert!(out_override.passed, "{:#?}", out_override.failed_step);
+    let events_override = driver_override.events();
+    assert!(events_override.contains(&DriverEvent::LaunchApp {
+        app_id: "dev.deja.override".to_string(),
+        clear_state: false,
+        clear_keychain: false,
+    }));
+    assert!(events_override.contains(&DriverEvent::LaunchApp {
+        app_id: "dev.deja.child".to_string(),
+        clear_state: false,
+        clear_keychain: false,
+    }));
+    assert!(events_override.contains(&DriverEvent::StopApp("dev.deja.override".to_string())));
+}
+
+#[tokio::test]
+async fn round1_selector_deadline_bounds_slow_hierarchy_and_zero_timeout_single_probe() {
+    let slow_driver = MockDriver::full();
+    slow_driver.set_screen(hierarchy_of(vec![node(
+        0,
+        None,
+        "target",
+        "Target",
+        UiRect::new(0.0, 0.0, 100.0, 40.0),
+    )]));
+    slow_driver.state.lock().unwrap().hierarchy_delay = Some(Duration::from_millis(250));
+
+    // In-flight hierarchy taking 250ms MUST be cut off at the 60ms selector deadline!
+    let req = WaitSelectorRequest::visible(
+        "dev.deja.checkout",
+        Selector::by_id("target"),
+        Duration::from_millis(60),
+    );
+    let started = Instant::now();
+    let outcome = wait_local(&slow_driver, &req, &CancellationToken::new())
+        .await
+        .unwrap();
+    assert!(
+        !outcome.matched,
+        "match completing after deadline must be rejected"
+    );
+    assert!(
+        started.elapsed() < Duration::from_millis(180),
+        "wait_local exceeded deadline bound: {:?}",
+        started.elapsed()
+    );
+
+    // `timeout == 0` preserves a single immediate probe!
+    let fast_driver = MockDriver::full();
+    fast_driver.set_screen(hierarchy_of(vec![node(
+        0,
+        None,
+        "target",
+        "Target",
+        UiRect::new(0.0, 0.0, 100.0, 40.0),
+    )]));
+    let zero_req = WaitSelectorRequest::visible(
+        "dev.deja.checkout",
+        Selector::by_id("target"),
+        Duration::ZERO,
+    );
+    let single = wait_local(&fast_driver, &zero_req, &CancellationToken::new())
+        .await
+        .unwrap();
+    assert!(single.matched);
+    assert_eq!(single.polls, 1);
+}
+
+#[test]
+fn round1_nested_relational_selector_honors_index() {
+    let row0 = node(1, None, "row", "", UiRect::new(0.0, 100.0, 390.0, 60.0));
+    let btn0 = node(
+        2,
+        Some(1),
+        "buy_a",
+        "Buy",
+        UiRect::new(20.0, 110.0, 100.0, 40.0),
+    );
+    let row1 = node(3, None, "row", "", UiRect::new(0.0, 180.0, 390.0, 60.0));
+    let btn1 = node(
+        4,
+        Some(3),
+        "buy_b",
+        "Buy",
+        UiRect::new(20.0, 190.0, 100.0, 40.0),
+    );
+    let nodes = [row0, btn0, row1, btn1];
+
+    let sel = Selector {
+        text: Some("Buy".to_string()),
+        child_of: Some(Box::new(Selector {
+            id: Some("row".to_string()),
+            index: Some(1),
+            ..Selector::default()
+        })),
+        ..Selector::default()
+    };
+    let matched = CompiledSelector::compile(&sel)
+        .unwrap()
+        .match_one(&nodes)
+        .expect("should match child of 2nd row");
+    assert_eq!(matched.identifier, "buy_b");
+}
+
+#[tokio::test]
+async fn round1_compound_act_propagates_action_ok_false_and_preserves_partial_success() {
+    let ws = TempDir::new("round1-compound-act");
+    let driver = MockDriver::with_caps(
+        "ios",
+        DriverCapabilities::with([
+            DriverCapability::AccessibilityTree,
+            DriverCapability::CompoundAct,
+        ]),
+    );
+    driver.set_screen(hierarchy_of(vec![node(
+        0,
+        None,
+        "submit_btn",
+        "Submit",
+        UiRect::new(20.0, 200.0, 100.0, 44.0),
+    )]));
+
+    // 1. `action_ok: false` MUST fail execution instead of silently succeeding.
+    driver
+        .state
+        .lock()
+        .unwrap()
+        .scripted_act_outcomes
+        .push_back(ActOutcome {
+            action_ok: false,
+            elapsed_ms: 5,
+            hierarchy: None,
+            hierarchy_error: Some("synthesized tap failed".to_string()),
+        });
+    let out_fail = FlowExecutor::new(FlowExecutionConfig::new(ws.path().to_path_buf()))
+        .execute_yaml(
+            &driver,
+            "appId: dev.deja.checkout\n---\n- tapOn:\n    id: submit_btn\n",
+            &CancellationToken::new(),
+        )
+        .await;
+    assert!(!out_fail.passed);
+    assert_eq!(
+        out_fail.failure.as_ref().map(|f| f.category),
+        Some(FailureCategory::Runner)
+    );
+    assert!(
+        out_fail
+            .failed_step
+            .as_ref()
+            .is_some_and(|s| s.message.contains("synthesized tap failed"))
+    );
+
+    // 2. `action_ok: true` with `hierarchy_error: Some(...)` preserves partial success.
+    driver
+        .state
+        .lock()
+        .unwrap()
+        .scripted_act_outcomes
+        .push_back(ActOutcome {
+            action_ok: true,
+            elapsed_ms: 5,
+            hierarchy: None,
+            hierarchy_error: Some("ax snapshot timed out".to_string()),
+        });
+    let out_ok = FlowExecutor::new(FlowExecutionConfig::new(ws.path().to_path_buf()))
+        .execute_yaml(
+            &driver,
+            "appId: dev.deja.checkout\n---\n- tapOn:\n    id: submit_btn\n",
+            &CancellationToken::new(),
+        )
+        .await;
+    assert!(out_ok.passed, "{:#?}", out_ok.failed_step);
+}
+
+#[tokio::test]
+async fn round1_action_settled_fail_fast_vs_explicit_wait_timeout() {
+    let ws = TempDir::new("round1-fail-fast");
+    let driver = MockDriver::full();
+    driver.set_screen(hierarchy_of(vec![node(
+        0,
+        None,
+        "home",
+        "Home",
+        UiRect::new(0.0, 0.0, 390.0, 844.0),
+    )]));
+
+    // 1. Missing `tapOn` target fails fast on settled screen well before 5s timeout!
+    let mut cfg = FlowExecutionConfig::new(ws.path().to_path_buf());
+    cfg.default_step_timeout = Duration::from_secs(5);
+    cfg.action_fail_fast_settle_polls = Some(3);
+    let started_tap = Instant::now();
+    let tap_out = FlowExecutor::new(cfg.clone())
+        .execute_yaml(
+            &driver,
+            "appId: dev.deja.checkout\n---\n- tapOn:\n    id: nonexistent_btn\n",
+            &CancellationToken::new(),
+        )
+        .await;
+    assert!(!tap_out.passed);
+    assert_eq!(
+        tap_out.failure.as_ref().map(|f| f.category),
+        Some(FailureCategory::Selector)
+    );
+    assert!(
+        started_tap.elapsed() < Duration::from_millis(600),
+        "missing tap target should fail fast on settled screen, took {:?}",
+        started_tap.elapsed()
+    );
+
+    // 2. Explicit `extendedWaitUntil` ignores action fail-fast and waits the full timeout!
+    let started_wait = Instant::now();
+    let wait_out = FlowExecutor::new(cfg.clone())
+        .execute_yaml(
+            &driver,
+            "appId: dev.deja.checkout\n---\n- extendedWaitUntil:\n    visible: \"Later\"\n    timeout: 180\n",
+            &CancellationToken::new(),
+        )
+        .await;
+    assert!(!wait_out.passed);
+    assert_eq!(
+        wait_out.failure.as_ref().map(|f| f.category),
+        Some(FailureCategory::Timeout)
+    );
+    assert!(
+        started_wait.elapsed() >= Duration::from_millis(150),
+        "explicit extendedWaitUntil must not fail fast early: {:?}",
+        started_wait.elapsed()
+    );
+
+    // 3. Truncated screen NEVER triggers settled fail-fast on tapOn!
+    let trunc_driver = MockDriver::full();
+    let mut trunc = hierarchy_of(vec![node(
+        0,
+        None,
+        "home",
+        "Home",
+        UiRect::new(0.0, 0.0, 390.0, 844.0),
+    )]);
+    trunc.truncated = true;
+    trunc_driver.set_screen(trunc);
+    let mut short_cfg = cfg;
+    short_cfg.default_step_timeout = Duration::from_millis(160);
+    let started_trunc = Instant::now();
+    let trunc_out = FlowExecutor::new(short_cfg)
+        .execute_yaml(
+            &trunc_driver,
+            "appId: dev.deja.checkout\n---\n- tapOn:\n    id: nonexistent_btn\n",
+            &CancellationToken::new(),
+        )
+        .await;
+    assert!(!trunc_out.passed);
+    assert!(
+        started_trunc.elapsed() >= Duration::from_millis(130),
+        "truncated screen must not fail fast early: {:?}",
+        started_trunc.elapsed()
+    );
+}
+
+#[tokio::test]
+async fn round1_retry_tap_if_no_change_and_hold_scroll_capability() {
+    let ws = TempDir::new("round1-retry-tap-and-hold");
+
+    // 1. `retryTapIfNoChange: true` with unchanged screen after 1st tap -> issues 1 bounded retry tap!
+    let driver_no_change = MockDriver::full();
+    let screen_a = hierarchy_of(vec![node(
+        0,
+        None,
+        "flaky_btn",
+        "Continue",
+        UiRect::new(20.0, 300.0, 200.0, 44.0),
+    )]);
+    let screen_b = hierarchy_of(vec![node(
+        0,
+        None,
+        "next_screen",
+        "Done",
+        UiRect::new(20.0, 300.0, 200.0, 44.0),
+    )]);
+    driver_no_change.set_screen(screen_a.clone());
+    driver_no_change.push_tap_screen(screen_a.clone());
+    driver_no_change.push_tap_screen(screen_b.clone());
+
+    let retry_yaml = r#"
+appId: dev.deja.checkout
+---
+- tapOn:
+    id: flaky_btn
+    retryTapIfNoChange: true
+- assertVisible:
+    id: next_screen
+"#;
+    let out_retry = FlowExecutor::new(FlowExecutionConfig::new(ws.path().to_path_buf()))
+        .execute_yaml(&driver_no_change, retry_yaml, &CancellationToken::new())
+        .await;
+    assert!(out_retry.passed, "{:#?}", out_retry.failed_step);
+    let taps_no_change = driver_no_change
+        .events()
+        .into_iter()
+        .filter(|e| matches!(e, DriverEvent::Tap(_, _)))
+        .count();
+    assert_eq!(
+        taps_no_change, 2,
+        "expected 1 initial tap + 1 bounded retry tap"
+    );
+    assert_eq!(out_retry.timing.steps[0].retries, 1);
+
+    // When 1st tap immediately changes the screen, NO retry tap is issued.
+    let driver_changed = MockDriver::full();
+    driver_changed.set_screen(screen_a);
+    driver_changed.push_tap_screen(screen_b);
+    let out_changed = FlowExecutor::new(FlowExecutionConfig::new(ws.path().to_path_buf()))
+        .execute_yaml(&driver_changed, retry_yaml, &CancellationToken::new())
+        .await;
+    assert!(out_changed.passed, "{:#?}", out_changed.failed_step);
+    let taps_changed = driver_changed
+        .events()
+        .into_iter()
+        .filter(|e| matches!(e, DriverEvent::Tap(_, _)))
+        .count();
+    assert_eq!(taps_changed, 1);
+    assert_eq!(out_changed.timing.steps[0].retries, 0);
+
+    // 2. `HoldScroll` capability: `scrollUntilVisible` passes `hold_duration_ms: Some(150)`,
+    // while fast `swipe` keeps `hold_duration_ms: None`!
+    let hold_driver = MockDriver::with_caps(
+        "ios",
+        DriverCapabilities::with([
+            DriverCapability::AccessibilityTree,
+            DriverCapability::HoldScroll,
+        ]),
+    );
+    hold_driver.set_screen(hierarchy_of(vec![node(
+        0,
+        None,
+        "top_row",
+        "Top",
+        UiRect::new(0.0, 100.0, 390.0, 40.0),
+    )]));
+    hold_driver.push_swipe_screen(hierarchy_of(vec![node(
+        1,
+        None,
+        "found_row",
+        "Found",
+        UiRect::new(20.0, 400.0, 350.0, 40.0),
+    )]));
+
+    let scroll_and_swipe = r#"
+appId: dev.deja.checkout
+---
+- scrollUntilVisible:
+    element:
+      id: found_row
+    direction: DOWN
+    timeout: 2000
+- swipe:
+    direction: UP
+"#;
+    let out_hold = FlowExecutor::new(FlowExecutionConfig::new(ws.path().to_path_buf()))
+        .execute_yaml(&hold_driver, scroll_and_swipe, &CancellationToken::new())
+        .await;
+    assert!(out_hold.passed, "{:#?}", out_hold.failed_step);
+    let hold_values: Vec<Option<u64>> = hold_driver
+        .events()
+        .into_iter()
+        .filter_map(|e| match e {
+            DriverEvent::Swipe {
+                hold_duration_ms, ..
+            } => Some(hold_duration_ms),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        hold_values,
+        vec![Some(DEFAULT_HOLD_SCROLL_MS), None],
+        "scrollUntilVisible must set hold_duration_ms=Some(150) on HoldScroll drivers while fast swipe stays None"
+    );
+
+    // Driver WITHOUT `HoldScroll` keeps `hold_duration_ms: None` even for `scrollUntilVisible`.
+    let plain_driver = MockDriver::full();
+    plain_driver.set_screen(hierarchy_of(vec![node(
+        0,
+        None,
+        "top_row",
+        "Top",
+        UiRect::new(0.0, 100.0, 390.0, 40.0),
+    )]));
+    plain_driver.push_swipe_screen(hierarchy_of(vec![node(
+        1,
+        None,
+        "found_row",
+        "Found",
+        UiRect::new(20.0, 400.0, 350.0, 40.0),
+    )]));
+    let out_plain = FlowExecutor::new(FlowExecutionConfig::new(ws.path().to_path_buf()))
+        .execute_yaml(&plain_driver, scroll_and_swipe, &CancellationToken::new())
+        .await;
+    assert!(out_plain.passed, "{:#?}", out_plain.failed_step);
+    let plain_holds: Vec<Option<u64>> = plain_driver
+        .events()
+        .into_iter()
+        .filter_map(|e| match e {
+            DriverEvent::Swipe {
+                hold_duration_ms, ..
+            } => Some(hold_duration_ms),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(plain_holds, vec![None, None]);
 }

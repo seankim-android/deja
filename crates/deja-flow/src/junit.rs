@@ -251,54 +251,58 @@ pub fn synthesized_attempts_junit(input: &SynthesizedAttemptsJunitInput<'_>) -> 
     )
 }
 
+fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack.windows(needle.len()).position(|w| w == needle)
+}
+
 /// Returns `true` when a JUnit XML document reports at least one failure, error, or non-`SUCCESS` status.
 #[must_use]
 pub fn reports_failure(xml: &str) -> bool {
     let bytes = xml.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
-        if xml[i..].starts_with("<![CDATA[") {
-            if let Some(end) = xml[i + 9..].find("]]>") {
+        if bytes[i] != b'<' {
+            i += 1;
+            continue;
+        }
+        if bytes[i..].starts_with(b"<![CDATA[") {
+            if let Some(end) = find_bytes(&bytes[i + 9..], b"]]>") {
                 i += 9 + end + 3;
                 continue;
             }
             break;
         }
-        if xml[i..].starts_with("<!--") {
-            if let Some(end) = xml[i + 4..].find("-->") {
+        if bytes[i..].starts_with(b"<!--") {
+            if let Some(end) = find_bytes(&bytes[i + 4..], b"-->") {
                 i += 4 + end + 3;
                 continue;
             }
             break;
         }
-        if bytes[i] == b'<' {
-            let tag_end = find_tag_end(xml, i);
-            let tag = &xml[i..tag_end];
-            if tag.starts_with("<failure")
-                && matches!(
-                    tag.as_bytes().get(8),
-                    Some(b' ' | b'\t' | b'\r' | b'\n' | b'>' | b'/')
-                )
-            {
-                return true;
-            }
-            if tag.starts_with("<error")
-                && matches!(
-                    tag.as_bytes().get(6),
-                    Some(b' ' | b'\t' | b'\r' | b'\n' | b'>' | b'/')
-                )
-            {
-                return true;
-            }
-            if let Some(status) = extract_tag_attr(tag, "status")
-                && status != "SUCCESS"
-            {
-                return true;
-            }
-            i = tag_end;
-            continue;
+        let tag_end = find_tag_end(xml, i);
+        let tag = &xml[i..tag_end];
+        if bytes[i..tag_end].starts_with(b"<failure")
+            && matches!(
+                bytes.get(i + 8),
+                Some(b' ' | b'\t' | b'\r' | b'\n' | b'>' | b'/')
+            )
+        {
+            return true;
         }
-        i += 1;
+        if bytes[i..tag_end].starts_with(b"<error")
+            && matches!(
+                bytes.get(i + 6),
+                Some(b' ' | b'\t' | b'\r' | b'\n' | b'>' | b'/')
+            )
+        {
+            return true;
+        }
+        if let Some(status) = extract_tag_attr(tag, "status")
+            && status != "SUCCESS"
+        {
+            return true;
+        }
+        i = tag_end;
     }
     false
 }
@@ -443,9 +447,9 @@ where
     let mut i = 0;
 
     while i < bytes.len() {
-        if xml[i..].starts_with("<![CDATA[") {
+        if bytes[i..].starts_with(b"<![CDATA[") {
             let content_start = i + 9;
-            if let Some(rel_end) = xml[content_start..].find("]]>") {
+            if let Some(rel_end) = find_bytes(&bytes[content_start..], b"]]>") {
                 let inner = &xml[content_start..content_start + rel_end];
                 let redacted = redact(inner);
                 out.push_str("<![CDATA[");
@@ -463,9 +467,9 @@ where
             continue;
         }
 
-        if xml[i..].starts_with("<!--") {
+        if bytes[i..].starts_with(b"<!--") {
             let content_start = i + 4;
-            if let Some(rel_end) = xml[content_start..].find("-->") {
+            if let Some(rel_end) = find_bytes(&bytes[content_start..], b"-->") {
                 let inner = &xml[content_start..content_start + rel_end];
                 let redacted = redact(inner);
                 out.push_str("<!--");
@@ -575,22 +579,25 @@ fn extract_testsuite_blocks(xml: &str) -> Vec<&str> {
     let mut i = 0;
 
     while i < bytes.len() {
-        if xml[i..].starts_with("<![CDATA[") {
-            if let Some(end) = xml[i + 9..].find("]]>") {
+        if bytes[i] != b'<' {
+            i += 1;
+            continue;
+        }
+        if bytes[i..].starts_with(b"<![CDATA[") {
+            if let Some(end) = find_bytes(&bytes[i + 9..], b"]]>") {
                 i += 9 + end + 3;
                 continue;
             }
             break;
         }
-        if xml[i..].starts_with("<!--") {
-            if let Some(end) = xml[i + 4..].find("-->") {
+        if bytes[i..].starts_with(b"<!--") {
+            if let Some(end) = find_bytes(&bytes[i + 4..], b"-->") {
                 i += 4 + end + 3;
                 continue;
             }
             break;
         }
-        if bytes[i] == b'<'
-            && xml[i..].starts_with("<testsuite")
+        if bytes[i..].starts_with(b"<testsuite")
             && matches!(
                 bytes.get(i + 10),
                 Some(b' ' | b'\t' | b'\r' | b'\n' | b'>' | b'/')
@@ -605,59 +612,56 @@ fn extract_testsuite_blocks(xml: &str) -> Vec<&str> {
                 continue;
             }
             // Scan forward to matching `</testsuite>`, tracking nested `<testsuite>` if any
-            // while skipping CDATA, comments, and quoted tag attributes.
+            // while skipping CDATA, comments, and quoted tag attributes on byte slices.
             let mut depth = 1usize;
             let mut cursor = open_end;
             while cursor < bytes.len() && depth > 0 {
-                if xml[cursor..].starts_with("<![CDATA[") {
-                    if let Some(end) = xml[cursor + 9..].find("]]>") {
+                if bytes[cursor] != b'<' {
+                    cursor += 1;
+                    continue;
+                }
+                if bytes[cursor..].starts_with(b"<![CDATA[") {
+                    if let Some(end) = find_bytes(&bytes[cursor + 9..], b"]]>") {
                         cursor += 9 + end + 3;
                         continue;
                     }
                     cursor = bytes.len();
                     break;
                 }
-                if xml[cursor..].starts_with("<!--") {
-                    if let Some(end) = xml[cursor + 4..].find("-->") {
+                if bytes[cursor..].starts_with(b"<!--") {
+                    if let Some(end) = find_bytes(&bytes[cursor + 4..], b"-->") {
                         cursor += 4 + end + 3;
                         continue;
                     }
                     cursor = bytes.len();
                     break;
                 }
-                if bytes[cursor] == b'<' {
-                    let end = find_tag_end(xml, cursor);
-                    let tag = &xml[cursor..end];
-                    if tag.starts_with("<testsuite")
-                        && matches!(
-                            tag.as_bytes().get(10),
-                            Some(b' ' | b'\t' | b'\r' | b'\n' | b'>' | b'/')
-                        )
-                        && !tag.ends_with("/>")
-                    {
-                        depth += 1;
-                    } else if tag.starts_with("</testsuite")
-                        && matches!(
-                            tag.as_bytes().get(11),
-                            Some(b' ' | b'\t' | b'\r' | b'\n' | b'>')
-                        )
-                    {
-                        depth -= 1;
-                        if depth == 0 {
-                            suites.push(&xml[suite_start..end]);
-                            cursor = end;
-                            break;
-                        }
+                let end = find_tag_end(xml, cursor);
+                let tag_bytes = &bytes[cursor..end];
+                if tag_bytes.starts_with(b"<testsuite")
+                    && matches!(
+                        tag_bytes.get(10),
+                        Some(b' ' | b'\t' | b'\r' | b'\n' | b'>' | b'/')
+                    )
+                    && !tag_bytes.ends_with(b"/>")
+                {
+                    depth += 1;
+                } else if tag_bytes.starts_with(b"</testsuite")
+                    && matches!(tag_bytes.get(11), Some(b' ' | b'\t' | b'\r' | b'\n' | b'>'))
+                {
+                    depth -= 1;
+                    if depth == 0 {
+                        suites.push(&xml[suite_start..end]);
+                        cursor = end;
+                        break;
                     }
-                    cursor = end;
-                    continue;
                 }
-                cursor += 1;
+                cursor = end;
             }
             i = cursor;
             continue;
         }
-        i += 1;
+        i = find_tag_end(xml, i);
     }
 
     suites

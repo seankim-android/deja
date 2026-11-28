@@ -35,8 +35,9 @@ pub use driver::{
     WaitSelectorOutcome, WaitSelectorRequest,
 };
 pub use executor::{
-    EnvStack, FlowExecutionConfig, FlowExecutionError, FlowExecutionOutcome, FlowExecutor,
-    MAX_FLOW_DEPTH, MAX_INTERPOLATED_BYTES, MAX_REPEAT_ITERATIONS, MAX_RETRIES,
+    DEFAULT_ACTION_FAIL_FAST_SETTLE_POLLS, DEFAULT_HOLD_SCROLL_MS, EnvStack, FlowExecutionConfig,
+    FlowExecutionError, FlowExecutionOutcome, FlowExecutor, MAX_FLOW_DEPTH, MAX_INTERPOLATED_BYTES,
+    MAX_REPEAT_ITERATIONS, MAX_RETRIES,
 };
 pub use junit::{
     SynthesizedAttemptsJunitInput, SynthesizedJunitInput, atomic_write_junit, decode_xml,
@@ -52,8 +53,9 @@ pub use parser::{
     WaitForAnimationToEndStep, parse_flow,
 };
 pub use selector::{
-    CompiledSelector, MAX_SELECTOR_DEPTH, PointCoord, PointSpec, REGEX_DFA_SIZE_LIMIT,
-    REGEX_SIZE_LIMIT, Selector, SelectorError, build_visible_context, wait_local,
+    CompiledSelector, MAX_SELECTOR_DEPTH, MAX_SELECTOR_PATTERN_BYTES, PointCoord, PointSpec,
+    REGEX_DFA_SIZE_LIMIT, REGEX_SIZE_LIMIT, Selector, SelectorError, build_visible_context,
+    wait_local,
 };
 pub use timing::{LatencyStats, RunTimingBreakdown, StepTiming};
 

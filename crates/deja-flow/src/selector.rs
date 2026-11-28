@@ -300,24 +300,74 @@ impl Selector {
     }
 }
 
-fn compile_anchored_regex(field: &'static str, pattern: &str) -> Result<Regex, SelectorError> {
-    let anchored = format!("^(?:{pattern})$");
-    RegexBuilder::new(&anchored)
-        .size_limit(REGEX_SIZE_LIMIT)
-        .dfa_size_limit(REGEX_DFA_SIZE_LIMIT)
-        .build()
-        .map_err(|err| SelectorError::InvalidRegex {
-            field,
-            pattern: pattern.to_string(),
-            message: err.to_string(),
-        })
+/// Maximum raw byte length of a single selector `id`/`text` pattern.
+pub const MAX_SELECTOR_PATTERN_BYTES: usize = 4096;
+
+/// Compiled exact-or-anchored-regex matcher for a selector `id` or `text` field.
+///
+/// Exact string equality is always honored alongside anchored regex matching so literal UI
+/// copy containing regex metacharacters (such as `$5.00 · 6 stickers`, `Total: $5.00`, or
+/// unescaped brackets/parentheses) still matches verbatim while oversized/complex regex
+/// patterns fail closed on [`REGEX_SIZE_LIMIT`].
+#[derive(Debug, Clone)]
+struct CompiledPattern {
+    raw: String,
+    regex: Option<Regex>,
+}
+
+impl CompiledPattern {
+    fn compile(field: &'static str, pattern: &str) -> Result<Self, SelectorError> {
+        if pattern.len() > MAX_SELECTOR_PATTERN_BYTES {
+            return Err(SelectorError::InvalidRegex {
+                field,
+                pattern: pattern.chars().take(64).collect(),
+                message: format!(
+                    "selector pattern exceeds maximum length of {MAX_SELECTOR_PATTERN_BYTES} bytes"
+                ),
+            });
+        }
+        let anchored = format!("^(?:{pattern})$");
+        match RegexBuilder::new(&anchored)
+            .size_limit(REGEX_SIZE_LIMIT)
+            .dfa_size_limit(REGEX_DFA_SIZE_LIMIT)
+            .build()
+        {
+            Ok(re) => Ok(Self {
+                raw: pattern.to_string(),
+                regex: Some(re),
+            }),
+            Err(regex::Error::Syntax(_)) => {
+                // Literal UI text containing unbalanced regex syntax (e.g. "Save [20%" or
+                // "Item (1") falls back to exact string equality.
+                Ok(Self {
+                    raw: pattern.to_string(),
+                    regex: None,
+                })
+            }
+            Err(err) => Err(SelectorError::InvalidRegex {
+                field,
+                pattern: pattern.to_string(),
+                message: err.to_string(),
+            }),
+        }
+    }
+
+    fn is_match(&self, candidate: &str) -> bool {
+        if candidate.is_empty() && !self.raw.is_empty() {
+            return false;
+        }
+        if candidate == self.raw {
+            return true;
+        }
+        self.regex.as_ref().is_some_and(|re| re.is_match(candidate))
+    }
 }
 
 /// Pre-compiled [`Selector`] with bounded anchored regexes ready for repeated polling evaluations.
 #[derive(Debug, Clone)]
 pub struct CompiledSelector {
-    id_pattern: Option<(String, Regex)>,
-    text_pattern: Option<(String, Regex)>,
+    id_pattern: Option<CompiledPattern>,
+    text_pattern: Option<CompiledPattern>,
     index: Option<usize>,
     enabled: Option<bool>,
     checked: Option<bool>,
@@ -346,11 +396,11 @@ impl CompiledSelector {
             return Err(SelectorError::EmptySelector);
         }
         let id_pattern = match &selector.id {
-            Some(pat) => Some((pat.clone(), compile_anchored_regex("id", pat)?)),
+            Some(pat) => Some(CompiledPattern::compile("id", pat)?),
             None => None,
         };
         let text_pattern = match &selector.text {
-            Some(pat) => Some((pat.clone(), compile_anchored_regex("text", pat)?)),
+            Some(pat) => Some(CompiledPattern::compile("text", pat)?),
             None => None,
         };
         let below = selector
@@ -407,28 +457,19 @@ impl CompiledSelector {
     }
 
     fn matches_local_attributes(&self, node: &UiNode) -> bool {
-        if let Some((raw, re)) = &self.id_pattern {
-            if node.identifier.is_empty() && !raw.is_empty() {
-                return false;
-            }
-            if !re.is_match(&node.identifier) {
-                return false;
-            }
+        if let Some(ref pat) = self.id_pattern
+            && !pat.is_match(&node.identifier)
+        {
+            return false;
         }
-        if let Some((raw, re)) = &self.text_pattern {
+        if let Some(ref pat) = self.text_pattern {
             let candidates = [
                 Some(node.label.as_str()),
                 Some(node.title.as_str()),
                 node.value.as_deref(),
                 node.placeholder_value.as_deref(),
             ];
-            let matched = candidates.into_iter().flatten().any(|s| {
-                if s.is_empty() && !raw.is_empty() {
-                    false
-                } else {
-                    re.is_match(s)
-                }
-            });
+            let matched = candidates.into_iter().flatten().any(|s| pat.is_match(s));
             if !matched {
                 return false;
             }
@@ -456,47 +497,59 @@ impl CompiledSelector {
         true
     }
 
-    /// Evaluates this selector against `nodes` and returns all matching nodes ranked by
-    /// spatial distance (when directional predicates are active), then `hittable && is_on_screen`,
-    /// then `is_on_screen`, then original tree order.
+    /// Evaluates this selector against visible (`is_on_screen`) nodes, honoring `index` on both
+    /// top-level and nested relational selectors, and ranking matches by spatial distance (when
+    /// directional predicates are active), then `hittable && is_on_screen`, then `is_on_screen`,
+    /// then original tree order.
     pub fn match_all<'a>(&self, nodes: &'a [UiNode]) -> Vec<&'a UiNode> {
         let graph = TreeIndex::build(nodes);
-        self.match_all_with_index(nodes, &graph)
+        self.match_all_with_index(nodes, &graph, true)
     }
 
-    /// Evaluates this selector and returns the selected node (honoring `index`, defaulting to `0`).
+    /// Evaluates this selector across ALL nodes including off-screen (`is_on_screen == false`)
+    /// nodes, ranking `hittable && is_on_screen` ahead of `is_on_screen` ahead of off-screen.
+    pub fn match_all_including_offscreen<'a>(&self, nodes: &'a [UiNode]) -> Vec<&'a UiNode> {
+        let graph = TreeIndex::build(nodes);
+        self.match_all_with_index(nodes, &graph, false)
+    }
+
+    /// Evaluates this selector against visible (`is_on_screen`) nodes and returns the selected
+    /// node (honoring `index`, defaulting to `0`).
     pub fn match_one<'a>(&self, nodes: &'a [UiNode]) -> Option<&'a UiNode> {
-        let matches = self.match_all(nodes);
-        let idx = self.index.unwrap_or(0);
-        matches.get(idx).copied()
+        self.match_all(nodes).into_iter().next()
     }
 
-    fn match_all_with_index<'a>(&self, nodes: &'a [UiNode], graph: &TreeIndex) -> Vec<&'a UiNode> {
+    fn match_all_with_index<'a>(
+        &self,
+        nodes: &'a [UiNode],
+        graph: &TreeIndex,
+        visible_only: bool,
+    ) -> Vec<&'a UiNode> {
         let below_anchors = self
             .below
             .as_deref()
-            .map(|s| s.match_all_with_index(nodes, graph));
+            .map(|s| s.match_all_with_index(nodes, graph, visible_only));
         let above_anchors = self
             .above
             .as_deref()
-            .map(|s| s.match_all_with_index(nodes, graph));
+            .map(|s| s.match_all_with_index(nodes, graph, visible_only));
         let left_anchors = self
             .left_of
             .as_deref()
-            .map(|s| s.match_all_with_index(nodes, graph));
+            .map(|s| s.match_all_with_index(nodes, graph, visible_only));
         let right_anchors = self
             .right_of
             .as_deref()
-            .map(|s| s.match_all_with_index(nodes, graph));
+            .map(|s| s.match_all_with_index(nodes, graph, visible_only));
 
         let child_of_anchor_ids: Option<HashSet<usize>> = self.child_of.as_deref().map(|s| {
-            s.match_all_with_index(nodes, graph)
+            s.match_all_with_index(nodes, graph, visible_only)
                 .into_iter()
                 .map(|n| n.index)
                 .collect()
         });
         let contains_child_ids: Option<HashSet<usize>> = self.contains_child.as_deref().map(|s| {
-            s.match_all_with_index(nodes, graph)
+            s.match_all_with_index(nodes, graph, visible_only)
                 .into_iter()
                 .map(|n| n.index)
                 .collect()
@@ -505,7 +558,7 @@ impl CompiledSelector {
             .contains_descendants
             .iter()
             .map(|s| {
-                s.match_all_with_index(nodes, graph)
+                s.match_all_with_index(nodes, graph, visible_only)
                     .into_iter()
                     .map(|n| n.index)
                     .collect()
@@ -520,6 +573,9 @@ impl CompiledSelector {
         let mut ranked: Vec<(f64, usize, &'a UiNode)> = Vec::new();
 
         for (pos, node) in nodes.iter().enumerate() {
+            if visible_only && !node.is_on_screen {
+                continue;
+            }
             if !self.matches_local_attributes(node) {
                 continue;
             }
@@ -593,7 +649,12 @@ impl CompiledSelector {
                 .then_with(|| pa.cmp(pb))
         });
 
-        ranked.into_iter().map(|(_, _, node)| node).collect()
+        let ordered: Vec<&'a UiNode> = ranked.into_iter().map(|(_, _, node)| node).collect();
+        if let Some(idx) = self.index {
+            ordered.get(idx).copied().into_iter().collect()
+        } else {
+            ordered
+        }
     }
 }
 
@@ -846,12 +907,16 @@ pub async fn wait_local<D: PlatformDriver + ?Sized>(
 
     let start = Instant::now();
     let deadline = start + req.timeout;
+    let single_probe = req.timeout.is_zero();
     let mut schedule = PollSchedule::default();
     let mut settle = SettleTracker::new(req.stable_polls.max(1));
+    let mut miss_settle = req
+        .fail_fast_on_settle_polls
+        .map(|n| SettleTracker::new(n.max(2)));
     let mut polls: u32 = 0;
 
     let mut cached_hierarchy: Option<UiHierarchy> = None;
-    let mut cached_hash_u64: Option<u64> = None;
+    let mut latest_hierarchy: Option<UiHierarchy> = None;
     let mut known_hash: Option<String> = None;
 
     if let Some(ref init) = req.initial_hierarchy
@@ -863,50 +928,82 @@ pub async fn wait_local<D: PlatformDriver + ?Sized>(
         } else {
             format!("{h_u64:016x}")
         };
-        cached_hash_u64 = Some(h_u64);
-        known_hash = Some(h_hex);
+        if !init.truncated {
+            known_hash = Some(h_hex);
+        }
         cached_hierarchy = Some(init.clone());
+        latest_hierarchy = Some(init.clone());
     }
 
-    let mut last_transient_err;
+    let mut last_transient_err: Option<DriverError> = None;
 
     loop {
         if cancel.is_cancelled() {
             return Err(DriverError::Cancelled);
         }
+        let remaining_for_fetch = if single_probe {
+            None
+        } else {
+            let rem = deadline.saturating_duration_since(Instant::now());
+            if rem.is_zero() {
+                break;
+            }
+            Some(rem)
+        };
         polls = polls.saturating_add(1);
 
-        let fetch = tokio::select! {
-            biased;
-            _ = cancel.cancelled() => return Err(DriverError::Cancelled),
-            res = driver.hierarchy(
-                &req.app_id,
-                req.include_system_ui,
-                known_hash.as_deref(),
-                cancel,
-            ) => res,
+        let fetch = match remaining_for_fetch {
+            None => tokio::select! {
+                biased;
+                _ = cancel.cancelled() => return Err(DriverError::Cancelled),
+                res = driver.hierarchy(
+                    &req.app_id,
+                    req.include_system_ui,
+                    known_hash.as_deref(),
+                    cancel,
+                ) => res,
+            },
+            Some(rem) => tokio::select! {
+                biased;
+                _ = cancel.cancelled() => return Err(DriverError::Cancelled),
+                timed = tokio::time::timeout(
+                    rem,
+                    driver.hierarchy(
+                        &req.app_id,
+                        req.include_system_ui,
+                        known_hash.as_deref(),
+                        cancel,
+                    ),
+                ) => match timed {
+                    Ok(res) => res,
+                    Err(_) => break,
+                },
+            },
         };
+
+        if !single_probe && Instant::now() > deadline {
+            break;
+        }
 
         match fetch {
             Ok(resp) => {
                 last_transient_err = None;
-                let (effective_nodes_ready, effective_truncated, hash_u64, hash_hex) = if resp
-                    .unchanged
-                {
+                let effective: Option<UiHierarchy> = if resp.unchanged {
                     if let Some(ref cached) = cached_hierarchy {
-                        let h_u64 = cached_hash_u64.unwrap_or_else(|| cached.hierarchy_hash_u64());
-                        let h_hex = known_hash
-                            .clone()
-                            .unwrap_or_else(|| format!("{h_u64:016x}"));
-                        (true, cached.truncated, h_u64, h_hex)
+                        // Reuse ONLY `cached.nodes` while preserving the fresh response's
+                        // `truncated`, `state`, `viewport`, and `hierarchy_hash` metadata.
+                        Some(resp.merge_unchanged_with_cached_nodes(cached))
                     } else {
                         // Driver returned `unchanged: true` without any cached nodes:
                         // never treat empty payload as absence! Reset settle and re-poll uncached.
                         if req.wait_stable {
                             settle.reset();
                         }
+                        if let Some(ref mut ms) = miss_settle {
+                            ms.reset();
+                        }
                         known_hash = None;
-                        (false, true, 0, String::new())
+                        None
                     }
                 } else {
                     let h_u64 = resp.hierarchy_hash_u64();
@@ -915,14 +1012,24 @@ pub async fn wait_local<D: PlatformDriver + ?Sized>(
                     } else {
                         format!("{h_u64:016x}")
                     };
-                    let truncated = resp.truncated;
-                    cached_hash_u64 = Some(h_u64);
-                    known_hash = Some(h_hex.clone());
-                    cached_hierarchy = Some(resp);
-                    (true, truncated, h_u64, h_hex)
+                    if resp.truncated {
+                        known_hash = None;
+                    } else {
+                        known_hash = Some(h_hex);
+                    }
+                    cached_hierarchy = Some(resp.clone());
+                    Some(resp)
                 };
 
-                if effective_nodes_ready && let Some(ref cached) = cached_hierarchy {
+                if let Some(effective) = effective {
+                    let effective_truncated = effective.truncated;
+                    let hash_u64 = effective.hierarchy_hash_u64();
+                    let hash_hex = if is_valid_hex_hash(&effective.hierarchy_hash) {
+                        effective.hierarchy_hash.to_ascii_lowercase()
+                    } else {
+                        format!("{hash_u64:016x}")
+                    };
+
                     if req.wait_stable {
                         if effective_truncated {
                             settle.reset();
@@ -931,7 +1038,7 @@ pub async fn wait_local<D: PlatformDriver + ?Sized>(
                         }
                     }
 
-                    let matched_node = compiled.match_one(&cached.nodes).cloned();
+                    let matched_node = compiled.match_one(&effective.nodes).cloned();
                     let condition_met = if req.not_visible {
                         // Never falsely pass `not_visible` on a truncated hierarchy capture!
                         if effective_truncated {
@@ -945,22 +1052,33 @@ pub async fn wait_local<D: PlatformDriver + ?Sized>(
 
                     let stable_ok = !req.wait_stable || settle.is_settled();
 
+                    latest_hierarchy = Some(effective);
+
                     if condition_met && stable_ok {
                         let elapsed = start.elapsed();
                         return Ok(WaitSelectorOutcome {
                             matched: true,
                             elapsed_ms: elapsed.as_millis() as u64,
                             polls,
-                            settled_early: elapsed < req.timeout,
+                            settled_early: !single_probe && elapsed < req.timeout,
                             hierarchy_hash: hash_hex,
                             matched_node,
                             visible_context: VisibleContext::default(),
                             hierarchy: if req.return_hierarchy {
-                                Some(cached.clone())
+                                latest_hierarchy
                             } else {
                                 None
                             },
                         });
+                    }
+
+                    // Settled fail-fast for missing action selectors on a static, complete screen.
+                    if let Some(ref mut ms) = miss_settle {
+                        if condition_met || effective_truncated {
+                            ms.reset();
+                        } else if ms.observe_hash(hash_u64).is_settled() {
+                            break;
+                        }
                     }
                 }
             }
@@ -976,9 +1094,16 @@ pub async fn wait_local<D: PlatformDriver + ?Sized>(
                 if req.wait_stable {
                     settle.reset();
                 }
+                if let Some(ref mut ms) = miss_settle {
+                    ms.reset();
+                }
                 last_transient_err = Some(err);
             }
             Err(err) => return Err(err),
+        }
+
+        if single_probe {
+            break;
         }
 
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -993,12 +1118,12 @@ pub async fn wait_local<D: PlatformDriver + ?Sized>(
     }
 
     if let Some(err) = last_transient_err
-        && cached_hierarchy.is_none()
+        && latest_hierarchy.is_none()
     {
         return Err(err);
     }
 
-    let nodes = cached_hierarchy
+    let nodes = latest_hierarchy
         .as_ref()
         .map(|h| h.nodes.as_slice())
         .unwrap_or(&[]);
@@ -1018,7 +1143,7 @@ pub async fn wait_local<D: PlatformDriver + ?Sized>(
         matched_node: None,
         visible_context,
         hierarchy: if req.return_hierarchy {
-            cached_hierarchy
+            latest_hierarchy
         } else {
             None
         },

@@ -292,6 +292,42 @@ impl UiHierarchy {
         format!("{:016x}", self.hierarchy_hash_u64())
     }
 
+    /// Reconstructs a full hierarchy snapshot from an `unchanged: true` response by reusing ONLY
+    /// `cached.nodes` while preserving the fresh response's `truncated`, `state`, `viewport`,
+    /// `app_id`, and `hierarchy_hash` metadata (and remaining truncated if `cached` was truncated).
+    pub fn merge_unchanged_with_cached_nodes(self, cached: &UiHierarchy) -> UiHierarchy {
+        let effective_hash = if !self.hierarchy_hash.is_empty() {
+            self.hierarchy_hash
+        } else {
+            cached.hierarchy_hash.clone()
+        };
+        let effective_viewport = self.viewport.or(cached.viewport);
+        let effective_app_id = if !self.app_id.is_empty() {
+            self.app_id
+        } else {
+            cached.app_id.clone()
+        };
+        let effective_state = if !self.state.is_empty() {
+            self.state
+        } else {
+            cached.state.clone()
+        };
+        let nodes = if self.nodes.is_empty() {
+            cached.nodes.clone()
+        } else {
+            self.nodes
+        };
+        UiHierarchy {
+            app_id: effective_app_id,
+            state: effective_state,
+            viewport: effective_viewport,
+            truncated: self.truncated || cached.truncated,
+            hierarchy_hash: effective_hash,
+            unchanged: false,
+            nodes,
+        }
+    }
+
     /// Resolves the screen viewport from `self.viewport`, falling back to root/max node bounds
     /// or [`DEFAULT_VIEWPORT_WIDTH`] x [`DEFAULT_VIEWPORT_HEIGHT`].
     pub fn effective_viewport(&self) -> UiSize {
@@ -503,6 +539,10 @@ pub struct WaitSelectorRequest {
     pub not_visible: bool,
     pub wait_stable: bool,
     pub stable_polls: usize,
+    /// When `Some(n)`, fails fast on a missing selector once the screen produces `n`
+    /// consecutive identical non-truncated hierarchy hashes (used for action lookups like
+    /// `tapOn`, left `None` for explicit waits like `extendedWaitUntil`/`assertVisible`).
+    pub fail_fast_on_settle_polls: Option<usize>,
     pub timeout: Duration,
     pub include_system_ui: bool,
     pub return_hierarchy: bool,
@@ -519,6 +559,7 @@ impl WaitSelectorRequest {
             not_visible: false,
             wait_stable: false,
             stable_polls: 2,
+            fail_fast_on_settle_polls: None,
             timeout,
             include_system_ui: false,
             return_hierarchy: true,

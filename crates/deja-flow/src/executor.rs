@@ -57,6 +57,14 @@ pub const DEFAULT_STEP_TIMEOUT: Duration = Duration::from_secs(5);
 /// Default timeout for `waitForAnimationToEnd`.
 pub const DEFAULT_ANIMATION_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Default hold-before-lift duration in milliseconds for `scrollUntilVisible` on drivers
+/// advertising [`DriverCapability::HoldScroll`].
+pub const DEFAULT_HOLD_SCROLL_MS: u64 = 150;
+
+/// Default number of consecutive identical non-truncated hierarchy polls before a missing
+/// action selector (`tapOn`/`longPressOn`/`doubleTapOn`) fails fast.
+pub const DEFAULT_ACTION_FAIL_FAST_SETTLE_POLLS: usize = 3;
+
 /// Errors emitted internally during interpolation, confinement, or execution limits.
 #[derive(Debug, Error)]
 pub enum FlowExecutionError {
@@ -235,6 +243,11 @@ pub struct FlowExecutionConfig {
     pub default_step_timeout: Duration,
     pub default_animation_timeout: Duration,
     pub flow_timeout: Option<Duration>,
+    /// When `Some(n)`, missing action selectors (`tapOn`, `longPressOn`, `doubleTapOn`, `swipe.from`)
+    /// fail fast once the screen stays static & non-truncated for `n` consecutive polls.
+    /// Explicit waits (`extendedWaitUntil`, `assertVisible`, `assertNotVisible`) ignore this and
+    /// always wait up to their timeout.
+    pub action_fail_fast_settle_polls: Option<usize>,
     pub include_system_ui: bool,
     pub redactor: Redactor,
     pub provider_redactor: ProviderKeyRedactor,
@@ -253,6 +266,7 @@ impl FlowExecutionConfig {
             default_step_timeout: DEFAULT_STEP_TIMEOUT,
             default_animation_timeout: DEFAULT_ANIMATION_TIMEOUT,
             flow_timeout: None,
+            action_fail_fast_settle_polls: Some(DEFAULT_ACTION_FAIL_FAST_SETTLE_POLLS),
             include_system_ui: false,
             redactor: create_redactor(&ws_str, None, &[]),
             provider_redactor: provider_key_redactor(std::iter::empty::<(&str, &str)>()),
@@ -303,6 +317,7 @@ type StepResult<T = ()> = Result<T, Box<FailedStepContext>>;
 
 struct RuntimeState {
     canonical_workspace: PathBuf,
+    platform: &'static str,
     env: EnvStack,
     app_id: Option<String>,
     step_counter: usize,
@@ -492,12 +507,9 @@ impl FlowExecutor {
 
         let mut state = RuntimeState {
             canonical_workspace,
+            platform: driver.platform(),
             env: EnvStack::new(self.config.env.clone()),
-            app_id: self
-                .config
-                .app_id_override
-                .clone()
-                .or_else(|| parsed.header.app_id.clone()),
+            app_id: self.config.app_id_override.clone(),
             step_counter: 0,
             assertions_executed: 0,
             timing: RunTimingBreakdown::default(),
@@ -511,8 +523,15 @@ impl FlowExecutor {
         let exec_started = Instant::now();
         let result = match driver.ensure_session(&child_cancel).await {
             Ok(()) => {
-                self.execute_parsed_flow(driver, &parsed, &flow_dir, &mut state, &child_cancel)
-                    .await
+                self.execute_parsed_flow(
+                    driver,
+                    &parsed,
+                    &flow_dir,
+                    false,
+                    &mut state,
+                    &child_cancel,
+                )
+                .await
             }
             Err(err) => Err(self.driver_err_to_failed_step(
                 0,
@@ -527,11 +546,12 @@ impl FlowExecutor {
         state.timing.total_ms = total_ms;
 
         let did_time_out = timed_out.load(Ordering::SeqCst) && !parent_cancel.is_cancelled();
+        let scrubbed_app_id = state.app_id.as_deref().map(|id| self.scrub(id));
 
         match result {
             Ok(()) if !did_time_out => FlowExecutionOutcome {
                 passed: true,
-                app_id: state.app_id,
+                app_id: scrubbed_app_id,
                 duration_ms: total_ms,
                 timing: state.timing,
                 assertions_executed: state.assertions_executed,
@@ -559,7 +579,7 @@ impl FlowExecutor {
                 });
                 FlowExecutionOutcome {
                     passed: false,
-                    app_id: state.app_id,
+                    app_id: scrubbed_app_id,
                     duration_ms: total_ms,
                     timing: state.timing,
                     assertions_executed: state.assertions_executed,
@@ -599,6 +619,9 @@ impl FlowExecutor {
                     }
                 }
 
+                // Always scrub failure labels, messages, and crash detail before classification/serialization.
+                self.scrub_failed_step(&mut failed_step);
+
                 let failure = FailureClassifier::classify(&ClassificationInput {
                     passed: false,
                     timed_out: did_time_out,
@@ -609,7 +632,7 @@ impl FlowExecutor {
 
                 FlowExecutionOutcome {
                     passed: false,
-                    app_id: state.app_id,
+                    app_id: scrubbed_app_id,
                     duration_ms: total_ms,
                     timing: state.timing,
                     assertions_executed: state.assertions_executed,
@@ -634,7 +657,7 @@ impl FlowExecutor {
         let failed_step = FailedStepContext {
             step_index: 0,
             command: command.to_string(),
-            label: label.to_string(),
+            label: self.scrub(label),
             kind,
             message: self.scrub(&message),
             visible_context: None,
@@ -649,7 +672,11 @@ impl FlowExecutor {
         });
         FlowExecutionOutcome {
             passed: false,
-            app_id: self.config.app_id_override.clone(),
+            app_id: self
+                .config
+                .app_id_override
+                .as_deref()
+                .map(|id| self.scrub(id)),
             duration_ms: elapsed,
             timing: RunTimingBreakdown {
                 total_ms: elapsed,
@@ -669,22 +696,33 @@ impl FlowExecutor {
             .redact(&self.config.redactor.redact(text))
     }
 
+    fn scrub_failed_step(&self, ctx: &mut FailedStepContext) {
+        ctx.label = self.scrub(&ctx.label);
+        ctx.message = self.scrub(&ctx.message);
+        if let Some(ref mut sig) = ctx.crash_signal
+            && let Some(ref detail) = sig.detail
+        {
+            sig.detail = Some(self.scrub(detail));
+        }
+    }
+
     fn execute_parsed_flow<'a, D: PlatformDriver + ?Sized>(
         &'a self,
         driver: &'a D,
         flow: &'a ParsedFlow,
         flow_dir: &'a Path,
+        is_child_flow: bool,
         state: &'a mut RuntimeState,
         cancel: &'a CancellationToken,
     ) -> Pin<Box<dyn Future<Output = StepResult> + Send + 'a>> {
         Box::pin(async move {
-            // Push header env frame (interpolated in parent scope).
+            // Push header env frame (interpolated in parent scope) BEFORE resolving header appId/url.
             let mut header_env = BTreeMap::new();
             for (k, v) in &flow.header.env {
                 let interp = state.env.interpolate(v).map_err(|err| FailedStepContext {
                     step_index: state.step_counter,
                     command: "env".to_string(),
-                    label: format!("Interpolate header env `{k}`"),
+                    label: self.scrub(&format!("Interpolate header env `{k}`")),
                     kind: StepFailureKind::LimitExceeded,
                     message: self.scrub(&err.to_string()),
                     visible_context: None,
@@ -697,16 +735,40 @@ impl FlowExecutor {
                 state.env.push(header_env);
             }
 
-            // Preserve parent app_id if header overrides it only for this flow scope.
+            // Resolve header target (`appId` or URL-only Web `url`) using loaded header `env`.
+            // Explicit `config.app_id_override` takes precedence for the root flow; child flows
+            // temporarily scope their own header target and restore the parent on return.
             let prev_app_id = state.app_id.clone();
-            if let Some(ref hdr_app) = flow.header.app_id
-                && (prev_app_id.is_none() || state.call_stack.len() > 1)
+            let raw_header_target = flow.header.app_id.as_deref().or(flow.header.url.as_deref());
+            let header_target = match raw_header_target {
+                Some(raw) => match state.env.interpolate(raw) {
+                    Ok(resolved) => Some(resolved),
+                    Err(err) => {
+                        if pushed_header_env {
+                            state.env.pop();
+                        }
+                        return Err(Box::new(FailedStepContext {
+                            step_index: state.step_counter,
+                            command: "header".to_string(),
+                            label: "Interpolate flow header target".to_string(),
+                            kind: StepFailureKind::LimitExceeded,
+                            message: self.scrub(&err.to_string()),
+                            visible_context: None,
+                            crash_signal: None,
+                        }));
+                    }
+                },
+                None => None,
+            };
+
+            if is_child_flow {
+                if let Some(target) = header_target {
+                    state.app_id = Some(target);
+                }
+            } else if self.config.app_id_override.is_none()
+                && let Some(target) = header_target
             {
-                let resolved = state
-                    .env
-                    .interpolate(hdr_app)
-                    .unwrap_or_else(|_| hdr_app.clone());
-                state.app_id = Some(resolved);
+                state.app_id = Some(target);
             }
 
             // 1. onFlowStart -> 2. main steps.
@@ -730,7 +792,8 @@ impl FlowExecutor {
                         cancel,
                     )
                     .await;
-                if let Err(hook_err) = complete_result {
+                if let Err(mut hook_err) = complete_result {
+                    self.scrub_failed_step(&mut hook_err);
                     if primary_result.is_err() {
                         warn!(
                             command = %hook_err.command,
@@ -745,7 +808,7 @@ impl FlowExecutor {
                 }
             }
 
-            if prev_app_id.is_some() && state.call_stack.len() > 1 {
+            if is_child_flow {
                 state.app_id = prev_app_id;
             }
             if pushed_header_env {
@@ -811,6 +874,7 @@ impl FlowExecutor {
             let command = step.command_name();
             let started = Instant::now();
             let mut settled_early = false;
+            let mut retries: u32 = 0;
 
             let res = match step {
                 FlowStep::LaunchApp(s) => {
@@ -843,15 +907,24 @@ impl FlowExecutor {
                 FlowStep::TapOn(s) => self
                     .exec_tap(driver, s, TapKind::Tap, step_index, state, cancel)
                     .await
-                    .map(|early| settled_early = early),
+                    .map(|(early, r)| {
+                        settled_early = early;
+                        retries = r;
+                    }),
                 FlowStep::LongPressOn(s) => self
                     .exec_tap(driver, s, TapKind::LongPress, step_index, state, cancel)
                     .await
-                    .map(|early| settled_early = early),
+                    .map(|(early, r)| {
+                        settled_early = early;
+                        retries = r;
+                    }),
                 FlowStep::DoubleTapOn(s) => self
                     .exec_tap(driver, s, TapKind::DoubleTap, step_index, state, cancel)
                     .await
-                    .map(|early| settled_early = early),
+                    .map(|(early, r)| {
+                        settled_early = early;
+                        retries = r;
+                    }),
                 FlowStep::InputText(s) => {
                     self.exec_input_text(driver, s, step_index, state, cancel)
                         .await
@@ -906,7 +979,7 @@ impl FlowExecutor {
                 step_index,
                 command: command.to_string(),
                 duration_ms: started.elapsed().as_millis() as u64,
-                retries: 0,
+                retries,
                 settled_early,
             });
 
@@ -938,6 +1011,9 @@ impl FlowExecutor {
         }
         if let Some(ref current) = state.app_id {
             return Ok(current.clone());
+        }
+        if state.platform.eq_ignore_ascii_case("web") {
+            return Ok(String::new());
         }
         Err(Box::new(FailedStepContext {
             step_index,
@@ -999,7 +1075,7 @@ impl FlowExecutor {
         Box::new(FailedStepContext {
             step_index,
             command: command.to_string(),
-            label,
+            label: self.scrub(&label),
             kind,
             message: self.scrub(&err.to_string()),
             visible_context: None,
@@ -1206,6 +1282,21 @@ impl FlowExecutor {
         state: &mut RuntimeState,
         cancel: &CancellationToken,
     ) -> Result<(), DriverError> {
+        self.dispatch_action_observed(driver, app_id, action, state, cancel)
+            .await
+            .map(|_| ())
+    }
+
+    /// Dispatches an action primitive (or compound `act_and_observe`), returning `true` when
+    /// `CompoundAct` updated `state.last_hierarchy` with a fresh, non-truncated observation.
+    async fn dispatch_action_observed<D: PlatformDriver + ?Sized>(
+        &self,
+        driver: &D,
+        app_id: &str,
+        action: ActAction,
+        state: &mut RuntimeState,
+        cancel: &CancellationToken,
+    ) -> Result<bool, DriverError> {
         if driver
             .capabilities()
             .supports(DriverCapability::CompoundAct)
@@ -1213,7 +1304,14 @@ impl FlowExecutor {
             let known_hash = state
                 .last_hierarchy
                 .as_ref()
-                .map(UiHierarchy::hierarchy_hash_hex);
+                .filter(|h| !h.unchanged && !h.truncated)
+                .map(|h| {
+                    if is_valid_hex_hash(&h.hierarchy_hash) {
+                        h.hierarchy_hash.to_ascii_lowercase()
+                    } else {
+                        h.hierarchy_hash_hex()
+                    }
+                });
             let payload = ActPayload {
                 app_id: app_id.to_string(),
                 action,
@@ -1225,14 +1323,33 @@ impl FlowExecutor {
                 known_hash,
             };
             let outcome = driver.act_and_observe(&payload, cancel).await?;
+            if !outcome.action_ok {
+                return Err(DriverError::Transport {
+                    operation: "act_and_observe".to_string(),
+                    detail: outcome
+                        .hierarchy_error
+                        .unwrap_or_else(|| "compound action reported action_ok=false".to_string()),
+                    transient: false,
+                });
+            }
+            let mut got_complete_hierarchy = false;
             if let Some(h) = outcome.hierarchy {
-                if !h.unchanged {
+                if h.unchanged {
+                    if let Some(ref cached) = state.last_hierarchy {
+                        let merged = h.merge_unchanged_with_cached_nodes(cached);
+                        got_complete_hierarchy = !merged.truncated;
+                        state.last_hierarchy = Some(merged);
+                    } else {
+                        state.last_hierarchy = None;
+                    }
+                } else {
+                    got_complete_hierarchy = !h.truncated;
                     state.last_hierarchy = Some(h);
                 }
             } else if outcome.hierarchy_error.is_some() {
                 state.last_hierarchy = None;
             }
-            return Ok(());
+            return Ok(got_complete_hierarchy);
         }
 
         match action {
@@ -1288,7 +1405,7 @@ impl FlowExecutor {
             ActAction::HideKeyboard => driver.hide_keyboard(app_id, cancel).await?,
             ActAction::Back => driver.back(app_id, cancel).await?,
         }
-        Ok(())
+        Ok(false)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1299,6 +1416,7 @@ impl FlowExecutor {
         selector: Selector,
         not_visible: bool,
         timeout: Duration,
+        fail_fast_on_settle_polls: Option<usize>,
         state: &mut RuntimeState,
         cancel: &CancellationToken,
     ) -> Result<crate::driver::WaitSelectorOutcome, DriverError> {
@@ -1308,6 +1426,7 @@ impl FlowExecutor {
             not_visible,
             wait_stable: false,
             stable_polls: 2,
+            fail_fast_on_settle_polls,
             timeout,
             include_system_ui: self.config.include_system_ui,
             return_hierarchy: true,
@@ -1345,7 +1464,7 @@ impl FlowExecutor {
         let known_hash = state
             .last_hierarchy
             .as_ref()
-            .filter(|h| !h.unchanged)
+            .filter(|h| !h.unchanged && !h.truncated)
             .map(|h| {
                 if is_valid_hex_hash(&h.hierarchy_hash) {
                     h.hierarchy_hash.to_ascii_lowercase()
@@ -1364,7 +1483,7 @@ impl FlowExecutor {
 
         if resp.unchanged {
             if let Some(ref cached) = state.last_hierarchy {
-                return Ok(cached.clone());
+                return Ok(resp.merge_unchanged_with_cached_nodes(cached));
             }
             // No cached nodes yet; re-fetch uncached.
             let fresh = driver
@@ -1388,7 +1507,7 @@ impl FlowExecutor {
         step_index: usize,
         state: &mut RuntimeState,
         cancel: &CancellationToken,
-    ) -> StepResult<bool> {
+    ) -> StepResult<(bool, u32)> {
         let command = kind.command_name();
         let app_id = self.resolve_app_id(None, state, step_index, command)?;
         let selector = state
@@ -1397,18 +1516,21 @@ impl FlowExecutor {
             .map_err(|err| FailedStepContext {
                 step_index,
                 command: command.to_string(),
-                label: step.label.clone().unwrap_or_else(|| command.to_string()),
+                label: self.scrub(step.label.as_deref().unwrap_or(command)),
                 kind: StepFailureKind::LimitExceeded,
                 message: self.scrub(&err.to_string()),
                 visible_context: None,
                 crash_signal: None,
             })?;
-        let label = step
-            .label
-            .clone()
-            .unwrap_or_else(|| format!("{} {}", kind.label_prefix(), selector.describe()));
+        let label = self.scrub(
+            &step
+                .label
+                .clone()
+                .unwrap_or_else(|| format!("{} {}", kind.label_prefix(), selector.describe())),
+        );
 
         let mut settled_early = false;
+        let mut retries: u32 = 0;
         let target_point = if selector.has_element_criteria() {
             self.require_capability(
                 driver,
@@ -1426,6 +1548,7 @@ impl FlowExecutor {
                     selector.clone(),
                     false,
                     self.config.default_step_timeout,
+                    self.config.action_fail_fast_settle_polls,
                     state,
                     cancel,
                 )
@@ -1437,8 +1560,8 @@ impl FlowExecutor {
 
             let Some(node) = wait.matched_node else {
                 if selector.optional {
-                    debug!(command, selector = %selector.describe(), "skipping optional tap miss");
-                    return Ok(false);
+                    debug!(command, selector = %self.scrub(&selector.describe()), "skipping optional tap miss");
+                    return Ok((false, 0));
                 }
                 return Err(Box::new(FailedStepContext {
                     step_index,
@@ -1511,7 +1634,33 @@ impl FlowExecutor {
             }));
         }
 
+        let retry_if_no_change = selector.retry_tap_if_no_change.unwrap_or(false)
+            && driver
+                .capabilities()
+                .supports(DriverCapability::AccessibilityTree);
+
         for rep in 0..repeats {
+            let pre_tap_hash = if retry_if_no_change {
+                if let Some(h) = state.last_hierarchy.as_ref().filter(|h| !h.truncated) {
+                    Some(h.hierarchy_hash_u64())
+                } else {
+                    match self
+                        .fetch_fresh_hierarchy(driver, &app_id, state, cancel)
+                        .await
+                    {
+                        Ok(h) if !h.truncated => Some(h.hierarchy_hash_u64()),
+                        Ok(_) => None,
+                        Err(err) => {
+                            return Err(
+                                self.driver_err_to_failed_step(step_index, command, label, err)
+                            );
+                        }
+                    }
+                }
+            } else {
+                None
+            };
+
             let action = match kind {
                 TapKind::Tap => ActAction::Tap {
                     x: target_point.x,
@@ -1527,11 +1676,48 @@ impl FlowExecutor {
                     y: target_point.y,
                 },
             };
-            self.dispatch_action(driver, &app_id, action, state, cancel)
+            let got_complete_post = self
+                .dispatch_action_observed(driver, &app_id, action.clone(), state, cancel)
                 .await
                 .map_err(|err| {
                     self.driver_err_to_failed_step(step_index, command, label.clone(), err)
                 })?;
+
+            // Bounded single retry when `retryTapIfNoChange: true` and the chrome-stripped
+            // non-truncated hierarchy hash did not change after the tap.
+            if let Some(before_hash) = pre_tap_hash {
+                let post_hash = if got_complete_post
+                    && let Some(ref h) = state.last_hierarchy
+                    && !h.truncated
+                {
+                    Some(h.hierarchy_hash_u64())
+                } else {
+                    match self
+                        .fetch_fresh_hierarchy(driver, &app_id, state, cancel)
+                        .await
+                    {
+                        Ok(h) if !h.truncated => Some(h.hierarchy_hash_u64()),
+                        Ok(_) => None,
+                        Err(err) => {
+                            return Err(
+                                self.driver_err_to_failed_step(step_index, command, label, err)
+                            );
+                        }
+                    }
+                };
+                if post_hash == Some(before_hash) {
+                    debug!(
+                        command,
+                        "retryTapIfNoChange detected unchanged hierarchy; retrying tap once"
+                    );
+                    retries = retries.saturating_add(1);
+                    self.dispatch_action(driver, &app_id, action, state, cancel)
+                        .await
+                        .map_err(|err| {
+                            self.driver_err_to_failed_step(step_index, command, label.clone(), err)
+                        })?;
+                }
+            }
 
             if rep + 1 < repeats
                 && let Some(delay_ms) = selector.delay_ms
@@ -1569,7 +1755,7 @@ impl FlowExecutor {
             .map_err(|err| self.driver_err_to_failed_step(step_index, command, label, err))?;
         }
 
-        Ok(settled_early)
+        Ok((settled_early, retries))
     }
 
     async fn exec_input_text<D: PlatformDriver + ?Sized>(
@@ -1790,6 +1976,7 @@ impl FlowExecutor {
                     interpolated.clone(),
                     false,
                     self.config.default_step_timeout,
+                    self.config.action_fail_fast_settle_polls,
                     state,
                     cancel,
                 )
@@ -1905,6 +2092,10 @@ impl FlowExecutor {
         let deadline = started + timeout;
         let mut settle = SettleTracker::new(2);
         let swipe_duration_ms = scroll_speed_to_duration_ms(step.speed);
+        let hold_duration_ms = driver
+            .capabilities()
+            .supports(DriverCapability::HoldScroll)
+            .then_some(DEFAULT_HOLD_SCROLL_MS);
         let min_vis_fraction = f64::from(step.visibility_percentage) / 100.0;
 
         let mut end_of_scroll = false;
@@ -1946,7 +2137,7 @@ impl FlowExecutor {
                                 start: nudge_start,
                                 end: nudge_end,
                                 duration_ms: swipe_duration_ms.min(400),
-                                hold_duration_ms: None,
+                                hold_duration_ms,
                             },
                             state,
                             cancel,
@@ -1988,7 +2179,7 @@ impl FlowExecutor {
                     start,
                     end,
                     duration_ms: swipe_duration_ms,
-                    hold_duration_ms: None,
+                    hold_duration_ms,
                 },
                 state,
                 cancel,
@@ -2209,10 +2400,12 @@ impl FlowExecutor {
                 visible_context: None,
                 crash_signal: None,
             })?;
-        let label = step
-            .label
-            .clone()
-            .unwrap_or_else(|| format!("Assert that {} is visible", selector.describe()));
+        let label = self.scrub(
+            &step
+                .label
+                .clone()
+                .unwrap_or_else(|| format!("Assert that {} is visible", selector.describe())),
+        );
 
         self.require_capability(
             driver,
@@ -2234,6 +2427,7 @@ impl FlowExecutor {
                 selector.clone(),
                 false,
                 timeout,
+                None,
                 state,
                 cancel,
             )
@@ -2246,7 +2440,7 @@ impl FlowExecutor {
             return Ok(wait.settled_early);
         }
         if selector.optional {
-            debug!(selector = %selector.describe(), "skipping optional assertVisible miss");
+            debug!(selector = %self.scrub(&selector.describe()), "skipping optional assertVisible miss");
             return Ok(false);
         }
 
@@ -2289,10 +2483,12 @@ impl FlowExecutor {
                 visible_context: None,
                 crash_signal: None,
             })?;
-        let label = step
-            .label
-            .clone()
-            .unwrap_or_else(|| format!("Assert that {} is not visible", selector.describe()));
+        let label = self.scrub(
+            &step
+                .label
+                .clone()
+                .unwrap_or_else(|| format!("Assert that {} is not visible", selector.describe())),
+        );
 
         self.require_capability(
             driver,
@@ -2314,6 +2510,7 @@ impl FlowExecutor {
                 selector.clone(),
                 true,
                 timeout,
+                None,
                 state,
                 cancel,
             )
@@ -2326,7 +2523,7 @@ impl FlowExecutor {
             return Ok(wait.settled_early);
         }
         if selector.optional {
-            debug!(selector = %selector.describe(), "skipping optional assertNotVisible miss");
+            debug!(selector = %self.scrub(&selector.describe()), "skipping optional assertNotVisible miss");
             return Ok(false);
         }
 
@@ -2375,13 +2572,13 @@ impl FlowExecutor {
                     visible_context: None,
                     crash_signal: None,
                 })?;
-        let label = step.label.clone().unwrap_or_else(|| {
+        let label = self.scrub(&step.label.clone().unwrap_or_else(|| {
             if not_visible {
                 format!("Extended wait until {} is not visible", selector.describe())
             } else {
                 format!("Extended wait until {} is visible", selector.describe())
             }
-        });
+        }));
 
         self.require_capability(
             driver,
@@ -2399,6 +2596,7 @@ impl FlowExecutor {
                 selector.clone(),
                 not_visible,
                 Duration::from_millis(step.timeout_ms),
+                None,
                 state,
                 cancel,
             )
@@ -2698,6 +2896,7 @@ impl FlowExecutor {
                                                 driver,
                                                 &sub_parsed,
                                                 &sub_dir,
+                                                true,
                                                 state,
                                                 cancel,
                                             )
