@@ -33,9 +33,9 @@ use crate::fs_safe::{
     write_atomic_confined, write_atomic_nofollow_excl,
 };
 use crate::output::{
-    CliRunReport, RedactionContext, emit_summary, format_error_summary_line, format_summary_line,
-    native_engine_report, print_human_run_report, workspace_relative_display,
-    write_early_error_junit, write_report_junit,
+    CliRunReport, RedactionContext, emit_summary, format_cli_summary_line,
+    format_error_summary_line, native_engine_report, print_human_run_report,
+    workspace_relative_display, write_early_error_junit, write_report_junit,
 };
 
 const MAX_GOALS_FILE_BYTES: u64 = 4 * 1024 * 1024;
@@ -859,6 +859,7 @@ pub fn build_base_report(
         runtime,
         timing: None,
         visible_context: None,
+        selection_reason: None,
     }
 }
 
@@ -947,7 +948,7 @@ pub fn finalize_run_report(
     }
 
     if summary_mode {
-        let line = format_summary_line(&report.core, redaction);
+        let line = format_cli_summary_line(report, redaction);
         emit_summary(&deps.output, json_mode, &line);
     }
 

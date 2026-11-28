@@ -17,8 +17,8 @@ use crate::exit_codes::{
 };
 use crate::fs_safe::{lexical_normalize, read_to_string_nofollow_bounded};
 use crate::output::{
-    CliRunReport, RedactionContext, emit_summary, format_error_summary_line, format_summary_line,
-    print_human_run_report,
+    CliRunReport, RedactionContext, emit_summary, format_cli_summary_line,
+    format_error_summary_line, print_human_run_report,
 };
 
 const MAX_REPORT_BYTES: u64 = 16 * 1024 * 1024;
@@ -205,7 +205,7 @@ fn inspect_report_file(
     }
 
     if args.summary {
-        let summary_line = format_summary_line(&report.core, &redaction);
+        let summary_line = format_cli_summary_line(&report, &redaction);
         emit_summary(&deps.output, json_mode, &summary_line);
     }
 

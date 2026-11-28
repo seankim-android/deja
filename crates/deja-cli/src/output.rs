@@ -96,8 +96,44 @@ impl OutputSink {
     }
 }
 
+/// Why a goal was selected for execution under `--changed-from <git-ref>` (`DEJA-80`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SelectionReason {
+    ChangedClosure,
+    AlwaysInclude,
+    FallbackAll,
+}
+
+impl SelectionReason {
+    /// Wire kebab-case name used in JSON reports and `deja-summary v=1` (`selection=<reason>`).
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ChangedClosure => "changed-closure",
+            Self::AlwaysInclude => "always-include",
+            Self::FallbackAll => "fallback-all",
+        }
+    }
+}
+
+/// Summary of `--changed-from` affected-flow selection attached to [`CliBatchRunReport`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchSelectionSummary {
+    pub base_ref: String,
+    pub fallback_all: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback_reason: Option<String>,
+    pub changed_files_count: usize,
+    pub selected_count: usize,
+    pub skipped_count: usize,
+    #[serde(default)]
+    pub skipped_goals: Vec<String>,
+}
+
 /// Additive schema-1 CLI run report wrapping [`RunResult`] with runtime, timing breakdown,
-/// and bounded visible error context (`DEJA-83`).
+/// bounded visible error context (`DEJA-83`), and optional `--changed-from` selection reason (`DEJA-80`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CliRunReport {
@@ -109,6 +145,8 @@ pub struct CliRunReport {
     pub timing: Option<RunTimingBreakdown>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub visible_context: Option<VisibleContext>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selection_reason: Option<SelectionReason>,
 }
 
 /// Summary of one execution shard (device + isolated store) in a batch run.
@@ -137,6 +175,8 @@ pub struct BatchCounts {
     pub drifted: usize,
     pub cancelled: usize,
     pub skipped: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skipped_by_selection: Option<usize>,
     pub errored: usize,
 }
 
@@ -161,6 +201,8 @@ pub struct BatchGoalResult {
     pub report_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub historical_median_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selection_reason: Option<SelectionReason>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub report: Option<CliRunReport>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -193,6 +235,8 @@ pub struct CliBatchRunReport {
     pub devices: Vec<String>,
     pub shards: Vec<BatchShardSummary>,
     pub scheduled_order: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selection: Option<BatchSelectionSummary>,
     pub counts: BatchCounts,
     pub goals: Vec<BatchGoalResult>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -301,6 +345,15 @@ impl RedactionContext {
             .iter()
             .map(|g| self.redact_str(g))
             .collect();
+        if let Some(ref mut sel) = scrubbed.selection {
+            sel.base_ref = self.redact_str(&sel.base_ref);
+            sel.fallback_reason = sel.fallback_reason.as_deref().map(|r| self.redact_str(r));
+            sel.skipped_goals = sel
+                .skipped_goals
+                .iter()
+                .map(|g| self.redact_str(g))
+                .collect();
+        }
         for entry in &mut scrubbed.goals {
             entry.goal_key = self.redact_goal_key(&entry.goal);
             if let Some(ref mut inner) = entry.report {
@@ -675,6 +728,24 @@ fn encode_bounded_summary_field(raw: &str, redaction: &RedactionContext) -> Stri
 /// Format a [`RunResult`] into the exact `deja-summary v=1` single-line grammar.
 #[must_use]
 pub fn format_summary_line(result: &RunResult, redaction: &RedactionContext) -> String {
+    format_summary_line_with_selection(result, None, redaction)
+}
+
+/// Format a [`CliRunReport`] into `deja-summary v=1`, emitting `selection=<reason>` immediately
+/// before `goal=` ONLY when `report.selection_reason` is `Some`.
+#[must_use]
+pub fn format_cli_summary_line(report: &CliRunReport, redaction: &RedactionContext) -> String {
+    format_summary_line_with_selection(&report.core, report.selection_reason, redaction)
+}
+
+/// Format a [`RunResult`] into `deja-summary v=1`, optionally inserting `selection=<reason>`
+/// immediately before `goal=<pct-enc>` (keeping `goal=` strictly last per `docs/REFERENCE.md`).
+#[must_use]
+pub fn format_summary_line_with_selection(
+    result: &RunResult,
+    selection_reason: Option<SelectionReason>,
+    redaction: &RedactionContext,
+) -> String {
     let outcome = outcome_wire_name(result.outcome);
     let cache = cache_status_wire(result.cache_status);
     let fingerprint = format_fingerprint_12(&result.identity.build_fingerprint);
@@ -726,6 +797,10 @@ pub fn format_summary_line(result: &RunResult, redaction: &RedactionContext) -> 
         }
     }
 
+    if let Some(reason) = selection_reason {
+        line.push_str(&format!(" selection={}", reason.as_str()));
+    }
+
     let goal_redacted = if !result.identity.goal.trim().is_empty() {
         redaction.redact_goal_key(&result.identity.goal)
     } else {
@@ -757,12 +832,36 @@ pub fn format_batch_status_summary_line(
     build_fingerprint: &str,
     redaction: &RedactionContext,
 ) -> String {
+    format_batch_status_summary_line_with_selection(
+        raw_goal,
+        outcome,
+        failure,
+        build_fingerprint,
+        None,
+        redaction,
+    )
+}
+
+/// Variant of [`format_batch_status_summary_line`] that inserts `selection=<reason>` immediately
+/// before `goal=<pct-enc>` when `selection_reason` is `Some`.
+#[must_use]
+pub fn format_batch_status_summary_line_with_selection(
+    raw_goal: &str,
+    outcome: &str,
+    failure: &str,
+    build_fingerprint: &str,
+    selection_reason: Option<SelectionReason>,
+    redaction: &RedactionContext,
+) -> String {
     let fingerprint = format_fingerprint_12(build_fingerprint);
     let engine = format_engine_semver(Some(&native_engine_report()));
     let goal_redacted = redaction.redact_goal_key(raw_goal);
     let goal_encoded = percent_encode_summary(&goal_redacted);
+    let selection_part = selection_reason
+        .map(|r| format!(" selection={}", r.as_str()))
+        .unwrap_or_default();
     format!(
-        "deja-summary v=1 outcome={outcome} cache=not-checked fingerprint={fingerprint} engine={engine} model_calls=0 failure={failure} goal={goal_encoded}"
+        "deja-summary v=1 outcome={outcome} cache=not-checked fingerprint={fingerprint} engine={engine} model_calls=0 failure={failure}{selection_part} goal={goal_encoded}"
     )
 }
 
@@ -795,6 +894,28 @@ pub fn print_human_batch_report(
             .collect();
         out.writeln_stdout(&format!("  devices: {}", devs.join(", ")));
     }
+    if let Some(ref sel) = report.selection {
+        let mode_detail = if sel.fallback_all {
+            format!(
+                "fallback-all ({})",
+                sel.fallback_reason
+                    .as_deref()
+                    .map(|r| redaction.redact_str(r))
+                    .unwrap_or_else(|| "unspecified".to_string())
+            )
+        } else {
+            format!(
+                "selected={}, skipped_by_selection={}",
+                sel.selected_count, sel.skipped_count
+            )
+        };
+        out.writeln_stdout(&format!(
+            "  selection: base={} changed_files={} {}",
+            redaction.redact_str(&sel.base_ref),
+            sel.changed_files_count,
+            mode_detail,
+        ));
+    }
     for entry in &report.goals {
         let goal = redaction.redact_str(&entry.goal);
         let device_str = entry
@@ -802,13 +923,18 @@ pub fn print_human_batch_report(
             .as_deref()
             .map(|d| format!(" device={}", redaction.redact_str(d)))
             .unwrap_or_default();
+        let selection_str = entry
+            .selection_reason
+            .map(|r| format!(" selection={}", r.as_str()))
+            .unwrap_or_default();
         out.writeln_stdout(&format!(
-            "  [{}] {}: outcome={} duration={}ms{}",
+            "  [{}] {}: outcome={} duration={}ms{}{}",
             entry.index + 1,
             goal,
             entry.outcome,
             entry.duration_ms,
             device_str,
+            selection_str,
         ));
         for err in &entry.errors {
             out.writeln_stderr(&format!("    error: {}", redaction.redact_str(err)));
@@ -857,6 +983,9 @@ pub fn print_human_run_report(
     ));
     if let Some(ref rt) = report.runtime {
         out.writeln_stdout(&format!("  runtime: {}", redaction.redact_str(rt)));
+    }
+    if let Some(reason) = report.selection_reason {
+        out.writeln_stdout(&format!("  selection: {}", reason.as_str()));
     }
     if let Some(ref yaml_path) = report.core.yaml_path {
         out.writeln_stdout(&format!("  flow: {}", redaction.redact_str(yaml_path)));
@@ -1000,5 +1129,31 @@ mod tests {
         assert!(flaky_line.contains("attempts=2 attempt1=selector attempt2=none"));
         assert!(flaky_line.contains("attempt1_step=Tap%20on%20Checkout"));
         assert!(flaky_line.ends_with(" goal=complete%20checkout%21"));
+
+        // Optional `selection=<reason>` appears immediately before `goal=` ONLY when present.
+        let cli_report = CliRunReport {
+            core: flaky.clone(),
+            runtime: None,
+            timing: None,
+            visible_context: None,
+            selection_reason: Some(SelectionReason::ChangedClosure),
+        };
+        let sel_line = format_cli_summary_line(&cli_report, &redaction);
+        assert!(
+            sel_line.ends_with(" selection=changed-closure goal=complete%20checkout%21"),
+            "expected selection immediately before goal=, got: {sel_line}"
+        );
+        let status_sel_line = format_batch_status_summary_line_with_selection(
+            "Complete checkout!",
+            "error",
+            "error",
+            &"a".repeat(64),
+            Some(SelectionReason::AlwaysInclude),
+            &redaction,
+        );
+        assert!(
+            status_sel_line.ends_with(" selection=always-include goal=complete%20checkout%21"),
+            "expected selection immediately before goal=, got: {status_sel_line}"
+        );
     }
 }
